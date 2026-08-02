@@ -25,7 +25,7 @@ import {
   PromptInputTools,
   usePromptInputAttachments,
 } from "@/components/ai-elements/prompt-input";
-import { canModelReadNatively } from "@/lib/attachment-accept";
+import { canModelReadNatively, MAX_ATTACHMENT_BYTES } from "@/lib/attachment-accept";
 import { composerKeyAction } from "@/lib/composer-keys";
 import {
   isCompactCommand,
@@ -337,7 +337,7 @@ export function Composer({
       }`}
       accept={attachmentAccept}
       maxFiles={maxFiles}
-      maxFileSize={10 * 1024 * 1024}
+      maxFileSize={MAX_ATTACHMENT_BYTES}
       uploadAttachments={effectiveUploadAttachments}
       onError={(err) => {
         if (err.code === "accept") toast("That file type isn't supported.");

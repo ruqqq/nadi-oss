@@ -6,11 +6,14 @@ import {
 } from "../../../web/src/lib/attachment-accept";
 
 describe("ATTACHMENT_ACCEPT", () => {
-  it("includes images, pdf, and text extensions", () => {
+  it("includes images, pdf, text extensions, and known binary documents", () => {
     expect(ATTACHMENT_ACCEPT).toContain("image/png");
     expect(ATTACHMENT_ACCEPT).toContain("application/pdf");
     expect(ATTACHMENT_ACCEPT).toContain(".ts");
     expect(ATTACHMENT_ACCEPT).toContain(".md");
+    expect(ATTACHMENT_ACCEPT).toContain(".epub");
+    expect(ATTACHMENT_ACCEPT).toContain(".odt");
+    expect(ATTACHMENT_ACCEPT).toContain(".xlsx");
   });
 });
 
@@ -23,6 +26,13 @@ describe("fileMatchesAccept", () => {
   it("matches code files by extension when MIME is empty", () => {
     expect(fileMatchesAccept({ type: "", name: "mod.ts" }, ATTACHMENT_ACCEPT)).toBe(true);
     expect(fileMatchesAccept({ type: "", name: "README.md" }, ATTACHMENT_ACCEPT)).toBe(true);
+  });
+
+  it("matches epub by extension when MIME is empty or octet-stream", () => {
+    expect(fileMatchesAccept({ type: "", name: "book.epub" }, ATTACHMENT_ACCEPT)).toBe(true);
+    expect(
+      fileMatchesAccept({ type: "application/octet-stream", name: "book.epub" }, ATTACHMENT_ACCEPT),
+    ).toBe(true);
   });
 
   it("rejects disallowed extensions", () => {

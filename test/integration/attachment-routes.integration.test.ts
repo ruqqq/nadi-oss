@@ -221,6 +221,22 @@ describe("attachment routes", () => {
     expect(res.status).toBe(415);
   });
 
+  it("accepts an epub by extension when the browser MIME is empty", async () => {
+    const seeded = await seedThread();
+    const fd = new FormData();
+    fd.set("file", new File([new Uint8Array([1, 2, 3])], "book.epub", { type: "" }));
+    const res = await SELF.fetch(uploadUrl(), {
+      method: "POST",
+      body: fd,
+      headers: { cookie: `better-auth.session_token=${seeded.token}` },
+    });
+    expect(res.status).toBe(201);
+    const json = (await res.json()) as { id: string; mimeType: string };
+    expect(json.mimeType).toBe("application/epub+zip");
+    const obj = await env.ATTACHMENTS_BUCKET.get(`${seeded.workspaceId}/th-up/${json.id}.epub`);
+    expect(obj).not.toBeNull();
+  });
+
   it("rejects an oversized file with 413", async () => {
     const seeded = await seedThread();
     const tooBig = new Uint8Array(10 * 1024 * 1024 + 1);

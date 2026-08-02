@@ -65,15 +65,19 @@ describe("isExtractionEnabled", () => {
 });
 
 describe("isExtractableMime", () => {
-  it("accepts images, pdf and office formats", () => {
+  it("accepts images, pdf and document formats toMarkdown understands", () => {
     expect(isExtractableMime("image/png")).toBe(true);
     expect(isExtractableMime("application/pdf")).toBe(true);
     expect(isExtractableMime(OFFICE_DOCX)).toBe(true);
+    expect(isExtractableMime("application/vnd.oasis.opendocument.text")).toBe(true);
+    expect(isExtractableMime("application/vnd.ms-excel")).toBe(true);
+    expect(isExtractableMime("application/vnd.apple.numbers")).toBe(true);
   });
 
-  it("rejects text and unknown types", () => {
+  it("rejects text, archives, and epub (upload-only)", () => {
     expect(isExtractableMime("text/plain")).toBe(false);
     expect(isExtractableMime("application/zip")).toBe(false);
+    expect(isExtractableMime("application/epub+zip")).toBe(false);
   });
 });
 
