@@ -1,12 +1,6 @@
 import { describe, expect, it } from "vitest";
-import {
-  BINARY_DOCUMENT_MIME_BY_EXT,
-  TEXT_MIME_BY_EXT,
-} from "../../src/http/attachment-routes";
-import {
-  BINARY_DOCUMENT_EXTENSIONS,
-  TEXT_EXTENSIONS,
-} from "../../web/src/lib/attachment-accept";
+import { BINARY_DOCUMENT_MIME_BY_EXT, TEXT_MIME_BY_EXT } from "../../src/http/attachment-routes";
+import { BINARY_DOCUMENT_EXTENSIONS, TEXT_EXTENSIONS } from "../../web/src/lib/attachment-accept";
 
 // Guards against the front/back allowlist drifting: the composer picker's
 // accepted text/code + binary-document extensions must exactly match the
