@@ -16,18 +16,25 @@ export interface PushPreviewPart {
 }
 
 export interface PushPreviewMessage {
+  role?: unknown;
   parts?: unknown;
 }
 
 /**
- * Reads the trailing text of the last message.
+ * Reads the trailing text of the last assistant message in the turn.
+ *
+ * Role matters: turn-end injection flush can append a user-role system-reminder
+ * after the assistant reply, and quoting that on a lock screen would be wrong.
+ * Messages without a role (unit fixtures, older shapes) still count so the
+ * extractor stays total over plain objects.
  *
  * Only `text` parts are kept. Reasoning is excluded on purpose — a model's
  * private deliberation on someone's lock screen is the worst version of this
  * feature — and so are tool and file parts, which are not prose.
  */
 export function extractPushPreview(messages: readonly PushPreviewMessage[]): string | null {
-  const parts = messages.at(-1)?.parts;
+  const message = lastAssistantMessage(messages);
+  const parts = message?.parts;
   if (!Array.isArray(parts)) {
     return null;
   }
@@ -52,4 +59,17 @@ export function extractPushPreview(messages: readonly PushPreviewMessage[]): str
   // hard slice rather than returning nothing.
   const cut = lastSpace > 0 ? clipped.slice(0, lastSpace) : clipped;
   return `${cut.trimEnd()}…`;
+}
+
+function lastAssistantMessage(
+  messages: readonly PushPreviewMessage[],
+): PushPreviewMessage | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (!message) continue;
+    // Skip known non-assistant roles; accept assistant and role-less shapes.
+    if (message.role === "user" || message.role === "system") continue;
+    return message;
+  }
+  return undefined;
 }

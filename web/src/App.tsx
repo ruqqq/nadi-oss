@@ -190,6 +190,7 @@ import { railToggleIndicator } from "./components/chat/ThreadIndicator";
 import { ThreadRowMenu } from "./components/chat/ThreadRowMenu";
 import { PendingFirstMessage } from "./components/chat/PendingFirstMessage";
 import { PendingThreadConversation } from "./components/chat/PendingThreadConversation";
+import { TypingDots } from "./components/chat/TypingDots";
 import {
   isRetryable,
   needsFirstMessageResync,
@@ -3959,7 +3960,8 @@ function PendingNewThreadView({
         {/* Same body + disabled composer as the history-loading skeleton, so the
             optimistic bubble keeps its place as the surface swaps under it. The
             message is in flight (the thread is being created), so it reads as
-            "Sending…" — the same indicator it carries through delivery. */}
+            "Sending…" — and the typing dots sit under it immediately, before
+            any stream exists. */}
         <PendingThreadConversation text={text} files={files} status="sending" />
         <Composer
           onSend={() => {}}
@@ -4830,11 +4832,15 @@ function ThreadChat({
   // "still working" signal persists across tool runs, reasoning, and text.
   // showPendingReply covers the gap before the first connect: history says a
   // turn is mid-flight, and the socket that will stream it isn't open yet.
-  const showTyping =
+  const streamTyping =
     readiness.showPendingReply ||
     ((isStreaming || status === "submitted") &&
       !(resumeCompleted && isStreaming && isConversationComplete(messages)));
-
+  // The optimistic first-message bubble renders BELOW ChatLog, so its typing
+  // dots must sit under the bubble — not inside the log (which would paint
+  // them above it). Cover the create → deliver → stream-start gap here.
+  const showOptimisticTyping = !!bubble && bubble.status !== "failed";
+  const showTyping = streamTyping && !bubble;
   const handleSend = useCallback(
     async (text: string, files: FileUIPart[], opts?: { steer?: boolean }) => {
       if (feedbackMode) {
@@ -5129,6 +5135,11 @@ function ThreadChat({
             status={bubble.status}
             onRetry={onRetryFirstMessage}
           />
+        )}
+        {showOptimisticTyping && (
+          <div className="px-4 pb-4">
+            <TypingDots />
+          </div>
         )}
 
         {!feedbackMode && <QueuedMessageStrip items={queuedStripItems} onCancel={cancelQueuedMessage} />}

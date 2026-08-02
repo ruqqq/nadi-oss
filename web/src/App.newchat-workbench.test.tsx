@@ -199,10 +199,11 @@ describe("pending new-chat projection", () => {
 
     expect(window.location.pathname).toBe("/");
     expect(screen.getByText("hello from a slow connection")).toBeTruthy();
-    // The bubble's own "Sending…" indicator carries progress — no separate
-    // typing-dots indicator, which would only duplicate it in the optimistic view.
+    // Delivery progress stays on the bubble; the typing dots are the assistant
+    // affordance and must appear immediately — before the thread (or stream)
+    // exists — so the optimistic view feels like a live turn.
     expect(screen.getByText(/Sending/i)).toBeTruthy();
-    expect(screen.queryByRole("status", { name: "Nadi is responding" })).toBeNull();
+    expect(screen.getByRole("status", { name: "Nadi is responding" })).toBeTruthy();
     // The pending projection carries the same disabled composer shell as the
     // history-loading skeleton, so the composer no longer pops in as the surface
     // swaps under the optimistic bubble — but it can't be typed into until the
@@ -222,7 +223,7 @@ describe("pending new-chat projection", () => {
     if (!form) throw new Error("composer form not found");
     fireEvent.submit(form);
 
-    await screen.findByText(/Sending/i);
+    await screen.findByRole("status", { name: "Nadi is responding" });
     await act(async () => resolveCreate?.(CREATED_THREAD));
 
     await waitFor(() => expect(window.location.pathname).toBe("/threads/thr_new"));
@@ -244,13 +245,14 @@ describe("pending new-chat projection", () => {
     if (!form) throw new Error("composer form not found");
     fireEvent.submit(form);
 
-    await screen.findByText(/Sending/i);
+    await screen.findByRole("status", { name: "Nadi is responding" });
     await act(async () => rejectCreate?.(new Error("slow network failed")));
 
     const restored = await screen.findByPlaceholderText(/message/i);
     expect(restored).toHaveProperty("value", "keep this draft");
     // Back on the live hero composer, not the pending projection's disabled shell.
     expect((restored as HTMLTextAreaElement).disabled).toBe(false);
+    expect(screen.queryByRole("status", { name: "Nadi is responding" })).toBeNull();
     expect(screen.getByRole("alert").textContent).toContain("slow network failed");
     expect(window.location.pathname).toBe("/");
   });
