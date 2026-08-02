@@ -26,6 +26,7 @@ import { MessageRow } from "./MessageRow";
 import { CompletionGroup } from "./CompletionGroup";
 import type { SubagentRunsState } from "@/lib/use-subagent-runs";
 import { TypingDots } from "./TypingDots";
+import { withRenderableContent } from "@/lib/message-state";
 
 type AddToolApprovalResponse = (opts: { id: string; approved: boolean }) => void;
 
@@ -154,8 +155,11 @@ export function ChatLog({
   onFeedbackDraftEdit?: () => void;
   submittedFeedbackDraftIds?: Set<string>;
 }) {
-  const empty = visibleChatMessages(messages).length === 0 && !busy && !hasPendingBubble;
-  const visibleMessages = visibleChatMessages(messages);
+  // Contentless assistant rows are dropped here rather than inside
+  // visibleChatMessages, which owns a different question (hidden system
+  // reminders). See rendersNoContent for why an invisible row still matters.
+  const visibleMessages = withRenderableContent(visibleChatMessages(messages));
+  const empty = visibleMessages.length === 0 && !busy && !hasPendingBubble;
   const feedbackScreenshots = visibleMessages.flatMap((message) =>
     message.parts.filter((part): part is FileUIPart => part.type === "file"),
   );
@@ -212,8 +216,11 @@ export function ChatLog({
         {showTyping && (
           // ConversationContent gaps children by gap-8 (message rhythm). The
           // dots are a continuation of the previous bubble, not a new message —
-          // cancel that gap so they sit just under it.
-          <div className="-mt-8">
+          // cancel that gap, then add back the same 12px the optimistic dots
+          // sit at in PendingThreadConversation. Cancelling outright left them
+          // flush against the bubble's edge while the optimistic ones had a
+          // gap, so the handoff between the two showed as a shift.
+          <div className="-mt-8 pt-3">
             <TypingDots />
           </div>
         )}

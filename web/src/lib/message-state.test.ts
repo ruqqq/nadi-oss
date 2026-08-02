@@ -1,6 +1,6 @@
 import { describe, expect, it, test } from "vitest";
 import type { UIMessage } from "ai";
-import { awaitsAssistantReply, isConversationComplete } from "./message-state";
+import { awaitsAssistantReply, isConversationComplete, withRenderableContent } from "./message-state";
 
 function text(text: string, state = "done") {
   return { type: "text", text, state };
@@ -106,5 +106,38 @@ describe("awaitsAssistantReply", () => {
 
   test("empty transcript awaits nothing", () => {
     expect(awaitsAssistantReply([])).toBe(false);
+  });
+});
+
+describe("withRenderableContent", () => {
+  const msg = (role: string, parts: unknown[]) => ({ id: role + parts.length, role, parts }) as unknown as UIMessage;
+
+  // THE BUG THIS EXISTS FOR. The SDK inserts a bare assistant message when a
+  // stream opens. It paints nothing, but as a child of a gap-8 flex column it
+  // still contributes 32px — so the typing dots dropped 32px the instant a turn
+  // started and rose again on the first token.
+  test("drops the empty assistant placeholder a stream opens with", () => {
+    const messages = [msg("user", [{ type: "text", text: "hi" }]), msg("assistant", [])];
+    expect(withRenderableContent(messages).map((m) => m.role)).toEqual(["user"]);
+  });
+
+  test("keeps an assistant message the moment it has text", () => {
+    const messages = [msg("assistant", [{ type: "text", text: "T" }])];
+    expect(withRenderableContent(messages)).toHaveLength(1);
+  });
+
+  test("keeps a tool-only assistant message, which paints a tool row", () => {
+    const messages = [msg("assistant", [{ type: "tool-read_file", state: "input-available" }])];
+    expect(withRenderableContent(messages)).toHaveLength(1);
+  });
+
+  test("drops an assistant message whose only text is whitespace", () => {
+    expect(withRenderableContent([msg("assistant", [{ type: "text", text: "   " }])])).toHaveLength(0);
+  });
+
+  // Never filter the user's side: an empty-looking user message would be an
+  // attachment-only one, and those carry file parts.
+  test("leaves user messages alone", () => {
+    expect(withRenderableContent([msg("user", [])])).toHaveLength(1);
   });
 });
