@@ -61,7 +61,7 @@ OPENAI_OAUTH_SECRET_NAME=provider:openai-oauth
 # Sign-in allowlist. Comma-separated; an entry with `@` is an exact email, an
 # entry without `@` is a whole domain (any address at that domain).
 # Case-insensitive. Empty/unset disables the gate (all emails allowed).
-# e.g. WHITELISTED_EMAILS=you@example.com, exe.dev, ruqqq.com
+# e.g. WHITELISTED_EMAILS=you@example.com, example.org, partner.example
 WHITELISTED_EMAILS=
 
 # Accounts with unlimited invites and access to the waiting list. Comma-separated

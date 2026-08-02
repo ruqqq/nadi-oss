@@ -34,8 +34,8 @@ describe("canUseProvider", () => {
   });
 
   it("honours a bare domain entry as 'anyone at this domain'", () => {
-    expect(canUseProvider({ WORKERS_AI_EMAILS: "exe.dev" }, "workers-ai", "a@exe.dev")).toBe(true);
-    expect(canUseProvider({ WORKERS_AI_EMAILS: "exe.dev" }, "workers-ai", "a@other.dev")).toBe(
+    expect(canUseProvider({ WORKERS_AI_EMAILS: "example.org" }, "workers-ai", "a@example.org")).toBe(true);
+    expect(canUseProvider({ WORKERS_AI_EMAILS: "example.org" }, "workers-ai", "a@other.dev")).toBe(
       false,
     );
   });

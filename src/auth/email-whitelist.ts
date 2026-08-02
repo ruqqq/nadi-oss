@@ -4,7 +4,7 @@
  * The allowlist is a comma-separated string (the `WHITELISTED_EMAILS` env var).
  * Each entry is one of:
  *   - an exact email (contains `@`), e.g. `you@example.com`
- *   - a whole domain (no `@`), e.g. `exe.dev` — matches any address at that
+ *   - a whole domain (no `@`), e.g. `example.org` — matches any address at that
  *     exact domain (not subdomains).
  *
  * Matching is case-insensitive and trims surrounding whitespace. When the

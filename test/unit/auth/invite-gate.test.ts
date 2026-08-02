@@ -14,7 +14,7 @@ describe("isSuperuser", () => {
   });
 
   it("does not treat a bare domain as a wildcard (unlike the env allowlist)", () => {
-    expect(isSuperuser("anyone@ruqqq.sg", "ruqqq.sg")).toBe(false);
+    expect(isSuperuser("anyone@partner.example", "partner.example")).toBe(false);
   });
 
   it("is closed when unset or empty", () => {

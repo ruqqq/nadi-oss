@@ -20,36 +20,36 @@ describe("isEmailAllowed", () => {
   });
 
   it("allows any address at a whitelisted bare domain", () => {
-    expect(isEmailAllowed("someone@exe.dev", "exe.dev")).toBe(true);
-    expect(isEmailAllowed("other@exe.dev", "exe.dev")).toBe(true);
+    expect(isEmailAllowed("someone@example.org", "example.org")).toBe(true);
+    expect(isEmailAllowed("other@example.org", "example.org")).toBe(true);
   });
 
   it("does not match a domain entry against a different domain", () => {
-    expect(isEmailAllowed("someone@notexe.dev", "exe.dev")).toBe(false);
+    expect(isEmailAllowed("someone@notexample.org", "example.org")).toBe(false);
   });
 
   it("does not treat a domain entry as a subdomain wildcard", () => {
-    expect(isEmailAllowed("someone@sub.exe.dev", "exe.dev")).toBe(false);
+    expect(isEmailAllowed("someone@sub.example.org", "example.org")).toBe(false);
   });
 
   it("matches case-insensitively for both exact and domain rules", () => {
     expect(isEmailAllowed("You@Example.Com", "you@example.com")).toBe(true);
-    expect(isEmailAllowed("SOMEONE@EXE.DEV", "exe.dev")).toBe(true);
+    expect(isEmailAllowed("SOMEONE@EXAMPLE.ORG", "example.org")).toBe(true);
   });
 
   it("trims whitespace around comma-separated entries", () => {
-    expect(isEmailAllowed("someone@exe.dev", "you@example.com,  exe.dev ")).toBe(true);
+    expect(isEmailAllowed("someone@example.org", "you@example.com,  example.org ")).toBe(true);
   });
 
   it("supports a mixed list of exact emails and domains", () => {
-    const rules = "you@example.com, exe.dev, ruqqq.com";
+    const rules = "you@example.com, example.org, partner.example";
     expect(isEmailAllowed("you@example.com", rules)).toBe(true);
-    expect(isEmailAllowed("anyone@exe.dev", rules)).toBe(true);
-    expect(isEmailAllowed("anyone@ruqqq.com", rules)).toBe(true);
+    expect(isEmailAllowed("anyone@example.org", rules)).toBe(true);
+    expect(isEmailAllowed("anyone@partner.example", rules)).toBe(true);
     expect(isEmailAllowed("nope@elsewhere.com", rules)).toBe(false);
   });
 
   it("rejects a malformed candidate email with no domain", () => {
-    expect(isEmailAllowed("notanemail", "exe.dev")).toBe(false);
+    expect(isEmailAllowed("notanemail", "example.org")).toBe(false);
   });
 });
