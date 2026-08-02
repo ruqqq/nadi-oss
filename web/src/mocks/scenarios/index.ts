@@ -23,6 +23,7 @@ import type { ThreadSummary } from "../../threads-api";
 import type { WorkbenchSummary } from "../../workbenches-api";
 import type { MockFaults, MockStore } from "../store";
 import { TOOL_RUN_THREAD_ID, TOOL_WRITE_THREAD_ID } from "../chat/tool-run-transcript";
+import { MID_TURN_THREAD_ID } from "../chat/mid-turn-transcript";
 
 /** Fixed clock so screenshots are byte-stable across runs. 2026-07-08T00:00:00Z. */
 const NOW = 1_752_000_000_000;
@@ -898,6 +899,27 @@ function historyErrorStore(): MockStore {
 /** Send the first message from the new-chat hero here and the delivery POST
  *  hangs, then fails: the optimistic bubble is visible as `sending` for a beat
  *  and then lands on `failed` with its Retry. */
+/**
+ * A thread whose history stops mid-turn, so opening it lands in the "a reply is
+ * inbound but nothing is streaming yet" state. Drives the typing-dots hold that
+ * used to blink out the moment the socket reported open.
+ */
+function midTurnResumeStore(): MockStore {
+  const base = defaultStore();
+  return {
+    ...base,
+    threads: [
+      makeThread({
+        threadId: MID_TURN_THREAD_ID,
+        title: "Deploy config walkthrough",
+        lastMessagePreview: "Now walk me through what changed in the workflow.",
+        updatedAt: NOW - 1 * MINUTE,
+      }),
+      ...base.threads,
+    ],
+  };
+}
+
 function firstMessageFailureStore(): MockStore {
   return { ...defaultStore(), faults: { ...noFaults(), messageSendFailsAfterMs: 2_000 } };
 }
@@ -1255,6 +1277,7 @@ export const SCENARIOS: Record<string, () => MockStore> = {
   "thread-activity": defaultStore,
   "history-error": historyErrorStore,
   "first-message-failure": firstMessageFailureStore,
+  "mid-turn-resume": midTurnResumeStore,
   feedback: feedbackStore,
   "feedback-model-error": feedbackModelErrorStore,
   "feedback-rate-limited": feedbackRateLimitedStore,

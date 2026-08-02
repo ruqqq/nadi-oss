@@ -16,6 +16,7 @@ import {
   singleMcpWriteTranscript,
   toolRunTranscript,
 } from "../chat/tool-run-transcript";
+import { MID_TURN_THREAD_ID, midTurnTranscript } from "../chat/mid-turn-transcript";
 import { historyUnreachable, mockId, notFound, pathParam } from "./util";
 
 const authHandlers = [
@@ -315,6 +316,7 @@ function feedbackHistory(threadId: string): unknown[] | null {
  * plain HTTP by `thread-history-fetch.ts` before any socket is dialled.
  */
 function seededHistory(threadId: string): unknown[] | null {
+  if (threadId === MID_TURN_THREAD_ID) return midTurnTranscript();
   if (threadId === TOOL_RUN_THREAD_ID) return toolRunTranscript();
   if (threadId === TOOL_WRITE_THREAD_ID) return singleMcpWriteTranscript();
   return feedbackHistory(threadId);

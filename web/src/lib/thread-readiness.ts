@@ -30,32 +30,41 @@ export function computeThreadReadiness(input: {
   socketConnected: boolean;
   everConnected: boolean;
   historyReloading: boolean;
-  connectTimedOut: boolean;
+  /**
+   * The pending-reply window ran out with no stream to show for it, so stop
+   * promising one. Restarted on every socket open — see ThreadChat.
+   */
+  pendingReplyExpired: boolean;
   offline: boolean;
-  /** How many messages the loaded history holds. */
-  messageCount: number;
-  /** Does that history end on a finished turn? (`isConversationComplete`) */
-  conversationComplete: boolean;
+  /** Is a turn live client-side? (`isStreaming || status === "submitted"`) */
+  streamActive: boolean;
+  /** Does the loaded history stop on a user message? (`awaitsAssistantReply`) */
+  awaitingReply: boolean;
 }): ThreadReadiness {
   const {
     socketConnected,
     everConnected,
     historyReloading,
-    connectTimedOut,
+    pendingReplyExpired,
     offline,
-    messageCount,
-    conversationComplete,
+    streamActive,
+    awaitingReply,
   } = input;
 
-  // Only before the first connect: after it, isStreaming drives the indicator.
+  // Held until the reply itself shows up, NOT until the socket opens. The
+  // socket opens a few hundred ms before the SDK's resume handshake replays any
+  // chunks, and releasing on `everConnected` left that window with no bubble and
+  // no dots — the placeholder went away before its replacement arrived.
+  //
   // Every clause earns its place —
   //  - offline: no socket is coming, so no reply is coming.
-  //  - connectTimedOut: the same 4s valve that used to release the full
-  //    skeleton, so a socket that never opens can't twitch the dots forever.
-  //  - messageCount: isConversationComplete([]) is FALSE, so a brand-new empty
-  //    thread reads as "mid-turn" and would promise a reply nobody sent.
-  const showPendingReply =
-    !offline && !everConnected && !connectTimedOut && messageCount > 0 && !conversationComplete;
+  //  - streamActive: the stream took over; isStreaming drives the dots from here.
+  //  - pendingReplyExpired: the valve. Without it a thread whose turn died
+  //    mid-flight would promise a reply forever, since nothing else in this
+  //    predicate ever becomes false on its own.
+  //  - awaitingReply: the transcript stops on a user message. An empty thread
+  //    falls out for free — it has no last message to be a user message.
+  const showPendingReply = !offline && !streamActive && !pendingReplyExpired && awaitingReply;
 
   const sendBlocked = offline || !socketConnected || historyReloading;
 
