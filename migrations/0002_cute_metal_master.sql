@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX `verifications_identifier_unique` ON `verifications` (`identifier`);

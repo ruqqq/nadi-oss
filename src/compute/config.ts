@@ -1,0 +1,224 @@
+import { z } from "zod";
+import { mergeComputeEnv } from "./env-vars";
+import { DEFAULT_MONITOR_POLL_INTERVAL_MS } from "./watchers";
+import type {
+  AgentComputeSettings,
+  ComputeConfigResult,
+  ComputeOutputLimits,
+  ComputeResourceProfile,
+  EnvironmentSource,
+  ProviderConfig,
+  WorkspaceComputeSettings,
+} from "./types";
+
+export const COMPUTE_RESOURCE_PROFILE_IDS = [
+  "small",
+  "medium",
+] as const satisfies readonly ComputeResourceProfile[];
+export const DEFAULT_COMPUTE_RESOURCE_PROFILE: ComputeResourceProfile = "small";
+export const DEFAULT_COMPUTE_RECOVERY_TTL_MS = 86_400_000;
+
+export const environmentSourceSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("image"), value: z.string() }),
+  z.object({ kind: z.literal("snapshot"), value: z.string() }),
+]);
+
+export const providerConfigSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("daytona"),
+    apiKeySecretName: z.string(),
+    apiUrl: z.string().nullable(),
+    target: z.string().nullable(),
+    profiles: z.record(z.enum(["small", "medium"]), environmentSourceSchema.nullable()),
+  }),
+  z.object({ kind: z.literal("cloudflare") }),
+  z.object({ kind: z.literal("mock") }),
+]);
+
+export function parseProviderConfigJson(raw: string): ProviderConfig {
+  try {
+    return providerConfigSchema.parse(JSON.parse(raw)) as ProviderConfig;
+  } catch {
+    throw new Error("invalid_provider_config_json");
+  }
+}
+
+export const DEFAULT_COMPUTE_LIMITS: ComputeOutputLimits = {
+  tailMaxLines: 200,
+  tailMaxBytes: 32_000,
+  grepMaxMatches: 50,
+  grepMaxContextLines: 5,
+  grepMaxReturnedLines: 300,
+  grepMaxBytes: 64_000,
+  readMaxLines: 500,
+  readMaxBytes: 64_000,
+  maxProcessOutputBytes: 20_000_000,
+  maxThreadOutputBytes: 100_000_000,
+  maxUploadBytes: 25_000_000,
+  maxDownloadBytes: 25_000_000,
+};
+
+export const DEFAULT_COMPUTE_ALLOWED_HOSTS = [
+  "registry.npmjs.org",
+  "registry.yarnpkg.com",
+  "pypi.org",
+  "files.pythonhosted.org",
+  "github.com",
+  "*.github.com",
+  "*.githubusercontent.com",
+  "deb.debian.org",
+  "security.debian.org",
+  "archive.ubuntu.com",
+  "security.ubuntu.com",
+];
+
+const DOMAIN_RE = /^(\*\.)?([a-z0-9-]+\.)+[a-z]{2,}$/i;
+
+export function isComputeResourceProfile(value: string): value is ComputeResourceProfile {
+  return (COMPUTE_RESOURCE_PROFILE_IDS as readonly string[]).includes(value);
+}
+
+export function validateComputeResourceProfile(value: string): ComputeResourceProfile {
+  if (!isComputeResourceProfile(value)) throw new Error("invalid_compute_resource_profile");
+  return value;
+}
+
+export function clampPositiveInt(value: unknown, fallback: number, max: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(1, Math.trunc(value)));
+}
+
+export function parseDomainList(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  return raw
+    .split(/[,\n]/)
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+export function validateSandboxDomain(value: string): string {
+  const domain = value.trim().toLowerCase();
+  if (!domain) throw new Error("sandbox_domain_required");
+  if (!DOMAIN_RE.test(domain)) throw new Error("sandbox_domain_invalid");
+  return domain;
+}
+
+/**
+ * Whether producing a final {@link ComputeConfigResult} for this PRELIMINARY
+ * result (one resolved with no workbench profile) requires fetching the
+ * thread's actual workbench profile. `true` for anything that will end up
+ * enabled, and for the one bail reason (`missing_source`) that itself depends
+ * on the profile — every other bail (`missing_workspace_settings`,
+ * `disabled`, `unsupported_provider`, `missing_secret`) is decided before the
+ * profile is ever consulted, so a preliminary bail on one of those means the
+ * real answer can't change once the profile is known. Callers that own a
+ * separate, potentially-expensive profile lookup (e.g. a per-thread D1 query)
+ * use this to skip that lookup entirely on a genuinely-disabled workspace.
+ */
+export function needsWorkbenchResourceProfile(preliminary: ComputeConfigResult): boolean {
+  return preliminary.enabled || preliminary.reason === "missing_source";
+}
+
+export function resolveEffectiveComputeConfig(input: {
+  workspace: WorkspaceComputeSettings | null;
+  agent: AgentComputeSettings | null;
+  daytonaCredentialPresent: boolean;
+  daytonaProfiles: Record<ComputeResourceProfile, EnvironmentSource | null>;
+  mcpHosts?: string[];
+  workspaceSecretEnvNames?: string[];
+  agentSecretEnvNames?: string[];
+  /** The thread's frozen workbench profile. Null/absent = no workbench. */
+  workbenchResourceProfile?: ComputeResourceProfile | null | undefined;
+}): ComputeConfigResult {
+  const { workspace, agent } = input;
+  if (!workspace) return { enabled: false, reason: "missing_workspace_settings" };
+  if (!workspace.enabled || agent?.enabled === false) return { enabled: false, reason: "disabled" };
+  if (workspace.provider !== workspace.providerConfig.kind) {
+    return { enabled: false, reason: "unsupported_provider" };
+  }
+  if (workspace.providerConfig.kind === "daytona" && !input.daytonaCredentialPresent) {
+    return { enabled: false, reason: "missing_secret" };
+  }
+
+  // The workbench snapshot is the only source of sandbox size. Workbench-less
+  // threads get the default. Resolved BEFORE the missing_source check below so
+  // validation sees the profile that will actually be acquired.
+  const resourceProfile = input.workbenchResourceProfile ?? DEFAULT_COMPUTE_RESOURCE_PROFILE;
+  if (
+    workspace.providerConfig.kind === "daytona" &&
+    input.daytonaProfiles[resourceProfile] === null
+  ) {
+    return { enabled: false, reason: "missing_source" };
+  }
+
+  // The workspace toggle is the master switch. When on, the allowlist is the
+  // workspace domains (or the sensible defaults if none) unioned with enabled
+  // MCP server hosts. Workbench-specific additions are layered on later at
+  // compute acquisition (they need the thread's workbench, unknown here); the
+  // agent-level override was retired in favor of that. When off, the network is
+  // unrestricted (null).
+  let allowedHosts: string[] | null = null;
+  if (workspace.networkRestrictionEnabled) {
+    const configured = parseDomainList(workspace.networkDomainAllowlist);
+    const workspaceHosts = configured.length
+      ? configured
+      : DEFAULT_COMPUTE_ALLOWED_HOSTS.map((host) => host.toLowerCase());
+    const mcpHosts = (input.mcpHosts ?? [])
+      .map((host) => host.trim().toLowerCase())
+      .filter(Boolean);
+    allowedHosts = [...new Set([...workspaceHosts, ...mcpHosts])];
+  }
+
+  return {
+    enabled: true,
+    value: {
+      provider: workspace.provider,
+      providerConfig: workspace.providerConfig,
+      resourceProfile,
+      idleTimeoutMs: agent?.idleTimeoutMs ?? workspace.idleTimeoutMs,
+      recoveryTtlMs: workspace.recoveryTtlMs,
+      maxProcessRuntimeMs: agent?.maxProcessRuntimeMs ?? workspace.maxProcessRuntimeMs,
+      monitorPollIntervalMs: DEFAULT_MONITOR_POLL_INTERVAL_MS,
+      limits: workspace.limits,
+      allowedHosts,
+      editableEnv: mergeComputeEnv(workspace.envVars, agent?.envVars ?? undefined),
+      agentEditableEnv: agent?.envVars ?? {},
+      secretEnvNames: [
+        ...new Set([
+          ...(input.workspaceSecretEnvNames ?? []),
+          ...(input.agentSecretEnvNames ?? []),
+        ]),
+      ].sort(),
+      environmentEditableEnv: {},
+      environmentSecretEnvNames: [],
+    },
+  };
+}
+
+/**
+ * The compute provider a new workspace's default sandbox is created with.
+ * `DEFAULT_SANDBOX_PROVIDER` opts a deployment out of the production default
+ * (`cloudflare`); local dev sets it to `mock`. An unrecognized value falls back
+ * to `cloudflare` so a typo can never silently hand new users a broken sandbox.
+ */
+export function resolveDefaultSandboxProvider(env: {
+  DEFAULT_SANDBOX_PROVIDER?: string | undefined;
+}): "cloudflare" | "daytona" | "mock" {
+  const raw = env.DEFAULT_SANDBOX_PROVIDER?.trim().toLowerCase();
+  if (raw === "mock" || raw === "daytona" || raw === "cloudflare") return raw;
+  return "cloudflare";
+}
+
+export function defaultProviderConfig(provider: string): ProviderConfig {
+  if (provider === "cloudflare") return { kind: "cloudflare" };
+  if (provider === "mock") return { kind: "mock" };
+  return {
+    kind: "daytona",
+    apiKeySecretName: "sandbox:daytona",
+    apiUrl: null,
+    target: null,
+    profiles: { small: null, medium: null },
+  };
+}
+
+export type { EnvironmentSource };

@@ -1,0 +1,1 @@
+ALTER TABLE `agents` ADD `show_reasoning` integer DEFAULT true NOT NULL;

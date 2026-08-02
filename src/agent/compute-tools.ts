@@ -1,0 +1,1030 @@
+import { tool, type ToolSet } from "ai";
+import { z } from "zod";
+import type { Env } from "../env";
+import { AttachmentRepository } from "../db/attachment-repository";
+import { AgentSkillRepository } from "../db/repositories/agent-skills";
+import { registryDb } from "../db/client";
+import { computeConfigFromInputs, loadComputeConfigInputs } from "../compute/settings";
+import { ThreadComputeStore } from "../compute/thread-store";
+import { ThreadComputeService } from "../compute/thread-service";
+import { resolveComputeEnvVars } from "../compute/env-resolve";
+import { buildComputeBackend } from "../compute/registry";
+import { ComputeError } from "../compute/errors";
+import { ContainerLedger } from "../compute/container-ledger";
+import {
+  createComputeQuotaGate,
+  parseMaxActiveContainers,
+  RECLAIM_RPC_TIMEOUT_MS,
+  type ComputeQuotaGate,
+} from "../compute/container-quota";
+import { buildComputeFileToolDefs } from "./compute-file-tools";
+import {
+  DEFAULT_COMPUTE_ALLOWED_HOSTS,
+  defaultProviderConfig,
+  isComputeResourceProfile,
+  needsWorkbenchResourceProfile,
+  parseDomainList,
+} from "../compute/config";
+import type { ComputeResourceProfile } from "../compute/backend";
+import type { BackendReference, ComputeBackend } from "../compute/backend";
+import type { EffectiveComputeConfig } from "../compute/types";
+import type { WatcherCompletionInfo } from "./system-reminder";
+import type { WorkLedgerSink } from "./work-ledger-store";
+import { getGithubAppConfig } from "../github/config";
+import { applyGithubToken } from "./github-token-wiring";
+import { ThreadRepositorySnapshotRepository } from "../db/repositories/thread-repository-snapshots";
+import { ThreadRepository } from "../db/repositories/threads";
+import { WorkbenchRepository } from "../db/repositories/workbenches";
+import { ComputeEnvSecretsStore } from "../compute/env-secrets";
+import { parseEnvVarsJson } from "../compute/env-vars";
+import { createWorkspaceSecretsServices } from "../secrets";
+import { commitWorkbenchSwitchIfPending } from "./workbench-switch-commit";
+import { log } from "../log";
+import {
+  probeWorkspaceCleanliness,
+  type WorkspaceCleanliness,
+} from "../compute/workspace-cleanliness";
+import { confirmWorkSaved, type WorkSavedToolDeps } from "./work-saved-tool";
+
+/**
+ * Everything a thread Durable Object must supply so the native compute exec tools
+ * (and the idle-eviction alarm callback) can construct a fully wired
+ * {@link ThreadComputeService} for the current thread. The DO owns the SQLite
+ * storage, the alarm scheduler, and the conversation, so those capabilities are
+ * injected rather than reached for globally — which also keeps the compute tool
+ * layer testable with fakes.
+ */
+export interface ComputeToolHostDeps {
+  env: Env;
+  threadId: string;
+  storage: DurableObjectStorage;
+  resolveRuntimeConfig: () => Promise<{ workspaceId: string; agentId: string }>;
+  /** Bridges {@link ThreadComputeService}'s `setAlarm` onto the Agents SDK scheduler. */
+  scheduleEviction: (timestampMs: number) => Promise<void>;
+  /** Cancels the outstanding idle-eviction alarm; used by `exec_shutdown` after teardown. */
+  cancelEviction: () => Promise<void>;
+  /**
+   * Delivers a hidden system-reminder to the model. `"deferred"` appends it to
+   * the thread's transcript history so the model sees it on the next turn
+   * WITHOUT triggering one now; `"proactive"` drives a turn to surface it
+   * immediately.
+   *
+   * When `options.watcher` is supplied the reminder is delivered as a
+   * watcher-completion variant: the model still reads the same
+   * `<system-reminder>` body, but the message is tagged with structured
+   * metadata so the web transcript renders it as a visible completion card
+   * (see {@link WatcherCompletionInfo}) instead of hiding it.
+   */
+  deliverSystemReminder: (
+    body: string,
+    mode: "deferred" | "proactive",
+    options?: { watcher?: WatcherCompletionInfo },
+  ) => Promise<void>;
+  /**
+   * Serializes lazy environment creation across concurrent compute exec tool
+   * calls in a turn. The DO backs this with `ctx.blockConcurrencyWhile` so
+   * exactly one backend environment is created (see {@link ThreadComputeService}).
+   */
+  serializeCreation?: <T>(fn: () => Promise<T>) => Promise<T>;
+  now?: () => number;
+  /**
+   * Test seam: substitute the backend (e.g. the in-memory fake) instead of
+   * constructing a real Daytona client from the decrypted workspace secret.
+   */
+  buildBackend?: (config: EffectiveComputeConfig) => Promise<ComputeBackend>;
+  /**
+   * Whether this runtime can drive a PROACTIVE system-reminder turn (see
+   * {@link deliverSystemReminder}). Manual watcher registration is only ever
+   * surfaced via a proactive reminder on process exit, so runtimes that cannot
+   * deliver proactively (legacy `ThreadAgentV2`) MUST NOT be allowed to register
+   * one — that would be a silent black hole where the watch is accepted but the
+   * model is never told the process finished. `true` on the Think runtime,
+   * `false` on legacy.
+   */
+  supportsProcessMonitor: boolean;
+  /** Whether exec calls may background commands after the foreground window. */
+  backgroundLongRunningExec?: boolean;
+  /**
+   * When set, the resolved service ATTACHES to this backend environment (a
+   * subagent sharing its parent's machine) instead of provisioning its own.
+   */
+  attachedRuntime?: BackendReference;
+  /**
+   * Owner-side guard consulted by idle eviction / exec_shutdown so the shared
+   * machine is not torn down while a child subagent holds a lease.
+   */
+  hasBlockingWork?: () => Promise<boolean>;
+  /** Clears the "workspace verified clean" bit. Optional — see thread-service.ts. */
+  markSandboxDirty?: () => Promise<void>;
+  /** Sets/clears the "workspace verified clean" bit; backs `confirm_work_saved`. */
+  setSandboxDeclaredClean?: (clean: boolean) => Promise<void>;
+  /** Read side of the "workspace verified clean" bit; drives idle-release disposition. */
+  isSandboxDeclaredClean?: () => Promise<boolean>;
+  /** Git-based cleanliness probe; drives idle-release disposition when the bit isn't set. */
+  probeWorkspaceCleanliness?: () => Promise<WorkspaceCleanliness>;
+  /** @internal for tests only — shrinks sync-first exec timing without waiting on real time. */
+  execForegroundTimeoutMs?: number;
+  /** @internal for tests only — shrinks sync-first exec polling without waiting on real time. */
+  execForegroundPollIntervalMs?: number;
+  /** @internal for tests only — advances fake time instead of sleeping. */
+  sleep?: (ms: number) => Promise<void>;
+  /**
+   * Write surface for the background work ledger (see `WorkLedgerStore`).
+   * Threaded through so watched-process registration/liveness stamps land in
+   * the ledger the reaper reads; the reaper itself never touches compute.
+   */
+  workLedger?: WorkLedgerSink;
+  /**
+   * The ledger's next sweep horizon (`nextSweepAt` over open rows). Supplied by
+   * the agent, which owns the ledger. Folded into the compute service's single
+   * alarm min-fold so the reaper rides the thread's one alarm instead of
+   * arming (and thereby cancelling) it.
+   */
+  getWorkHorizon?: () => number | null;
+  /**
+   * Fired once, after `ThreadComputeService` acquires a genuinely fresh
+   * runtime (not a recovery restore). Wired to `createRepositoryPreparation`
+   * so a thread's workbench repos are cloned automatically; a workbench-less
+   * thread is a cheap no-op (no repository snapshots to prepare).
+   */
+  onFreshRuntimeAcquired?: () => Promise<void>;
+}
+
+/**
+ * Widen a compute egress allowlist with per-skill declared domains — but ONLY
+ * when a restriction is already in force. A null allowlist means "unrestricted"
+ * (org default applies); Daytona's domainAllowList REPLACES that default, so
+ * unioning into null would silently tighten an open environment. Never do that.
+ */
+export function unionAllowlistWithSkillDomains(
+  allowlist: string[] | null,
+  skillDomains: string[],
+): string[] | null {
+  if (allowlist === null) return null;
+  if (skillDomains.length === 0) return allowlist;
+  return [...new Set([...allowlist, ...skillDomains])];
+}
+
+/**
+ * The thread's frozen workbench resource profile, or `null` when it has no
+ * snapshot (or one predating the column). Callers pass this to
+ * `resolveComputeConfigForAgent` / `computeConfigFromInputs` so config resolves
+ * against the workbench the thread is actually assigned to rather than the
+ * `small` default.
+ */
+export async function readThreadWorkbenchResourceProfile(
+  env: Env,
+  threadId: string,
+): Promise<ComputeResourceProfile | null> {
+  const snapshot = await new ThreadRepositorySnapshotRepository(
+    registryDb(env),
+  ).listWorkbenchSnapshot(threadId);
+  return snapshot?.resourceProfile != null && isComputeResourceProfile(snapshot.resourceProfile)
+    ? snapshot.resourceProfile
+    : null;
+}
+
+/**
+ * Whether the thread has a workbench assigned — the configuration-level
+ * statement that this thread does repository work (it declares repos, a setup
+ * script and a sandbox size). Deliberately independent of
+ * {@link readThreadWorkbenchResourceProfile}: that helper returns `null` both
+ * for "no workbench" and for "workbench assigned but its stored profile
+ * predates the column / fails validation", and only the former means the
+ * thread has no workbench.
+ */
+export async function hasThreadWorkbench(env: Env, threadId: string): Promise<boolean> {
+  const snapshot = await new ThreadRepositorySnapshotRepository(
+    registryDb(env),
+  ).listWorkbenchSnapshot(threadId);
+  return snapshot?.workbenchId != null;
+}
+
+/**
+ * Rewrites the DO-persisted resource profile to the one the thread's CURRENT
+ * workbench snapshot declares. Called by `commitWorkbenchSwitchIfPending` right
+ * after a successful commit — see `adoptCommittedResourceProfile` there for why
+ * the stored value must be rewritten rather than left to age.
+ *
+ * Reads the snapshot directly instead of going through `resolveComputeService`:
+ * that helper deliberately prefers the stored profile over the workbench one,
+ * which is precisely the stale value being corrected here.
+ *
+ * Falls back to the resolved config's profile when the thread has no snapshot
+ * profile (an unassigned workbench), so the stored value always tracks whatever
+ * the next acquire would otherwise resolve to.
+ */
+export async function adoptCommittedWorkbenchResourceProfile(
+  deps: ComputeToolHostDeps,
+): Promise<void> {
+  const { workspaceId, agentId } = await deps.resolveRuntimeConfig();
+  const inputs = await loadComputeConfigInputs({ env: deps.env, workspaceId, agentId });
+  const workbenchResourceProfile = await readThreadWorkbenchResourceProfile(
+    deps.env,
+    deps.threadId,
+  );
+
+  const config = computeConfigFromInputs(inputs, workbenchResourceProfile);
+  if (!config.enabled) return;
+
+  const store = new ThreadComputeStore(deps.storage, config.value.limits);
+  store.migrate();
+  // No state yet → nothing stale to correct, and `markAcquiring` will seed the
+  // freshly-resolved profile itself on the next acquire.
+  if (!store.getComputeState()) return;
+  store.setResourceProfile(config.value.resourceProfile, (deps.now ?? Date.now)());
+}
+
+/**
+ * Resolves the effective compute config for the thread's agent and, when it is
+ * enabled, builds a thread-scoped {@link ThreadComputeService} backed by the
+ * DO's SQLite store. Returns `null` when compute execution is disabled or the
+ * effective configuration is incomplete — callers MUST treat `null` as "no
+ * compute" (hide all compute exec tools, schedule no eviction alarm).
+ */
+export async function resolveComputeService(deps: ComputeToolHostDeps): Promise<{
+  service: ThreadComputeService;
+  workspaceId: string;
+  config: EffectiveComputeConfig;
+} | null> {
+  const { workspaceId, agentId } = await deps.resolveRuntimeConfig();
+
+  // The D1-backed config inputs (workspace/agent settings, MCP hosts, secret
+  // names, credential presence) are independent of the workbench profile, so
+  // fetch them exactly once regardless of how many times we resolve below.
+  const inputs = await loadComputeConfigInputs({ env: deps.env, workspaceId, agentId });
+  // Resolve once with NO profile to learn whether compute is even enabled for
+  // this workspace/agent, without paying for the thread's workbench snapshot
+  // query. The enabled/disabled decision (aside from `missing_source`, which
+  // itself depends on the profile) never consults the profile — see
+  // `needsWorkbenchResourceProfile`. This is what keeps a compute-DISABLED
+  // workspace from paying an extra D1 round-trip for a value it will never use.
+  const preliminary = computeConfigFromInputs(inputs, null);
+  if (!needsWorkbenchResourceProfile(preliminary)) return null;
+
+  // `threadWorkbenchId` is the thread's assigned workbench BUNDLE
+  // (project/env-vars/setup-script grouping) — distinct from the
+  // `environmentId` local below, which names the base OS image for the
+  // selected resource profile. Prefer the immutable per-thread snapshot
+  // (taken when the bundle was assigned) and fall back to the live
+  // `threadIndex.workbenchId` for threads that predate the snapshot. Fetched
+  // ONLY once we know compute could actually be enabled (see above), so this
+  // query is paid exactly once and never on the disabled path.
+  const envSnapshot = await new ThreadRepositorySnapshotRepository(
+    registryDb(deps.env),
+  ).listWorkbenchSnapshot(deps.threadId);
+  const threadWorkbenchId =
+    envSnapshot?.workbenchId ??
+    (await new ThreadRepository(registryDb(deps.env)).getById(deps.threadId))?.workbenchId ??
+    null;
+  const workbenchResourceProfile =
+    envSnapshot?.resourceProfile != null && isComputeResourceProfile(envSnapshot.resourceProfile)
+      ? envSnapshot.resourceProfile
+      : null;
+
+  const config = computeConfigFromInputs(inputs, workbenchResourceProfile);
+  if (!config.enabled) return null;
+
+  const skillDomains = await new AgentSkillRepository(registryDb(deps.env)).listEnabledSkillDomains(
+    {
+      workspaceId,
+      agentId,
+    },
+  );
+
+  const store = new ThreadComputeStore(deps.storage, config.value.limits);
+  store.migrate();
+  const computeState = store.getComputeState();
+  // Prefer a profile persisted on state (from a running sandbox created under
+  // an earlier workbench) so the backend is built for the environment source
+  // that sandbox is actually acquired under, not just the settings default.
+  const effectiveProfile = computeState?.resourceProfile ?? config.value.resourceProfile;
+
+  let environmentEditableEnv: Record<string, string> = {};
+  let environmentSecretEnvNames: string[] = [];
+  // Workbench-level allowlist additions, applied additively on top of the
+  // workspace list. A Daytona workbench can also activate restrictions itself;
+  // that path must restore enabled MCP hosts that the unrestricted workspace
+  // resolution intentionally left out.
+  let workbenchNetworkHosts: string[] = [];
+  if (threadWorkbenchId) {
+    const workbenchRow = await new WorkbenchRepository(registryDb(deps.env)).getById(
+      threadWorkbenchId,
+    );
+    if (workbenchRow) {
+      environmentEditableEnv = parseEnvVarsJson(workbenchRow.sandboxEnvVarsJson);
+      workbenchNetworkHosts = parseDomainList(workbenchRow.sandboxNetworkDomainAllowlist);
+    }
+    const { store: secretsStore, writer: secretsWriter } = createWorkspaceSecretsServices(deps.env);
+    const envSecretsStore = new ComputeEnvSecretsStore({
+      store: secretsStore,
+      writer: secretsWriter,
+    });
+    const envSecretNames = await envSecretsStore.listEnvironmentNames(
+      workspaceId,
+      threadWorkbenchId,
+    );
+    environmentSecretEnvNames = envSecretNames.map((n) => n.name);
+  }
+
+  const baseAllowlist =
+    config.value.provider === "daytona" &&
+    config.value.allowedHosts === null &&
+    workbenchNetworkHosts.length > 0
+      ? DEFAULT_COMPUTE_ALLOWED_HOSTS
+      : config.value.allowedHosts;
+  const widenedAllowlist = unionAllowlistWithSkillDomains(baseAllowlist, [
+    ...inputs.mcpHosts,
+    ...skillDomains,
+    ...workbenchNetworkHosts,
+  ]);
+
+  const effectiveConfig: EffectiveComputeConfig = {
+    ...config.value,
+    allowedHosts: widenedAllowlist,
+    resourceProfile: effectiveProfile,
+    environmentEditableEnv,
+    environmentSecretEnvNames,
+  };
+  const existingReference =
+    computeState?.status === "active" && computeState.runtimeRef
+      ? computeState.runtimeRef
+      : computeState?.status === "recoverable" && computeState.recoveryRef
+        ? computeState.recoveryRef
+        : null;
+  if (existingReference) {
+    const storedProviderConfig =
+      computeState?.providerConfig?.kind === existingReference.provider
+        ? computeState.providerConfig
+        : existingReference.provider !== effectiveConfig.provider
+          ? defaultProviderConfig(existingReference.provider)
+          : effectiveConfig.providerConfig;
+    effectiveConfig.provider = existingReference.provider;
+    effectiveConfig.providerConfig = storedProviderConfig;
+  }
+
+  const environmentSource =
+    effectiveConfig.providerConfig.kind === "daytona"
+      ? effectiveConfig.providerConfig.profiles[effectiveProfile]
+      : null;
+  const environmentId = environmentSource
+    ? environmentSource.value
+    : `${effectiveConfig.provider}:${effectiveProfile}`;
+
+  const now = deps.now ?? (() => Date.now());
+  const backend = deps.buildBackend
+    ? await deps.buildBackend(effectiveConfig)
+    : await buildComputeBackend(deps.env, workspaceId, deps.threadId, effectiveConfig);
+  const computeEnv = await resolveComputeEnvVars({
+    env: deps.env,
+    workspaceId,
+    agentId,
+    // The thread's workbench id, threaded through to layer in its editable +
+    // secret env vars. Unrelated to the base-image `environmentId` local above.
+    environmentId: threadWorkbenchId,
+    config: effectiveConfig,
+  });
+  // Populate GH_TOKEN from a GitHub App installation when configured and unset.
+  let effectiveEnv = computeEnv;
+  const githubConfig = getGithubAppConfig(deps.env);
+  if (githubConfig) {
+    const snapshots = await new ThreadRepositorySnapshotRepository(
+      registryDb(deps.env),
+    ).listForThread(deps.threadId);
+    effectiveEnv = await applyGithubToken({
+      db: registryDb(deps.env),
+      workspaceId,
+      config: githubConfig,
+      existingEnv: computeEnv,
+      repoUrls: snapshots.map((s) => s.url),
+      log: (message) => console.log(message),
+    });
+  }
+  const quota = buildComputeQuotaGate({
+    env: deps.env,
+    effectiveConfig,
+    workspaceId,
+    threadId: deps.threadId,
+    now,
+  });
+  const backgroundLongRunningExec = deps.backgroundLongRunningExec ?? !deps.attachedRuntime;
+  const service = new ThreadComputeService({
+    backend,
+    store,
+    config: effectiveConfig,
+    environmentId,
+    threadId: deps.threadId,
+    env: effectiveEnv,
+    setAlarm: (timestamp) => deps.scheduleEviction(timestamp),
+    clearAlarm: () => deps.cancelEviction(),
+    now,
+    deliverSystemReminder: deps.deliverSystemReminder,
+    supportsProcessMonitor: deps.supportsProcessMonitor,
+    backgroundLongRunningExec,
+    ...(deps.serializeCreation ? { serializeCreation: deps.serializeCreation } : {}),
+    ...(deps.attachedRuntime ? { attachedRuntime: deps.attachedRuntime } : {}),
+    ...(quota ? { quota } : {}),
+    ...(deps.hasBlockingWork ? { hasBlockingWork: deps.hasBlockingWork } : {}),
+    ...(deps.markSandboxDirty ? { markSandboxDirty: deps.markSandboxDirty } : {}),
+    ...(deps.isSandboxDeclaredClean ? { isSandboxDeclaredClean: deps.isSandboxDeclaredClean } : {}),
+    ...(deps.probeWorkspaceCleanliness
+      ? { probeWorkspaceCleanliness: deps.probeWorkspaceCleanliness }
+      : {}),
+    ...(deps.execForegroundTimeoutMs !== undefined
+      ? { execForegroundTimeoutMs: deps.execForegroundTimeoutMs }
+      : {}),
+    ...(deps.execForegroundPollIntervalMs !== undefined
+      ? { execForegroundPollIntervalMs: deps.execForegroundPollIntervalMs }
+      : {}),
+    ...(deps.sleep ? { sleep: deps.sleep } : {}),
+    ...(deps.workLedger ? { workLedger: deps.workLedger } : {}),
+    ...(deps.getWorkHorizon ? { getWorkHorizon: deps.getWorkHorizon } : {}),
+    ...(deps.onFreshRuntimeAcquired ? { onFreshRuntimeAcquired: deps.onFreshRuntimeAcquired } : {}),
+  });
+  return { service, workspaceId, config: effectiveConfig };
+}
+
+/**
+ * Builds the per-workspace container cap for Cloudflare, and ONLY Cloudflare —
+ * Daytona has its own provider-side capacity and must never be gated by the
+ * ledger. Split out from {@link resolveComputeService} so this provider gate
+ * is a directly testable, pure property instead of something only observable
+ * by driving the whole resolution pipeline (DB-backed settings, secrets, MCP
+ * host lookups) end to end.
+ */
+export function buildComputeQuotaGate(input: {
+  env: Env;
+  effectiveConfig: EffectiveComputeConfig;
+  workspaceId: string;
+  threadId: string;
+  now: () => number;
+}): ComputeQuotaGate | undefined {
+  if (input.effectiveConfig.provider !== "cloudflare") return undefined;
+  return createComputeQuotaGate({
+    ledger: new ContainerLedger(input.env.REGISTRY_DB),
+    workspaceId: input.workspaceId,
+    threadId: input.threadId,
+    provider: input.effectiveConfig.provider,
+    profile: input.effectiveConfig.resourceProfile,
+    idleTimeoutMs: input.effectiveConfig.idleTimeoutMs,
+    limit: parseMaxActiveContainers(input.env.MAX_ACTIVE_CONTAINERS_PER_WORKSPACE),
+    now: input.now,
+    reclaim: (threadId) => reclaimContainer(input.env, threadId),
+  });
+}
+
+/**
+ * Ask another thread's DO to give up its idle container.
+ *
+ * MUST go through getAgentByName, not `namespace.get(idFromName(...))` — the raw
+ * stub bypasses the entry points where onStart() runs (see src/automata/fire-due.ts).
+ *
+ * Time-boxed: a DO is single-threaded, so a target mid-turn would otherwise make
+ * the caller wait behind its queue. A timeout is just a refusal.
+ *
+ * Imports `agents` dynamically: it touches `cloudflare:workers` at module load,
+ * which breaks node-environment unit tests (e.g. compute-tools-env.test.ts)
+ * that import this file only for the tool-def builder and never reach this
+ * function. A static top-level import would drag that failure into every
+ * consumer of this module regardless of whether reclaim ever runs.
+ */
+async function reclaimContainer(env: Env, threadId: string): Promise<boolean> {
+  const { getAgentByName } = await import("agents");
+  const stub = (await getAgentByName(env.THINK_THREAD_AGENT, threadId)) as unknown as {
+    releaseIfReclaimable: () => Promise<boolean>;
+  };
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(false), RECLAIM_RPC_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([stub.releaseIfReclaimable(), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** DO storage key: id of the single outstanding compute-eviction schedule. */
+export const COMPUTE_EVICTION_SCHEDULE_KEY = "sandbox:eviction-schedule-id";
+
+/**
+ * The Agents SDK owns the physical Durable Object `alarm()` (it drives the
+ * framework's scheduler), so compute idle eviction is scheduled through the
+ * documented `schedule()`/`cancelSchedule()` hooks rather than by overriding
+ * `alarm()`. This narrow interface is what {@link scheduleComputeEviction}
+ * needs from the host agent.
+ */
+export interface ComputeAlarmHost {
+  storage: DurableObjectStorage;
+  schedule: (when: Date, callback: string) => Promise<{ id: string }>;
+  cancelSchedule: (id: string) => Promise<boolean>;
+}
+
+/**
+ * (Re)arm the thread's single idle-eviction alarm at `timestampMs`. Because
+ * {@link ThreadComputeService} calls this after every compute operation to push
+ * the eviction time forward, we cancel the prior schedule first so exactly one
+ * eviction callback is ever outstanding (no accumulation across refreshes).
+ */
+export async function scheduleComputeEviction(
+  host: ComputeAlarmHost,
+  timestampMs: number,
+  callbackName: string,
+): Promise<void> {
+  // Race note (benign, self-healing): cancel-prior then schedule-new is not
+  // atomic, so two rapid refreshes interleaving at these awaits could briefly
+  // leave an orphan schedule (a stale callback whose id is no longer stored).
+  // That is harmless — the eviction tick is idempotent and reschedules itself
+  // when the environment is still within its idle budget, and releaseIfIdle
+  // no-ops on an already-released environment. The DO's single-threaded event
+  // model also serializes these calls in practice (each refresh awaits before
+  // the next compute op), so at most one schedule is normally outstanding. A
+  // stored id is always the most recent, so the next refresh cancels the right
+  // one.
+  const priorId = await host.storage.get<string>(COMPUTE_EVICTION_SCHEDULE_KEY);
+  if (priorId) {
+    try {
+      await host.cancelSchedule(priorId);
+    } catch {
+      /* prior schedule already fired or was cleared */
+    }
+  }
+  const created = await host.schedule(new Date(timestampMs), callbackName);
+  await host.storage.put(COMPUTE_EVICTION_SCHEDULE_KEY, created.id);
+}
+
+/**
+ * Cancel the thread's outstanding idle-eviction alarm and forget its id. Used
+ * by `exec_shutdown`, which tears the environment down immediately so there is
+ * nothing left to evict. Safe to call when no schedule is outstanding (no-op).
+ */
+export async function cancelComputeEviction(host: {
+  storage: DurableObjectStorage;
+  cancelSchedule: (id: string) => Promise<boolean>;
+}): Promise<void> {
+  const priorId = await host.storage.get<string>(COMPUTE_EVICTION_SCHEDULE_KEY);
+  if (!priorId) return;
+  try {
+    await host.cancelSchedule(priorId);
+  } catch {
+    /* schedule already fired or was cleared */
+  }
+  await host.storage.delete(COMPUTE_EVICTION_SCHEDULE_KEY);
+}
+
+interface ComputeFileContext {
+  env: Env;
+  threadId: string;
+  workspaceId: string;
+}
+
+/** Status peeks allowed per process per turn before exec_output refuses. */
+export const EXEC_OUTPUT_PEEK_LIMIT = 2;
+
+/**
+ * Whether this exec_output call should refuse. Only a WATCHED, still-RUNNING
+ * process can be refused: a notification is guaranteed for it, so polling adds
+ * nothing. An unwatched process (no notification coming) and an exited one
+ * (reading final output) always read freely, so a legitimate one-off peek
+ * never hits this.
+ */
+export function shouldRefusePeek(input: {
+  peeksThisTurn: number;
+  isWatched: boolean;
+  isRunning: boolean;
+}): boolean {
+  if (!input.isWatched || !input.isRunning) return false;
+  return input.peeksThisTurn >= EXEC_OUTPUT_PEEK_LIMIT;
+}
+
+export function toErrorResult(error: unknown): { ok: false; error: string; detail?: string } {
+  if (error instanceof ComputeError) {
+    return { ok: false, error: error.code, detail: error.message };
+  }
+  return { ok: false, error: error instanceof Error ? error.message : String(error) };
+}
+
+/**
+ * Builds the AI SDK `tool()` definitions for the compute exec surface. Split out
+ * from {@link createComputeTools} so the tool schemas + delegation wiring can be
+ * unit-tested with a stub service, independent of config/backend resolution.
+ * `getFileContext` is resolved lazily (upload/download need the workspace id).
+ */
+/**
+ * The two preconditions `confirm_workbench_switch` cannot safely run without,
+ * bundled so they arrive together or not at all.
+ *
+ * `hasBlockingWork` used to be an independent optional that defaulted to
+ * `async () => false` — failing OPEN on a safety precondition. Because the
+ * commit happens BEFORE `execShutdown`, a false `false` moves the snapshot to
+ * the new workbench and only then has `execShutdown` throw
+ * `compute_children_active`; that teardown failure is swallowed by design, so
+ * the thread is left with the new snapshot, the old sandbox, and live subagents
+ * still running on it — exactly the inconsistency the mechanism exists to
+ * prevent.
+ *
+ * Making the bundle gate tool REGISTRATION (below) is stronger than making the
+ * field required: a required field can still be satisfied with a stub
+ * `async () => false`, whereas a caller that has not wired the preconditions
+ * simply never gets the dangerous tool.
+ */
+export interface WorkbenchSwitchToolDeps {
+  hasBlockingWork: () => Promise<boolean>;
+  adoptCommittedResourceProfile: () => Promise<void>;
+}
+
+export interface BuildComputeToolDefsOptions {
+  networkDomainAllowlist?: string[] | null;
+  secretEnvVarNames?: string[];
+  envVarNames?: string[];
+  supportsProcessMonitor?: boolean;
+  backgroundLongRunningExec?: boolean;
+  attachedRuntime?: BackendReference | undefined;
+  workbenchSwitch?: WorkbenchSwitchToolDeps | undefined;
+  workSaved?: WorkSavedToolDeps | undefined;
+  now?: (() => number) | undefined;
+}
+
+export function buildComputeToolDefs(
+  getService: () => Promise<ThreadComputeService>,
+  getFileContext: () => Promise<ComputeFileContext>,
+  options: BuildComputeToolDefsOptions = {},
+): ToolSet {
+  const {
+    networkDomainAllowlist = null,
+    secretEnvVarNames = [],
+    envVarNames = [],
+    supportsProcessMonitor = false,
+    attachedRuntime,
+    backgroundLongRunningExec = !attachedRuntime,
+    workbenchSwitch,
+    workSaved,
+    now,
+  } = options;
+  const netNote =
+    networkDomainAllowlist && networkDomainAllowlist.length
+      ? ` Outbound network is restricted to an allowlist; reachable hosts include: ${networkDomainAllowlist.slice(0, 30).join(", ")}${networkDomainAllowlist.length > 30 ? ", …" : ""}. Other hosts are blocked.`
+      : "";
+  const presetNames = [...new Set([...envVarNames, ...secretEnvVarNames])].sort();
+  const envNote = presetNames.length
+    ? ` Preset environment variables are available to every command: ${presetNames.slice(0, 30).join(", ")}${presetNames.length > 30 ? ", …" : ""}.`
+    : "";
+  const backgroundNote = supportsProcessMonitor
+    ? "If it is still running after 10 seconds, it is backgrounded and the harness attempts to attach a watcher automatically. The returned result indicates whether watching was attached. When watching is true and no independent work remains, end your turn instead of polling; the watcher will notify you when the command finishes."
+    : "If it is still running after 10 seconds, it is backgrounded without a watcher in this runtime. Do not busy-poll just to wait; if no independent work remains, report that it is still running/backgrounded and stop. Use exec_output only for one-off current output inspection or truncated previews.";
+  const execTimingNote = !backgroundLongRunningExec
+    ? attachedRuntime
+      ? "This attached subagent runtime runs exec synchronously: it waits until the command exits and does not background long-running commands."
+      : "Exec runs synchronously in this runtime: it waits until exit and does not background long-running commands."
+    : `Wait up to 10 seconds for completion; if it finishes, stdout/stderr previews and exit status are returned directly. ${backgroundNote}`;
+  const timeoutNote =
+    " Omit timeoutMs unless intentionally capping runtime; if set, it must be at least as long as the command is expected to take.";
+  // Per-process peek counter for the exec_output anti-poll refusal. Scoped to
+  // this closure — NOT module-level — so it is naturally per-turn and
+  // per-thread: `createComputeTools` (and this function) is called fresh from
+  // `beforeTurn` every turn, on a per-DO-instance service, so a fresh Map here
+  // is both "resets each turn" and "never leaks across threads" for free,
+  // with no explicit reset call needed. A per-step reset would never let the
+  // limit bite (every peek reads as step 0); a module-global counter would
+  // refuse one thread's reads because another thread's peeks incremented it.
+  const execOutputPeeksThisTurn = new Map<string, number>();
+  return {
+    exec: tool({
+      description: `Run a shell command in this thread's isolated code sandbox. ${execTimingNote}${timeoutNote}${netNote}${envNote}`,
+      inputSchema: z.object({
+        command: z.string().describe("Shell command to run."),
+        cwd: z.string().optional().describe("Working directory inside the sandbox."),
+        env: z.record(z.string(), z.string()).optional().describe("Extra environment variables."),
+        timeoutMs: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe(
+            "Maximum wall-clock runtime in milliseconds. Omit unless intentionally capping runtime; if set, it must be at least as long as the command is expected to take, e.g. sleep 90 needs timeoutMs >= 90000.",
+          ),
+        label: z.string().optional().describe("Optional human-readable label."),
+      }),
+      execute: async (input) => {
+        try {
+          return await (await getService()).exec(input);
+        } catch (error) {
+          return toErrorResult(error);
+        }
+      },
+    }),
+    exec_output: tool({
+      description: `Read bounded recent output and live status for a sandbox process. It does NOT wait: it reports current status immediately and never returns full output. A message is delivered to this thread automatically when a background process finishes — if you have nothing else to do, end your turn instead of calling this. Use it only for a one-off status/output peek, never in a loop. A watched, still-running process allows at most ${EXEC_OUTPUT_PEEK_LIMIT} status peeks per turn — further calls are refused (without contacting the sandbox) since the completion notification is automatic. Unwatched and already-finished processes are never limited.`,
+      inputSchema: z.object({
+        processId: z.string(),
+        maxLines: z.number().int().positive().optional(),
+        maxBytes: z.number().int().positive().optional(),
+        // No "both": stdout/stderr are independently-indexed chunk streams with
+        // no reliable global ordering, so a combined tail can't be assembled
+        // correctly. Use exec_output_grep (merges by line number) for both.
+        stream: z.enum(["stdout", "stderr"]).optional(),
+      }),
+      execute: async (input) => {
+        try {
+          const service = await getService();
+          // Read-only view over the live watcher registry (no backend call):
+          // a process only appears here if it is actually being watched, and
+          // its `status` is the store's locally-known value, not a fresh
+          // provider read. That is exactly what lets the refusal below decide
+          // without ever touching the backend.
+          const watchers = service.listActiveWatchersView();
+          const watcherEntry = watchers.find((w) => w.processId === input.processId);
+          const isWatched = Boolean(watcherEntry);
+          const isRunning = watcherEntry?.status === "running";
+          const peeksThisTurn = execOutputPeeksThisTurn.get(input.processId) ?? 0;
+          if (shouldRefusePeek({ peeksThisTurn, isWatched, isRunning })) {
+            return {
+              ok: false as const,
+              refused: true as const,
+              processId: input.processId,
+              message: `Process ${input.processId} is being watched — you will be notified automatically when it finishes, with its output. You have already checked it ${peeksThisTurn} times this turn. Stop checking and end your turn; if you have other independent work, do that instead.`,
+            };
+          }
+          execOutputPeeksThisTurn.set(input.processId, peeksThisTurn + 1);
+          return await service.execOutput(input);
+        } catch (error) {
+          return toErrorResult(error);
+        }
+      },
+    }),
+    exec_output_grep: tool({
+      description: "Search stored stdout/stderr for a sandbox process with hard result limits.",
+      inputSchema: z.object({
+        processId: z.string(),
+        pattern: z.string(),
+        stream: z.enum(["stdout", "stderr", "both"]).optional(),
+        caseSensitive: z.boolean().optional(),
+        contextLines: z.number().int().nonnegative().optional(),
+        maxMatches: z.number().int().positive().optional(),
+      }),
+      execute: async (input) => {
+        try {
+          return await (await getService()).execOutputGrep(input);
+        } catch (error) {
+          return toErrorResult(error);
+        }
+      },
+    }),
+    exec_output_read: tool({
+      description: "Read a bounded line or byte range from stored sandbox process output.",
+      inputSchema: z.object({
+        processId: z.string(),
+        stream: z.enum(["stdout", "stderr"]).optional(),
+        startLine: z.number().int().positive().optional(),
+        endLine: z.number().int().positive().optional(),
+        startByte: z.number().int().nonnegative().optional(),
+        maxBytes: z.number().int().positive().optional(),
+      }),
+      execute: async (input) => {
+        try {
+          return await (await getService()).execOutputRead(input);
+        } catch (error) {
+          return toErrorResult(error);
+        }
+      },
+    }),
+    exec_stop: tool({
+      description: "Stop a sandbox process.",
+      inputSchema: z.object({
+        processId: z.string(),
+        mode: z.enum(["interrupt", "terminate", "kill"]).optional(),
+      }),
+      execute: async (input) => {
+        try {
+          return await (await getService()).execStop(input);
+        } catch (error) {
+          return toErrorResult(error);
+        }
+      },
+    }),
+    exec_shutdown: tool({
+      description:
+        "Shut down and delete this thread's code sandbox entirely, freeing its resources. Use when the sandbox is no longer needed. Idempotent — safe to call when no sandbox exists. If any process is still running, the call is refused and returns the running processes unless you pass confirm: true (running processes will be killed). After shutdown, a future exec transparently starts a fresh sandbox.",
+      inputSchema: z.object({
+        confirm: z
+          .boolean()
+          .optional()
+          .describe("Set true to proceed when processes are still running (they will be killed)."),
+      }),
+      execute: async (input) => {
+        try {
+          return await (await getService()).execShutdown(input);
+        } catch (error) {
+          return toErrorResult(error);
+        }
+      },
+    }),
+    exec_list: tool({
+      description: "List running and recent sandbox processes for this thread.",
+      inputSchema: z.object({
+        status: z.enum(["running", "exited", "failed", "stopped", "all"]).optional(),
+        limit: z.number().int().positive().optional(),
+      }),
+      execute: async (input) => {
+        try {
+          // Status filtering + limit ordering lives in the service so the status
+          // filter is applied BEFORE the limit (avoids under-returning).
+          return await (await getService()).execList(input);
+        } catch (error) {
+          return toErrorResult(error);
+        }
+      },
+    }),
+    exec_upload_file: tool({
+      description: "Upload an attached Nadi file into the sandbox.",
+      inputSchema: z.object({
+        sourceAttachmentId: z.string(),
+        destinationPath: z.string(),
+        overwrite: z.boolean().optional(),
+      }),
+      execute: async (input) => {
+        try {
+          const { env, threadId } = await getFileContext();
+          const row = await new AttachmentRepository(env.REGISTRY_DB).getByIdInThread(
+            input.sourceAttachmentId,
+            threadId,
+          );
+          if (!row) throw new Error("sandbox_upload_source_not_found");
+          const object = await env.ATTACHMENTS_BUCKET.get(row.r2Key);
+          if (!object) throw new Error("sandbox_upload_source_not_found");
+          const bytes = await object.arrayBuffer();
+          return await (
+            await getService()
+          ).execUploadFile({
+            destinationPath: input.destinationPath,
+            bytes,
+            ...(input.overwrite === undefined ? {} : { overwrite: input.overwrite }),
+          });
+        } catch (error) {
+          return toErrorResult(error);
+        }
+      },
+    }),
+    exec_download_file: tool({
+      description: "Download a sandbox file into Nadi-managed storage.",
+      inputSchema: z.object({
+        path: z.string(),
+        artifactName: z.string().optional(),
+        maxBytes: z.number().int().positive().optional(),
+      }),
+      execute: async (input) => {
+        try {
+          const { env, threadId, workspaceId } = await getFileContext();
+          const download = await (
+            await getService()
+          ).execDownloadFile({
+            path: input.path,
+            maxBytes: input.maxBytes ?? 10_000_000,
+          });
+          const attachmentId = `att_${crypto.randomUUID()}`;
+          const filename =
+            input.artifactName ?? download.filename ?? input.path.split("/").pop() ?? attachmentId;
+          const r2Key = `${workspaceId}/${threadId}/${attachmentId}`;
+          await env.ATTACHMENTS_BUCKET.put(r2Key, download.bytes);
+          await new AttachmentRepository(env.REGISTRY_DB).insert({
+            id: attachmentId,
+            workspaceId,
+            threadId,
+            mimeType: download.mimeType ?? "application/octet-stream",
+            filename,
+            byteSize: download.bytes.byteLength,
+            r2Key,
+            status: "committed",
+            createdAt: Date.now(),
+          });
+          return { attachmentId, filename, byteSize: download.bytes.byteLength };
+        } catch (error) {
+          return toErrorResult(error);
+        }
+      },
+    }),
+    // Registered only with its safety preconditions wired AND when this is not
+    // an attached subagent runtime — see `WorkbenchSwitchToolDeps`. Levelled up
+    // to match `confirm_work_saved`'s gate below: `createComputeTools` already
+    // omits `workbenchSwitch` from the options when `attachedRuntime` is set,
+    // but checking it again here (not only at the bundle-construction site)
+    // means the invariant holds regardless of how this function is called —
+    // a subagent reaching either tool is a data-loss bug, so the defensive
+    // check is cheap insurance against a future caller skipping that gate.
+    ...(workbenchSwitch && !attachedRuntime
+      ? {
+          confirm_workbench_switch: tool({
+            description:
+              "Confirm that all work in the current sandbox has been saved, so a user-requested workbench switch can proceed. The sandbox is destroyed immediately after this call. Only call this after committing and pushing anything worth keeping, or if there is nothing to save.",
+            inputSchema: z.object({}),
+            execute: async () => {
+              try {
+                const { env, threadId } = await getFileContext();
+                return await commitWorkbenchSwitchIfPending({
+                  threadId,
+                  now: now ?? (() => Date.now()),
+                  commitWorkbenchSwitch: (id, at) =>
+                    new ThreadRepository(registryDb(env)).commitWorkbenchSwitch(id, at),
+                  execShutdown: async () => (await getService()).execShutdown({ confirm: true }),
+                  hasBlockingWork: workbenchSwitch.hasBlockingWork,
+                  adoptCommittedResourceProfile: workbenchSwitch.adoptCommittedResourceProfile,
+                  onTeardownFailure: (error) =>
+                    log.warn("compute_tools.workbench_switch_teardown_failed", {
+                      threadId,
+                      error: String(error),
+                    }),
+                });
+              } catch (error) {
+                return toErrorResult(error);
+              }
+            },
+          }),
+        }
+      : {}),
+    // Registered only when its verification dependencies are wired AND this is
+    // not an attached subagent runtime — see `WorkSavedToolDeps`. An attached
+    // subagent shares its parent's runtime, so letting it declare the parent's
+    // sandbox discardable would destroy the parent's work; checked here (not
+    // only in `createComputeTools`) so the invariant holds regardless of caller.
+    ...(workSaved && !attachedRuntime
+      ? {
+          confirm_work_saved: tool({
+            description:
+              "Declare that all work in the sandbox is committed and pushed. This permits the idle sandbox to be discarded rather than preserved. The workspace is checked before the declaration is accepted: if any repository has uncommitted changes or unpushed commits, the call is refused and the offending paths are returned. Call this when you have finished working and everything is saved.",
+            inputSchema: z.object({}),
+            execute: async () => {
+              try {
+                return await confirmWorkSaved(workSaved);
+              } catch (error) {
+                return toErrorResult(error);
+              }
+            },
+          }),
+        }
+      : {}),
+  };
+}
+
+/**
+ * Async, config-aware factory for the native compute exec tools. Returns an empty
+ * tool set when compute execution is disabled or incomplete, so the runtime
+ * hides all compute exec tools from the model (design spec: the model must not
+ * see tools guaranteed to fail because no compute backend is configured).
+ */
+export async function createComputeTools(deps: ComputeToolHostDeps): Promise<ToolSet> {
+  const { supportsProcessMonitor, backgroundLongRunningExec, attachedRuntime } = deps;
+  const resolved = await resolveComputeService(deps);
+  if (!resolved) return {};
+  const execTools = buildComputeToolDefs(
+    async () => resolved.service,
+    async () => ({ env: deps.env, threadId: deps.threadId, workspaceId: resolved.workspaceId }),
+    {
+      networkDomainAllowlist: resolved.config.allowedHosts,
+      secretEnvVarNames: resolved.config.secretEnvNames,
+      envVarNames: Object.keys(resolved.config.editableEnv),
+      supportsProcessMonitor,
+      ...(backgroundLongRunningExec === undefined ? {} : { backgroundLongRunningExec }),
+      attachedRuntime,
+      // Gated on `attachedRuntime` being absent, the same way the tool this
+      // replaced (`select_sandbox_package`) was hidden from attached
+      // subagents: a subagent's `confirm_workbench_switch` call would resolve
+      // against its OWN thread row, which never has a pending switch, so it
+      // could only fail. `hasBlockingWork` alone doesn't distinguish this —
+      // `sandboxHostDeps()` sets it unconditionally — and checking "is a
+      // switch actually pending for THIS thread" would cost a D1 round-trip on
+      // every turn's tool build, which this codebase's latency budget (D1-from-DO
+      // ~220ms, sequential wave count dominates) rules out. Attached-runtime is
+      // knowable synchronously, so it's the gate.
+      workbenchSwitch:
+        deps.hasBlockingWork && !attachedRuntime
+          ? {
+              hasBlockingWork: deps.hasBlockingWork,
+              adoptCommittedResourceProfile: () => adoptCommittedWorkbenchResourceProfile(deps),
+            }
+          : undefined,
+      // Gated on `!attachedRuntime` for the same reason as `workbenchSwitch`:
+      // an attached subagent shares the parent's runtime, so letting it
+      // declare the parent's sandbox discardable would destroy the parent's
+      // work. `resolved.service` is already resolved for THIS runtime (the
+      // subagent's own attached environment when attached, the owner's
+      // otherwise), so gating registration is the only seam that matters.
+      workSaved:
+        !attachedRuntime && deps.setSandboxDeclaredClean
+          ? {
+              probe: async () =>
+                probeWorkspaceCleanliness((command, timeoutMs) =>
+                  resolved.service.execRun({ command, timeoutMs, label: "workspace cleanliness" }),
+                ),
+              setDeclaredClean: deps.setSandboxDeclaredClean,
+              threadId: deps.threadId,
+            }
+          : undefined,
+      now: deps.now,
+    },
+  );
+  // Model-native file tools share the same lease/runtime resolution as exec and
+  // are exposed only when compute is enabled (this factory returns {} above when
+  // it is not).
+  const fileTools = buildComputeFileToolDefs(async () => resolved.service.files);
+  return { ...execTools, ...fileTools };
+}

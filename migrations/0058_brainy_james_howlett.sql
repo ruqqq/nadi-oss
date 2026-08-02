@@ -1,0 +1,1 @@
+ALTER TABLE `user_notification_settings` ADD `push_preview_enabled` integer DEFAULT true NOT NULL;

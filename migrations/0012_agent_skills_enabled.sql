@@ -1,0 +1,1 @@
+ALTER TABLE agent_skills ADD COLUMN enabled INTEGER NOT NULL DEFAULT true;

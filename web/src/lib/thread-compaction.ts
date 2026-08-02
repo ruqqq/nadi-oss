@@ -1,0 +1,123 @@
+import type { UIMessage } from "ai";
+import type { CompactThreadResult, ThreadCompactionStatus } from "../threads-api";
+import { shouldUseQueuedSubmit } from "./queued-messages";
+
+type ToastId = string | number;
+
+type ManualThreadCompactionToast = {
+  loading(message: string): ToastId;
+  success(message: string, data?: { id?: ToastId }): ToastId;
+  info(message: string, data?: { id?: ToastId }): ToastId;
+  error(message: string, data?: { id?: ToastId }): ToastId;
+};
+
+export async function runManualThreadCompaction({
+  threadId,
+  compactThread,
+  toast,
+}: {
+  threadId: string;
+  compactThread: (threadId: string) => Promise<CompactThreadResult>;
+  toast: ManualThreadCompactionToast;
+}): Promise<CompactThreadResult> {
+  const toastId = toast.loading("Compacting thread…");
+  try {
+    const result = await compactThread(threadId);
+    if (result.compacted) toast.success(result.message, { id: toastId });
+    else toast.info(result.message, { id: toastId });
+    return result;
+  } catch (err) {
+    const error = err instanceof Error ? err : new Error(String(err));
+    toast.error(error.message, { id: toastId });
+    throw error;
+  }
+}
+
+export function isCompactionMessage(message: { id: string }): boolean {
+  return message.id.startsWith("compaction_");
+}
+
+/**
+ * The markdown summary a compaction message carries — the persisted digest of
+ * everything before it (Topic / Key Points / Current State / Open Items). Joins
+ * all text parts so the timeline can reveal it under the "Thread compacted"
+ * divider. Returns "" when the message has no text (nothing to expand).
+ */
+export function getCompactionSummary(message: UIMessage): string {
+  return message.parts
+    .filter(
+      (part): part is Extract<UIMessage["parts"][number], { type: "text" }> => part.type === "text",
+    )
+    .map((part) => part.text)
+    .join("\n\n")
+    .trim();
+}
+
+export function shouldQueueSubmitForThreadState({
+  runtime,
+  busy,
+  manualCompacting,
+  hasContent,
+}: {
+  runtime: "legacy" | "think";
+  busy: boolean;
+  manualCompacting: boolean;
+  hasContent: boolean;
+}): boolean {
+  return shouldUseQueuedSubmit({
+    runtime,
+    busy: busy || manualCompacting,
+    hasContent,
+  });
+}
+
+export type CompactionNotice = "none" | "not-needed";
+
+export function manualCompactionNoticeForResult(result: CompactThreadResult): CompactionNotice {
+  return result.compacted ? "none" : "not-needed";
+}
+
+export function compactionNoticeLabel(notice: CompactionNotice): string | null {
+  if (notice === "not-needed") return "No compaction needed";
+  return null;
+}
+
+export type CompactionSessionEvent = ThreadCompactionStatus & {
+  tokenEstimate?: number;
+  tokenThreshold?: number | null;
+};
+
+export type CompactionPhase = ThreadCompactionStatus["phase"];
+
+export function shouldApplyCompactionStatus({
+  currentPhase,
+  incomingPhase,
+  manualCompactionInFlight,
+}: {
+  currentPhase: CompactionPhase;
+  incomingPhase: CompactionPhase;
+  manualCompactionInFlight: boolean;
+}): boolean {
+  return !(incomingPhase === "idle" && currentPhase === "compacting" && manualCompactionInFlight);
+}
+
+export function parseCompactionSessionEvent(raw: string): CompactionSessionEvent | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== "object") return null;
+  const record = parsed as Record<string, unknown>;
+  if (record.type !== "cf_agent_session" && record.type !== "CF_AGENT_SESSION") return null;
+  if (record.phase !== "idle" && record.phase !== "compacting") return null;
+
+  return {
+    phase: record.phase,
+    ...(typeof record.tokenEstimate === "number" ? { tokenEstimate: record.tokenEstimate } : {}),
+    ...(typeof record.tokenThreshold === "number" || record.tokenThreshold === null
+      ? { tokenThreshold: record.tokenThreshold }
+      : {}),
+  };
+}

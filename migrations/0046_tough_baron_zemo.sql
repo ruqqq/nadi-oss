@@ -1,0 +1,1 @@
+ALTER TABLE `thread_index` ADD `workbench_switch_pending_at` integer;

@@ -1,0 +1,14 @@
+{
+  // The service worker runs in a ServiceWorkerGlobalScope, not a DOM window, so
+  // it needs the WebWorker lib — which cannot coexist with DOM in the app's
+  // program (the two libs declare conflicting globals). It gets its own program
+  // instead; `pnpm typecheck` runs both.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "WebWorker"],
+    "types": []
+  },
+  "include": ["src/sw.ts"],
+  // Undo the app program's exclusion of this very file.
+  "exclude": []
+}

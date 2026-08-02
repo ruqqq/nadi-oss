@@ -1,0 +1,87 @@
+# .dev.vars — local Wrangler dev secrets (copy this file to .dev.vars and fill in values)
+# .dev.vars itself is gitignored; this example file is committed.
+
+# Logging
+LOG_LEVEL=debug
+
+# Worker base URL (used for redirect/CORS references in local dev)
+APP_BASE_URL=http://localhost:8787
+
+# Bootstrap LLM provider + model for seed agents. Registered threads use their
+# agents.provider and agents.model rows at runtime.
+# Provider: openai | anthropic | openrouter | openai-oauth | mock | mock-tool-call
+# mock variants need no API key; openai-oauth reads encrypted workspace secrets.
+DEFAULT_MODEL_PROVIDER=openai-oauth
+DEFAULT_MODEL=gpt-5.4-mini
+DEFAULT_WORKSPACE_ID=default
+
+# Clean egress: openai-oauth and opencode-zen can route through the egress proxy
+# (infra/egress-proxy) using a per-workspace route (provider config proxyUrl,
+# e.g. https://proxy.example.com/opencode-zen). The VM bearer token is
+# EGRESS_PROXY_TOKEN (a wrangler secret). Set CODEX_DIRECT_ENABLED=true only when
+# testing direct Cloudflare Worker egress to ChatGPT.
+CODEX_DIRECT_ENABLED=false
+
+# Compute provider a new workspace's default sandbox is created with.
+# Provider: cloudflare | daytona | mock. Unset/blank → cloudflare (production).
+# `mock` is an in-memory local-dev sandbox that needs no credentials, containers,
+# or R2 — set it locally so the sandbox + exec tools work out of the box.
+# (`scripts/setup-local-env.mjs` sets this to `mock` for a generated .dev.vars.)
+DEFAULT_SANDBOX_PROVIDER=mock
+
+# Auth secret — generate a strong random value (e.g. `openssl rand -base64 32`)
+# This is a Wrangler secret; set via `wrangler secret put BETTER_AUTH_SECRET` in production.
+BETTER_AUTH_SECRET=
+
+# HITL tool-approval HMAC secret — set via `wrangler secret put TOOL_APPROVAL_SECRET`
+TOOL_APPROVAL_SECRET=
+
+# Email OTP delivery
+# RESEND_API_KEY is a Wrangler secret; set via `wrangler secret put RESEND_API_KEY`.
+RESEND_API_KEY=
+RESEND_FROM_EMAIL=Nadi <noreply@example.com>
+
+# Encrypted workspace secrets
+# Generate with `openssl rand -base64 32`.
+# This is a Wrangler secret; set via `wrangler secret put SECRETS_STORE_KEK_RAW_B64`.
+SECRETS_STORE_KEK_RAW_B64=
+
+# LLM provider API keys are stored encrypted in SECRETS_KV for the workspace
+# that owns the registered thread, not as Worker secrets.
+# Default secret names:
+# - provider:openai
+# - provider:anthropic
+# - provider:openrouter
+# A row in provider_configs can override the secret name per workspace/provider.
+
+# OpenAI OAuth testing provider
+# Store the OAuth token JSON in SECRETS_KV under this workspace secret name.
+OPENAI_OAUTH_SECRET_NAME=provider:openai-oauth
+
+# Sign-in allowlist. Comma-separated; an entry with `@` is an exact email, an
+# entry without `@` is a whole domain (any address at that domain).
+# Case-insensitive. Empty/unset disables the gate (all emails allowed).
+# e.g. WHITELISTED_EMAILS=you@example.com, exe.dev, ruqqq.com
+WHITELISTED_EMAILS=
+
+# Accounts with unlimited invites and access to the waiting list. Comma-separated
+# exact emails, case-insensitive. Every other account gets 5 invites.
+SUPERUSER_EMAILS=you@example.com
+
+# Accounts offered the Workers AI chat provider. Same syntax as
+# WHITELISTED_EMAILS (exact emails and/or bare domains). Workers AI needs no API
+# key — it bills the deployment's own Cloudflare account — so keep this list
+# tight. Empty/unset disables the gate and offers Workers AI to EVERY user.
+WORKERS_AI_EMAILS=you@example.com, teammate@example.com
+
+# GitHub App authentication (requires all five to be set; feature is disabled otherwise).
+# Register a GitHub App at https://github.com/settings/apps with Contents (Read & write),
+# Metadata (Read-only) permissions, and "Request user authorization (OAuth) during installation".
+# Set the Callback URL to https://<your-host>/api/github/callback.
+# Convert the downloaded PKCS#1 private key to PKCS#8:
+# openssl pkcs8 -topk8 -inform PEM -outform PEM -nocrypt -in app.private-key.pem -out app.pkcs8.pem
+GITHUB_APP_ID=
+GITHUB_APP_PRIVATE_KEY=
+GITHUB_APP_CLIENT_ID=
+GITHUB_APP_CLIENT_SECRET=
+GITHUB_APP_SLUG=

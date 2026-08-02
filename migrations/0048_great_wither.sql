@@ -1,0 +1,1 @@
+ALTER TABLE `workbenches` ADD `sandbox_network_domain_allowlist` text DEFAULT '' NOT NULL;

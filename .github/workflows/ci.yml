@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck (worker)
+        run: pnpm run typecheck
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Mock isolation
+        run: pnpm run check:mock-isolation
+
+      # The real wrangler.prod.jsonc is gitignored, so the example template is
+      # the only deploy config CI can see. A binding that exists in one file and
+      # not the other means someone's first deploy fails at runtime.
+      - name: Wrangler config parity
+        run: pnpm run check:wrangler
+
+      - name: Format check
+        run: pnpm run fmt:check
+
+      - name: Typecheck (web)
+        run: pnpm run web:typecheck
+
+      # CI never built the web app: the only build lived in deploy.yml, so a
+      # build-time break passed CI and failed at deploy. This also makes
+      # web/dist/ exist, which is what lets the mock-isolation dist assertion
+      # run — the isolation check above stays first so a mock leak fails fast.
+      - name: Build (web)
+        run: pnpm run web:build
+
+      - name: Unit tests
+        run: pnpm exec vitest run --project=unit --project=web-unit --project=sdk-contract
+
+      - name: Integration tests
+        run: pnpm run test:integration

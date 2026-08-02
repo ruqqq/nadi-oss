@@ -1,0 +1,1 @@
+ALTER TABLE `thread_index` ADD `search_repair_attempts` integer;

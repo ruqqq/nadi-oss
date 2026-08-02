@@ -1,0 +1,362 @@
+import type { WorkKind, WorkRow, WorkTerminal } from "./work-ledger";
+
+const WORK_LEDGER_SCHEMA = "agent_work_ledger";
+const WORK_LEDGER_SCHEMA_VERSION = 2;
+
+/**
+ * The surface the compute layer is handed (see `WorkLedgerSink` in
+ * thread-service.ts). Mostly writes — liveness, terminal, delivery — plus one
+ * read (`isDelivered`), needed so a terminal writer can ask whether someone
+ * else already told the model before it speaks. Deliberately narrow either
+ * way: compute reports and reads liveness about processes and never learns
+ * that subagents share the ledger.
+ */
+export interface WorkLedgerSink {
+  register(row: WorkRow): void;
+  stampAlive(id: string, at: number): void;
+  /**
+   * Close a row at the moment the work actually settles. The compute layer is
+   * the only thing that ever observes a real process exit/stop, so without
+   * this the reaper is the sole closer and would re-report every cleanly
+   * exited process as a `no_liveness` fault ~21s later. Returns the
+   * exactly-once gate (see {@link WorkLedgerStore.terminalize}).
+   */
+  terminalize(id: string, terminal: WorkTerminal): boolean;
+  /**
+   * Discharge this row's notification obligation — see
+   * {@link WorkLedgerStore.markDelivered}. On the sink because the compute layer
+   * is a terminal WRITER, and every writer owes the model exactly one
+   * notification: `pollWatcher` delivers a reminder and stamps on success,
+   * `execStop` delivers nothing by design and stamps at terminalize time. Without
+   * it here, compute could close a row but never declare who owed its delivery,
+   * and the sweep had to GUESS from the terminal's reason — which is what let it
+   * inject a second copy of a reminder `pollWatcher` had already sent.
+   *
+   * Still subagent-agnostic: this is "the model has been told about this row",
+   * a statement compute can make about its own processes.
+   */
+  markDelivered(id: string, at: number): boolean;
+  /**
+   * Whether the model has ALREADY been told about this row — see
+   * {@link WorkLedgerStore.isDelivered}. On the sink because `markDelivered` is
+   * claim-AFTER-success (a delivery that throws must stay owed and retryable),
+   * which makes it a receipt, not a mutual-exclusion gate: two writers can each
+   * believe they owe the same row. This is the read that lets the second one
+   * find out before it speaks, and it is why a `refreshProcessOutput` throw on
+   * the watcher poll path can no longer cost the model a duplicate card.
+   */
+  isDelivered(id: string): boolean;
+  /**
+   * Drop a row without a terminal. For work the model deliberately walked away
+   * from (`exec_unwatch`), where no terminal is truthful: the process did not
+   * exit, was not stopped, and did not fault. Leaving the row open instead
+   * would fault it as `no_liveness` once nothing stamps it, telling the model a
+   * still-running process was "torn down".
+   */
+  deleteRow(id: string): void;
+}
+
+interface WorkLedgerRow extends Record<string, string | number | null> {
+  id: string;
+  kind: string;
+  started_at: number;
+  last_alive_at: number;
+  stale_after_ms: number;
+  deadline_at: number;
+  generation: string;
+  terminal_outcome: string | null;
+  terminal_reason: string | null;
+  terminal_at: number | null;
+  terminal_detail: string | null;
+  delivered_at: number | null;
+}
+
+function toWorkRow(row: WorkLedgerRow): WorkRow {
+  return {
+    id: row.id,
+    kind: row.kind as WorkKind,
+    startedAt: row.started_at,
+    lastAliveAt: row.last_alive_at,
+    staleAfterMs: row.stale_after_ms,
+    deadlineAt: row.deadline_at,
+    generation: row.generation,
+    terminal:
+      row.terminal_outcome === null
+        ? null
+        : ({
+            outcome: row.terminal_outcome,
+            reason: row.terminal_reason,
+            at: row.terminal_at,
+            detail: row.terminal_detail ?? "",
+          } as WorkTerminal),
+    // Rows written before schema v2 have no column at all; the migration
+    // backfills them, so a NULL here always means a genuinely owed delivery.
+    deliveredAt: row.delivered_at ?? null,
+  };
+}
+
+/**
+ * Durable storage for the background work ledger. Owns its own schema name and
+ * version — it is NOT part of `thread_compute_store`, because the ledger spans
+ * subagent runs and the compute layer must stay subagent-agnostic.
+ */
+export class WorkLedgerStore implements WorkLedgerSink {
+  constructor(private readonly storage: DurableObjectStorage) {}
+
+  migrate(): void {
+    this.storage.transactionSync(() => {
+      this.storage.sql.exec(`
+        CREATE TABLE IF NOT EXISTS work_ledger_schema (
+          name text primary key,
+          version integer not null
+        )
+      `);
+      this.storage.sql.exec(`
+        CREATE TABLE IF NOT EXISTS background_work (
+          id text primary key,
+          kind text not null,
+          started_at integer not null,
+          last_alive_at integer not null,
+          stale_after_ms integer not null,
+          deadline_at integer not null,
+          generation text not null,
+          terminal_outcome text,
+          terminal_reason text,
+          terminal_at integer,
+          terminal_detail text,
+          delivered_at integer
+        )
+      `);
+      // v1 -> v2, additive: split the delivery gate from the terminal write. A
+      // deployed Worker reads rows written by v1, so probe rather than assume.
+      const columns = this.storage.sql
+        .exec<{ name: string }>("PRAGMA table_info(background_work)")
+        .toArray();
+      if (!columns.some((column) => column.name === "delivered_at")) {
+        this.storage.sql.exec("ALTER TABLE background_work ADD COLUMN delivered_at integer");
+        // DEPLOY HAZARD, and the reason this sits INSIDE the ALTER branch: every
+        // pre-existing terminal row would otherwise read as "owed a delivery"
+        // and the sweep would replay a stale completion into every live thread.
+        // The old code already delivered them, so stamp them delivered.
+        //
+        // `migrate()` runs on every DO start, so this must fire exactly once —
+        // on the migration itself. Outside this branch it would re-run forever
+        // and swallow a real pending delivery the sweep was about to retry.
+        this.storage.sql.exec(
+          `UPDATE background_work SET delivered_at = terminal_at
+           WHERE terminal_outcome IS NOT NULL AND delivered_at IS NULL`,
+        );
+      }
+      this.storage.sql.exec(
+        `INSERT INTO work_ledger_schema (name, version) VALUES (?, ?)
+         ON CONFLICT(name) DO UPDATE SET version = excluded.version`,
+        WORK_LEDGER_SCHEMA,
+        WORK_LEDGER_SCHEMA_VERSION,
+      );
+    });
+  }
+
+  /**
+   * Register work, or refresh an existing row. Re-registering never rewinds
+   * `started_at` (the original start is the one that matters for the deadline)
+   * and never resurrects a terminal row.
+   */
+  register(row: WorkRow): void {
+    this.storage.sql.exec(
+      `INSERT INTO background_work
+         (id, kind, started_at, last_alive_at, stale_after_ms, deadline_at, generation,
+          terminal_outcome, terminal_reason, terminal_at, terminal_detail)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         last_alive_at = max(background_work.last_alive_at, excluded.last_alive_at),
+         stale_after_ms = excluded.stale_after_ms,
+         deadline_at = excluded.deadline_at,
+         generation = excluded.generation`,
+      row.id,
+      row.kind,
+      row.startedAt,
+      row.lastAliveAt,
+      row.staleAfterMs,
+      row.deadlineAt,
+      row.generation,
+      row.terminal?.outcome ?? null,
+      row.terminal?.reason ?? null,
+      row.terminal?.at ?? null,
+      row.terminal?.detail ?? null,
+    );
+  }
+
+  /**
+   * Record real infrastructure activity. A no-op for unknown or terminal rows,
+   * and never moves time backwards — a late stamp must not un-stale a row.
+   */
+  stampAlive(id: string, at: number): void {
+    this.storage.sql.exec(
+      `UPDATE background_work
+         SET last_alive_at = max(last_alive_at, ?)
+       WHERE id = ? AND terminal_outcome IS NULL`,
+      at,
+      id,
+    );
+  }
+
+  get(id: string): WorkRow | null {
+    const row = this.storage.sql
+      .exec<WorkLedgerRow>("SELECT * FROM background_work WHERE id = ?", id)
+      .toArray()[0];
+    return row ? toWorkRow(row) : null;
+  }
+
+  listOpen(): WorkRow[] {
+    return this.storage.sql
+      .exec<WorkLedgerRow>("SELECT * FROM background_work WHERE terminal_outcome IS NULL")
+      .toArray()
+      .map(toWorkRow);
+  }
+
+  listAll(): WorkRow[] {
+    return this.storage.sql
+      .exec<WorkLedgerRow>("SELECT * FROM background_work")
+      .toArray()
+      .map(toWorkRow);
+  }
+
+  /**
+   * Write the terminal. Returns true only for the transition that actually
+   * terminalized the row — this is the exactly-once gate the caller uses to
+   * decide whether to deliver a notification, so a repeat must return false.
+   */
+  terminalize(id: string, terminal: WorkTerminal): boolean {
+    this.storage.sql.exec(
+      `UPDATE background_work
+         SET terminal_outcome = ?, terminal_reason = ?, terminal_at = ?, terminal_detail = ?
+       WHERE id = ? AND terminal_outcome IS NULL`,
+      terminal.outcome,
+      terminal.reason,
+      terminal.at,
+      terminal.detail,
+      id,
+    );
+    return (
+      this.storage.sql.exec<{ changes: number }>("SELECT changes() AS changes").toArray()[0]
+        ?.changes === 1
+    );
+  }
+
+  /**
+   * Close the DELIVERY gate: `delivered_at` means "the model's notification
+   * obligation for this row is DISCHARGED". Returns true only for the
+   * transition that actually claimed it — the caller's exactly-once permit.
+   *
+   * Every terminal writer discharges it, one of two ways: it delivers and then
+   * stamps on success, or it intends NO delivery and stamps at terminalize
+   * time (`execStop` — a user-initiated stop needs no card). Ownership is
+   * DECLARED by stamping, never inferred: the sweep once guessed from the
+   * terminal's `reason`, and `watch_timeout` has two writers (the reaper AND
+   * `pollWatcher`), so a reminder `pollWatcher` had already delivered read as
+   * owed and was sent a second time.
+   *
+   * Deliberately NOT the same gate as {@link terminalize}. That boolean used to
+   * mean both "I closed this row" and "I own delivery for it", so a throw on the
+   * way to the model left the row closed (invisible to `listOpen`, so the reaper
+   * could never revisit it) and the model never told. Splitting them lets the
+   * terminal stand — which is what advances the alarm horizon — while the
+   * delivery stays owed and retryable.
+   *
+   * An OPEN row cannot be delivered: there is no terminal to tell the model
+   * about, and marking one would strand its real terminal undelivered forever.
+   */
+  markDelivered(id: string, at: number): boolean {
+    this.storage.sql.exec(
+      `UPDATE background_work SET delivered_at = ?
+       WHERE id = ? AND terminal_outcome IS NOT NULL AND delivered_at IS NULL`,
+      at,
+      id,
+    );
+    return (
+      this.storage.sql.exec<{ changes: number }>("SELECT changes() AS changes").toArray()[0]
+        ?.changes === 1
+    );
+  }
+
+  /**
+   * Rows that reached a terminal the model was never told about. The sweep's
+   * retry list — read from the STORED terminal, so a retry costs no backend
+   * call and cannot wedge the alarm on a dead sandbox.
+   *
+   * Means exactly "the model was never told, and someone still owes it", and
+   * needs NO caller-side filter: every writer discharges the gate (see
+   * {@link markDelivered}), so anything left here is genuinely owed. It used to
+   * need one — every clean `process_exit`/`process_stopped` row sat here
+   * permanently — and that filter keyed on the terminal's reason, which is not
+   * a proxy for who owns delivery.
+   */
+  listUndelivered(): WorkRow[] {
+    return this.storage.sql
+      .exec<WorkLedgerRow>(
+        "SELECT * FROM background_work WHERE terminal_outcome IS NOT NULL AND delivered_at IS NULL",
+      )
+      .toArray()
+      .map(toWorkRow);
+  }
+
+  /**
+   * How many rows are terminal-but-owed, without materializing any. The alarm
+   * horizon needs only the EXISTENCE of an owed row (see `WORK_DELIVERY_RETRY_MS`),
+   * and it is computed on every arm — `getWorkHorizon` runs inside the compute
+   * service's `armAlarm`, i.e. on every tick — so this must not be
+   * `listUndelivered().length`: that is an unindexed scan that also builds a
+   * `WorkRow` per row for an answer that is one integer.
+   */
+  countUndelivered(): number {
+    return (
+      this.storage.sql
+        .exec<{ total: number }>(
+          `SELECT COUNT(*) AS total FROM background_work
+           WHERE terminal_outcome IS NOT NULL AND delivered_at IS NULL`,
+        )
+        .toArray()[0]?.total ?? 0
+    );
+  }
+
+  /**
+   * Whether this row's notification obligation is already discharged. A terminal
+   * WRITER asks before delivering, so it cannot add a second copy on top of a
+   * delivery someone else already made (see `pollWatcher`). Unknown rows read
+   * false — nothing was ever told about a row that does not exist.
+   */
+  isDelivered(id: string): boolean {
+    return (
+      (this.storage.sql
+        .exec<{ total: number }>(
+          "SELECT COUNT(*) AS total FROM background_work WHERE id = ? AND delivered_at IS NOT NULL",
+          id,
+        )
+        .toArray()[0]?.total ?? 0) > 0
+    );
+  }
+
+  deleteRow(id: string): void {
+    this.storage.sql.exec("DELETE FROM background_work WHERE id = ?", id);
+  }
+
+  /**
+   * Drop terminal rows past the retention window (`WORK_ROW_RETENTION_MS`) so
+   * the table does not grow unbounded per thread. `delivered_at IS NOT NULL`
+   * is read directly as "no delivery is owed" — every terminal writer
+   * discharges it, either by delivering then stamping, or by stamping at
+   * terminalize time when it intends no delivery (see `markDelivered`). A row
+   * still `NULL` is genuinely owed and must survive regardless of age, or
+   * pruning it would drop the sweep's only retry path. Deliberately NOT
+   * filtered by `terminal_reason` — reason is not a proxy for delivery
+   * ownership (see `REAPER_WORK_REASONS`'s doc for why that conflation was a
+   * Critical-level bug twice on this branch).
+   */
+  prune(before: number): void {
+    this.storage.sql.exec(
+      `DELETE FROM background_work
+       WHERE terminal_outcome IS NOT NULL AND delivered_at IS NOT NULL AND terminal_at < ?`,
+      before,
+    );
+  }
+}

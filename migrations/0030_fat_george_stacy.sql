@@ -1,0 +1,1 @@
+ALTER TABLE `automata` ADD `disabled_reason` text;

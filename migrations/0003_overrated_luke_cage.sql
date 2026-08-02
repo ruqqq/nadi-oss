@@ -1,0 +1,1 @@
+ALTER TABLE `thread_index` ADD `title_set` integer DEFAULT false NOT NULL;

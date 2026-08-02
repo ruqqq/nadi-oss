@@ -1,0 +1,1 @@
+ALTER TABLE `thread_index` ADD `recent_dismissed_at` integer;

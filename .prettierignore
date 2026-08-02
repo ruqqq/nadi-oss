@@ -1,0 +1,9 @@
+# oxfmt reads this file by default. It should format hand-written source
+# (src/, test/, root configs) only — not these:
+#
+# - web/        : separate package; shadcn/prettier conventions (no semicolons).
+# - migrations/ : drizzle-generated SQL + meta JSON; formatting fights the generator.
+# - docs/       : prose markdown; oxfmt's markdown reformatting is noisy and unwanted.
+web/
+migrations/
+docs/

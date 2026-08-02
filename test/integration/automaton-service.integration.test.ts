@@ -1,0 +1,450 @@
+import { env } from "cloudflare:test";
+import { drizzle } from "drizzle-orm/d1";
+import { eq } from "drizzle-orm";
+import { beforeEach, describe, expect, it } from "vitest";
+import * as schema from "../../src/db/schema";
+import { applyRegistryTestSchema } from "./helpers/registry";
+import { WorkspaceRepository } from "../../src/db/repositories/workspaces";
+import { AutomatonRepository } from "../../src/db/repositories/automata";
+import { startAutomatonRun } from "../../src/automata/fire-due";
+import {
+  AutomatonService,
+  AutomatonValidationError,
+  AutomatonProjectNotFoundError,
+  AutomatonNotFoundError,
+} from "../../src/automata/service";
+
+const now = 1_800_000_000_000;
+function db() {
+  return drizzle(env.REGISTRY_DB, { schema });
+}
+
+// Seeds a workspace with an owner membership and a valid default agent, and
+// returns the ids a service context needs.
+async function seedWorkspace(suffix: string) {
+  const workspaceId = `ws_${suffix}`;
+  const ownerUserId = `user_${suffix}`;
+  const agentId = `agt_${suffix}`;
+  await db()
+    .insert(schema.users)
+    .values({
+      id: ownerUserId,
+      email: `${ownerUserId}@example.com`,
+      name: null,
+      createdAt: new Date(now),
+      emailVerified: true,
+      image: null,
+      updatedAt: new Date(now),
+    });
+  await db()
+    .insert(schema.workspaces)
+    .values({ id: workspaceId, name: workspaceId, createdAt: now });
+  await db().insert(schema.workspaceMembers).values({
+    workspaceId,
+    userId: ownerUserId,
+    role: "owner",
+    createdAt: now,
+  });
+  await db().insert(schema.agents).values({
+    id: agentId,
+    workspaceId,
+    name: "Default",
+    systemPrompt: "You are helpful.",
+    provider: "anthropic",
+    model: "claude-sonnet-5",
+    createdAt: now,
+  });
+  return { workspaceId, ownerUserId, agentId };
+}
+
+// Seeds an active workbench in the workspace and returns its id.
+async function seedWorkbench(workspaceId: string) {
+  const id = `wbk_${crypto.randomUUID()}`;
+  await db().insert(schema.workbenches).values({
+    id,
+    workspaceId,
+    name: id,
+    description: "",
+    setupScript: "",
+    sandboxEnvVarsJson: "{}",
+    archivedAt: null,
+    createdAt: now,
+    updatedAt: now,
+  });
+  return id;
+}
+
+// Seeds a project with the given default workbench and returns its id.
+async function seedProject(workspaceId: string, defaultWorkbenchId: string) {
+  const id = `prj_${crypto.randomUUID()}`;
+  await db().insert(schema.projects).values({
+    id,
+    workspaceId,
+    name: id,
+    description: "",
+    customInstructions: "",
+    defaultWorkbenchId,
+    archivedAt: null,
+    createdAt: now,
+    updatedAt: now,
+  });
+  return id;
+}
+
+function service(ctx: {
+  workspaceId: string;
+  ownerUserId: string;
+  agentId: string;
+  viewerEmail?: string | null;
+}) {
+  return new AutomatonService(db(), {
+    env,
+    workspaceId: ctx.workspaceId,
+    ownerUserId: ctx.ownerUserId,
+    agentId: ctx.agentId,
+    viewerEmail: ctx.viewerEmail ?? `${ctx.ownerUserId}@example.com`,
+  });
+}
+
+describe("WorkspaceRepository.getOwnerUserId", () => {
+  beforeEach(async () => {
+    await applyRegistryTestSchema(env.REGISTRY_DB);
+  });
+
+  it("returns the owner membership's user id", async () => {
+    const seeded = await seedWorkspace("owner");
+    const ownerId = await new WorkspaceRepository(db()).getOwnerUserId(seeded.workspaceId);
+    expect(ownerId).toBe(seeded.ownerUserId);
+  });
+
+  it("returns null for a workspace with no owner", async () => {
+    const ownerId = await new WorkspaceRepository(db()).getOwnerUserId("ws_missing");
+    expect(ownerId).toBeNull();
+  });
+});
+
+describe("AutomatonService", () => {
+  beforeEach(async () => {
+    await applyRegistryTestSchema(env.REGISTRY_DB);
+  });
+
+  it("create computes a future nextDueAt and stamps owner/agent/workspace", async () => {
+    const seeded = await seedWorkspace("create");
+    const before = Date.now();
+    const row = await service(seeded).create({
+      name: "Daily briefing",
+      prompt: "Summarize today.",
+      timezone: "Asia/Singapore",
+      schedule: { kind: "daily", hour: 8, minute: 0 },
+    });
+    expect(row.nextDueAt).toBeGreaterThan(before);
+    expect(row.workspaceId).toBe(seeded.workspaceId);
+    expect(row.ownerUserId).toBe(seeded.ownerUserId);
+    expect(row.agentId).toBe(seeded.agentId);
+    expect(row.enabled).toBe(true);
+    expect(row.notifyMode).toBe("all");
+    expect(row.disabledReason).toBeNull();
+  });
+
+  it("create rejects an unknown timezone with a validation error", async () => {
+    const seeded = await seedWorkspace("tz");
+    await expect(
+      service(seeded).create({
+        name: "x",
+        prompt: "y",
+        timezone: "Not/A_Zone",
+        schedule: { kind: "daily", hour: 8, minute: 0 },
+      }),
+    ).rejects.toBeInstanceOf(AutomatonValidationError);
+  });
+
+  it("create rejects a bad cron schedule with a validation error", async () => {
+    const seeded = await seedWorkspace("cron");
+    await expect(
+      service(seeded).create({
+        name: "x",
+        prompt: "y",
+        timezone: "UTC",
+        schedule: { kind: "cron", expr: "not a cron" },
+      }),
+    ).rejects.toBeInstanceOf(AutomatonValidationError);
+  });
+
+  it("a false->true enable flip on update recomputes nextDueAt to a future time", async () => {
+    const seeded = await seedWorkspace("flip");
+    const created = await service(seeded).create({
+      name: "x",
+      prompt: "y",
+      timezone: "UTC",
+      schedule: { kind: "daily", hour: 8, minute: 0 },
+      enabled: false,
+    });
+    await env.REGISTRY_DB.prepare("UPDATE automata SET disabled_reason = ? WHERE id = ?")
+      .bind("Schedule is invalid.", created.id)
+      .run();
+    const updated = await service(seeded).update(created.id, { enabled: true });
+    expect(updated.enabled).toBe(true);
+    expect(updated.disabledReason).toBeNull();
+    expect(updated.nextDueAt).toBeGreaterThan(Date.now());
+  });
+
+  it("saving a valid schedule clears an existing disabled reason", async () => {
+    const seeded = await seedWorkspace("clear_reason");
+    const created = await service(seeded).create({
+      name: "x",
+      prompt: "y",
+      timezone: "UTC",
+      schedule: { kind: "daily", hour: 8, minute: 0 },
+      enabled: false,
+    });
+    await env.REGISTRY_DB.prepare("UPDATE automata SET disabled_reason = ? WHERE id = ?")
+      .bind("Schedule is invalid.", created.id)
+      .run();
+
+    const updated = await service(seeded).update(created.id, {
+      schedule: { kind: "daily", hour: 9, minute: 30 },
+    });
+
+    expect(updated.disabledReason).toBeNull();
+    expect(updated.scheduleJson).toBe('{"kind":"daily","hour":9,"minute":30}');
+  });
+
+  it("update patches only the provided fields", async () => {
+    const seeded = await seedWorkspace("patch");
+    const created = await service(seeded).create({
+      name: "x",
+      prompt: "y",
+      timezone: "UTC",
+      schedule: { kind: "daily", hour: 8, minute: 0 },
+    });
+    const updated = await service(seeded).update(created.id, { name: "renamed" });
+    expect(updated.name).toBe("renamed");
+    expect(updated.prompt).toBe("y");
+    expect(updated.nextDueAt).toBe(created.nextDueAt);
+  });
+
+  it("get/update on an automaton in another workspace throws NotFound", async () => {
+    const a = await seedWorkspace("wsa");
+    const b = await seedWorkspace("wsb");
+    const created = await service(a).create({
+      name: "x",
+      prompt: "y",
+      timezone: "UTC",
+      schedule: { kind: "daily", hour: 8, minute: 0 },
+    });
+    await expect(service(b).get(created.id)).rejects.toBeInstanceOf(AutomatonNotFoundError);
+    await expect(service(b).update(created.id, { name: "z" })).rejects.toBeInstanceOf(
+      AutomatonNotFoundError,
+    );
+  });
+
+  it("create rejects a project that does not belong to the workspace", async () => {
+    const seeded = await seedWorkspace("proj");
+    await expect(
+      service(seeded).create({
+        name: "x",
+        prompt: "y",
+        timezone: "UTC",
+        schedule: { kind: "daily", hour: 8, minute: 0 },
+        projectId: "prj_does_not_exist",
+      }),
+    ).rejects.toBeInstanceOf(AutomatonProjectNotFoundError);
+  });
+
+  it("create leaves the model null so the run inherits the agent's model", async () => {
+    const seeded = await seedWorkspace("model_default");
+    const row = await service(seeded).create({
+      name: "x",
+      prompt: "y",
+      timezone: "UTC",
+      schedule: { kind: "daily", hour: 8, minute: 0 },
+    });
+    expect(row.modelProvider).toBeNull();
+    expect(row.model).toBeNull();
+    expect(row.modelInputModalities).toBeNull();
+  });
+
+  it("create persists a model override and defaults its modalities to text", async () => {
+    const seeded = await seedWorkspace("model_set");
+    const row = await service(seeded).create({
+      name: "x",
+      prompt: "y",
+      timezone: "UTC",
+      schedule: { kind: "daily", hour: 8, minute: 0 },
+      modelProvider: "mock",
+      model: "mock-model",
+    });
+    expect(row.modelProvider).toBe("mock");
+    expect(row.model).toBe("mock-model");
+    expect(row.modelInputModalities).toBe('["text"]');
+  });
+
+  it("create rejects a provider the workspace has not set up", async () => {
+    const seeded = await seedWorkspace("model_unusable");
+    await expect(
+      service(seeded).create({
+        name: "x",
+        prompt: "y",
+        timezone: "UTC",
+        schedule: { kind: "daily", hour: 8, minute: 0 },
+        modelProvider: "anthropic",
+        model: "claude-opus-4-8",
+      }),
+    ).rejects.toBeInstanceOf(AutomatonValidationError);
+  });
+
+  it("create rejects a provider given without a model", async () => {
+    const seeded = await seedWorkspace("model_half");
+    await expect(
+      service(seeded).create({
+        name: "x",
+        prompt: "y",
+        timezone: "UTC",
+        schedule: { kind: "daily", hour: 8, minute: 0 },
+        modelProvider: "mock",
+      }),
+    ).rejects.toBeInstanceOf(AutomatonValidationError);
+  });
+
+  it("update sets a model override, and a null clears it back to the agent's model", async () => {
+    const seeded = await seedWorkspace("model_patch");
+    const created = await service(seeded).create({
+      name: "x",
+      prompt: "y",
+      timezone: "UTC",
+      schedule: { kind: "daily", hour: 8, minute: 0 },
+    });
+
+    const overridden = await service(seeded).update(created.id, {
+      modelProvider: "mock",
+      model: "mock-model",
+    });
+    expect(overridden.modelProvider).toBe("mock");
+    expect(overridden.model).toBe("mock-model");
+
+    const cleared = await service(seeded).update(created.id, {
+      modelProvider: null,
+      model: null,
+    });
+    expect(cleared.modelProvider).toBeNull();
+    expect(cleared.model).toBeNull();
+    expect(cleared.modelInputModalities).toBeNull();
+  });
+
+  it("update leaves an existing model override alone when the patch omits it", async () => {
+    const seeded = await seedWorkspace("model_untouched");
+    const created = await service(seeded).create({
+      name: "x",
+      prompt: "y",
+      timezone: "UTC",
+      schedule: { kind: "daily", hour: 8, minute: 0 },
+      modelProvider: "mock",
+      model: "mock-model",
+    });
+    const renamed = await service(seeded).update(created.id, { name: "renamed" });
+    expect(renamed.name).toBe("renamed");
+    expect(renamed.modelProvider).toBe("mock");
+    expect(renamed.model).toBe("mock-model");
+  });
+
+  it("persists an explicit workbench override on create", async () => {
+    const seeded = await seedWorkspace("wb-create");
+    const wb = await seedWorkbench(seeded.workspaceId);
+    const row = await service(seeded).create({
+      name: "wb",
+      prompt: "p",
+      timezone: "UTC",
+      schedule: { kind: "hourly", minute: 0 },
+      workbenchId: wb,
+    });
+    expect(row.workbenchId).toBe(wb);
+  });
+
+  it("defaults workbenchId to null (inherit) when omitted", async () => {
+    const seeded = await seedWorkspace("wb-null");
+    const row = await service(seeded).create({
+      name: "wb",
+      prompt: "p",
+      timezone: "UTC",
+      schedule: { kind: "hourly", minute: 0 },
+    });
+    expect(row.workbenchId).toBeNull();
+  });
+
+  it("clears the override when workbenchId is null on update", async () => {
+    const seeded = await seedWorkspace("wb-clear");
+    const wb = await seedWorkbench(seeded.workspaceId);
+    const created = await service(seeded).create({
+      name: "wb",
+      prompt: "p",
+      timezone: "UTC",
+      schedule: { kind: "hourly", minute: 0 },
+      workbenchId: wb,
+    });
+    const updated = await service(seeded).update(created.id, { workbenchId: null });
+    expect(updated.workbenchId).toBeNull();
+  });
+
+  it("rejects a dangling workbench id", async () => {
+    const seeded = await seedWorkspace("wb-bad");
+    await expect(
+      service(seeded).create({
+        name: "wb",
+        prompt: "p",
+        timezone: "UTC",
+        schedule: { kind: "hourly", minute: 0 },
+        workbenchId: "wb_does_not_exist",
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("fires against the override workbench, not the project default", async () => {
+    const seeded = await seedWorkspace("wb-fire");
+    const wbA = await seedWorkbench(seeded.workspaceId);
+    const wbB = await seedWorkbench(seeded.workspaceId);
+    const projectId = await seedProject(seeded.workspaceId, wbA); // default = A
+    const created = await service(seeded).create({
+      name: "wb",
+      prompt: "p",
+      timezone: "UTC",
+      schedule: { kind: "hourly", minute: 0 },
+      projectId,
+      workbenchId: wbB,
+    });
+    const automaton = await new AutomatonRepository(db()).getById(created.id);
+    const { threadId } = await startAutomatonRun(env, db(), automaton!, {
+      trigger: "manual",
+      dueAt: null,
+    });
+    const thread = await db()
+      .select()
+      .from(schema.threadIndex)
+      .where(eq(schema.threadIndex.id, threadId))
+      .get();
+    expect(thread!.workbenchId).toBe(wbB);
+  });
+
+  it("fires against the project default when no override is set", async () => {
+    const seeded = await seedWorkspace("wb-fire-inherit");
+    const wbA = await seedWorkbench(seeded.workspaceId);
+    const projectId = await seedProject(seeded.workspaceId, wbA);
+    const created = await service(seeded).create({
+      name: "wb",
+      prompt: "p",
+      timezone: "UTC",
+      schedule: { kind: "hourly", minute: 0 },
+      projectId,
+    });
+    const automaton = await new AutomatonRepository(db()).getById(created.id);
+    const { threadId } = await startAutomatonRun(env, db(), automaton!, {
+      trigger: "manual",
+      dueAt: null,
+    });
+    const thread = await db()
+      .select()
+      .from(schema.threadIndex)
+      .where(eq(schema.threadIndex.id, threadId))
+      .get();
+    expect(thread!.workbenchId).toBe(wbA);
+  });
+});

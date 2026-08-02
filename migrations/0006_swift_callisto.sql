@@ -1,0 +1,1 @@
+ALTER TABLE `thread_index` ADD `runtime` text DEFAULT 'legacy' NOT NULL;

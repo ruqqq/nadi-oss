@@ -1,0 +1,1 @@
+ALTER TABLE `workspaces` ADD `flags_json` text DEFAULT '{}' NOT NULL;

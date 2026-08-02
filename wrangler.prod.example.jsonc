@@ -1,0 +1,176 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "nadi",
+  "account_id": "<YOUR_CLOUDFLARE_ACCOUNT_ID>",
+  "main": "src/index.ts",
+  "workers_dev": true,
+  "preview_urls": true,
+  "routes": [{ "pattern": "<your-domain.example>", "custom_domain": true }],
+  "compatibility_date": "2026-05-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": true,
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "THREAD_AGENT", "class_name": "ThreadAgentV2" },
+      { "name": "THINK_THREAD_AGENT", "class_name": "ThinkThreadAgent" },
+      { "name": "WORKSPACE_MCP_AGENT", "class_name": "WorkspaceMcpAgent" },
+      { "name": "USER_HUB", "class_name": "UserHub" },
+      { "name": "VOICE_AGENT", "class_name": "VoiceAgent" },
+      { "name": "NADI_SANDBOX_SMALL", "class_name": "NadiSandboxSmall" },
+      { "name": "NADI_SANDBOX_MEDIUM", "class_name": "NadiSandboxMedium" },
+    ],
+  },
+  "containers": [
+    {
+      "class_name": "NadiSandboxSmall",
+      "image": "./container/Dockerfile",
+      // basic: ¼ vCPU / 1 GiB / 4 GB — matches Daytona small's 1 GiB RAM.
+      // NOT lite (256 MiB / 2 GB): the sandbox image unpacks to >2 GB, so lite's
+      // 2 GB disk fails ImagePull ("requested disk size smaller than the unpacked
+      // image"). A custom lite-with-4GB-disk is impossible — CF custom types need
+      // ≥1 vCPU, ≥3 GiB RAM/vCPU, and disk ≤ 2 GB per 1 GiB RAM, so basic is the
+      // smallest named type whose disk fits the image.
+      "instance_type": "basic",
+      // Unset defaults to 20/class in production. 100 basic + 100 standard-1
+      // = 75 vCPU / 500 GiB, well inside the 1,500 vCPU / 6 TiB account limits.
+      "max_instances": 100,
+    },
+    {
+      "class_name": "NadiSandboxMedium",
+      "image": "./container/Dockerfile",
+      // standard-1: ½ vCPU / 4 GiB / 8 GB — matches Daytona nadi-medium's 4 GiB / 8 GB.
+      "instance_type": "standard-1",
+      "max_instances": 100,
+    },
+  ],
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ThreadAgent"] },
+    {
+      "tag": "v2_thread_agent_v2_namespace",
+      "new_sqlite_classes": ["ThreadAgentV2"],
+    },
+    {
+      "tag": "v3_delete_thread_agent_namespace",
+      "deleted_classes": ["ThreadAgent"],
+    },
+    { "tag": "v4_workspace_mcp_agent", "new_sqlite_classes": ["WorkspaceMcpAgent"] },
+    { "tag": "v5_user_hub", "new_sqlite_classes": ["UserHub"] },
+    { "tag": "v6_think_thread_agent", "new_sqlite_classes": ["ThinkThreadAgent"] },
+    {
+      "tag": "v7_cloudflare_sandbox",
+      "new_sqlite_classes": ["NadiSandboxSmall", "NadiSandboxMedium"],
+    },
+    { "tag": "v8_voice_agent", "new_sqlite_classes": ["VoiceAgent"] },
+  ],
+  "d1_databases": [
+    {
+      "binding": "REGISTRY_DB",
+      "database_name": "nadi-registry",
+      "database_id": "<YOUR_D1_DATABASE_ID>",
+      "migrations_dir": "migrations",
+    },
+  ],
+  "r2_buckets": [
+    {
+      "binding": "ATTACHMENTS_BUCKET",
+      "bucket_name": "nadi-attachments",
+      // `remote: true` so `wrangler dev` reads/writes the real bucket (D1/DO stay
+      // local). Required because attachment URLs are SigV4-presigned against the
+      // real R2 S3 endpoint — a local-sim bucket would 404 those URLs.
+      "remote": true,
+    },
+    {
+      "binding": "BACKUP_BUCKET",
+      "bucket_name": "nadi-compute-backups",
+    },
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "SECRETS_KV",
+      "id": "<YOUR_KV_NAMESPACE_ID>",
+    },
+  ],
+  "ai": {
+    "binding": "AI",
+  },
+  "browser": {
+    "binding": "BROWSER",
+  },
+  "send_email": [
+    {
+      "name": "EMAIL",
+      "allowed_sender_addresses": ["signin@<your-domain.example>"],
+    },
+  ],
+  "vars": {
+    "NADI_EDITION": "cloud",
+    // Anything still pointing at the workers.dev host lands on the custom
+    // domain instead of serving a second origin (src/http/canonical-host.ts).
+    "CANONICAL_HOST": "<your-domain.example>",
+    "LEGACY_HOSTS": "",
+    "R2_ACCOUNT_ID": "<YOUR_CLOUDFLARE_ACCOUNT_ID>",
+    "R2_BUCKET_NAME": "nadi-attachments",
+    // Max concurrently-live Cloudflare containers per workspace. Not a secret —
+    // change it here and redeploy. Invalid/absent falls back to the code default.
+    "MAX_ACTIVE_CONTAINERS_PER_WORKSPACE": "10",
+    // Attachment text extraction for text-only models. Images use direct
+    // llama-4-scout extraction; documents still use Workers AI toMarkdown.
+    "ATTACHMENT_EXTRACTION": "true",
+    // Voice dictation in the composer. "true" enables it; anything else hides
+    // the mic and refuses the transcriber session server-side.
+    "VOICE_INPUT_ENABLED": "true",
+    // Process watchers + subagent dispatch. Fail closed unless explicitly enabled.
+    "BACKGROUND_WORK_ENABLED": "false",
+    "LOG_LEVEL": "debug",
+    "APP_BASE_URL": "https://<your-domain.example>",
+    "DEFAULT_MODEL_PROVIDER": "openai-oauth",
+    "DEFAULT_MODEL": "gpt-5.4-mini",
+    "DEFAULT_WORKSPACE_ID": "default",
+    "AUTH_EMAIL_FROM": "signin@<your-domain.example>",
+    // Sign-in allowlist. Comma-separated; an entry with `@` is an exact email,
+    // an entry without `@` is a whole domain (any address at that domain).
+    // Case-insensitive. Empty/unset disables the gate (all emails allowed).
+    "WHITELISTED_EMAILS": "",
+    // Accounts with unlimited invites and access to the waiting list.
+    // Comma-separated exact emails, case-insensitive.
+    "SUPERUSER_EMAILS": "you@example.com",
+    // Read-only feedback inbox admins. Comma-separated exact emails only.
+    "FEEDBACK_ADMIN_EMAILS": "you@example.com",
+    // Workers AI chat provider allowlist. Same syntax as WHITELISTED_EMAILS
+    // (exact emails and/or bare domains). Workers AI needs no API key — it bills
+    // our own Cloudflare account — so keep this list tight. Empty/unset disables
+    // the gate and offers Workers AI to EVERY user.
+    "WORKERS_AI_EMAILS": "",
+    // GitHub App (sandbox auth) — non-secret identifiers, safe to commit. The
+    // private key and client secret are secrets (via `wrangler secret put`).
+    // Feature stays off until all five (these three + the two secrets) are set.
+    "GITHUB_APP_ID": "",
+    "GITHUB_APP_CLIENT_ID": "",
+    "GITHUB_APP_SLUG": "",
+    // Experimental direct Codex egress flag. Keep false until direct Worker
+    // calls to chatgpt.com/backend-api/codex are verified in production logs.
+    // Clean-egress proxy routes are per-workspace
+    // (provider_configs.config_json.proxyUrl, e.g. https://vm.exe.xyz/openai-oauth);
+    // EGRESS_PROXY_TOKEN (secret) gates the exe.dev VM when a route is set.
+    "CODEX_DIRECT_ENABLED": "false",
+    // PostHog observability vars. POSTHOG_KEY is a secret set via
+    // `wrangler secret put POSTHOG_KEY` (and `.dev.vars` locally).
+    // When POSTHOG_KEY is unset, backend instrumentation is a no-op.
+    "POSTHOG_HOST": "https://us.i.posthog.com",
+    "POSTHOG_CAPTURE_CONTENT": "true",
+    // Cloudflare Sandbox compute backend. BACKUP_BUCKET_NAME/CLOUDFLARE_ACCOUNT_ID
+    // are needed to presign backup URLs in production (localBucket: true is used
+    // in local dev instead, resolving the BACKUP_BUCKET R2 binding directly).
+    // SANDBOX_TRANSPORT selects the RPC transport (required for e.g. tunnels).
+    "BACKUP_BUCKET_NAME": "nadi-compute-backups",
+    "CLOUDFLARE_ACCOUNT_ID": "<YOUR_CLOUDFLARE_ACCOUNT_ID>",
+    "SANDBOX_TRANSPORT": "rpc",
+  },
+  "triggers": { "crons": ["0 3 * * *", "* * * * *"] },
+  "observability": { "enabled": true },
+}

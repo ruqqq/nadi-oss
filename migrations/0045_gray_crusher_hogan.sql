@@ -1,0 +1,1 @@
+ALTER TABLE `thread_workbench_snapshots` ADD `resource_profile` text;

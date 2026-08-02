@@ -1,0 +1,1 @@
+ALTER TABLE `thread_index` ADD `last_compact_after_tokens` integer;

@@ -1,0 +1,1 @@
+ALTER TABLE `automata` ADD `workbench_id` text;

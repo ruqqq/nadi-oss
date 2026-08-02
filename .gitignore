@@ -1,0 +1,57 @@
+# Dependencies
+node_modules/
+web/node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+web/dist/
+.wrangler/
+.mf/
+
+# Secrets / local env
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.env
+.env.*
+!.env.local.example
+!web/.env.local.example
+
+# Test / coverage
+coverage/
+*.tsbuildinfo
+
+# Editor / OS
+.DS_Store
+*.log
+
+codex-auth.json
+
+# Note: worker-configuration.d.ts IS committed (needed for typecheck in CI) and
+# is NOT auto-regenerated on install. `wrangler types` infers secret + var types
+# from `.dev.vars`, which is gitignored — so regenerating without it (worktrees,
+# CI, fresh clones) silently drops all secret bindings and narrows vars. To
+# refresh after a wrangler.jsonc binding change, run `pnpm types` from a checkout
+# that has `.dev.vars` (i.e. the main checkout, NOT a worktree), then commit.
+# Secrets themselves are the source-of-truth-typed in src/env.ts. migrations/ ARE committed.
+
+# MSW's generated service worker, written by `msw init web/public/`. It is only
+# needed by the dev-only mock app (mock.html); Vite copies web/public/ verbatim
+# into dist, so committing it would ship it in every production build. Untracked
+# means CI and deploy (fresh checkouts) never see it at all. Regenerate on
+# demand with `pnpm --filter @nadi/web exec msw init public/`.
+web/public/mockServiceWorker.js
+
+# Visual brainstorming companion
+.superpowers/
+
+# Local design mockups / scratch
+scratch/
+
+# Local git worktrees
+.worktrees/
+
+# Your own production config, derived from wrangler.prod.example.jsonc.
+# Deployment-specific ids belong to you, not to the repo.
+wrangler.prod.jsonc

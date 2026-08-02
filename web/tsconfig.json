@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"]
+    },
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    // exactOptionalPropertyTypes is intentionally OFF for the web package: the
+    // vendored shadcn/ui + AI Elements components are not written against it and
+    // it is broadly incompatible with the React component ecosystem. Every other
+    // strict flag stays on.
+    "skipLibCheck": true,
+    "allowSyntheticDefaultImports": true,
+    "allowImportingTsExtensions": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "vite.config.ts"],
+  // The service worker is a WebWorker-lib program of its own (tsconfig.sw.json).
+  "exclude": ["src/sw.ts"]
+}

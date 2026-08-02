@@ -1,0 +1,340 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* Generate the utility classes streamdown emits for rendered markdown
+   (list-decimal, prose spacing, etc.) — it lives in node_modules, which
+   Tailwind's automatic content detection skips. */
+@source "../node_modules/streamdown/dist";
+
+/* Dark mode driven by a `.dark` class on <html> (set by lib/theme.ts before paint). */
+@custom-variant dark (&:is(.dark *));
+
+/* Installed PWA (home-screen) mode. Use `standalone:` to add iOS safe-area
+   bottom padding to bottom-anchored controls only when installed — in-browser
+   the OS chrome already reserves that space. */
+@custom-variant standalone (@media (display-mode: standalone));
+
+/* The two-column layout (pinned rail) — a tablet/desktop shape, NOT merely a
+   wide viewport. Width alone can't tell a phone in landscape (~932x430, which
+   clears 768) from a tablet, so height breaks the tie: phone landscapes top out
+   near 480px tall, the shortest tablet landscape (iPad) is 768. Keep this query
+   identical to WIDE_LAYOUT_QUERY in lib/use-wide-layout.ts — a test asserts it. */
+@custom-variant wide (@media (min-width: 768px) and (min-height: 600px));
+
+/* ============================================================
+   Dispatch design tokens — warm, editorial, calm.
+   Light is the default (:root); dark overrides under .dark.
+   Brand aubergine == shadcn --primary. shadcn --accent stays
+   a subtle hover surface. Nadi adds --approve / --reject / --gate.
+   ============================================================ */
+:root {
+  --radius: 0.6rem;
+
+  --background: #f4efe6;
+  --foreground: #23201a;
+  --card: #fbf8f1;
+  --card-foreground: #23201a;
+  --popover: #fbf8f1;
+  --popover-foreground: #23201a;
+  --primary: #6d3f8c;
+  --primary-foreground: #fbf8f1;
+  --secondary: #f1ebdf;
+  --secondary-foreground: #23201a;
+  --muted: #f1ebdf;
+  --muted-foreground: #8a7a5e;
+  --accent: #f1ebdf;
+  --accent-foreground: #23201a;
+  --destructive: #a23b3b;
+  --destructive-foreground: #fbf8f1;
+  --border: #e3d9c8;
+  --input: #e3d9c8;
+  --ring: #6d3f8c;
+
+  /* Nadi additions */
+  --faint: #b6a98f;
+  --approve: #3a6b4f;
+  --approve-foreground: #fbf8f1;
+  --reject: #a23b3b;
+  --reject-foreground: #fbf8f1;
+  --gate: #6d3f8c;
+  --gate-bg: #f3edf7;
+  --steer: #9a6410;
+  --steer-bg: #f7efdd;
+}
+
+.dark {
+  /* Warm espresso dark — keeps the editorial feel, not cold near-black. */
+  --background: #15120d;
+  --foreground: #ece3d3;
+  --card: #1e1a13;
+  --card-foreground: #ece3d3;
+  --popover: #1e1a13;
+  --popover-foreground: #ece3d3;
+  --primary: #b388d9;
+  --primary-foreground: #15120d;
+  --secondary: #262017;
+  --secondary-foreground: #ece3d3;
+  --muted: #262017;
+  --muted-foreground: #9d917b;
+  --accent: #262017;
+  --accent-foreground: #ece3d3;
+  --destructive: #e08a7a;
+  --destructive-foreground: #15120d;
+  --border: #322a1e;
+  --input: #322a1e;
+  --ring: #b388d9;
+
+  --faint: #6f6553;
+  --approve: #74b78d;
+  --approve-foreground: #15120d;
+  --reject: #e08a7a;
+  --reject-foreground: #15120d;
+  --gate: #b388d9;
+  --gate-bg: #241a2b;
+  --steer: #e0b364;
+  --steer-bg: #2a2113;
+}
+
+/* Map tokens into Tailwind's theme so utilities (bg-background, text-approve,
+   font-display, rounded-lg, …) resolve. Font families get @fontsource wiring
+   in step 2; fallbacks keep things sane until then. */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-faint: var(--faint);
+  --color-approve: var(--approve);
+  --color-approve-foreground: var(--approve-foreground);
+  --color-reject: var(--reject);
+  --color-reject-foreground: var(--reject-foreground);
+  --color-gate: var(--gate);
+  --color-gate-bg: var(--gate-bg);
+  --color-steer: var(--steer);
+  --color-steer-bg: var(--steer-bg);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Fraunces", ui-serif, Georgia, serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", monospace;
+
+  /* The one reading-column width. Every main-column surface — chat, compose,
+     the "All chats" list, and the settings panels — caps at `max-w-content`
+     so the app never sprawls on a wide monitor. Change it here, nowhere else. */
+  --container-content: 48rem;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    /* 16px base — blocks iOS Safari input zoom. */
+    font-size: 16px;
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+  }
+  /* Links read as clickable everywhere — chat-bubble markdown links (rendered by
+     Streamdown) otherwise inherit the default text cursor in some engines. */
+  a {
+    cursor: pointer;
+  }
+  /* The browser claims a horizontal swipe for history navigation, which would
+     fire alongside the left-edge swipe that opens the rail. Take the axis back.
+     Only the x axis: vertical overscroll (pull-to-refresh) stays as it was. */
+  html,
+  body {
+    overscroll-behavior-x: none;
+  }
+  /* In installed (standalone) PWA mode, stop iOS from rubber-band bouncing the
+     whole page. The main app is `h-dvh` and scrolls inside its own containers,
+     so the document scroller has nothing to move — disabling overscroll on it
+     kills the page-level bounce without touching inner scrolling or the
+     keyboard (no position:fixed lock needed). */
+  @media (display-mode: standalone) {
+    html,
+    body {
+      overscroll-behavior: none;
+    }
+  }
+}
+
+/* While the rail is being dragged in from the left edge it must track the finger,
+   so its transform comes from --rail-drag (0 = shut, 1 = fully open) and Radix's
+   own slide-in/out is suppressed for the duration. Scoped to [data-rail] so no
+   other sheet can be caught by it. See lib/use-edge-swipe.ts. */
+body[data-rail-dragging] [data-slot="sheet-content"][data-rail] {
+  animation: none !important;
+  transition: none;
+  transform: translate3d(calc(-1 * var(--rail-width) * (1 - var(--rail-drag, 0))), 0, 0);
+}
+body[data-rail-dragging] [data-slot="sheet-overlay"] {
+  animation: none !important;
+  transition: none;
+  opacity: var(--rail-drag, 0);
+}
+/* On release it glides the rest of the way rather than jumping. */
+body[data-rail-settling] [data-slot="sheet-content"][data-rail],
+body[data-rail-settling] [data-slot="sheet-overlay"] {
+  transition:
+    transform 180ms ease-out,
+    opacity 180ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  body[data-rail-settling] [data-slot="sheet-content"][data-rail],
+  body[data-rail-settling] [data-slot="sheet-overlay"] {
+    transition: none;
+  }
+}
+
+/* An ongoing tool-call activity line shimmers its text in place instead of
+   carrying a spinner marker — a marker that appears while running and vanishes
+   when done shifts the whole line. Mirrors the reasoning "Thinking…" shimmer
+   (ai-elements/shimmer.tsx): a band of the page background sweeps across the
+   muted-foreground text. */
+.activity-shimmer {
+  background-image:
+    linear-gradient(
+      90deg,
+      transparent calc(50% - 28px),
+      var(--color-background),
+      transparent calc(50% + 28px)
+    ),
+    linear-gradient(var(--color-muted-foreground), var(--color-muted-foreground));
+  background-size: 250% 100%, auto;
+  background-repeat: no-repeat, padding-box;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: activity-shimmer 1.6s linear infinite;
+}
+@keyframes activity-shimmer {
+  from {
+    background-position: 100% center;
+  }
+  to {
+    background-position: 0% center;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* No sweep for reduced-motion users — fall back to plain muted text. */
+  .activity-shimmer {
+    animation: none;
+    background-image: none;
+    color: var(--color-muted-foreground);
+  }
+}
+
+/* Links in rendered markdown are not anchors. Streamdown's link-safety flow
+   (on by default; we never configure it) renders a <button> that shows the URL
+   for confirmation before opening it — and Tailwind v4's preflight gives every
+   button `cursor: default`, so the one thing in a message that is obviously
+   clickable did not look it. The library builds the class list internally, so
+   this is the reachable seam. */
+[data-streamdown="link"] {
+  cursor: pointer;
+}
+
+/* Touch selection policy. On a touch device a long press is a gesture, not a
+   request to select a word — the rail's row menu is opened that way, and the
+   browser's own highlight fights it. So selection is off by default for coarse
+   pointers, and back on wherever copying is the point.
+
+   Scoped to `pointer: coarse` deliberately: a mouse user selecting a title or
+   an error message is doing something reasonable, and nothing there fights a
+   long press.
+
+   Not an allowlist by component but by intent: `font-mono` is what the design
+   system already reserves for the values worth copying (ids, paths, URLs,
+   branches, commands), and `data-selectable` marks prose meant to be quoted.
+   Line numbers inside a code block keep their own `select-none` — copied code
+   should not carry them. */
+@media (pointer: coarse) {
+  body {
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+  }
+
+  input,
+  textarea,
+  [contenteditable]:not([contenteditable="false"]),
+  code,
+  pre,
+  .font-mono,
+  [data-selectable],
+  .select-text {
+    -webkit-user-select: text;
+    user-select: text;
+    -webkit-touch-callout: default;
+  }
+
+  /* An opt-out nested inside an opt-in still wins, and carries the -webkit
+     prefix the utility alone may not. Nothing enables CodeBlock's line numbers
+     today, but if it does, "1 2 3" must not land in the paste. */
+  .select-none {
+    -webkit-user-select: none;
+    user-select: none;
+  }
+}
+
+/* iOS Safari zooms the whole viewport when a focused form control has a
+   computed font-size below 16px. The `html { font-size: 16px }` base and the
+   shadcn Input/Textarea `text-base` cover phones, but compact overrides
+   (`text-xs`/`text-sm` on the mono config inputs and setup-script textarea) and
+   the base `md:text-sm` — which turns on at ≥768px, i.e. tablets and phones in
+   landscape — drop below 16px and re-trigger the zoom. On coarse pointers, floor
+   every form control at 16px so no input can zoom; fine pointers (desktop) keep
+   the compact sizes, where viewport zoom doesn't apply. Needs !important to beat
+   the utility classes on the element. */
+@media (pointer: coarse) {
+  input,
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
+}
+
+/* Radix ScrollArea wraps content in an inline `display:table; min-width:100%`
+   div so it can scroll horizontally. That lets intrinsic content width exceed
+   100% and bleed past the right edge (dropping right padding on every row).
+   All our scroll areas are vertical, so force the wrapper to a block: it then
+   fills exactly 100% of the viewport and children truncate instead of
+   overflowing. Needs !important to beat Radix's inline style. */
+[data-radix-scroll-area-viewport] > div {
+  display: block !important;
+}
+
+/* On the two-column (wide) layout the rail pins to the left (w-72 = 288px =
+   RAIL_WIDTH_PX in App.tsx), so a viewport-centered toast reads as off-center
+   over the main pane. Shift the centered sonner toaster right by half the rail
+   width so it centers on the main pane instead of the whole viewport. sonner
+   keeps its own `transform: translateX(-50%)`, so only `left` moves. Query is
+   kept identical to the `wide` custom variant above. Below `wide` the rail is a
+   drawer (no pinned column), so the default viewport-centered toast is correct. */
+@media (min-width: 768px) and (min-height: 600px) {
+  [data-sonner-toaster][data-x-position="center"] {
+    left: calc(50% + 144px) !important;
+  }
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Subagent Debug Endpoints"
+  short_description: "QA subagents through debug HTTP endpoints"
+  default_prompt: "Use $subagent-debug-endpoints to verify subagent or sandbox exec behavior against the debug endpoints."

@@ -1,0 +1,1 @@
+ALTER TABLE `thread_index` ADD `archive_skipped_updated_at` integer;

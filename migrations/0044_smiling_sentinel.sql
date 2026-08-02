@@ -1,0 +1,1 @@
+ALTER TABLE `workbenches` ADD `resource_profile` text DEFAULT 'small' NOT NULL;
