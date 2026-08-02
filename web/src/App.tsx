@@ -180,6 +180,7 @@ const ChatLog = lazy(() =>
   import("./components/chat/ChatLog").then((m) => ({ default: m.ChatLog })),
 );
 import { ConversationSkeleton } from "./components/chat/ConversationSkeleton";
+import { ConversationFallback } from "./components/chat/ConversationFallback";
 import { Composer, type ComposerHandle } from "./components/chat/Composer";
 import { NEW_CHAT_SUGGESTIONS, PromptSuggestions } from "./components/chat/PromptSuggestions";
 import { ThreadDetailsSheet } from "./components/chat/ThreadDetailsSheet";
@@ -5123,10 +5124,9 @@ function ThreadChat({
       {/* Reading column: cap the width on wide screens and center it, so the
           thread never sprawls edge-to-edge. The Topbar stays full-bleed. */}
       <div className="mx-auto flex min-h-0 w-full max-w-content flex-1 flex-col">
-        {/* For a freshly-created thread the optimistic bubble is already on
-            screen; a lazy child of ChatLog suspending must not paint placeholder
-            bars above it — the empty conversation area just stays blank. */}
-        <Suspense fallback={bubble ? null : <ConversationSkeleton />}>
+        {/* A lazy child of ChatLog can suspend here. The fallback choice —
+            and why it must never be `null` — lives in ConversationFallback. */}
+        <Suspense fallback={<ConversationFallback hasPendingBubble={!!bubble} />}>
           <ChatLog
             messages={messages}
             addToolApprovalResponse={trackedAddToolApprovalResponse}
