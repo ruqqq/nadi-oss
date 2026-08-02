@@ -1,6 +1,11 @@
 import { describe, expect, it, test } from "vitest";
 import type { UIMessage } from "ai";
-import { awaitsAssistantReply, isConversationComplete, withRenderableContent } from "./message-state";
+import {
+  assistantHasPainted,
+  awaitsAssistantReply,
+  isConversationComplete,
+  withRenderableContent,
+} from "./message-state";
 
 function text(text: string, state = "done") {
   return { type: "text", text, state };
@@ -105,6 +110,26 @@ describe("awaitsAssistantReply", () => {
   });
 
   test("empty transcript awaits nothing", () => {
+    expect(awaitsAssistantReply([])).toBe(false);
+  });
+});
+
+describe("assistantHasPainted", () => {
+  const user = (id: string) => ({ id, role: "user", parts: [] }) as unknown as UIMessage;
+  const assistant = (id: string) => ({ id, role: "assistant", parts: [] }) as unknown as UIMessage;
+
+  test("a trailing assistant message is something to trail", () => {
+    expect(assistantHasPainted([user("u1"), assistant("a1")])).toBe(true);
+  });
+
+  test("a transcript still owing a reply has painted nothing", () => {
+    expect(assistantHasPainted([user("u1")])).toBe(false);
+  });
+
+  // Not the negation of awaitsAssistantReply: both answer false here, and both
+  // are right. Nothing is owed, and there is nothing to trail either.
+  test("an empty transcript has painted nothing", () => {
+    expect(assistantHasPainted([])).toBe(false);
     expect(awaitsAssistantReply([])).toBe(false);
   });
 });
