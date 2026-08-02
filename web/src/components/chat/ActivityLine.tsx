@@ -42,7 +42,11 @@ export const ActivityLine = forwardRef<
       type="button"
       aria-label={label}
       className={cn(
-        "group not-prose mb-1 flex w-fit max-w-full items-baseline gap-1.5 rounded-md py-0.5 pr-1.5 text-left align-top text-sm transition hover:bg-muted/40",
+        // `last:mb-0`: mb-1 separates consecutive activity lines, but as a
+        // TRAILING margin it also pushed whatever follows the last one down —
+        // most visibly the typing dots, which then sat lower after a tool row
+        // than after text. Spacing between rows is unchanged.
+        "group not-prose mb-1 flex w-fit max-w-full items-baseline gap-1.5 rounded-md py-0.5 pr-1.5 text-left align-top text-sm transition last:mb-0 hover:bg-muted/40",
         state === "error" ? "text-reject" : "text-muted-foreground",
         className,
       )}
