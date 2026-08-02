@@ -42,7 +42,20 @@ export const ActivityLine = forwardRef<
       type="button"
       aria-label={label}
       className={cn(
-        "group not-prose mb-1 flex w-fit max-w-full items-baseline gap-1.5 rounded-md py-0.5 pr-1.5 text-left align-top text-sm transition hover:bg-muted/40",
+        // mb-1 separates consecutive activity lines. As a TRAILING margin it
+        // also pushed whatever follows the last one down, so the typing dots
+        // sat lower after a tool row than after text.
+        //
+        // `last:-mb-1` does two things: it drops that trailing 4px, and it
+        // pulls the following content up by a further 4px to close the gap
+        // between where this row's TEXT ends and where its box does — baseline
+        // alignment against the taller status icon leaves slack that a plain
+        // text row has none of. Box-to-dots was already uniform at 12px;
+        // ink-to-dots was 16 vs 12, and ink is what the eye measures.
+        //
+        // A negative margin rather than less padding, so the hover background
+        // keeps its size and this row does not move — only what follows it does.
+        "group not-prose mb-1 flex w-fit max-w-full items-baseline gap-1.5 rounded-md py-0.5 pr-1.5 text-left align-top text-sm transition last:-mb-1 hover:bg-muted/40",
         state === "error" ? "text-reject" : "text-muted-foreground",
         className,
       )}

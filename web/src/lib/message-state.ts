@@ -1,6 +1,33 @@
 import type { UIMessage } from "ai";
 
 /**
+ * Has this message nothing to paint — no text, no reasoning, no tool call, no
+ * file?
+ *
+ * The SDK inserts a bare `{role: "assistant", parts: []}` the moment a stream
+ * opens, before any chunk lands. It draws nothing, but it is still a child of
+ * ConversationContent's `gap-8` flex column, so it contributes a 32px gap out
+ * of thin air. The typing dots that follow it carry `-mt-8` to cancel ONE such
+ * gap, so the placeholder's gap survives and the dots drop 32px the instant a
+ * turn starts, then rise again when the first token paints.
+ */
+export function rendersNoContent(message: UIMessage): boolean {
+  const parts = (message as { parts?: { type?: string; text?: string }[] }).parts ?? [];
+  // Vacuously true for `parts: []` — which is the case this exists for.
+  return parts.every(
+    (part) =>
+      (part.type === "text" || part.type === "reasoning") && (part.text ?? "").trim() === "",
+  );
+}
+
+/** Drop assistant rows that would paint nothing, so they cannot contribute a
+ *  flex gap. User rows are left alone: the composer cannot submit an empty
+ *  message, and an attachment-only one has file parts. */
+export function withRenderableContent(messages: UIMessage[]): UIMessage[] {
+  return messages.filter((message) => message.role !== "assistant" || !rendersNoContent(message));
+}
+
+/**
  * Does this transcript end on a user message — i.e. is a reply owed?
  *
  * Deliberately NOT `!isConversationComplete(messages)`. That predicate asks
