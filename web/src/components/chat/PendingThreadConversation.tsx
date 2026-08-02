@@ -2,8 +2,7 @@ import type { FileUIPart } from "ai";
 
 import { Conversation, ConversationContent } from "@/components/ai-elements/conversation";
 
-import { PendingFirstMessage } from "./PendingFirstMessage";
-import { TypingDots } from "./TypingDots";
+import { PendingFirstMessage, PendingReplyDots } from "./PendingFirstMessage";
 
 /**
  * The conversation body shown from the moment a new thread's first message is
@@ -37,13 +36,7 @@ export function PendingThreadConversation({
         </ConversationContent>
       </Conversation>
       <PendingFirstMessage text={text} files={files} status={status} onRetry={onRetry} />
-      {status !== "failed" && (
-        // Outside ConversationContent (no gap-8), so a light top pad is enough —
-        // pb-4 here used to leave a hole under the optimistic bubble.
-        <div className="px-4 pt-1 pb-2">
-          <TypingDots />
-        </div>
-      )}
+      {status !== "failed" && <PendingReplyDots />}
     </>
   );
 }

@@ -189,9 +189,8 @@ import { ShowMoreRow } from "./components/chat/ShowMoreRow";
 import { ThreadNavButton } from "./components/chat/ThreadNavButton";
 import { railToggleIndicator } from "./components/chat/ThreadIndicator";
 import { ThreadRowMenu } from "./components/chat/ThreadRowMenu";
-import { PendingFirstMessage } from "./components/chat/PendingFirstMessage";
+import { PendingFirstMessage, PendingReplyDots } from "./components/chat/PendingFirstMessage";
 import { PendingThreadConversation } from "./components/chat/PendingThreadConversation";
-import { TypingDots } from "./components/chat/TypingDots";
 import {
   isRetryable,
   needsFirstMessageResync,
@@ -5153,11 +5152,7 @@ function ThreadChat({
             onRetry={onRetryFirstMessage}
           />
         )}
-        {showOptimisticTyping && (
-          <div className="px-4 pt-1 pb-2">
-            <TypingDots />
-          </div>
-        )}
+        {showOptimisticTyping && <PendingReplyDots />}
 
         {!feedbackMode && <QueuedMessageStrip items={queuedStripItems} onCancel={cancelQueuedMessage} />}
 

@@ -6,6 +6,28 @@ import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 
 import { AttachmentPreviewChip } from "./AttachmentPreviewChip";
+import { TypingDots } from "./TypingDots";
+
+/**
+ * The typing dots that trail an optimistic first message, in both places that
+ * render one (the create-time projection and the live thread before the
+ * delivered message replaces the bubble). Shared because the two used to carry
+ * their own copy of this padding, and the copies drifted — the bubble jumped
+ * 20px as the surface swapped between them.
+ *
+ * These dots stand in for a reply that has not painted, exactly as ChatLog's do
+ * before the first token, so they keep the same full message gap: 32px below
+ * the bubble's visible edge. This renders outside ConversationContent, so there
+ * is no `gap-8` to inherit — and PendingFirstMessage's own `py-2` already
+ * supplies 8px of it, leaving 24 to pad here.
+ */
+export function PendingReplyDots() {
+  return (
+    <div className="px-4 pt-6 pb-2">
+      <TypingDots />
+    </div>
+  );
+}
 
 /**
  * A new thread's first message, shown optimistically while the thread is being

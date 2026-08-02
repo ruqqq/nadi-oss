@@ -26,7 +26,7 @@ import { MessageRow } from "./MessageRow";
 import { CompletionGroup } from "./CompletionGroup";
 import type { SubagentRunsState } from "@/lib/use-subagent-runs";
 import { TypingDots } from "./TypingDots";
-import { withRenderableContent } from "@/lib/message-state";
+import { assistantHasPainted, withRenderableContent } from "@/lib/message-state";
 
 type AddToolApprovalResponse = (opts: { id: string; approved: boolean }) => void;
 
@@ -165,6 +165,13 @@ export function ChatLog({
   );
   const latestThinking = latestThreadThinking(visibleMessages);
   const compactionNoticeText = compactionNoticeLabel(compactionNotice);
+  const liveThinking = showReasoning ? latestThinking : null;
+  // Is anything of this turn already on screen for the dots to trail?
+  const turnPainted =
+    assistantHasPainted(visibleMessages) ||
+    !!liveThinking ||
+    !!compactionNoticeText ||
+    compactionPhase === "compacting";
 
   return (
     <Conversation className="flex-1">
@@ -206,21 +213,28 @@ export function ChatLog({
 
         {compactionPhase === "compacting" && <CompactionProgressRow />}
 
-        {showReasoning && latestThinking && (
-          <Reasoning key={latestThinking.key} isStreaming={latestThinking.state === "streaming"}>
+        {liveThinking && (
+          <Reasoning key={liveThinking.key} isStreaming={liveThinking.state === "streaming"}>
             <ReasoningTrigger />
-            <ReasoningContent>{latestThinking.text}</ReasoningContent>
+            <ReasoningContent>{liveThinking.text}</ReasoningContent>
           </Reasoning>
         )}
 
         {showTyping && (
-          // ConversationContent gaps children by gap-8 (message rhythm). The
-          // dots are a continuation of the previous bubble, not a new message —
-          // cancel that gap, then add back the same 12px the optimistic dots
-          // sit at in PendingThreadConversation. Cancelling outright left them
-          // flush against the bubble's edge while the optimistic ones had a
-          // gap, so the handoff between the two showed as a shift.
-          <div className="-mt-8 pt-3">
+          // ConversationContent gaps children by gap-8 (message rhythm), and
+          // the dots play two different parts either side of the first token.
+          //
+          // Before the turn paints they ARE the assistant message — nothing
+          // else stands in for it — so they keep the full message gap and the
+          // first token lands on the line they were holding. Tucking them 12px
+          // under the user bubble instead (which is what they used to do) put
+          // them 32px above that line, so the instant text arrived they fell
+          // 52px: the "extra gap" that appears once streaming starts.
+          //
+          // Once something HAS painted they are a continuation of it, not a
+          // message of their own: cancel the gap and re-add 12px, the same
+          // trailing rhythm the tool rows and prose settle at.
+          <div className={cn(turnPainted && "-mt-8 pt-3")}>
             <TypingDots />
           </div>
         )}

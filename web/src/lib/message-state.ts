@@ -28,6 +28,21 @@ export function withRenderableContent(messages: UIMessage[]): UIMessage[] {
 }
 
 /**
+ * Has the assistant's turn painted anything yet?
+ *
+ * Asked of a list the contentless rows have already been filtered out of, so a
+ * trailing assistant message here is one that actually draws. It decides
+ * whether the typing dots are a CONTINUATION of a turn already on screen (tuck
+ * them under it) or a STAND-IN for a turn that has not painted (leave them in
+ * the message slot, so the first token lands where they were).
+ *
+ * `[]` answers false: an empty log has nothing to continue either.
+ */
+export function assistantHasPainted(messages: UIMessage[]): boolean {
+  return messages[messages.length - 1]?.role === "assistant";
+}
+
+/**
  * Does this transcript end on a user message — i.e. is a reply owed?
  *
  * Deliberately NOT `!isConversationComplete(messages)`. That predicate asks
