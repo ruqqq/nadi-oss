@@ -91,6 +91,41 @@ describe("extractPushPreview", () => {
     ).toBe("Latest turn.");
   });
 
+  // Turn-end injection flush can append a user-role system-reminder after the
+  // assistant reply. The preview must still quote the assistant, not that
+  // injection — otherwise the lock screen shows `<system-reminder>` prose.
+  it("reads the last assistant message, skipping a trailing user message", () => {
+    expect(
+      extractPushPreview([
+        { role: "user", parts: [text("What broke?")] },
+        { role: "assistant", parts: [text("The projector race.")] },
+        {
+          role: "user",
+          parts: [text("<system-reminder>\nWatcher finished.\n</system-reminder>")],
+        },
+      ]),
+    ).toBe("The projector race.");
+  });
+
+  it("skips earlier assistant turns and keeps the latest assistant reply", () => {
+    expect(
+      extractPushPreview([
+        { role: "assistant", parts: [text("Earlier turn.")] },
+        { role: "user", parts: [text("Try again.")] },
+        { role: "assistant", parts: [text("Latest turn.")] },
+      ]),
+    ).toBe("Latest turn.");
+  });
+
+  it("returns null when no assistant message has text", () => {
+    expect(
+      extractPushPreview([
+        { role: "user", parts: [text("Hello")] },
+        { role: "assistant", parts: [{ type: "tool-exec_run", input: { command: "ls" } }] },
+      ]),
+    ).toBeNull();
+  });
+
   it("returns null for empty, absent, or malformed input", () => {
     expect(extractPushPreview([])).toBeNull();
     expect(extractPushPreview([{}])).toBeNull();

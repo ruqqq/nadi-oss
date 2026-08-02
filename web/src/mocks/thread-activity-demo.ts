@@ -19,9 +19,9 @@ const SCENARIO = "thread-activity";
 /**
  * Staggered so each toast is legible on its own before the next arrives. The
  * previews mirror what `extractPushPreview` produces server-side — the last
- * message's prose, collapsed and clipped — so the mocked toast is the same
- * shape as the real one. The failure carries none, exercising the fallback to
- * generic copy.
+ * assistant message's prose, collapsed and clipped — so the mocked toast is the
+ * same shape as the real one. The failure carries none, exercising the fallback
+ * to generic copy.
  */
 const SCRIPT = [
   {

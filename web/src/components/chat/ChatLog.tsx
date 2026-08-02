@@ -209,7 +209,14 @@ export function ChatLog({
           </Reasoning>
         )}
 
-        {showTyping && <TypingDots />}
+        {showTyping && (
+          // ConversationContent gaps children by gap-8 (message rhythm). The
+          // dots are a continuation of the previous bubble, not a new message —
+          // cancel that gap so they sit just under it.
+          <div className="-mt-8">
+            <TypingDots />
+          </div>
+        )}
 
         {error && (
           <Alert variant="destructive">

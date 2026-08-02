@@ -3,13 +3,14 @@ import type { FileUIPart } from "ai";
 import { Conversation, ConversationContent } from "@/components/ai-elements/conversation";
 
 import { PendingFirstMessage } from "./PendingFirstMessage";
+import { TypingDots } from "./TypingDots";
 
 /**
  * The conversation body shown from the moment a new thread's first message is
  * submitted until the live thread takes over — the optimistic user bubble
- * pinned to the bottom of an (otherwise empty) stick-to-bottom Conversation.
- * The bubble's own "Sending…" indicator carries progress; the live thread's
- * typing dots take over once the assistant's turn begins.
+ * pinned to the bottom of an (otherwise empty) stick-to-bottom Conversation,
+ * with the typing indicator as soon as the message is on its way (even before
+ * the thread exists or the stream opens).
  *
  * It mirrors the live ChatLog's layout on purpose: an empty flex-1 Conversation
  * with the bubble as its trailing sibling. That way the bubble keeps the same
@@ -36,6 +37,13 @@ export function PendingThreadConversation({
         </ConversationContent>
       </Conversation>
       <PendingFirstMessage text={text} files={files} status={status} onRetry={onRetry} />
+      {status !== "failed" && (
+        // Outside ConversationContent (no gap-8), so a light top pad is enough —
+        // pb-4 here used to leave a hole under the optimistic bubble.
+        <div className="px-4 pt-1 pb-2">
+          <TypingDots />
+        </div>
+      )}
     </>
   );
 }
