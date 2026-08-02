@@ -1,6 +1,22 @@
 import type { UIMessage } from "ai";
 
 /**
+ * Does this transcript end on a user message — i.e. is a reply owed?
+ *
+ * Deliberately NOT `!isConversationComplete(messages)`. That predicate asks
+ * "is anything streaming right now", so it answers TRUE (complete) for
+ * `[user, assistant, user]` — a transcript that plainly stops mid-turn. Every
+ * thread past its first turn looks finished to it, which is why the
+ * pending-reply indicator only ever appeared on brand-new threads.
+ *
+ * Mid-turn the server's persisted history stops at the user message, so "ends
+ * on a user message" is exactly the shape of a turn still in flight.
+ */
+export function awaitsAssistantReply(messages: UIMessage[]): boolean {
+  return messages[messages.length - 1]?.role === "user";
+}
+
+/**
  * Determine whether a conversation is genuinely complete by inspecting the
  * message parts. Used after a PWA background/resume cycle where the AI SDK's
  * internal `isStreaming` flag may be stale because the WebSocket "turn finished"

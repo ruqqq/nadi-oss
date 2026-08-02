@@ -294,7 +294,10 @@ import { showThreadActivityToast } from "./lib/thread-activity-toast";
  */
 const CLAIM_RETRY_DELAYS_MS = [250, 750, 1_500, 3_000, 5_000];
 import { visibleRailThreads } from "./lib/thread-dismissal";
-import { isConversationComplete } from "./lib/message-state";
+import { awaitsAssistantReply, isConversationComplete } from "./lib/message-state";
+import { mergeResyncedHistory } from "./lib/history-merge";
+/** How long a thread may promise an inbound reply with nothing to show for it. */
+const PENDING_REPLY_WINDOW_MS = 5_000;
 import { threadMatchesProjectFilter, type ProjectThreadFilter } from "./lib/project-thread-filter";
 import { openUserHubSocket, setUserHubPresence } from "./lib/user-hub-socket";
 import { isUserActive, trackUserActivity } from "./lib/user-activity";
@@ -4383,14 +4386,21 @@ function ThreadChat({
   useEffect(() => {
     if (socketConnected) setEverConnected(true);
   }, [socketConnected]);
-  // Safety valve: never trap an offline thread in an infinite skeleton — after
-  // this window we drop to the thread with a gated composer + "Connecting…" hint.
-  const [connectTimedOut, setConnectTimedOut] = useState(false);
+  // Safety valve on the "a reply is coming" promise: never leave a thread
+  // twitching typing dots forever when no reply is actually on its way.
+  //
+  // It restarts on every socket transition, because the window it guards
+  // recurs. The gap this covers is "socket is up but the SDK's chunk replay
+  // hasn't started yet", which happens on every reconnect — the one-shot
+  // `connectTimedOut` this replaces only ever armed before the FIRST connect,
+  // leaving later resumes with no valve at all. Each reconnect earns one fresh
+  // window because each reconnect might bring a replay.
+  const [pendingReplyExpired, setPendingReplyExpired] = useState(false);
   useEffect(() => {
-    if (everConnected) return;
-    const id = window.setTimeout(() => setConnectTimedOut(true), 4000);
+    setPendingReplyExpired(false);
+    const id = window.setTimeout(() => setPendingReplyExpired(true), PENDING_REPLY_WINDOW_MS);
     return () => window.clearTimeout(id);
-  }, [everConnected]);
+  }, [socketConnected]);
   const [historyReloading, setHistoryReloading] = useState(false);
 
   const subagentRuns = useSubagentRuns(agent, backgroundWorkEnabled);
@@ -4459,13 +4469,20 @@ function ThreadChat({
   threadRef.current = thread;
   const setMessagesRef = useRef(setMessages);
   setMessagesRef.current = setMessages;
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
 
   const syncThreadHistory = useCallback(async () => {
     setHistoryReloading(true);
     try {
       const fresh = await fetchThreadHistory(historyFetchTargetForThread(threadRef.current));
       if (fresh.length > 0) {
-        setMessagesRef.current(fresh);
+        // Merged, not assigned. Mid-turn the server's history stops at the user
+        // message, so a plain assign deletes the assistant bubble the user is
+        // watching and it only returns when the SDK replays the buffered chunks
+        // — a content flash that reads as data loss. `fresh` still wins for
+        // everything it knows about; see mergeResyncedHistory.
+        setMessagesRef.current(mergeResyncedHistory(messagesRef.current, fresh));
         // A real transcript reached us, so the messages are trustworthy again:
         // this is the recovery path out of a degraded load, and the only one.
         setHistoryDegraded(false);
@@ -4570,10 +4587,10 @@ function ThreadChat({
     socketConnected,
     everConnected,
     historyReloading,
-    connectTimedOut,
+    pendingReplyExpired,
     offline,
-    messageCount: messages.length,
-    conversationComplete: isConversationComplete(messages),
+    streamActive: isStreaming || status === "submitted",
+    awaitingReply: awaitsAssistantReply(messages),
   });
   const readinessHint =
     readiness.reason === "offline"

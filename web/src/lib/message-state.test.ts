@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, test } from "vitest";
 import type { UIMessage } from "ai";
-import { isConversationComplete } from "./message-state";
+import { awaitsAssistantReply, isConversationComplete } from "./message-state";
 
 function text(text: string, state = "done") {
   return { type: "text", text, state };
@@ -80,5 +80,31 @@ describe("isConversationComplete", () => {
       assistant("m1", [{ type: "text", text: "hello" }]),
     ];
     expect(isConversationComplete(msgs)).toBe(true);
+  });
+});
+
+describe("awaitsAssistantReply", () => {
+  const user = (id: string) => ({ id, role: "user", parts: [] }) as unknown as UIMessage;
+  const assistant = (id: string) => ({ id, role: "assistant", parts: [] }) as unknown as UIMessage;
+
+  test("transcript stopping on a user message is awaiting a reply", () => {
+    expect(awaitsAssistantReply([user("u1")])).toBe(true);
+  });
+
+  // THE BUG THIS EXISTS FOR. `!isConversationComplete` answers FALSE here — it
+  // means "nothing is streaming", so every thread past its first turn looked
+  // finished and never showed the pending-reply indicator.
+  test("a completed earlier turn does not make a mid-turn transcript look done", () => {
+    const messages = [user("u1"), assistant("a1"), user("u2")];
+    expect(awaitsAssistantReply(messages)).toBe(true);
+    expect(isConversationComplete(messages)).toBe(true);
+  });
+
+  test("transcript ending on an assistant reply awaits nothing", () => {
+    expect(awaitsAssistantReply([user("u1"), assistant("a1")])).toBe(false);
+  });
+
+  test("empty transcript awaits nothing", () => {
+    expect(awaitsAssistantReply([])).toBe(false);
   });
 });
