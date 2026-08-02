@@ -50,12 +50,12 @@ cp wrangler.prod.example.jsonc wrangler.prod.jsonc
 
 Replace every `<PLACEHOLDER>`:
 
-| Placeholder | Value |
-| --- | --- |
+| Placeholder                    | Value                            |
+| ------------------------------ | -------------------------------- |
 | `<YOUR_CLOUDFLARE_ACCOUNT_ID>` | from `pnpm exec wrangler whoami` |
-| `<YOUR_D1_DATABASE_ID>` | from step 1 |
-| `<YOUR_KV_NAMESPACE_ID>` | from step 1 |
-| `<your-domain.example>` | your hostname |
+| `<YOUR_D1_DATABASE_ID>`        | from step 1                      |
+| `<YOUR_KV_NAMESPACE_ID>`       | from step 1                      |
+| `<your-domain.example>`        | your hostname                    |
 
 Without a custom domain: delete the `routes` array and set `CANONICAL_HOST` to
 `""`. `workers_dev: true` still gives you a `*.workers.dev` URL. Leave
