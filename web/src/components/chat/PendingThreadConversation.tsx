@@ -38,7 +38,9 @@ export function PendingThreadConversation({
       </Conversation>
       <PendingFirstMessage text={text} files={files} status={status} onRetry={onRetry} />
       {status !== "failed" && (
-        <div className="px-4 pb-4">
+        // Outside ConversationContent (no gap-8), so a light top pad is enough —
+        // pb-4 here used to leave a hole under the optimistic bubble.
+        <div className="px-4 pt-1 pb-2">
           <TypingDots />
         </div>
       )}

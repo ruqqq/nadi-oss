@@ -5137,7 +5137,7 @@ function ThreadChat({
           />
         )}
         {showOptimisticTyping && (
-          <div className="px-4 pb-4">
+          <div className="px-4 pt-1 pb-2">
             <TypingDots />
           </div>
         )}
