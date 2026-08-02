@@ -155,7 +155,7 @@
     // Experimental direct Codex egress flag. Keep false until direct Worker
     // calls to chatgpt.com/backend-api/codex are verified in production logs.
     // Clean-egress proxy routes are per-workspace
-    // (provider_configs.config_json.proxyUrl, e.g. https://vm.exe.xyz/openai-oauth);
+    // (provider_configs.config_json.proxyUrl, e.g. https://proxy.example.com/openai-oauth);
     // EGRESS_PROXY_TOKEN (secret) gates the exe.dev VM when a route is set.
     "CODEX_DIRECT_ENABLED": "false",
     // PostHog observability vars. POSTHOG_KEY is a secret set via
