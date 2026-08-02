@@ -3,6 +3,9 @@ import type { ModelInputModality } from "../settings-api";
 const IMAGE_MIME = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "webp", "gif"]);
 
+/** Hard ceiling for a single chat attachment — keep in sync with the upload route. */
+export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+
 // Curated text/code extensions (kept in sync with the backend allowlist).
 export const TEXT_EXTENSIONS = [
   "txt",
@@ -36,13 +39,30 @@ export const TEXT_EXTENSIONS = [
   "php",
 ];
 
-// Office formats (kept in sync with the backend OFFICE_MIME_BY_EXT allowlist).
-export const OFFICE_EXTENSIONS = ["docx", "xlsx", "pptx"];
+// Binary documents (kept in sync with the backend BINARY_DOCUMENT_MIME_BY_EXT
+// allowlist). Includes OOXML, legacy Excel, OpenDocument, Apple Numbers, and
+// EPUB — formats the agent can still open via getAttachmentUrl even when
+// toMarkdown cannot extract them.
+export const BINARY_DOCUMENT_EXTENSIONS = [
+  "docx",
+  "xlsx",
+  "pptx",
+  "xls",
+  "xlsm",
+  "xlsb",
+  "odt",
+  "ods",
+  "numbers",
+  "epub",
+];
+
+/** @deprecated Use BINARY_DOCUMENT_EXTENSIONS. */
+export const OFFICE_EXTENSIONS = BINARY_DOCUMENT_EXTENSIONS;
 
 // The composer file-picker `accept` attribute: images + PDF (by MIME) plus
-// text/code by extension (browsers report empty/odd MIME for code files, so
-// extensions filter the OS picker more reliably). Decoupled from model
-// modalities — capability is surfaced via a toast instead.
+// text/code and binary documents by extension (browsers report empty/odd MIME
+// for these, so extensions filter the OS picker more reliably). Decoupled from
+// model modalities — capability is surfaced via a toast instead.
 export const ATTACHMENT_ACCEPT = [
   "image/png",
   "image/jpeg",
@@ -50,7 +70,7 @@ export const ATTACHMENT_ACCEPT = [
   "image/gif",
   "application/pdf",
   ...TEXT_EXTENSIONS.map((ext) => `.${ext}`),
-  ...OFFICE_EXTENSIONS.map((ext) => `.${ext}`),
+  ...BINARY_DOCUMENT_EXTENSIONS.map((ext) => `.${ext}`),
 ].join(",");
 
 function extensionOf(name: string): string {

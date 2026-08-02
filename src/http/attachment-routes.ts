@@ -21,7 +21,10 @@ export const ACCEPTED_MIME_TYPES = new Set([
   "image/gif",
   "application/pdf",
 ]);
-export const MAX_DERIVATIVE_BYTES = 10 * 1024 * 1024;
+/** Hard ceiling for a single chat attachment upload (client + server). */
+export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+/** @deprecated Use MAX_ATTACHMENT_BYTES. Kept as an alias for existing imports. */
+export const MAX_DERIVATIVE_BYTES = MAX_ATTACHMENT_BYTES;
 
 const EXT_BY_MIME: Record<string, string> = {
   "image/png": "png",
@@ -31,16 +34,31 @@ const EXT_BY_MIME: Record<string, string> = {
   "application/pdf": "pdf",
 };
 
-// Office formats. Binary containers, never served as markup, so the text/plain
-// canonicalisation applied to html/svg is unnecessary. Read only by toMarkdown.
-export const OFFICE_MIME_BY_EXT: Record<string, string> = {
+// Binary document formats. Never served as markup, so the text/plain
+// canonicalisation applied to html/svg is unnecessary. Extension is the source
+// of truth when browsers report octet-stream / empty type.
+//
+// Formats Workers AI toMarkdown understands are also listed in
+// DOCUMENT_MIME_TYPES (attachment-extraction.ts) for automatic extraction; the
+// rest (notably epub) still upload and reach the agent via getAttachmentUrl.
+export const BINARY_DOCUMENT_MIME_BY_EXT: Record<string, string> = {
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  xls: "application/vnd.ms-excel",
+  xlsm: "application/vnd.ms-excel.sheet.macroenabled.12",
+  xlsb: "application/vnd.ms-excel.sheet.binary.macroenabled.12",
+  odt: "application/vnd.oasis.opendocument.text",
+  ods: "application/vnd.oasis.opendocument.spreadsheet",
+  numbers: "application/vnd.apple.numbers",
+  epub: "application/epub+zip",
 };
 
-const EXT_BY_OFFICE_MIME: Record<string, string> = Object.fromEntries(
-  Object.entries(OFFICE_MIME_BY_EXT).map(([ext, mime]) => [mime, ext]),
+/** @deprecated Use BINARY_DOCUMENT_MIME_BY_EXT. */
+export const OFFICE_MIME_BY_EXT = BINARY_DOCUMENT_MIME_BY_EXT;
+
+const EXT_BY_BINARY_DOCUMENT_MIME: Record<string, string> = Object.fromEntries(
+  Object.entries(BINARY_DOCUMENT_MIME_BY_EXT).map(([ext, mime]) => [mime, ext]),
 );
 
 // Curated text/code allowlist keyed by lower-cased file extension. Browsers
@@ -94,15 +112,15 @@ function resolveUploadType(file: File): { mimeType: string; ext: string } | null
   if (ACCEPTED_MIME_TYPES.has(file.type)) {
     return { mimeType: file.type, ext: EXT_BY_MIME[file.type]! };
   }
-  const officeExt = EXT_BY_OFFICE_MIME[file.type];
-  if (officeExt) return { mimeType: file.type, ext: officeExt };
+  const binaryExt = EXT_BY_BINARY_DOCUMENT_MIME[file.type];
+  if (binaryExt) return { mimeType: file.type, ext: binaryExt };
 
-  // Browsers report application/octet-stream (or "") for Office files often
+  // Browsers report application/octet-stream (or "") for binary documents often
   // enough that the extension is the more reliable signal.
   const ext = fileExtension(file.name);
   if (!ext) return null;
-  const officeMime = OFFICE_MIME_BY_EXT[ext];
-  if (officeMime) return { mimeType: officeMime, ext };
+  const binaryMime = BINARY_DOCUMENT_MIME_BY_EXT[ext];
+  if (binaryMime) return { mimeType: binaryMime, ext };
   const mimeType = TEXT_MIME_BY_EXT[ext];
   return mimeType ? { mimeType, ext } : null;
 }
@@ -164,7 +182,7 @@ async function handleUpload(req: Request, env: Env, threadId: string): Promise<R
   if (!resolved) {
     return Response.json({ error: "unsupported_file_type", mimeType: file.type }, { status: 415 });
   }
-  if (file.size > MAX_DERIVATIVE_BYTES) {
+  if (file.size > MAX_ATTACHMENT_BYTES) {
     return Response.json({ error: "file_too_large", byteSize: file.size }, { status: 413 });
   }
 

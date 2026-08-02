@@ -60,11 +60,20 @@ export function isExtractionEnabled(flag: string | undefined): boolean {
 }
 
 const IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+// Subset of BINARY_DOCUMENT_MIME_BY_EXT that Workers AI toMarkdown can convert.
+// EPUB is intentionally absent — it uploads, but extraction falls through to
+// getAttachmentUrl rather than a failing toMarkdown call.
 const DOCUMENT_MIME_TYPES = new Set([
   "application/pdf",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "application/vnd.ms-excel",
+  "application/vnd.ms-excel.sheet.macroenabled.12",
+  "application/vnd.ms-excel.sheet.binary.macroenabled.12",
+  "application/vnd.oasis.opendocument.text",
+  "application/vnd.oasis.opendocument.spreadsheet",
+  "application/vnd.apple.numbers",
 ]);
 
 export function isExtractableMime(mimeType: string): boolean {
