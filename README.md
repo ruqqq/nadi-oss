@@ -1,38 +1,53 @@
 # Nadi
 
-Mobile-first agentic chat you host yourself. Bring your own model keys; the
-agent gets a real sandbox, your MCP servers, and a schedule.
+An open-source, ChatGPT-like app that runs on your own Cloudflare account, on
+any model with your own key. The agent gets a real machine to work on, your MCP
+servers, memory and skills it writes for itself, and schedules that run while
+you're away.
 
 ![Nadi's web UI: a support thread where the agent reads the ticket queue, finds the cause, drafts the customer note and schedules it for Monday — beside a sidebar of threads across Customers, Finance, Growth, Ops and Exec](./docs/screenshots/web-ui-hero.png)
 
-## What is Nadi?
-
-Most agent products ask you to trust someone else's cloud with your keys, your
-code, and your conversations. Nadi is a single Cloudflare Worker you deploy to
-your own account. Your D1 database, your R2 bucket, your provider keys, your
-sandbox credentials — nothing routes through a vendor in the middle.
-
-It is built for a phone first. Threads survive backgrounding, work continues
-while the tab is closed, and the app keeps working read-only when the network
-does not. An agent that only works at a desk is not much use when the thing you
-need it to do arrives at 11pm.
+Built for a phone first. Install it and it can reach you when a job finishes:
+threads survive backgrounding, work carries on while the tab is closed, and
+history stays readable offline.
 
 <p align="center">
   <img src="./docs/screenshots/mobile-chats.png" width="43%" alt="The chat drawer on a phone: threads across Customers, Finance, Growth, Ops and Exec, with a nightly automaton among them" />
   <img src="./docs/screenshots/mobile-thread.png" width="43%" alt="The same support thread on a phone: the agent's findings, its tool activity, and the composer" />
 </p>
 
-Model providers are pluggable — Anthropic, OpenAI, OpenRouter, Workers AI,
-OpenCode Zen — and the model is a per-thread snapshot, so changing your default
-never rewrites the past.
+Nine providers or any endpoint you can name, changeable mid-thread.
+
+## Getting started
+
+**Try it** — [nadiai.app](https://nadiai.app) runs the hosted beta. It is
+invite-only for now; without an invite you can still leave your email and we
+will write when there is room.
+
+**Run it yourself** — everything below works against your own Cloudflare
+account.
+
+```bash
+pnpm install
+cp .dev.vars.example .dev.vars   # add BETTER_AUTH_SECRET, TOOL_APPROVAL_SECRET, a model key
+pnpm run db:migrate:local
+pnpm run dev                     # Worker on :8787
+pnpm run web:dev                 # SPA on :5173, second terminal
+```
+
+Schema lives in `src/db/schema.ts`; migrations are drizzle-generated and never
+hand-edited (`pnpm run db:generate`). Full workflow:
+[`docs/runbooks/local-dev.md`](./docs/runbooks/local-dev.md).
 
 ## Features
 
 - **Threads with real work.** Every chat is a Durable Object with its own
   history, token budget and automatic compaction.
-- **MCP with per-tool policy.** Attach any MCP server — ticketing, docs, CRM,
-  your own — and set each tool to `auto_allow`, `approval_required`, or `deny`.
-  Approvals are signed, not trusted.
+- **MCP with per-tool policy.** Attach any MCP server — [Composio](https://composio.dev/)
+  for a thousand-odd SaaS integrations, [Markdump](https://markdump.com) for
+  markdown notes the agent reads and writes like a second brain, or your own —
+  and set each tool to `auto_allow`, `approval_required`, or `deny`. Approvals
+  are signed, not trusted.
 - **Automata.** Scheduled agent runs that post back only when they have
   something to say.
 - **Sandboxed execution.** Workbenches define a repo, a machine size and an
@@ -41,7 +56,8 @@ never rewrites the past.
 - **Skills and memory.** Reusable procedures and durable facts, both editable
   from the app and by the agent.
 - **Subagents.** Parallel work on the parent's machine, feature-flagged.
-- **Offline PWA.** Installable, with read-only history when disconnected.
+- **Installable PWA.** Push notifications when unattended work finishes (needs
+  VAPID keys), and read-only history when disconnected.
 
 ## Architecture
 
@@ -75,20 +91,6 @@ flowchart LR
 **[`docs/architecture.md`](./docs/architecture.md) is the full tour** — request
 path, the DO model, how compute is abstracted, and where state actually lives.
 
-## Quickstart
-
-```bash
-pnpm install
-cp .dev.vars.example .dev.vars   # add BETTER_AUTH_SECRET, TOOL_APPROVAL_SECRET, a model key
-pnpm run db:migrate:local
-pnpm run dev                     # Worker on :8787
-pnpm run web:dev                 # SPA on :5173, second terminal
-```
-
-Schema lives in `src/db/schema.ts`; migrations are drizzle-generated and never
-hand-edited (`pnpm run db:generate`). Full workflow:
-[`docs/runbooks/local-dev.md`](./docs/runbooks/local-dev.md).
-
 ## Known issues
 
 Live constraints, not aspirations — you will meet these:
@@ -120,8 +122,8 @@ Milestones, not dates:
 4. **Coding depth** — subagents on by default, sturdier watchers, richer
    workbenches.
 
-A hosted service is deferred until the compute economics are understood. The
-self-hosted path is the product.
+The hosted beta is how this gets tested, not a product yet; a paid service
+waits until the compute economics are understood.
 
 ## Contributing
 
