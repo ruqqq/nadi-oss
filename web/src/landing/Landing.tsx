@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { BrandMark } from "@/components/BrandMark";
 import { Button } from "@/components/ui/button";
 import { GithubLogo } from "@/icons";
@@ -24,7 +25,22 @@ const PROVIDERS = [...SETTINGS_PROVIDER_OPTIONS]
  * which is a claim that rots the moment someone ships a feature.
  */
 
-type Capability = { key: string; body: string };
+/** An outbound link inside body copy. A function declaration, so it is hoisted
+ *  above the module-level CAPABILITIES array that renders it. */
+function LandingLink({ href, children }: { href: string; children: ReactNode }) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer noopener"
+      className="text-foreground underline decoration-border underline-offset-4 transition-colors hover:decoration-primary"
+    >
+      {children}
+    </a>
+  );
+}
+
+type Capability = { key: string; body: ReactNode };
 
 // A ledger, not a feature grid: these are things the *same thread* can reach, so
 // each body says what it means for you rather than what it is. They are not a
@@ -60,7 +76,14 @@ const CAPABILITIES: Capability[] = [
   },
   {
     key: "MCP",
-    body: "Bring any MCP server. Every tool gets a policy: run it, ask me first, or never.",
+    body: (
+      <>
+        Bring any MCP server — <LandingLink href="https://composio.dev/">Composio</LandingLink> for a
+        thousand-odd SaaS integrations,{" "}
+        <LandingLink href="https://markdump.com">Markdump</LandingLink> for notes it reads and writes
+        like a second brain. Every tool gets a policy: run it, ask me first, or never.
+      </>
+    ),
   },
 ];
 
@@ -127,9 +150,10 @@ export function Landing({
               One conversation. It does the whole job.
             </h1>
             <p className="max-w-prose text-lg text-muted-foreground leading-relaxed">
-              The thread that reads your spreadsheet can run your code, remember what it found, and
-              do it again every Monday. No second product to open, nothing to re-upload, no
-              explaining yourself twice. On any model, on your own key.
+              It starts like the chat app you already use. Then the thread that read your
+              spreadsheet runs your code, remembers what it found, and does it again every Monday.
+              No second product to open, nothing to re-upload, no explaining yourself twice. On any
+              model, on your own key.
             </p>
             <div className="flex flex-wrap items-center gap-3">
               <Button size="lg" onClick={onSignIn}>
@@ -227,6 +251,11 @@ export function Landing({
             <p className="max-w-prose text-muted-foreground leading-relaxed">
               Not a badge. The whole thing: every thread is a Durable Object with its own storage,
               close to you at the edge, which is how the agent keeps its place while it works.
+            </p>
+            <p className="max-w-prose text-muted-foreground leading-relaxed">
+              It is also open source, Apache-2.0, so this is not the only place it can run. Point a
+              Cloudflare account of your own at it and the same thing is yours — the code, the
+              threads, the keys.
             </p>
           </div>
 
