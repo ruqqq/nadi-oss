@@ -98,7 +98,7 @@ describe("EmpowerStep", () => {
     mocks.listMcpServers.mockResolvedValue([markdump]);
     mocks.listMcpServerTools.mockResolvedValue({
       needsAuth: false,
-      tools: [{ name: "gmail_send_email", description: null, policy: "auto_allow" as const }],
+      tools: [{ name: "GMAIL_SEND_EMAIL", description: null, policy: "auto_allow" as const }],
     });
     const onCalendarConnectedChange = vi.fn();
 

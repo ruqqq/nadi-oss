@@ -49,6 +49,28 @@ describe("hasCalendarTool", () => {
   it("does not claim a calendar when the tool list is empty or failed to load", () => {
     expect(hasCalendarTool([])).toBe(false);
   });
+
+  // A server scoped to expose only write tools is calendar-NAMED but cannot
+  // read anything back — a briefing prompt would still be a broken promise.
+  it("does not match a create-only set of calendar tools", () => {
+    expect(
+      hasCalendarTool(["GOOGLECALENDAR_CREATE_EVENT", "GOOGLECALENDAR_QUICK_ADD", "GOOGLECALENDAR_DELETE_EVENT"]),
+    ).toBe(false);
+  });
+
+  // A setup/connect tool's only job is connecting a calendar the user has NOT
+  // connected — matching on its name would arm the prompt before any calendar
+  // is actually reachable.
+  it("does not match a setup-shaped tool name", () => {
+    expect(hasCalendarTool(["connect_calendar_account"])).toBe(false);
+    expect(hasCalendarTool(["enable_calendar_toolkit"])).toBe(false);
+  });
+
+  it("matches a genuine read-shaped calendar tool", () => {
+    expect(hasCalendarTool(["GOOGLECALENDAR_FIND_EVENT"])).toBe(true);
+    expect(hasCalendarTool(["GOOGLECALENDAR_LIST_CALENDARS"])).toBe(true);
+    expect(hasCalendarTool(["GOOGLECALENDAR_FIND_FREE_SLOTS"])).toBe(true);
+  });
 });
 
 describe("arm/take", () => {

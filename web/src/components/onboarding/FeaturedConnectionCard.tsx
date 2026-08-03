@@ -14,7 +14,7 @@ import {
   type McpServer,
 } from "../../mcp-api";
 
-export type FeaturedConnectionState = "unknown" | "not-added" | "busy" | "needs-auth" | "connected";
+type FeaturedConnectionState = "unknown" | "not-added" | "busy" | "needs-auth" | "connected";
 
 export function FeaturedConnectionCard({
   connection,
@@ -40,11 +40,14 @@ export function FeaturedConnectionCard({
    * collapses "unknown"/"not-added"/"busy"/"needs-auth" into one thing: no
    * capability to consult. `string[]` means connected and introspected, with
    * exactly the tool names that came back — including `[]` for a connected
-   * server with genuinely zero tools. That distinction is load-bearing:
-   * `null` and `[]` must never be conflated, because a lifted contract that
-   * exposed the granular "authorized" state (instead of only "here is what it
-   * can do") is exactly what let a past version of this wizard infer a
-   * calendar from a connection that never had one.
+   * server with genuinely zero tools. Keep `null` and `[]` distinct rather
+   * than folding them together here: a past version of this wizard lifted
+   * the raw "authorized" state instead of "here is what it can do", and that
+   * let a reader infer a capability from a connection fact. Narrowing this
+   * signature doesn't make that inference impossible — a future consumer can
+   * still write `toolNames !== null` and call it "connected" — but it makes
+   * the inference unattractive: the natural thing to reach for at this call
+   * site is what the tools actually are, not whether the row is authorized.
    */
   onResolved?: (connectionId: FeaturedConnectionId, toolNames: string[] | null) => void;
 }) {

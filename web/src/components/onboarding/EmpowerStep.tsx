@@ -34,8 +34,13 @@ export function EmpowerStep({
   // adding a second row for a server the user just authorized.
   const [servers, setServers] = useState<McpServer[] | undefined>(undefined);
   // `null` = not connected (or not yet resolved); `string[]` = connected with
-  // exactly these tool names, including `[]` for zero. Never conflate the two
-  // — see `FeaturedConnectionCard`'s `onResolved` doc for why.
+  // exactly these tool names, including `[]` for zero. The two aren't
+  // conflated here — `?? []` below treats them the same only because both
+  // happen to mean "no calendar" for THIS check. Keep them distinct in the
+  // type anyway: a future consumer that cares about "connected" as its own
+  // fact (not just "has a calendar") needs that distinction preserved, and
+  // `FeaturedConnectionCard`'s `onResolved` doc explains why collapsing them
+  // at the source would be the wrong place to lose it.
   type ResolvedMap = Partial<Record<FeaturedConnectionId, string[] | null>>;
   const [resolvedTools, setResolvedTools] = useState<ResolvedMap>({});
 
@@ -60,10 +65,14 @@ export function EmpowerStep({
   }, []);
 
   useEffect(() => {
-    // Impossible to arm the calendar prompt without a resolved calendar-named
-    // tool: `resolvedTools[id]` is `null` for anything short of a fully
-    // introspected connection, and `hasCalendarTool` only ever sees the tool
-    // names of one that resolved.
+    // `resolvedTools[id]` is `null` for anything short of a fully
+    // introspected connection, and `?? []` folds that into "no tools to
+    // check" — the same outcome a genuinely empty, connected tool list
+    // produces. `hasCalendarTool` only ever sees names that actually
+    // resolved, so this can't arm the calendar prompt off an unresolved or
+    // not-yet-connected row; it can still be bypassed by a future call site
+    // that reaches into `resolvedTools` directly instead of going through
+    // this derivation.
     const calendarConnected = FEATURED_CONNECTIONS.some((c) =>
       hasCalendarTool(resolvedTools[c.id] ?? []),
     );

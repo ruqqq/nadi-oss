@@ -711,7 +711,7 @@ function onboardingEmpowerComposioNoCalendarStore(): MockStore {
     ],
     mcpTools: {
       [serverId]: [
-        { name: "gmail_send_email", description: "Send an email from Gmail.", policy: "approval_required" },
+        { name: "GMAIL_SEND_EMAIL", description: "Send an email from Gmail.", policy: "approval_required" },
       ],
     },
     mcpNeedsAuth: {},

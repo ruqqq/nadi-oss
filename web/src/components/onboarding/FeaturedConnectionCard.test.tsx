@@ -42,11 +42,12 @@ describe("FeaturedConnectionCard onResolved", () => {
   });
   afterEach(cleanup);
 
-  // The whole point of narrowing the lifted contract to `string[] | null`:
-  // a connected server that genuinely has zero tools ("we looked, and there
-  // is nothing") must NOT read the same as "not connected, nothing to say
-  // yet". Collapsing these back into one falsy signal is exactly the
-  // regression this type exists to make impossible to write by accident.
+  // Forward-looking invariant, not one anything currently depends on: a
+  // connected server that genuinely has zero tools ("we looked, and there is
+  // nothing") must be distinguishable from "not connected, nothing to say
+  // yet" even though today's only consumer treats them the same. Pins the
+  // `[]`/`null` split at its source so a later consumer that does care about
+  // "connected" as its own fact still gets it right.
   it("reports [] (not null) for a connected server with zero tools", async () => {
     mocks.listMcpServerTools.mockResolvedValue({ needsAuth: false, tools: [] });
     const onResolved = vi.fn();

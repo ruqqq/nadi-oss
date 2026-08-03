@@ -16,15 +16,45 @@ export function automatonNudgePrompt(input: { calendarConnected: boolean }): str
 }
 
 /**
- * Loose, anchored substring match against "calendar". Vendor tool ids carry a
- * service prefix (`GOOGLECALENDAR_FIND_EVENT`, `calendar_list_events`), so an
- * exact-name allowlist would miss real tools. The failure direction is what
- * matters: a missed match only costs the safe, service-agnostic prompt, while
- * a false match promises calendar data that may not exist — so this stays
- * loose-but-anchored on the word itself rather than enumerating vendor ids.
+ * Read-shaped tokens a calendar tool's name needs to carry before it counts.
+ * Deliberately just the unambiguous verbs — "event" is left out on purpose:
+ * it is a noun that shows up in write tools too (`CREATE_EVENT`,
+ * `DELETE_EVENT`), so it does not discriminate read from write and would
+ * reintroduce exactly the false-positive this list exists to prevent.
+ */
+const READ_SHAPED_TOKENS = new Set(["list", "find", "get", "search", "freebusy", "busy"]);
+
+/** Splits a tool name into lowercase words on camelCase, `_`, `-`, and spaces. */
+function tokenize(name: string): string[] {
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .split(/[^a-zA-Z0-9]+/)
+    .map((token) => token.toLowerCase())
+    .filter(Boolean);
+}
+
+/**
+ * True only for a tool name that is BOTH calendar-named AND read-shaped.
+ *
+ * `"calendar"` itself is matched as a plain substring, not a whole token —
+ * vendor ids concatenate the service name onto the capability with no
+ * separator (`GOOGLECALENDAR_FIND_EVENT`), so anchoring on word boundaries
+ * would miss real tools. That substring test alone over-matches, though: a
+ * server can be scoped to expose only calendar-*named* tools that cannot read
+ * anything (`GOOGLECALENDAR_CREATE_EVENT`, `GOOGLECALENDAR_QUICK_ADD`,
+ * `GOOGLECALENDAR_DELETE_EVENT`), or a setup tool whose only job is
+ * connecting a calendar the user hasn't connected yet
+ * (`connect_calendar_account`). Requiring a read-shaped token too rules both
+ * out. The failure direction is still what justifies staying loose on each
+ * half rather than enumerating vendor tool ids: a missed match only costs the
+ * safe, service-agnostic prompt, while a false match promises data the agent
+ * cannot fetch.
  */
 export function hasCalendarTool(toolNames: readonly string[]): boolean {
-  return toolNames.some((name) => name.toLowerCase().includes("calendar"));
+  return toolNames.some((name) => {
+    if (!name.toLowerCase().includes("calendar")) return false;
+    return tokenize(name).some((token) => READ_SHAPED_TOKENS.has(token));
+  });
 }
 
 type NudgeStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
