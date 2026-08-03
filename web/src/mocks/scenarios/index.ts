@@ -24,6 +24,7 @@ import type { WorkbenchSummary } from "../../workbenches-api";
 import type { MockFaults, MockStore } from "../store";
 import { TOOL_RUN_THREAD_ID, TOOL_WRITE_THREAD_ID } from "../chat/tool-run-transcript";
 import { MID_TURN_THREAD_ID } from "../chat/mid-turn-transcript";
+import { HERO_THREAD_ID } from "../chat/hero-transcript";
 
 /** Fixed clock so screenshots are byte-stable across runs. 2026-07-08T00:00:00Z. */
 const NOW = 1_752_000_000_000;
@@ -922,6 +923,80 @@ function midTurnResumeStore(): MockStore {
   };
 }
 
+/**
+ * The documentation screenshot seed: a full two-exchange thread at the top of a
+ * populated rail. Kept a named scenario rather than a one-off script so a
+ * regenerated hero image is reproducible instead of a lucky capture.
+ */
+function heroStore(): MockStore {
+  const base = defaultStore();
+  return {
+    ...base,
+    threads: [
+      makeThread({
+        threadId: HERO_THREAD_ID,
+        title: "Support volume doubled this week",
+        lastMessagePreview: "The draft opens here Monday at 9:00.",
+        projectName: "Customers",
+        updatedAt: NOW - 3 * MINUTE,
+      }),
+      // A deliberately mixed rail. The default store's threads are all
+      // platform work, which framed the whole screenshot as an engineering
+      // tool; the product is not one.
+      makeThread({
+        threadId: "thr_hero_2",
+        title: "Weekly revenue digest",
+        projectName: "Finance",
+        lastMessagePreview: "Net revenue retention is up 4 points.",
+        updatedAt: NOW - 2 * HOUR,
+      }),
+      makeThread({
+        threadId: "thr_hero_3",
+        title: "Rewrite the onboarding email sequence",
+        projectName: "Growth",
+        lastMessagePreview: "Third email is doing the work of the first two.",
+        updatedAt: NOW - 5 * HOUR,
+      }),
+      makeThread({
+        threadId: "thr_hero_4",
+        title: "Vendor contract review — renewal terms",
+        projectName: "Ops",
+        lastMessagePreview: "Auto-renew clause needs 60 days notice.",
+        updatedAt: NOW - 1 * DAY,
+      }),
+      makeThread({
+        threadId: "thr_hero_5",
+        title: "Q3 board update outline",
+        projectName: "Exec",
+        lastMessagePreview: "Draft is in /drafts/q3-board.md.",
+        updatedAt: NOW - 1 * DAY - 3 * HOUR,
+      }),
+      makeThread({
+        threadId: "thr_hero_6",
+        title: "Nightly deploy digest",
+        source: "automaton",
+        automatonName: "Nightly digest",
+        lastMessagePreview: "3 deploys, no rollbacks.",
+        updatedAt: NOW - 2 * DAY,
+      }),
+      makeThread({
+        threadId: "thr_hero_7",
+        title: "Migrate D1 schema for billing country",
+        projectName: "Platform",
+        lastMessagePreview: "Migration 0061 generated.",
+        updatedAt: NOW - 2 * DAY - 4 * HOUR,
+      }),
+    ],
+    // Server ids match the tool keys heroTranscript() uses, so the run log
+    // renders "Zendesk"/"Linear"/"Markdump" instead of a raw namespaced key.
+    mcpServers: [
+      { id: "s4zen", name: "Zendesk", url: "https://mcp.zendesk.com/sse", enabled: true, createdAt: NOW - 9 * DAY },
+      { id: "s1abc", name: "Linear", url: "https://mcp.linear.app/sse", enabled: true, createdAt: NOW - 9 * DAY },
+      { id: "s3ghi", name: "Markdump", url: "https://mcp.example.com/mcp", enabled: true, createdAt: NOW - 9 * DAY },
+    ],
+  };
+}
+
 function firstMessageFailureStore(): MockStore {
   return { ...defaultStore(), faults: { ...noFaults(), messageSendFailsAfterMs: 2_000 } };
 }
@@ -1280,6 +1355,7 @@ export const SCENARIOS: Record<string, () => MockStore> = {
   "history-error": historyErrorStore,
   "first-message-failure": firstMessageFailureStore,
   "mid-turn-resume": midTurnResumeStore,
+  hero: heroStore,
   feedback: feedbackStore,
   "feedback-model-error": feedbackModelErrorStore,
   "feedback-rate-limited": feedbackRateLimitedStore,
