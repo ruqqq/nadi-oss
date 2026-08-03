@@ -1,4 +1,5 @@
 import { DurableObjectOAuthClientProvider } from "agents";
+import { resolveAppName } from "../app-name";
 import type { Env } from "../env";
 import {
   getMcpOAuthClient,
@@ -35,16 +36,18 @@ import type {
  * `workspaceId` is resolved lazily (the resolver may legitimately return
  * undefined during the pre-onStart storage-restore pass, in which case we fall
  * back to base DO storage and behave exactly as a non-mirroring provider).
+ *
+ * OAuth `client_name` comes from `APP_NAME` (via `resolveAppName`) — never the
+ * Durable Object instance name.
  */
 export class KvMcpOAuthProvider extends DurableObjectOAuthClientProvider {
   constructor(
     storage: DurableObjectStorage,
-    clientName: string,
     baseRedirectUrl: string,
     private readonly env: Env,
     private readonly resolveWorkspaceId: () => Promise<string | undefined>,
   ) {
-    super(storage, clientName, baseRedirectUrl);
+    super(storage, resolveAppName(env), baseRedirectUrl);
   }
 
   private currentServerId(): string | undefined {

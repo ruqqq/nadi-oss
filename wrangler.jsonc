@@ -145,6 +145,9 @@
     // Process watchers + subagent dispatch. Fail closed unless explicitly enabled.
     "BACKGROUND_WORK_ENABLED": "false",
     "LOG_LEVEL": "debug",
+    // Product display name (MCP OAuth client_name, etc.). Self-hosters can
+    // rebrand here; unset/blank falls back to "Nadi" in resolveAppName.
+    "APP_NAME": "Nadi",
     "APP_BASE_URL": "http://localhost:8787",
     "DEFAULT_MODEL_PROVIDER": "openai-oauth",
     "DEFAULT_MODEL": "gpt-5.4-mini",

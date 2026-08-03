@@ -101,6 +101,7 @@ function integrationPlugins() {
         },
         bindings: {
           LOG_LEVEL: "warn",
+          APP_NAME: "Nadi",
           APP_BASE_URL: "https://nadi.test",
           CANONICAL_HOST: "app.example.com",
           LEGACY_HOSTS: "legacy.example.com",

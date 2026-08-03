@@ -22,6 +22,14 @@ export interface Env extends Cloudflare.Env {
   NADI_EDITION?: string;
 
   /**
+   * Product display name for this deployment. Used as the OAuth `client_name`
+   * when registering with MCP servers. Read via `resolveAppName` in
+   * `src/app-name.ts` (unset/blank → `"Nadi"`). Optional because older configs
+   * omit it and the fallback keeps registration working.
+   */
+  APP_NAME?: string;
+
+  /**
    * Host this deployment serves as its canonical origin, e.g. "app.example.com".
    * With LEGACY_HOSTS, requests to an old hostname 308 here. Unset (the
    * self-hosted default) disables the redirect entirely. See

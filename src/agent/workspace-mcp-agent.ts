@@ -23,7 +23,7 @@ export class WorkspaceMcpAgent extends Agent<Env> {
    */
   createMcpOAuthProvider(callbackUrl: string): AgentMcpOAuthProvider {
     const workspaceId = this.name.replace(/^workspace:/, "");
-    return new KvMcpOAuthProvider(this.ctx.storage, this.name, callbackUrl, this.env, () =>
+    return new KvMcpOAuthProvider(this.ctx.storage, callbackUrl, this.env, () =>
       Promise.resolve(workspaceId),
     );
   }

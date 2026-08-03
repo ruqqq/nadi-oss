@@ -26,6 +26,19 @@ async function clearKv() {
 describe("KvMcpOAuthProvider", () => {
   beforeEach(clearKv);
 
+  it("registers with MCP OAuth servers using APP_NAME, not the workspace DO name", async () => {
+    const stub = env.WORKSPACE_MCP_AGENT.get(env.WORKSPACE_MCP_AGENT.idFromName(`workspace:${WS}`));
+    await runInDurableObject(stub, async (instance: WorkspaceMcpAgent) => {
+      expect(instance.name).toBe(`workspace:${WS}`);
+      const provider = instance.createMcpOAuthProvider("https://nadi.test/cb");
+      // OAuth dynamic client registration sends clientMetadata.client_name to the
+      // authorization server — resolveAppName(APP_NAME), never workspace:<id>.
+      // Custom APP_NAME values are covered by test/unit/app-name.test.ts.
+      expect(provider.clientMetadata.client_name).toBe("Nadi");
+      expect(provider.clientMetadata.client_name).not.toBe(instance.name);
+    });
+  });
+
   it("tokens() guards the serverId-not-yet-set timing and reads from KV once set", async () => {
     const stub = env.WORKSPACE_MCP_AGENT.get(env.WORKSPACE_MCP_AGENT.idFromName(`workspace:${WS}`));
     await runInDurableObject(stub, async (instance: WorkspaceMcpAgent) => {

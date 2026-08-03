@@ -781,7 +781,7 @@ export class ThinkThreadAgent extends Think<Env> {
   }
 
   createMcpOAuthProvider(callbackUrl: string): AgentMcpOAuthProvider {
-    return new KvMcpOAuthProvider(this.ctx.storage, this.name, callbackUrl, this.env, () =>
+    return new KvMcpOAuthProvider(this.ctx.storage, callbackUrl, this.env, () =>
       this.resolveWorkspaceIdForOAuth(),
     );
   }
