@@ -17,6 +17,11 @@ while the tab is closed, and the app keeps working read-only when the network
 does not. An agent that only works at a desk is not much use when the thing you
 need it to do arrives at 11pm.
 
+<p align="center">
+  <img src="./docs/screenshots/mobile-chats.png" width="43%" alt="The chat drawer on a phone: threads across Customers, Finance, Growth, Ops and Exec, with a nightly automaton among them" />
+  <img src="./docs/screenshots/mobile-thread.png" width="43%" alt="The same support thread on a phone: the agent's findings, its tool activity, and the composer" />
+</p>
+
 Model providers are pluggable — Anthropic, OpenAI, OpenRouter, Workers AI,
 OpenCode Zen — and the model is a per-thread snapshot, so changing your default
 never rewrites the past.
