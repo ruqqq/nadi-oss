@@ -31,14 +31,18 @@ export function classifyInstallPlatform(input: {
     return /CriOS|FxiOS|EdgiOS|OPiOS/.test(ua) ? "ios-other" : "ios-safari";
   }
 
-  // Stock iPadOS 13+ Safari sends a desktop Mac UA by default (no iPad token),
-  // distinguishable only by touch support — a real Mac reports 0 touch points.
-  if (/Macintosh/.test(ua) && input.maxTouchPoints > 0) return "ios-safari";
-
   // Firefox and desktop Safari have no install prompt; Chromium forks do.
   const chromium = /Chrome\/|Chromium\/|Edg\//.test(ua) && !/OPR\//.test(ua);
-  if (!chromium) return "unsupported";
-  return /Android/.test(ua) ? "android-chromium" : "desktop-chromium";
+  if (chromium) return /Android/.test(ua) ? "android-chromium" : "desktop-chromium";
+
+  // Stock iPadOS 13+ Safari sends a desktop Mac UA by default (no iPad token).
+  // Chromium is excluded above, so this only needs to separate Safari from
+  // desktop Firefox (no `Safari/` token) and anything else non-Chromium; a
+  // real desktop Mac (any browser) reports 0 touch points, so touch support
+  // is what marks this as the touchscreen iPad, not the desktop machine.
+  if (/Macintosh/.test(ua) && /Safari\//.test(ua) && input.maxTouchPoints > 0) return "ios-safari";
+
+  return "unsupported";
 }
 
 export function detectInstallPlatform(): InstallPlatform {

@@ -68,6 +68,22 @@ describe("classifyInstallPlatform", () => {
     ).toBe("desktop-chromium");
   });
 
+  it("classifies a touch-capable Mac running desktop Chrome as desktop-chromium, not ios-safari", () => {
+    // A touch-capable external display, or DevTools touch emulation, gives a
+    // real Mac maxTouchPoints > 0. The Mac-UA + touch check must not shadow
+    // Chromium's own detection — that would tell a working Chrome install
+    // path to go tap a Share button that doesn't exist.
+    expect(
+      classifyInstallPlatform({ userAgent: DESKTOP_CHROME, standalone: false, maxTouchPoints: 5 }),
+    ).toBe("desktop-chromium");
+  });
+
+  it("classifies a touch-capable Mac running desktop Firefox as unsupported, not ios-safari", () => {
+    expect(
+      classifyInstallPlatform({ userAgent: DESKTOP_FIREFOX, standalone: false, maxTouchPoints: 5 }),
+    ).toBe("unsupported");
+  });
+
   it("reports unsupported where there is nothing to offer", () => {
     expect(
       classifyInstallPlatform({ userAgent: DESKTOP_SAFARI, standalone: false, maxTouchPoints: 0 }),
