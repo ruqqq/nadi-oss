@@ -100,10 +100,26 @@ function decodeSegment(segment: string): string {
  */
 export const MCP_RETURN_PATH_KEY = "nadi.mcp.returnPath";
 
-/** Only ever restore a Settings path — this comes back from storage, not from us. */
+/**
+ * The onboarding wizard is the second legal return target for an MCP OAuth
+ * redirect. It is matched exactly — root path, `onboarding=force` present —
+ * so a stashed value can never redirect the user somewhere arbitrary.
+ */
+export function isOnboardingPath(pathAndQuery: string): boolean {
+  if (!pathAndQuery.startsWith("/?")) return false;
+  const [pathname, search = ""] = pathAndQuery.split("?", 2) as [string, string?];
+  if (pathname !== "/") return false;
+  return new URLSearchParams(search).get("onboarding") === "force";
+}
+
+/**
+ * Only ever restore a path we recognize — this comes back from storage, not
+ * from us. Consume it either way, so a rejected value can't linger and hijack a
+ * later navigation.
+ */
 export function takeMcpReturnPath(storage: Pick<Storage, "getItem" | "removeItem">): string | null {
   const stored = storage.getItem(MCP_RETURN_PATH_KEY);
   if (stored === null) return null;
   storage.removeItem(MCP_RETURN_PATH_KEY);
-  return isSettingsPath(stored) ? stored : null;
+  return isSettingsPath(stored) || isOnboardingPath(stored) ? stored : null;
 }

@@ -40,18 +40,52 @@ export function isKeylessOnboardingProvider(provider: SettingsProvider): boolean
   return provider === "workers-ai";
 }
 
-export type OnboardingStepId = "provider" | "assistant" | "web-search";
+export type OnboardingStepId = "provider" | "assistant" | "empower" | "install";
+
+export interface OnboardingStepDef {
+  id: OnboardingStepId;
+  label: string;
+  optional: boolean;
+}
 
 /**
- * The wizard's steps, in display order. Optional steps can be skipped and never
- * block reaching chat; only the required ones gate progress. Kept here rather
- * than in the component so the shape is testable without rendering.
+ * The wizard's steps in display order. Steps are ids rather than ordinals
+ * because two things vary: the install step is skipped for a user who already
+ * installed the PWA (who must not see "Step 3 of 4" either), and the empower
+ * step has to be nameable in a URL so an MCP OAuth redirect can return to it.
  */
-export const ONBOARDING_STEPS: { id: OnboardingStepId; label: string; optional: boolean }[] = [
-  { id: "provider", label: "Connect a provider", optional: false },
-  { id: "assistant", label: "Set up your assistant", optional: false },
-  { id: "web-search", label: "Enable web search", optional: true },
-];
+export function visibleOnboardingSteps(input: { installed: boolean }): OnboardingStepDef[] {
+  const steps: OnboardingStepDef[] = [
+    { id: "provider", label: "Connect a provider", optional: false },
+    { id: "assistant", label: "Set up your assistant", optional: false },
+    { id: "empower", label: "Empower your agent", optional: true },
+  ];
+  if (!input.installed) {
+    steps.push({ id: "install", label: "Install Nadi", optional: true });
+  }
+  return steps;
+}
+
+const STEP_IDS: OnboardingStepId[] = ["provider", "assistant", "empower", "install"];
+
+/** `null` when absent or unrecognized — the caller falls back to step one. */
+export function parseOnboardingStep(search: string): OnboardingStepId | null {
+  const value = new URLSearchParams(search).get("step");
+  return STEP_IDS.find((id) => id === value) ?? null;
+}
+
+/**
+ * The URL for a wizard step. Every step is addressable, so back/forward move
+ * between steps and a step can be linked to directly.
+ *
+ * `onboarding=force` is load-bearing on every step, not just the OAuth return:
+ * once the provider step is done a provider key exists, so
+ * `deriveNeedsOnboarding` is false and a reload on `?step=empower` would drop
+ * the user into chat instead of back onto the step they were on.
+ */
+export function onboardingStepPath(step: OnboardingStepId): string {
+  return `/?onboarding=force&step=${step}`;
+}
 
 /**
  * A fresh user needs onboarding only when they have no usable provider

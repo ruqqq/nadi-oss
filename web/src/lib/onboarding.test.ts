@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   ONBOARDING_PROVIDER_OPTIONS,
-  ONBOARDING_STEPS,
   deriveNeedsOnboarding,
   isKeylessOnboardingProvider,
   isOnboardingForced,
   onboardingProviderOptions,
+  onboardingStepPath,
+  parseOnboardingStep,
   RECOMMENDED_ONBOARDING_PROVIDER,
+  visibleOnboardingSteps,
 } from "./onboarding";
 
 describe("isOnboardingForced", () => {
@@ -21,16 +23,6 @@ describe("isOnboardingForced", () => {
     expect(isOnboardingForced("?onboarding=")).toBe(false);
     expect(isOnboardingForced("?onboarding=1")).toBe(false);
     expect(isOnboardingForced("?onboarding=Force")).toBe(false);
-  });
-});
-
-describe("ONBOARDING_STEPS", () => {
-  it("runs required setup before the optional step", () => {
-    expect(ONBOARDING_STEPS.map((s) => s.id)).toEqual(["provider", "assistant", "web-search"]);
-  });
-
-  it("marks only web search as skippable", () => {
-    expect(ONBOARDING_STEPS.filter((s) => s.optional).map((s) => s.id)).toEqual(["web-search"]);
   });
 });
 
@@ -137,5 +129,51 @@ describe("deriveNeedsOnboarding", () => {
   it("ignores web search: a usable provider is enough, key or not", () => {
     const withKey = [{ provider: "openai", secretPresent: true }];
     expect(deriveNeedsOnboarding({ providers: withKey, threadCount: 0 })).toBe(false);
+  });
+});
+
+describe("visibleOnboardingSteps", () => {
+  it("ends with the install step when the app is not installed", () => {
+    const steps = visibleOnboardingSteps({ installed: false });
+    expect(steps.map((s) => s.id)).toEqual(["provider", "assistant", "empower", "install"]);
+  });
+
+  it("omits the install step when already installed", () => {
+    const steps = visibleOnboardingSteps({ installed: true });
+    expect(steps.map((s) => s.id)).toEqual(["provider", "assistant", "empower"]);
+  });
+
+  it("marks only provider and assistant required", () => {
+    const required = visibleOnboardingSteps({ installed: false })
+      .filter((s) => !s.optional)
+      .map((s) => s.id);
+    expect(required).toEqual(["provider", "assistant"]);
+  });
+});
+
+describe("parseOnboardingStep", () => {
+  it("reads a known step id", () => {
+    expect(parseOnboardingStep("?onboarding=force&step=empower")).toBe("empower");
+    expect(parseOnboardingStep("?step=install")).toBe("install");
+  });
+
+  it("is null for a missing or unknown step", () => {
+    expect(parseOnboardingStep("")).toBe(null);
+    expect(parseOnboardingStep("?onboarding=force")).toBe(null);
+    expect(parseOnboardingStep("?step=nonsense")).toBe(null);
+  });
+});
+
+describe("onboardingStepPath", () => {
+  it("forces the wizard and names the step", () => {
+    expect(onboardingStepPath("empower")).toBe("/?onboarding=force&step=empower");
+  });
+
+  it("round-trips through parseOnboardingStep for every step", () => {
+    // Every step is linkable, so every step must survive the round trip — this
+    // is what makes back/forward land on a real screen rather than step one.
+    for (const id of ["provider", "assistant", "empower", "install"] as const) {
+      expect(parseOnboardingStep(new URL(onboardingStepPath(id), "https://x").search)).toBe(id);
+    }
   });
 });

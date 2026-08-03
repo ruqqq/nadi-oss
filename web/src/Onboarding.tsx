@@ -20,10 +20,10 @@ import { Textarea } from "./components/ui/textarea";
 import { Globe, Key } from "./icons";
 import { cn } from "./lib/utils";
 import {
-  ONBOARDING_STEPS,
   RECOMMENDED_ONBOARDING_PROVIDER,
   isKeylessOnboardingProvider,
   onboardingProviderOptions,
+  visibleOnboardingSteps,
 } from "./lib/onboarding";
 import { track } from "./lib/posthog";
 import {
@@ -712,14 +712,15 @@ export function Onboarding({
 }
 
 function StepIndicator({ step }: { step: OnboardingStep }) {
-  const label = ONBOARDING_STEPS[step - 1]?.label ?? "";
+  const steps = visibleOnboardingSteps({ installed: false });
+  const label = steps[step - 1]?.label ?? "";
   return (
     <div className="space-y-2">
       <p className="font-medium text-muted-foreground text-xs uppercase tracking-wide">
-        Step {step} of {ONBOARDING_STEPS.length} · {label}
+        Step {step} of {steps.length} · {label}
       </p>
       <div className="flex gap-1.5" aria-hidden="true">
-        {ONBOARDING_STEPS.map((entry, index) => (
+        {steps.map((entry, index) => (
           <span
             key={entry.id}
             className={cn("h-1 flex-1 rounded-full", index < step ? "bg-primary" : "bg-border")}
