@@ -922,17 +922,25 @@ function OgCard() {
 
       <div className="flex flex-col gap-6">
         <p className="font-medium font-mono text-muted-foreground text-sm uppercase tracking-[0.2em]">
-          Bring your own model
+          On any model, on your own key
         </p>
-        <h1 className="max-w-[16ch] font-display font-semibold text-[86px] leading-[0.98] tracking-tight">
-          The agent isn’t the model.
+        {/* The two lines are authored, not measured: each is nowrap so the break
+            stays between "Your AI" and the noun no matter what the measure would
+            do. Caps get tracking-normal — tracking-tight is set for lowercase and
+            crowds them. */}
+        <h1 className="font-display font-semibold leading-[0.98] tracking-tight">
+          <span className="block whitespace-nowrap text-[72px] text-muted-foreground">Your AI</span>
+          <span className="block whitespace-nowrap text-[150px] uppercase tracking-normal">
+            coworker.
+          </span>
         </h1>
       </div>
 
       <div className="flex items-center justify-between border-border border-t pt-6">
+        {/* A sentence per line, so neither wraps to a one-word orphan. */}
         <p className="max-w-[52ch] text-lg text-muted-foreground">
-          Agents that work in parallel, a sandbox they can run code in, work they can schedule. You
-          bring the brain, on your own key.
+          <span className="block">Delegate the work, schedule it to repeat.</span>
+          <span className="block">It learns from every conversation.</span>
         </p>
         <span className="shrink-0 font-mono text-primary text-sm">nadiai.app</span>
       </div>

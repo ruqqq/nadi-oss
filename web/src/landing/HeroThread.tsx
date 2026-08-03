@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useMotionValueEvent, useScroll } from "motion/react";
 import { MessageRow } from "@/components/chat/MessageRow";
 import { ThreadModelBadge } from "@/components/model/ThreadModelBadge";
 import { cn } from "@/lib/utils";
@@ -34,6 +35,7 @@ export function HeroThread() {
   const [index, setIndex] = useState(0);
   const [taken, setTaken] = useState(false);
   const reducedMotion = useMediaQuery("(prefers-reduced-motion: reduce)");
+  const { scrollY } = useScroll();
   const [revealed, setRevealed] = useState(reducedMotion ? HERO_MOVES.length : 1);
   const done = revealed >= HERO_MOVES.length;
 
@@ -52,12 +54,11 @@ export function HeroThread() {
 
   // Scrolling means they are reading ahead of the stagger, and a row fading in
   // behind their eye line is just noise. Once they move, show the whole thread.
-  useEffect(() => {
-    if (done) return;
-    const showAll = () => setRevealed(HERO_MOVES.length);
-    window.addEventListener("scroll", showAll, { passive: true, once: true });
-    return () => window.removeEventListener("scroll", showAll);
-  }, [done]);
+  // Driven off Motion's scroll value rather than a `scroll` listener of our own:
+  // Motion already tracks it once for the page and batches the reads.
+  useMotionValueEvent(scrollY, "change", (y) => {
+    if (!done && y > 0) setRevealed(HERO_MOVES.length);
+  });
 
   const pick = useCallback((next: number) => {
     setTaken(true);

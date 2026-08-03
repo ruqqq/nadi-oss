@@ -3,7 +3,7 @@ import type { UIMessage } from "ai";
 // The hero transcript, fed to the real chat components rather than a drawing of
 // them.
 //
-// The page's thesis is that one conversation does the whole job, so the data is
+// The page's thesis is that one coworker does the whole job, so the data is
 // built to make that literally true: this is ONE thread, not a gallery of them.
 // It starts as data work, becomes code running on a real machine, becomes work
 // that runs on a schedule — and the last move has no question above it at all,

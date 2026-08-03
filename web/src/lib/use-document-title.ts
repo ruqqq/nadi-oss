@@ -5,7 +5,7 @@ import { useEffect } from "react";
  * was there before on the way out.
  *
  * Pass `null` to leave the title alone — that is the landing page, which keeps
- * the tagline baked into `index.html` ("Nadi: The agent isn't the model.").
+ * the tagline baked into `index.html` ("Nadi: Your AI coworker.").
  * Inside the app the title is just the deployment's name, because a tagline is
  * a pitch and a person who is already signed in has bought it; what they want
  * from a browser tab is to find this one among nine others.
