@@ -54,6 +54,8 @@ function makeThread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
     model: "claude-sonnet-4-5",
     modelInputModalities: ["text"],
     showReasoning: false,
+    reasoningEffort: "medium",
+    modelSupportsReasoning: true,
     runtime: "think",
     title: "Untitled thread",
     source: "manual",

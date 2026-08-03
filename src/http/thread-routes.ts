@@ -436,6 +436,8 @@ export async function selectThreadSummariesForUser(
       model: threadIndex.model,
       modelInputModalities: threadIndex.modelInputModalities,
       showReasoning: threadIndex.showReasoning,
+      reasoningEffort: threadIndex.reasoningEffort,
+      modelSupportsReasoning: threadIndex.modelSupportsReasoning,
       kind: threadIndex.kind,
       runtime: threadIndex.runtime,
       activityStatus: threadIndex.activityStatus,
@@ -1146,20 +1148,35 @@ async function renameThread(
     return new Response("Archived threads are read-only", { status: 409 });
   }
 
-  const patch = body as { title?: unknown; projectId?: unknown; workbenchId?: unknown };
+  const patch = body as {
+    title?: unknown;
+    projectId?: unknown;
+    workbenchId?: unknown;
+    reasoningEffort?: unknown;
+  };
   const title = parseThreadTitlePatch(patch.title);
   if (!title.ok) return title.response;
   const projectId = await resolveThreadProjectPatch(db, thread.workspaceId, patch.projectId);
   if (!projectId.ok) return projectId.response;
   const workbenchId = await resolveThreadWorkbenchPatch(db, thread.workspaceId, patch.workbenchId);
   if (!workbenchId.ok) return workbenchId.response;
-  if (!title.hasValue && !projectId.hasValue && !workbenchId.hasValue) {
+  const reasoningEffort = parseThreadReasoningEffortPatch(patch.reasoningEffort);
+  if (!reasoningEffort.ok) return reasoningEffort.response;
+  if (
+    !title.hasValue &&
+    !projectId.hasValue &&
+    !workbenchId.hasValue &&
+    !reasoningEffort.hasValue
+  ) {
     return new Response("No valid fields to update", { status: 400 });
   }
 
   const updatedAt = Date.now();
   if (title.hasValue) {
     await repo.update(threadId, { title: title.value, titleSet: true, updatedAt });
+  }
+  if (reasoningEffort.hasValue) {
+    await repo.update(threadId, { reasoningEffort: reasoningEffort.value, updatedAt });
   }
   if (projectId.hasValue) {
     await repo.updateProject(threadId, projectId.value, updatedAt);
@@ -1469,6 +1486,25 @@ function parseThreadTitlePatch(
   if (clean.length === 0)
     return { ok: false, response: new Response("title required", { status: 400 }) };
   return { ok: true, hasValue: true, value: clean };
+}
+
+function parseThreadReasoningEffortPatch(
+  value: unknown,
+):
+  | { ok: true; hasValue: false }
+  | { ok: true; hasValue: true; value: ReasoningEffort }
+  | { ok: false; response: Response } {
+  if (value === undefined) return { ok: true, hasValue: false };
+  const parsed = parseReasoningEffort(value);
+  if (!parsed) {
+    return {
+      ok: false,
+      response: new Response("reasoningEffort must be one of off, low, medium, high", {
+        status: 400,
+      }),
+    };
+  }
+  return { ok: true, hasValue: true, value: parsed };
 }
 
 async function resolveThreadProjectId(

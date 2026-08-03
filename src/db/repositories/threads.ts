@@ -154,7 +154,13 @@ export class ThreadRepository {
 
   async update(
     threadId: string,
-    fields: { title?: string; titleSet?: boolean; updatedAt?: number; archivedAt?: number | null },
+    fields: {
+      title?: string;
+      titleSet?: boolean;
+      updatedAt?: number;
+      archivedAt?: number | null;
+      reasoningEffort?: string;
+    },
   ) {
     await this.db.update(threadIndex).set(fields).where(eq(threadIndex.id, threadId));
   }

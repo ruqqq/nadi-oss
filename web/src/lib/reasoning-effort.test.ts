@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   availableEffortOptions,
   providerSupportsReasoningEffort,
+  reasoningControlsForThreadModel,
   shouldOfferEffortControl,
 } from "./reasoning-effort";
 
@@ -69,6 +70,37 @@ describe("providerSupportsReasoningEffort", () => {
     for (const provider of ["openai-compatible", "workers-ai"]) {
       expect(providerSupportsReasoningEffort(provider)).toBe(false);
     }
+  });
+});
+
+describe("reasoningControlsForThreadModel", () => {
+  it("reads controls from the matching whitelist model", () => {
+    expect(
+      reasoningControlsForThreadModel(
+        [
+          {
+            provider: "zai",
+            whitelistModels: [
+              { id: "glm-5.1", reasoningControls: [{ type: "toggle" }] },
+              { id: "glm-5.2", reasoningControls: [{ type: "effort", values: ["high", "max"] }] },
+            ],
+          },
+        ],
+        "zai",
+        "glm-5.2",
+      ),
+    ).toEqual([{ type: "effort", values: ["high", "max"] }]);
+  });
+
+  it("returns undefined when the model is unknown to the whitelist", () => {
+    expect(
+      reasoningControlsForThreadModel(
+        [{ provider: "anthropic", whitelistModels: [{ id: "claude-opus-4-8" }] }],
+        "anthropic",
+        "claude-sonnet-4-5",
+      ),
+    ).toBeUndefined();
+    expect(reasoningControlsForThreadModel([], "anthropic", "claude-sonnet-4-5")).toBeUndefined();
   });
 });
 

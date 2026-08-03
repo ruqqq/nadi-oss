@@ -96,6 +96,7 @@ const FeedbackInbox = lazy(() =>
 );
 import {
   getDefaultAgentSettings,
+  isSettingsProvider,
   type AgentSettingsResponse,
   type ModelInputModality,
   type ProviderModelSearchResult,
@@ -117,6 +118,7 @@ import {
   renameThread,
   setThreadRecentDismissed,
   switchThreadWorkbench,
+  updateThreadReasoningEffort,
   type ThreadSummary,
   fetchArchivedSummaries,
 } from "./threads-api";
@@ -255,7 +257,7 @@ import {
   selectNewChatProvider,
   typeNewChatModel,
 } from "./lib/new-chat-model";
-import { availableEffortOptions, shouldOfferEffortControl } from "./lib/reasoning-effort";
+import { availableEffortOptions, reasoningControlsForThreadModel, shouldOfferEffortControl } from "./lib/reasoning-effort";
 import { EffortDial } from "./components/model/EffortDial";
 import {
   manualCompactionNoticeForResult,
@@ -2204,6 +2206,20 @@ export function ChatApp({
       });
   }, []);
 
+  const handleThreadReasoningEffort = useCallback((threadId: string, effort: ReasoningEffort) => {
+    void updateThreadReasoningEffort(threadId, effort)
+      .then((updated) => {
+        setActiveThread((current) =>
+          current && current.threadId === threadId ? updated : current,
+        );
+        setThreads((current) => mergeThreadsExcluding(current, [updated], excludedThreadIds()));
+      })
+      .catch((error: unknown) => {
+        setThreadError(error instanceof Error ? error : new Error(String(error)));
+        toast.error("Couldn't update thinking effort");
+      });
+  }, []);
+
   /**
    * Deliver the first message into a thread that already exists, tracking it as
    * an optimistic bubble. `sending` disables that thread's composer so the first
@@ -3128,11 +3144,13 @@ export function ChatApp({
                 thread={activeThread}
                 historyReloadNonce={threadReloadNonce}
                 projects={projects}
+                providers={newChatProviders}
                 leading={threadNav}
                 pendingFirstMessage={pendingFirstMessage}
                 onRetryFirstMessage={retryFirstMessage}
                 onSettleFirstMessage={settleFirstMessage}
                 onRename={handleRenameThread}
+                onReasoningEffortChange={handleThreadReasoningEffort}
                 onMoveThread={moveThread}
                 onCreateProjectForThread={createProjectForThread}
                 onArchiveThread={archiveThread}
@@ -4183,11 +4201,14 @@ interface ThreadChatProps {
   thread: ThreadSummary;
   historyReloadNonce: number;
   projects: ProjectSummary[];
+  /** Used to resolve per-model effort options for the composer dial. */
+  providers?: ProviderSettingsView[];
   leading: React.ReactNode;
   pendingFirstMessage?: PendingFirstMessageState | null;
   onRetryFirstMessage?: () => void;
   onSettleFirstMessage?: (threadId: string) => void;
   onRename?: (threadId: string, title: string) => void;
+  onReasoningEffortChange?: (threadId: string, effort: ReasoningEffort) => void;
   onMoveThread?: (threadId: string, projectId: string | null) => void;
   onCreateProjectForThread?: (threadId: string, name: string) => Promise<void>;
   onArchiveThread?: (threadId: string) => void;
@@ -4290,11 +4311,13 @@ function ThreadChat({
   thread,
   historyReloadNonce,
   projects,
+  providers = [],
   leading,
   pendingFirstMessage,
   onRetryFirstMessage,
   onSettleFirstMessage,
   onRename,
+  onReasoningEffortChange,
   onMoveThread,
   onCreateProjectForThread,
   onArchiveThread,
@@ -5237,7 +5260,38 @@ function ThreadChat({
           safeAreaBottom
           voiceEnabled={voiceEnabled}
           placeholder={composerPlaceholder}
-          footerTrailing={feedbackMode ? undefined : <ThreadModelBadge model={thread.model} />}
+          footerTrailing={
+            feedbackMode ? undefined : (
+              <>
+                {shouldOfferEffortControl({
+                  provider: isSettingsProvider(thread.provider) ? thread.provider : null,
+                  modelSupportsReasoning: thread.modelSupportsReasoning,
+                }) &&
+                  onReasoningEffortChange && (
+                    <EffortDial
+                      triggerId={`thread-effort-${thread.threadId}`}
+                      effort={thread.reasoningEffort}
+                      options={availableEffortOptions(
+                        reasoningControlsForThreadModel(
+                          providers,
+                          thread.provider,
+                          thread.model,
+                        ),
+                      )}
+                      onEffortChange={(effort) =>
+                        onReasoningEffortChange(thread.threadId, effort)
+                      }
+                      disabled={
+                        (thread.runtime === "legacy" && busy) ||
+                        draftSeed === null ||
+                        sendingFirstMessage
+                      }
+                    />
+                  )}
+                <ThreadModelBadge model={thread.model} />
+              </>
+            )
+          }
         />
       </div>
     </div>

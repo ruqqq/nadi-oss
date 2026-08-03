@@ -12,6 +12,8 @@ function thread(over: Partial<ThreadSummary> = {}): ThreadSummary {
     model: "gpt-5.5",
     modelInputModalities: ["text"],
     showReasoning: true,
+    reasoningEffort: "medium",
+    modelSupportsReasoning: true,
     runtime: "think",
     title: "Title",
     source: "manual",

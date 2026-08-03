@@ -14,6 +14,9 @@ export interface ThreadSummary {
   model: string;
   modelInputModalities: ModelInputModality[];
   showReasoning: boolean;
+  reasoningEffort: ReasoningEffort;
+  /** `null` = unknown — never conflate with false. */
+  modelSupportsReasoning: boolean | null;
   runtime: "legacy" | "think";
   activityStatus?: ThreadActivityStatus;
   currentTurnStartedAt?: number | null;
@@ -307,6 +310,24 @@ export async function renameThread(
   });
   if (!res.ok) {
     throw await errorFromResponse(res, "rename this chat");
+  }
+  const body = (await res.json()) as { thread: ThreadSummary };
+  return body.thread;
+}
+
+export async function updateThreadReasoningEffort(
+  threadId: string,
+  reasoningEffort: ReasoningEffort,
+  fetchImpl: FetchLike = appFetch,
+): Promise<ThreadSummary> {
+  const res = await fetchImpl(`/api/threads/${encodeURIComponent(threadId)}`, {
+    method: "PATCH",
+    credentials: "include",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ reasoningEffort }),
+  });
+  if (!res.ok) {
+    throw await errorFromResponse(res, "update thinking effort");
   }
   const body = (await res.json()) as { thread: ThreadSummary };
   return body.thread;
