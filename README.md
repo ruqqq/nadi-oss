@@ -1,36 +1,32 @@
 # Nadi
 
-One conversation that does the whole job. The thread that reads your
-spreadsheet can run your code, remember what it found, and do it again every
-Monday — on any model, on your own key.
+An open-source, ChatGPT-like app that runs on your own Cloudflare account, on
+any model with your own key. The agent gets a real machine to work on, your MCP
+servers, memory and skills it writes for itself, and schedules that run while
+you're away.
 
 ![Nadi's web UI: a support thread where the agent reads the ticket queue, finds the cause, drafts the customer note and schedules it for Monday — beside a sidebar of threads across Customers, Finance, Growth, Ops and Exec](./docs/screenshots/web-ui-hero.png)
 
-## What is Nadi?
-
-Nadi owns what makes an agent useful — its memory, the skills it writes, the
-schedules it keeps, the machine it works in — which leaves the model a swappable
-part. One thread does the whole job: no second product to open, nothing to
-re-upload.
-
-Built for a phone first. Threads survive backgrounding, work carries on while the
-tab is closed, and history stays readable offline.
+Built for a phone first. Install it and it can reach you when a job finishes:
+threads survive backgrounding, work carries on while the tab is closed, and
+history stays readable offline.
 
 <p align="center">
   <img src="./docs/screenshots/mobile-chats.png" width="43%" alt="The chat drawer on a phone: threads across Customers, Finance, Growth, Ops and Exec, with a nightly automaton among them" />
   <img src="./docs/screenshots/mobile-thread.png" width="43%" alt="The same support thread on a phone: the agent's findings, its tool activity, and the composer" />
 </p>
 
-Nine model providers or any endpoint you name, on your own key, changeable
-mid-thread. Apache-2.0, running as a single Cloudflare Worker on your account.
+Nine providers or any endpoint you can name, changeable mid-thread.
 
 ## Features
 
 - **Threads with real work.** Every chat is a Durable Object with its own
   history, token budget and automatic compaction.
-- **MCP with per-tool policy.** Attach any MCP server — ticketing, docs, CRM,
-  your own — and set each tool to `auto_allow`, `approval_required`, or `deny`.
-  Approvals are signed, not trusted.
+- **MCP with per-tool policy.** Attach any MCP server — [Composio](https://composio.dev/)
+  for a thousand-odd SaaS integrations, [Markdump](https://markdump.com) for
+  markdown notes the agent reads and writes like a second brain, or your own —
+  and set each tool to `auto_allow`, `approval_required`, or `deny`. Approvals
+  are signed, not trusted.
 - **Automata.** Scheduled agent runs that post back only when they have
   something to say.
 - **Sandboxed execution.** Workbenches define a repo, a machine size and an
@@ -39,7 +35,8 @@ mid-thread. Apache-2.0, running as a single Cloudflare Worker on your account.
 - **Skills and memory.** Reusable procedures and durable facts, both editable
   from the app and by the agent.
 - **Subagents.** Parallel work on the parent's machine, feature-flagged.
-- **Offline PWA.** Installable, with read-only history when disconnected.
+- **Installable PWA.** Push notifications when unattended work finishes (needs
+  VAPID keys), and read-only history when disconnected.
 
 ## Architecture
 

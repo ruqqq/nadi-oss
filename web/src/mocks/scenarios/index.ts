@@ -935,6 +935,10 @@ function heroStore(): MockStore {
     threads: [
       makeThread({
         threadId: HERO_THREAD_ID,
+        // The model Nadi leads with on the landing page, so the screenshots and
+        // the pitch name the same thing.
+        provider: "opencode-go",
+        model: "deepseek-v4-flash",
         title: "Support volume doubled this week",
         lastMessagePreview: "The draft opens here Monday at 9:00.",
         projectName: "Customers",
