@@ -2,6 +2,8 @@ import { eq } from "drizzle-orm";
 import type { Env } from "../env";
 import { validateRequestSession } from "../auth/session";
 import { isSuperuser } from "../auth/invite-gate";
+import { buildWaitlistAcceptedCopy } from "../auth/email-copy";
+import { sendOtpEmail } from "../auth/email-sender";
 import { registryDb } from "../db/client";
 import {
   INVITE_LIMIT,
@@ -60,6 +62,39 @@ function serializeWaiting(entry: WaitingListEntry) {
   };
 }
 
+/** Tell a direct-email invitee they can sign in. Never throws — access already landed. */
+async function notifyWaitlistAccepted(env: Env, email: string): Promise<void> {
+  const signInUrl = env.APP_BASE_URL.replace(/\/$/, "");
+  const copy = buildWaitlistAcceptedCopy({ signInUrl });
+  try {
+    await sendOtpEmail({
+      env,
+      to: email,
+      subject: copy.subject,
+      text: copy.text,
+    });
+    console.log(
+      JSON.stringify({
+        ts: new Date().toISOString(),
+        level: "info",
+        event: "auth.waitlist-accepted.email_sent",
+        email,
+        subject: copy.subject,
+      }),
+    );
+  } catch (err) {
+    console.log(
+      JSON.stringify({
+        ts: new Date().toISOString(),
+        level: "warn",
+        event: "auth.waitlist-accepted.email_failed",
+        email,
+        error: err instanceof Error ? err.message : String(err),
+      }),
+    );
+  }
+}
+
 async function listInvites(req: Request, env: Env): Promise<Response> {
   const session = await validateRequestSession(env, req);
   if (!session) return new Response("Unauthorized", { status: 401 });
@@ -112,10 +147,12 @@ async function createInvite(req: Request, env: Env): Promise<Response> {
     const existing = await repo.findByEmail(email);
     if (existing && existing.status !== "pending") {
       await new WaitingListRepository(db).remove(email);
+      await notifyWaitlistAccepted(env, email);
       return Response.json({ invite: serialize(existing) }, { status: 200 });
     }
     const invite = await repo.createForEmail(session.user.id, email);
     await new WaitingListRepository(db).remove(email);
+    await notifyWaitlistAccepted(env, email);
     return Response.json({ invite: serialize(invite) }, { status: 201 });
   }
 

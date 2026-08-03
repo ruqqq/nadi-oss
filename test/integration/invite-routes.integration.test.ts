@@ -1,5 +1,5 @@
 import { SELF, env } from "cloudflare:test";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { drizzle } from "drizzle-orm/d1";
 import { eq } from "drizzle-orm";
 import * as schema from "../../src/db/schema";
@@ -11,6 +11,29 @@ const SUPERUSER = "boss@example.com";
 
 const db = () => drizzle(env.REGISTRY_DB, { schema });
 const cookie = (token: string) => ({ cookie: `better-auth.session_token=${token}` });
+
+/**
+ * Integration tests disable real email delivery. Temporarily enable the binding
+ * and swap in a fake `send` so waitlist-acceptance mail can be asserted.
+ */
+function stubAuthEmailDelivery(send: ReturnType<typeof vi.fn>): () => void {
+  const mutable = env as unknown as {
+    EMAIL_DELIVERY_DISABLED?: string;
+    EMAIL: { send: typeof send };
+  };
+  const previousDisabled = mutable.EMAIL_DELIVERY_DISABLED;
+  const previousEmail = mutable.EMAIL;
+  mutable.EMAIL_DELIVERY_DISABLED = "";
+  mutable.EMAIL = { send };
+  return () => {
+    if (previousDisabled === undefined) {
+      delete mutable.EMAIL_DELIVERY_DISABLED;
+    } else {
+      mutable.EMAIL_DELIVERY_DISABLED = previousDisabled;
+    }
+    mutable.EMAIL = previousEmail;
+  };
+}
 
 async function seedUser(id: string, email: string, token: string) {
   await db()
@@ -290,38 +313,84 @@ describe("invite routes", () => {
 
   it("lets a superuser invite a waiting-list email directly and clears the entry", async () => {
     const boss = await seedUser("boss", SUPERUSER, "boss-tok");
+    const send = vi.fn(async () => ({ messageId: "email_waitlist_1" }));
+    const restoreEmail = stubAuthEmailDelivery(send);
 
-    // Stranger tries to sign in and lands on the waiting list.
-    await SELF.fetch("https://nadi.test/api/auth/email-otp/send-verification-otp", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: "hopeful@example.com", type: "sign-in" }),
-    });
+    try {
+      // Stranger tries to sign in and lands on the waiting list.
+      await SELF.fetch("https://nadi.test/api/auth/email-otp/send-verification-otp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "hopeful@example.com", type: "sign-in" }),
+      });
 
-    const listed = await SELF.fetch("https://nadi.test/api/invites", {
-      headers: cookie(boss.token),
-    });
-    expect(await listed.json()).toMatchObject({
-      isSuperuser: true,
-      quota: { limit: null },
-      waitingList: [{ email: "hopeful@example.com", attempts: 1 }],
-    });
+      const listed = await SELF.fetch("https://nadi.test/api/invites", {
+        headers: cookie(boss.token),
+      });
+      expect(await listed.json()).toMatchObject({
+        isSuperuser: true,
+        quota: { limit: null },
+        waitingList: [{ email: "hopeful@example.com", attempts: 1 }],
+      });
 
-    const invited = await SELF.fetch("https://nadi.test/api/invites", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...cookie(boss.token) },
-      body: JSON.stringify({ email: "hopeful@example.com" }),
-    });
-    expect(invited.status).toBe(201);
+      const invited = await SELF.fetch("https://nadi.test/api/invites", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...cookie(boss.token) },
+        body: JSON.stringify({ email: "hopeful@example.com" }),
+      });
+      expect(invited.status).toBe(201);
 
-    // Off the waiting list, and now able to request an OTP.
-    expect(await db().select().from(schema.waitingList).all()).toHaveLength(0);
-    const otpRes = await SELF.fetch("https://nadi.test/api/auth/email-otp/send-verification-otp", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: "hopeful@example.com", type: "sign-in" }),
+      // Off the waiting list, and now able to request an OTP.
+      expect(await db().select().from(schema.waitingList).all()).toHaveLength(0);
+      expect(send).toHaveBeenCalledWith({
+        from: { name: "Nadi", email: "signin@nadi.test" },
+        to: "hopeful@example.com",
+        subject: "You're in — sign in to Nadi",
+        text: "There's room for you on Nadi. Sign in at https://nadi.test with this email address.",
+      });
+      const otpRes = await SELF.fetch(
+        "https://nadi.test/api/auth/email-otp/send-verification-otp",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: "hopeful@example.com", type: "sign-in" }),
+        },
+      );
+      expect(otpRes.status).toBe(200);
+    } finally {
+      restoreEmail();
+    }
+  });
+
+  it("still admits a waiting-list email when acceptance mail fails to send", async () => {
+    const boss = await seedUser("boss", SUPERUSER, "boss-tok");
+    const send = vi.fn(async () => {
+      throw new Error("binding rejected");
     });
-    expect(otpRes.status).toBe(200);
+    const restoreEmail = stubAuthEmailDelivery(send);
+
+    try {
+      await SELF.fetch("https://nadi.test/api/auth/email-otp/send-verification-otp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "resilient@example.com", type: "sign-in" }),
+      });
+
+      const invited = await SELF.fetch("https://nadi.test/api/invites", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...cookie(boss.token) },
+        body: JSON.stringify({ email: "resilient@example.com" }),
+      });
+      expect(invited.status).toBe(201);
+      expect(await db().select().from(schema.waitingList).all()).toHaveLength(0);
+      expect(send).toHaveBeenCalled();
+      // Gate opens even though delivery failed — the invite row is what matters.
+      await expect(canSignIn(env, db(), "resilient@example.com")).resolves.toEqual({
+        allowed: true,
+      });
+    } finally {
+      restoreEmail();
+    }
   });
 
   it("does not let an ordinary user invite a specific email or see the waiting list", async () => {
