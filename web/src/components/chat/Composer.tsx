@@ -71,10 +71,12 @@ export type ComposerHandle = {
    *  empty — used to restore a cancelled queued message without clobbering
    *  in-progress input. */
   prefillIfEmpty: (text: string) => void;
-  /** Replaces the whole input with `text` and focuses it, cursor at the end.
-   *  Unlike prefillIfEmpty this clobbers existing input — for a deliberate pick
-   *  (a prompt suggestion) where the tap is the intent to swap. */
-  replaceText: (text: string) => void;
+  /** Replaces the whole input with `text`, cursor at the end, focusing it unless
+   *  `focus: false`. Unlike prefillIfEmpty this clobbers existing input — for a
+   *  deliberate pick (a prompt suggestion) where the tap is the intent to swap.
+   *  Text seeded without a gesture must pass `focus: false`: raising the
+   *  software keyboard on mount covers the copy that explains the text. */
+  replaceText: (text: string, options?: { focus?: boolean }) => void;
 };
 
 export function Composer({
@@ -195,12 +197,12 @@ export function Composer({
         el.dispatchEvent(new Event("input", { bubbles: true }));
         el.focus();
       },
-      replaceText: (text: string) => {
+      replaceText: (text: string, options?: { focus?: boolean }) => {
         const el = textareaRef.current;
         if (!el) return;
         el.setRangeText(text, 0, el.value.length, "end");
         el.dispatchEvent(new Event("input", { bubbles: true }));
-        el.focus();
+        if (options?.focus !== false) el.focus();
       },
     }),
     [],

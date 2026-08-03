@@ -75,6 +75,21 @@ export function parseOnboardingStep(search: string): OnboardingStepId | null {
 }
 
 /**
+ * A parsed step is only usable if it is one of the steps actually shown. The
+ * install step is hidden inside the installed PWA, so `?step=install` there
+ * names a step with no card and no successor: the indicator would announce step
+ * one while nothing rendered, and finishing would navigate backwards. Fall back
+ * to the first visible step instead.
+ */
+export function resolveOnboardingStep(
+  step: OnboardingStepId | null | undefined,
+  steps: OnboardingStepDef[],
+): OnboardingStepId {
+  if (step && steps.some((s) => s.id === step)) return step;
+  return steps[0]?.id ?? "provider";
+}
+
+/**
  * The URL for a wizard step. Every step is addressable, so back/forward move
  * between steps and a step can be linked to directly.
  *

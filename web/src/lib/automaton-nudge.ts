@@ -28,3 +28,16 @@ export function takeAutomatonNudge(storage: NudgeStorage): string | null {
   storage.removeItem(AUTOMATON_NUDGE_KEY);
   return stored.trim().length > 0 ? stored : null;
 }
+
+/**
+ * Reads without consuming. Arming and *showing* the nudge are separated by a
+ * screen that may never mount — the new-chat view waits on a thread fetch, and
+ * a user who drops offline in the seconds after finishing setup gets an error
+ * screen instead. Consuming at that point would lose the nudge for good, so the
+ * read is a peek and the clear happens where it is actually rendered.
+ */
+export function peekAutomatonNudge(storage: NudgeStorage): string | null {
+  const stored = storage.getItem(AUTOMATON_NUDGE_KEY);
+  if (stored === null) return null;
+  return stored.trim().length > 0 ? stored : null;
+}

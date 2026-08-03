@@ -32,7 +32,7 @@ import {
 import type { CSSProperties } from "react";
 import type { FileUIPart, UIMessage } from "ai";
 import { applyArchivedCompactions } from "./lib/archived-compaction";
-import { takeAutomatonNudge } from "./lib/automaton-nudge";
+import { peekAutomatonNudge, takeAutomatonNudge } from "./lib/automaton-nudge";
 import {
   backToHere,
   cameFrom,
@@ -1641,10 +1641,13 @@ export function ChatApp({
   // Staged attachments captured at submit, kept alongside draftText so creation
   // failure can restore them to the composer.
   const [draftFiles, setDraftFiles] = useState<FileUIPart[]>([]);
-  // One-shot post-onboarding nudge, read exactly once from localStorage so a
-  // second new chat in the same session shows nothing.
+  // One-shot post-onboarding nudge. PEEKED here — the new-chat view that shows
+  // it only mounts once the thread fetch resolves, so consuming at mount would
+  // silently throw the nudge away on a transient failure. It is cleared when it
+  // is actually rendered (`onNudgeShown`), and the in-memory state below is what
+  // keeps a second new chat in the same session from showing it again.
   const [nudgePrompt, setNudgePrompt] = useState<string | null>(() =>
-    typeof localStorage === "undefined" ? null : takeAutomatonNudge(localStorage),
+    typeof localStorage === "undefined" ? null : peekAutomatonNudge(localStorage),
   );
   // Seed the new-chat provider/model from the synchronously-cached bootstrap
   // settings (localStorage) so the composer is usable immediately on load and
@@ -3281,6 +3284,9 @@ export function ChatApp({
               modelInputModalities={newChatModelInputModalities}
               voiceEnabled={voiceEnabled}
               nudgePrompt={nudgePrompt}
+              onNudgeShown={() => {
+                if (typeof localStorage !== "undefined") takeAutomatonNudge(localStorage);
+              }}
               onDismissNudge={() => setNudgePrompt(null)}
             />
           ) : (
@@ -3808,6 +3814,7 @@ export function NewChatView({
   modelInputModalities,
   voiceEnabled,
   nudgePrompt,
+  onNudgeShown,
   onDismissNudge,
 }: {
   onCreateAndSend: (text: string, files: FileUIPart[]) => void;
@@ -3843,18 +3850,25 @@ export function NewChatView({
   voiceEnabled?: boolean;
   /** One-shot post-onboarding prompt seeded into the composer, or null. */
   nudgePrompt: string | null;
+  /** Fired the first time the nudge actually reaches the screen, so the stored
+   *  one-shot is consumed at render rather than at app mount. */
+  onNudgeShown: () => void;
   onDismissNudge: () => void;
 }) {
   const canSend = canStartNewChat({ provider, model });
   const offline = useOffline();
   const composerRef = useRef<ComposerHandle | null>(null);
   const [nudgeVisible, setNudgeVisible] = useState(nudgePrompt !== null);
+  // The seeded text is not a gesture, so it must not raise the software
+  // keyboard — on a phone that would cover the callout explaining the text.
+  const [suppressAutoFocus] = useState(nudgePrompt !== null);
   const seededRef = useRef(false);
   useEffect(() => {
     if (nudgePrompt === null || seededRef.current) return;
     seededRef.current = true;
-    composerRef.current?.replaceText(nudgePrompt);
-  }, [nudgePrompt]);
+    composerRef.current?.replaceText(nudgePrompt, { focus: false });
+    onNudgeShown();
+  }, [nudgePrompt, onNudgeShown]);
 
   const dismissNudge = useCallback(() => {
     setNudgeVisible(false);
@@ -3982,7 +3996,7 @@ export function NewChatView({
           defaultValue={seedText ?? undefined}
           safeAreaBottom
           voiceEnabled={voiceEnabled}
-          autoFocus={canSend}
+          autoFocus={canSend && !suppressAutoFocus}
           footerTrailing={
             provider && (
               <>
@@ -5710,8 +5724,29 @@ export default function App({
     return () => clearInterval(id);
   }, [reachability, revalidateBootstrap]);
 
+  // The wizard's steps are addressable, so it pushes one history entry per
+  // forward step — and those entries outlive it. Every one of them has pathname
+  // "/", so `setPath` below is a no-op and a Back after setup looks broken; worse,
+  // they still carry `onboarding=force`, so reloading on one reopens the wizard
+  // and finishing it arms a second nudge. Once onboarding is done these entries
+  // are dead: rewrite each as it is popped (so a reload can never re-force
+  // setup) and keep going back, which is what the wizard's own pushes displaced.
+  const onboardingDoneRef = useRef(onboarding.status === "done");
   useEffect(() => {
-    const onPop = () => setPath(window.location.pathname);
+    onboardingDoneRef.current = onboarding.status === "done";
+  }, [onboarding.status]);
+  useEffect(() => {
+    const onPop = () => {
+      if (onboardingDoneRef.current && isOnboardingForced(window.location.search)) {
+        clearForcedOnboarding();
+        // Bounded: only a wizard entry can trigger this, and there are finitely
+        // many. With nothing behind, `back()` is a no-op and the loop ends with
+        // a URL that no longer re-forces setup.
+        window.history.back();
+        return;
+      }
+      setPath(window.location.pathname);
+    };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);

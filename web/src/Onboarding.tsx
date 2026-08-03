@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { toast } from "sonner";
 import { Alert, AlertDescription } from "./components/ui/alert";
@@ -21,7 +21,7 @@ import { Spinner } from "./components/ui/spinner";
 import { Textarea } from "./components/ui/textarea";
 import { Globe, Key } from "./icons";
 import { armAutomatonNudge } from "./lib/automaton-nudge";
-import { FEATURED_CONNECTIONS, findFeaturedServer } from "./lib/featured-connections";
+import type { FeaturedConnectionId } from "./lib/featured-connections";
 import { cn } from "./lib/utils";
 import {
   RECOMMENDED_ONBOARDING_PROVIDER,
@@ -29,11 +29,11 @@ import {
   onboardingProviderOptions,
   onboardingStepPath,
   parseOnboardingStep,
+  resolveOnboardingStep,
   visibleOnboardingSteps,
 } from "./lib/onboarding";
 import type { OnboardingStepDef, OnboardingStepId } from "./lib/onboarding";
 import { track } from "./lib/posthog";
-import type { McpServer } from "./mcp-api";
 import {
   type AgentSettingsResponse,
   type ModelInputModality,
@@ -137,7 +137,9 @@ export function Onboarding({
   onComplete: () => void;
 }) {
   const steps = useMemo(() => visibleOnboardingSteps({ installed }), [installed]);
-  const [step, setStep] = useState<OnboardingStepId>(initialStep ?? "provider");
+  const [step, setStep] = useState<OnboardingStepId>(() =>
+    resolveOnboardingStep(initialStep, steps),
+  );
   const providerOptions = useMemo(
     () => onboardingProviderOptions({ workersAi: workersAiEnabled }),
     [workersAiEnabled],
@@ -180,9 +182,11 @@ export function Onboarding({
   const [exaError, setExaError] = useState<string | null>(null);
   const [exaAlreadySet, setExaAlreadySet] = useState(false);
 
-  // Empower step — tracks what the user actually connected, so completion can
-  // seed a nudge that never asks for data the agent can't get.
-  const [connectedServers, setConnectedServers] = useState<McpServer[]>([]);
+  // Empower step — the connections that resolved as AUTHORIZED, so completion
+  // can seed a nudge that never asks for data the agent can't get. A server row
+  // is not enough: consent can be denied, abandoned, or fail after the row
+  // exists.
+  const [connectedIds, setConnectedIds] = useState<FeaturedConnectionId[]>([]);
 
   // Only reached once the required steps are done, so load the current state
   // lazily rather than paying for it on every onboarding mount.
@@ -210,22 +214,40 @@ export function Onboarding({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // How many entries this wizard has pushed and not yet popped. `history.back()`
+  // is only ours to call while this is above zero — a tab opened straight at
+  // `?step=assistant` has no wizard entry behind it (the mount effect REPLACED
+  // that one), so an unguarded back would leave the app entirely.
+  const pushDepthRef = useRef(0);
+
   useEffect(() => {
     const onPop = () => {
       const next = parseOnboardingStep(window.location.search);
       // A back that leaves the wizard's own entries (no step param) is not ours
       // to handle — App's router owns that navigation.
-      if (next) setStep(next);
+      if (!next) return;
+      pushDepthRef.current = Math.max(0, pushDepthRef.current - 1);
+      setStep(resolveOnboardingStep(next, steps));
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
-  }, []);
+  }, [steps]);
 
   /** Forward navigation pushes, so back returns to the previous step. */
   const goToStep = useCallback((next: OnboardingStepId) => {
     window.history.pushState(null, "", onboardingStepPath(next));
+    pushDepthRef.current += 1;
     setStep(next);
   }, []);
+
+  /** Back within the wizard, without ever escaping the app. */
+  const goBack = useCallback(
+    (fallback: OnboardingStepId) => {
+      if (pushDepthRef.current > 0) window.history.back();
+      else goToStep(fallback);
+    },
+    [goToStep],
+  );
 
   /** Move to the next visible step, or finish if this was the last one. */
   const advance = useCallback(() => {
@@ -233,16 +255,10 @@ export function Onboarding({
     const next = steps[index + 1];
     if (next) goToStep(next.id);
     else {
-      armAutomatonNudge(localStorage, {
-        composioConnected:
-          findFeaturedServer(
-            connectedServers,
-            FEATURED_CONNECTIONS.find((c) => c.id === "composio")!,
-          ) !== null,
-      });
+      armAutomatonNudge(localStorage, { composioConnected: connectedIds.includes("composio") });
       onComplete();
     }
-  }, [steps, step, goToStep, onComplete, connectedServers]);
+  }, [steps, step, goToStep, onComplete, connectedIds]);
 
   const secretName = useMemo(
     () => settings.providers.find((p) => p.provider === provider)?.configuredSecretName,
@@ -667,7 +683,7 @@ export function Onboarding({
                     variant="ghost"
                     onClick={() => {
                       setAgentError(null);
-                      window.history.back();
+                      goBack("provider");
                     }}
                     disabled={savingAgent}
                   >
@@ -689,7 +705,7 @@ export function Onboarding({
             </Card>
           ) : step === "empower" ? (
             <EmpowerStep
-              onConnectionsChange={setConnectedServers}
+              onConnectedChange={setConnectedIds}
               exaCard={
                 <Card className="gap-3 p-4">
                   <form className="space-y-4" onSubmit={submitWebSearch}>

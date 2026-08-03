@@ -92,10 +92,23 @@ export function InstallStep({ onDone }: { onDone: () => void }) {
         </ol>
       )}
 
+      {/* Completion is only observable where `appinstalled` fires — i.e. a
+          Chromium we still hold a prompt event for. iOS never fires it, so a
+          user who has just added Nadi to their home screen would otherwise find
+          the wizard's last control is a ghost button telling them they are
+          skipping the thing they just did. Everywhere we cannot detect it, the
+          step gets a real primary action that finishes without claiming an
+          install happened. */}
       <div className="flex justify-end gap-2">
-        <Button type="button" variant="ghost" onClick={onDone}>
-          {installed ? "Done" : "Skip for now"}
-        </Button>
+        {installed || !(chromium && prompt) ? (
+          <Button type="button" onClick={onDone}>
+            Done
+          </Button>
+        ) : (
+          <Button type="button" variant="ghost" onClick={onDone}>
+            Skip for now
+          </Button>
+        )}
       </div>
     </Card>
   );

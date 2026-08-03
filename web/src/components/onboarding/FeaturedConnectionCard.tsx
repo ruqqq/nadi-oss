@@ -4,7 +4,7 @@ import { Button } from "../ui/button";
 import { Card } from "../ui/card";
 import { Spinner } from "../ui/spinner";
 import { Check } from "../../icons";
-import type { FeaturedConnection } from "../../lib/featured-connections";
+import type { FeaturedConnection, FeaturedConnectionId } from "../../lib/featured-connections";
 import { MCP_RETURN_PATH_KEY } from "../../lib/settings-routes";
 import { onboardingStepPath } from "../../lib/onboarding";
 import {
@@ -21,14 +21,28 @@ export function FeaturedConnectionCard({
   icon,
   server,
   onAdded,
+  onStateChange,
 }: {
   connection: FeaturedConnection;
   icon: React.ReactNode;
-  /** The existing server for this connection, or null if it isn't added yet. */
-  server: McpServer | null;
+  /**
+   * The existing server for this connection: `undefined` while the list is
+   * still loading, `null` once it has loaded and there is no row. The
+   * distinction is load-bearing — returning from OAuth consent reloads the
+   * page, and a card that read a still-loading list as "not added" would offer
+   * Connect to the user who just authorized, creating a second server row.
+   */
+  server: McpServer | null | undefined;
   onAdded: (server: McpServer) => void;
+  /**
+   * The card's RESOLVED state, lifted so the wizard can tell an authorized
+   * connection from a row that merely exists.
+   */
+  onStateChange?: (connectionId: FeaturedConnectionId, state: FeaturedConnectionState) => void;
 }) {
-  const [state, setState] = useState<FeaturedConnectionState>(server ? "unknown" : "not-added");
+  const [state, setState] = useState<FeaturedConnectionState>(
+    server === null ? "not-added" : "unknown",
+  );
   const [toolCount, setToolCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
@@ -109,10 +123,23 @@ export function FeaturedConnectionCard({
   // In an effect, not during render — `resolve` calls the network and sets
   // state, and a render-phase call would fire again on every re-render.
   useEffect(() => {
-    if (!server || probedRef.current.has(server.id)) return;
+    // Still loading: stay "unknown" so the button reads Connect but cannot be
+    // pressed.
+    if (server === undefined) return;
+    if (server === null) {
+      // The list resolved with no row for this connection. Only leave the
+      // loading state — never clobber a state a click already moved us to.
+      setState((current) => (current === "unknown" ? "not-added" : current));
+      return;
+    }
+    if (probedRef.current.has(server.id)) return;
     probedRef.current.add(server.id);
     void resolve(server, false).catch(() => setState("needs-auth"));
   }, [server, resolve]);
+
+  useEffect(() => {
+    onStateChange?.(connection.id, state);
+  }, [connection.id, state, onStateChange]);
 
   return (
     <Card className="gap-3 p-4">

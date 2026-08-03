@@ -7,6 +7,7 @@ import {
   onboardingProviderOptions,
   onboardingStepPath,
   parseOnboardingStep,
+  resolveOnboardingStep,
   RECOMMENDED_ONBOARDING_PROVIDER,
   visibleOnboardingSteps,
 } from "./onboarding";
@@ -175,5 +176,26 @@ describe("onboardingStepPath", () => {
     for (const id of ["provider", "assistant", "empower", "install"] as const) {
       expect(parseOnboardingStep(new URL(onboardingStepPath(id), "https://x").search)).toBe(id);
     }
+  });
+});
+
+describe("resolveOnboardingStep", () => {
+  const all = visibleOnboardingSteps({ installed: false });
+  const installed = visibleOnboardingSteps({ installed: true });
+
+  it("keeps a step that is visible", () => {
+    expect(resolveOnboardingStep("empower", all)).toBe("empower");
+    expect(resolveOnboardingStep("install", all)).toBe("install");
+  });
+
+  it("falls back to the first visible step for a hidden one", () => {
+    // The installed PWA has no install step: keeping it would announce "Step 1
+    // of 3" over a card that renders nothing, and Done would go backwards.
+    expect(resolveOnboardingStep("install", installed)).toBe("provider");
+  });
+
+  it("falls back for null or undefined", () => {
+    expect(resolveOnboardingStep(null, all)).toBe("provider");
+    expect(resolveOnboardingStep(undefined, all)).toBe("provider");
   });
 });
