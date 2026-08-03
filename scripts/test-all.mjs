@@ -34,9 +34,25 @@ async function runStage(name, commands) {
   return statuses.every((status) => status === 0);
 }
 
-const workersPassed = await runStage("Worker integration", [
-  ["exec", "vitest", "run", "--project=integration-fast"],
-  ["exec", "vitest", "run", "--project=integration-isolated"],
+// The three workers-pool projects run one at a time on purpose. Each spins up
+// its own workerd pool, and running them concurrently peaks well past a small
+// dev box's RAM — the failure mode is an OOM SIGKILL that reads as a test
+// failure. Sequential is also no slower now that integration-shared imports the
+// module graph once instead of once per file.
+async function runStagesSequentially(names) {
+  for (const name of names) {
+    const passed = await runStage(`Worker integration: ${name}`, [
+      ["exec", "vitest", "run", `--project=${name}`],
+    ]);
+    if (!passed) return false;
+  }
+  return true;
+}
+
+const workersPassed = await runStagesSequentially([
+  "integration-fast",
+  "integration-shared",
+  "integration-isolated",
 ]);
 
 if (workersPassed) {
