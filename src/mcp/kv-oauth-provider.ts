@@ -12,6 +12,9 @@ import type {
   OAuthTokens,
 } from "./oauth-types";
 
+/** OAuth `client_name` sent during MCP dynamic client registration. */
+export const MCP_OAUTH_CLIENT_NAME = "Nadi";
+
 /**
  * KV-backed OAuth provider for MCP servers. Subclasses the SDK's
  * DurableObjectOAuthClientProvider (which already implements PKCE/state/redirect
@@ -39,12 +42,11 @@ import type {
 export class KvMcpOAuthProvider extends DurableObjectOAuthClientProvider {
   constructor(
     storage: DurableObjectStorage,
-    clientName: string,
     baseRedirectUrl: string,
     private readonly env: Env,
     private readonly resolveWorkspaceId: () => Promise<string | undefined>,
   ) {
-    super(storage, clientName, baseRedirectUrl);
+    super(storage, MCP_OAUTH_CLIENT_NAME, baseRedirectUrl);
   }
 
   private currentServerId(): string | undefined {
