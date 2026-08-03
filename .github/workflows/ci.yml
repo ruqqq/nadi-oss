@@ -54,8 +54,15 @@ jobs:
       - name: Build (web)
         run: pnpm run web:build
 
+      # These two steps must between them name every project in
+      # vitest.config.ts, or the unnamed ones silently stop running. Vitest only
+      # hard-errors on a project filter that matches nothing when NO other
+      # filter matches either; alongside a valid one it is silently dropped and
+      # the run still exits 0. A stale filter naming a long-gone project sat
+      # here doing nothing for exactly that reason.
       - name: Unit tests
-        run: pnpm exec vitest run --project=unit --project=web-unit --project=sdk-contract
+        run: pnpm exec vitest run --project=unit --project=web-unit
 
+      # Covers integration-fast, integration-shared and integration-isolated.
       - name: Integration tests
         run: pnpm run test:integration
