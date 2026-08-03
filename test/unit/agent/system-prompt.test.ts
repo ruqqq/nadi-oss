@@ -4,7 +4,7 @@ import { composeSystemPrompt } from "../../../src/agent/system-prompt";
 describe("composeSystemPrompt", () => {
   it("keeps the unassigned prompt text unchanged when no project context is provided", () => {
     expect(composeSystemPrompt({ systemPrompt: "You are Nadi." })).toBe(
-      "You are Nadi.\n\nAgent memory policy: Memories are durable across threads for this agent. Record a memory yourself, without being asked, when the user corrects you, states a preference or a constraint, settles on a way of working, or tells you something about their project, tools, or environment that will still be true next week. Do NOT record what the repository already states (code structure, git history, documented commands), anything that only matters inside this thread, or secrets, credentials, API keys, tokens, or passwords. Prefer `update_memory` over a near-duplicate `remember`, and use `forget_memory` when the user asks you to drop something or you learn a memory is wrong. Memories reflect what was true when written: verify one against the current code before you rely on it.",
+      "You are Nadi.\n\nAgent memory policy: Memories are durable across threads for this agent. Record a memory yourself, without being asked, when the user corrects you, states a preference or a constraint, settles on a way of working, or tells you something about their project, tools, or environment that will still be true next week. Prefer granular records: one discrete fact, preference, constraint, or workflow per memory — when the user shares several independent points, call `remember` once per point rather than bundling them. Do NOT record what the repository already states (code structure, git history, documented commands), anything that only matters inside this thread, or secrets, credentials, API keys, tokens, or passwords. Prefer `update_memory` over a near-duplicate `remember`, and use `forget_memory` when the user asks you to drop something or you learn a memory is wrong. Memories reflect what was true when written: verify one against the current code before you rely on it.",
     );
   });
 
@@ -82,6 +82,16 @@ describe("composeSystemPrompt", () => {
     expect(out).toContain("Do NOT record what the repository already states");
     expect(out).toContain("secrets, credentials, API keys, tokens, or passwords");
     expect(out).not.toContain("explicitly asks");
+  });
+
+  // Bundled multi-topic memories blunt the index hooks and block surgical
+  // update/forget. The policy must prefer one discrete point per record.
+  it("prefers granular memory records over bundled multi-topic dumps", () => {
+    const out = composeSystemPrompt({ systemPrompt: "You are Nadi." });
+
+    expect(out).toContain("Prefer granular records");
+    expect(out).toContain("one discrete fact, preference, constraint, or workflow per memory");
+    expect(out).toContain("once per point rather than bundling them");
   });
 
   it("lists the agent's memories so recall needs no search", () => {

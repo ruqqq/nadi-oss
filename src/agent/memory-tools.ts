@@ -24,11 +24,13 @@ export function createMemoryTools(input: { env: Env; threadId: string }): ToolSe
       // asks you to remember", which meant nothing was ever recorded proactively:
       // users don't ask. Name the triggers, and keep the exclusions loud.
       description:
-        "Store a durable memory for this agent. Call this yourself, without being asked, whenever the user corrects you, states a preference or constraint, settles on a way of working, or tells you something about their project, tools, or environment that will still be true next week. Do NOT store what the repository already states, details that only matter inside this thread, or secrets, credentials, tokens, and passwords. Check the memory index in your system prompt first: if a memory already covers this, call update_memory instead.",
+        "Store a durable memory for this agent. Call this yourself, without being asked, whenever the user corrects you, states a preference or constraint, settles on a way of working, or tells you something about their project, tools, or environment that will still be true next week. Prefer granular records: one discrete fact, preference, constraint, or workflow per call — when the user shares several independent points, call this once per point rather than bundling them. Do NOT store what the repository already states, details that only matter inside this thread, or secrets, credentials, tokens, and passwords. Check the memory index in your system prompt first: if a memory already covers this, call update_memory instead.",
       inputSchema: z.object({
         content: z
           .string()
-          .describe("Stable fact, preference, workflow, or project context to remember"),
+          .describe(
+            "One discrete stable fact, preference, workflow, or project context to remember",
+          ),
         title: z.string().optional().describe("Short label for the memory"),
         kind: memoryKindSchema.optional().describe("Memory category"),
       }),
