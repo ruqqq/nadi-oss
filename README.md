@@ -1,30 +1,28 @@
 # Nadi
 
-Mobile-first agentic chat you host yourself. Bring your own model keys; the
-agent gets a real sandbox, your MCP servers, and a schedule.
+One conversation that does the whole job. The thread that reads your
+spreadsheet can run your code, remember what it found, and do it again every
+Monday — on any model, on your own key.
 
 ![Nadi's web UI: a support thread where the agent reads the ticket queue, finds the cause, drafts the customer note and schedules it for Monday — beside a sidebar of threads across Customers, Finance, Growth, Ops and Exec](./docs/screenshots/web-ui-hero.png)
 
 ## What is Nadi?
 
-Most agent products ask you to trust someone else's cloud with your keys, your
-code, and your conversations. Nadi is a single Cloudflare Worker you deploy to
-your own account. Your D1 database, your R2 bucket, your provider keys, your
-sandbox credentials — nothing routes through a vendor in the middle.
+Nadi owns what makes an agent useful — its memory, the skills it writes, the
+schedules it keeps, the machine it works in — which leaves the model a swappable
+part. One thread does the whole job: no second product to open, nothing to
+re-upload.
 
-It is built for a phone first. Threads survive backgrounding, work continues
-while the tab is closed, and the app keeps working read-only when the network
-does not. An agent that only works at a desk is not much use when the thing you
-need it to do arrives at 11pm.
+Built for a phone first. Threads survive backgrounding, work carries on while the
+tab is closed, and history stays readable offline.
 
 <p align="center">
   <img src="./docs/screenshots/mobile-chats.png" width="43%" alt="The chat drawer on a phone: threads across Customers, Finance, Growth, Ops and Exec, with a nightly automaton among them" />
   <img src="./docs/screenshots/mobile-thread.png" width="43%" alt="The same support thread on a phone: the agent's findings, its tool activity, and the composer" />
 </p>
 
-Model providers are pluggable — Anthropic, OpenAI, OpenRouter, Workers AI,
-OpenCode Zen — and the model is a per-thread snapshot, so changing your default
-never rewrites the past.
+Nine model providers or any endpoint you name, on your own key, changeable
+mid-thread. Apache-2.0, running as a single Cloudflare Worker on your account.
 
 ## Features
 
