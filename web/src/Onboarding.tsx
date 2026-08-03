@@ -8,6 +8,7 @@ import { OfflineBanner } from "./components/OfflineBanner";
 import { Input } from "./components/ui/input";
 import { Label } from "./components/ui/label";
 import { ModelCombobox } from "./components/settings/ModelCombobox";
+import { InstallStep } from "./components/onboarding/InstallStep";
 import {
   Select,
   SelectContent,
@@ -746,6 +747,8 @@ export function Onboarding({
                 </div>
               </form>
             </Card>
+          ) : step === "install" ? (
+            <InstallStep onDone={advance} />
           ) : null}
         </div>
       </main>

@@ -20,15 +20,20 @@ export type InstallPlatform =
 export function classifyInstallPlatform(input: {
   userAgent: string;
   standalone: boolean;
+  maxTouchPoints: number;
 }): InstallPlatform {
   if (input.standalone) return "installed";
   const ua = input.userAgent;
 
   if (/iPad|iPhone|iPod/.test(ua)) {
-    // CriOS = Chrome, FxiOS = Firefox, EdgiOS = Edge. Anything else on iOS is
-    // Safari or close enough to share its Share-button flow.
-    return /CriOS|FxiOS|EdgiOS|OPT\//.test(ua) ? "ios-other" : "ios-safari";
+    // CriOS = Chrome, FxiOS = Firefox, EdgiOS = Edge, OPiOS = Opera. Anything
+    // else on iOS is Safari or close enough to share its Share-button flow.
+    return /CriOS|FxiOS|EdgiOS|OPiOS/.test(ua) ? "ios-other" : "ios-safari";
   }
+
+  // Stock iPadOS 13+ Safari sends a desktop Mac UA by default (no iPad token),
+  // distinguishable only by touch support — a real Mac reports 0 touch points.
+  if (/Macintosh/.test(ua) && input.maxTouchPoints > 0) return "ios-safari";
 
   // Firefox and desktop Safari have no install prompt; Chromium forks do.
   const chromium = /Chrome\/|Chromium\/|Edg\//.test(ua) && !/OPR\//.test(ua);
@@ -41,5 +46,6 @@ export function detectInstallPlatform(): InstallPlatform {
   return classifyInstallPlatform({
     userAgent: navigator.userAgent,
     standalone: typeof window.matchMedia === "function" && isStandaloneDisplay(),
+    maxTouchPoints: navigator.maxTouchPoints,
   });
 }

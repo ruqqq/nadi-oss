@@ -23,6 +23,7 @@ import { AppToaster } from "./components/ui/sonner";
 import { ServiceWorkerUpdateToast } from "./components/ServiceWorkerUpdateToast";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { installEdgeSwipeGuard } from "./lib/edge-swipe-guard";
+import { startInstallPromptCapture } from "./lib/install-prompt";
 import { BOOTSTRAP_CACHE_KEY, BOOTSTRAP_CACHE_VERSION } from "./lib/bootstrap-cache";
 import { worker } from "./mocks/browser";
 import { seedStore } from "./mocks/store";
@@ -56,6 +57,11 @@ Object.defineProperty(navigator, "onLine", {
 });
 
 installEdgeSwipeGuard();
+
+// Mirrors main.tsx: `beforeinstallprompt` fires once, early, so the mock app
+// needs the same capture wired up for the onboarding install step to be
+// exercisable at all (a synthetic dispatch in visual QA is otherwise inert).
+startInstallPromptCapture();
 
 const store = seedStore(params.get("scenario") ?? "default");
 
