@@ -133,9 +133,9 @@ export function ChatLog({
    * the only place thinking is actually shown, since MessageRow is always
    * passed `showReasoning={false}`.
    *
-   * Until effort became its own setting, `showReasoning: false` also stopped the
-   * model thinking at the provider, so nothing ever reached this component and
-   * the flag appeared to work. It never did.
+   * Source of truth is the workspace agent setting (`settings.agent.showReasoning`),
+   * not the per-thread snapshot. Effort decides whether the model thinks; this
+   * flag only decides whether that thinking is shown.
    */
   showReasoning?: boolean;
   error?: Error;

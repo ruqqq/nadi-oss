@@ -43,11 +43,10 @@ function renderLog(showReasoning: boolean | undefined) {
 }
 
 describe("ChatLog reasoning visibility", () => {
-  it("hides the live thinking block when the thread has reasoning display off", () => {
+  it("hides the live thinking block when reasoning display is off", () => {
     // This is the ONLY place thinking is rendered — MessageRow is always passed
-    // showReasoning={false}. Before effort became its own setting, the flag also
-    // stopped the model thinking at the provider, so nothing reached this
-    // component and the flag only appeared to work.
+    // showReasoning={false}. The flag is the workspace agent preference (not the
+    // per-thread snapshot): callers pass settings.agent.showReasoning.
     renderLog(false);
     expect(screen.queryByText(THINKING_TEXT)).not.toBeInTheDocument();
     // The answer itself must still render — this hides thinking, not the turn.

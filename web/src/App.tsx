@@ -1649,7 +1649,7 @@ export function ChatApp({
   const [newChatModelInputModalities, setNewChatModelInputModalities] = useState(
     newChatSeed.modelInputModalities,
   );
-  const [newChatShowReasoning, setNewChatShowReasoning] = useState(newChatSeed.showReasoning);
+  const [agentShowReasoning, setAgentShowReasoning] = useState(newChatSeed.showReasoning);
   const [newChatReasoningEffort, setNewChatReasoningEffort] = useState(newChatSeed.reasoningEffort);
   const [newChatModelSupportsReasoning, setNewChatModelSupportsReasoning] = useState(
     newChatSeed.modelSupportsReasoning,
@@ -1682,7 +1682,7 @@ export function ChatApp({
         const state = deriveNewChatModelState(settings);
         setNewChatProviders(state.providers);
         setNewChatAnyUsable(state.anyUsableProvider);
-        setNewChatShowReasoning(state.showReasoning);
+        setAgentShowReasoning(state.showReasoning);
         setNewChatReasoningEffort(state.reasoningEffort);
 
         // The provider/model the user picked for the chat they're composing is
@@ -2299,7 +2299,7 @@ export function ChatApp({
         provider: selectedProvider,
         model: newChatModel,
         modelInputModalities: newChatModelInputModalities,
-        showReasoning: newChatShowReasoning,
+        showReasoning: agentShowReasoning,
         reasoningEffort: newChatReasoningEffort,
         modelSupportsReasoning: newChatModelSupportsReasoning,
         ...(selectedProjectId ? { projectId: selectedProjectId } : {}),
@@ -2354,7 +2354,7 @@ export function ChatApp({
       newChatModel,
       newChatModelInputModalities,
       newChatProvider,
-      newChatShowReasoning,
+      agentShowReasoning,
       newChatReasoningEffort,
       newChatModelSupportsReasoning,
       projects,
@@ -3125,6 +3125,7 @@ export function ChatApp({
                 key={activeThread.threadId}
                 thread={activeThread}
                 projects={projects}
+                showReasoning={agentShowReasoning}
                 leading={threadNav}
                 onDeleteThread={deleteThread}
               />
@@ -3145,6 +3146,7 @@ export function ChatApp({
                 historyReloadNonce={threadReloadNonce}
                 projects={projects}
                 providers={newChatProviders}
+                showReasoning={agentShowReasoning}
                 leading={threadNav}
                 pendingFirstMessage={pendingFirstMessage}
                 onRetryFirstMessage={retryFirstMessage}
@@ -3203,7 +3205,7 @@ export function ChatApp({
                   provider: newChatProvider,
                   model: newChatModel,
                   modelInputModalities: newChatModelInputModalities,
-                  showReasoning: newChatShowReasoning,
+                  showReasoning: agentShowReasoning,
                   reasoningEffort: newChatReasoningEffort,
                   modelSupportsReasoning: newChatModelSupportsReasoning,
                   modelReasoningControls: newChatReasoningControls,
@@ -3221,7 +3223,7 @@ export function ChatApp({
                   provider: newChatProvider,
                   model: newChatModel,
                   modelInputModalities: newChatModelInputModalities,
-                  showReasoning: newChatShowReasoning,
+                  showReasoning: agentShowReasoning,
                   reasoningEffort: newChatReasoningEffort,
                   modelSupportsReasoning: newChatModelSupportsReasoning,
                   modelReasoningControls: newChatReasoningControls,
@@ -3238,7 +3240,7 @@ export function ChatApp({
                   provider: newChatProvider,
                   model: newChatModel,
                   modelInputModalities: newChatModelInputModalities,
-                  showReasoning: newChatShowReasoning,
+                  showReasoning: agentShowReasoning,
                   reasoningEffort: newChatReasoningEffort,
                   modelSupportsReasoning: newChatModelSupportsReasoning,
                   modelReasoningControls: newChatReasoningControls,
@@ -3999,11 +4001,14 @@ function PendingNewThreadView({
 function LegacyArchiveThread({
   thread,
   projects,
+  showReasoning = true,
   leading,
   onDeleteThread,
 }: {
   thread: ThreadSummary;
   projects: ProjectSummary[];
+  /** Workspace agent display preference — same source as live threads. */
+  showReasoning?: boolean;
   leading: React.ReactNode;
   onDeleteThread?: (threadId: string) => void;
 }) {
@@ -4098,6 +4103,7 @@ function LegacyArchiveThread({
               readOnly
               error={error}
               servers={toolServers}
+              showReasoning={showReasoning}
               emptyTitle="No archived messages"
               emptyDescription="This legacy thread has no persisted messages."
             />
@@ -4203,6 +4209,11 @@ interface ThreadChatProps {
   projects: ProjectSummary[];
   /** Used to resolve per-model effort options for the composer dial. */
   providers?: ProviderSettingsView[];
+  /**
+   * Workspace agent display preference — not the thread snapshot. Thinking
+   * effort is per-thread; whether reasoning text is shown follows Settings.
+   */
+  showReasoning?: boolean;
   leading: React.ReactNode;
   pendingFirstMessage?: PendingFirstMessageState | null;
   onRetryFirstMessage?: () => void;
@@ -4312,6 +4323,7 @@ function ThreadChat({
   historyReloadNonce,
   projects,
   providers = [],
+  showReasoning = true,
   leading,
   pendingFirstMessage,
   onRetryFirstMessage,
@@ -5159,7 +5171,7 @@ function ThreadChat({
             compactionNotice={compactionNotice}
             error={error}
             servers={toolServers}
-            showReasoning={thread.showReasoning}
+            showReasoning={showReasoning}
             subagentRuns={subagentRuns}
             onFeedbackDraftSubmit={feedbackMode ? submitFeedbackDraftFromCard : undefined}
             onFeedbackDraftEdit={feedbackMode ? keepEditingFeedbackDraft : undefined}
