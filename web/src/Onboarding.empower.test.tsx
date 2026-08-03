@@ -92,6 +92,27 @@ describe("Onboarding empower step", () => {
     expect(localStorage.getItem(AUTOMATON_NUDGE_KEY)).not.toMatch(/calendar/i);
   });
 
+  // The reported bug: Composio finishing OAuth means the PLATFORM is
+  // authorized, not that any calendar account is attached inside it. A user
+  // can connect Gmail only and finish the wizard with no calendar reachable
+  // at all — the nudge must not promise one.
+  it("REGRESSION does not promise calendar data when Composio is connected but no calendar tool exists", async () => {
+    mocks.listMcpServers.mockResolvedValue([composio]);
+    mocks.listMcpServerTools.mockResolvedValue({
+      needsAuth: false,
+      tools: [{ name: "gmail_send_email", description: null, policy: "auto_allow" as const }],
+    });
+    renderWizard({ initialStep: "empower" });
+
+    await screen.findByText(/Connected · 1 tool/);
+    await userEvent.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    await waitFor(() => {
+      expect(localStorage.getItem(AUTOMATON_NUDGE_KEY)).not.toBeNull();
+    });
+    expect(localStorage.getItem(AUTOMATON_NUDGE_KEY)).not.toMatch(/calendar/i);
+  });
+
   it("promises calendar data once Composio is authorized", async () => {
     mocks.listMcpServers.mockResolvedValue([composio]);
     mocks.listMcpServerTools.mockResolvedValue({

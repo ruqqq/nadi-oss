@@ -103,4 +103,52 @@ describe("EmpowerStep", () => {
       expect(onConnectedChange).toHaveBeenLastCalledWith(["markdump"]);
     });
   });
+
+  // The connection being authorized is not enough — the tool that resolved
+  // has to actually be calendar-named. This is the lift path for the
+  // reported bug: Composio (the platform) authorizing is not a calendar.
+  it("does not report calendarConnected when authorized with no calendar-named tool", async () => {
+    mocks.listMcpServers.mockResolvedValue([markdump]);
+    mocks.listMcpServerTools.mockResolvedValue({
+      needsAuth: false,
+      tools: [{ name: "gmail_send_email", description: null, policy: "auto_allow" as const }],
+    });
+    const onCalendarConnectedChange = vi.fn();
+
+    render(
+      <EmpowerStep
+        exaCard={null}
+        onContinue={() => {}}
+        onCalendarConnectedChange={onCalendarConnectedChange}
+      />,
+    );
+
+    await screen.findByText(/Connected · 1 tool/);
+    await waitFor(() => {
+      expect(onCalendarConnectedChange).toHaveBeenCalled();
+    });
+    expect(onCalendarConnectedChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("reports calendarConnected once a calendar-named tool resolves", async () => {
+    mocks.listMcpServers.mockResolvedValue([markdump]);
+    mocks.listMcpServerTools.mockResolvedValue({
+      needsAuth: false,
+      tools: [{ name: "GOOGLECALENDAR_FIND_EVENT", description: null, policy: "auto_allow" as const }],
+    });
+    const onCalendarConnectedChange = vi.fn();
+
+    render(
+      <EmpowerStep
+        exaCard={null}
+        onContinue={() => {}}
+        onCalendarConnectedChange={onCalendarConnectedChange}
+      />,
+    );
+
+    await screen.findByText(/Connected · 1 tool/);
+    await waitFor(() => {
+      expect(onCalendarConnectedChange).toHaveBeenLastCalledWith(true);
+    });
+  });
 });

@@ -36,14 +36,21 @@ export function FeaturedConnectionCard({
   onAdded: (server: McpServer) => void;
   /**
    * The card's RESOLVED state, lifted so the wizard can tell an authorized
-   * connection from a row that merely exists.
+   * connection from a row that merely exists — plus the tool names that
+   * resolved with it, so the wizard can tell what capabilities (e.g. a
+   * calendar) are actually reachable rather than assuming from the connection
+   * alone. Empty whenever the state isn't a freshly-resolved "connected".
    */
-  onStateChange?: (connectionId: FeaturedConnectionId, state: FeaturedConnectionState) => void;
+  onStateChange?: (
+    connectionId: FeaturedConnectionId,
+    state: FeaturedConnectionState,
+    toolNames: string[],
+  ) => void;
 }) {
   const [state, setState] = useState<FeaturedConnectionState>(
     server === null ? "not-added" : "unknown",
   );
-  const [toolCount, setToolCount] = useState(0);
+  const [toolNames, setToolNames] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   /** Reads the server's live state; starts consent when it needs authorizing. */
@@ -51,7 +58,7 @@ export function FeaturedConnectionCard({
     async (target: McpServer, startAuth: boolean) => {
       const { needsAuth, tools } = await listMcpServerTools(target.id);
       if (!needsAuth) {
-        setToolCount(tools.length);
+        setToolNames(tools.map((t) => t.name));
         setState("connected");
         return;
       }
@@ -70,7 +77,7 @@ export function FeaturedConnectionCard({
       }
       // Already authorized server-side (no OAuth, or credentials cached).
       const after = await listMcpServerTools(target.id);
-      setToolCount(after.tools.length);
+      setToolNames(after.tools.map((t) => t.name));
       setState(after.needsAuth ? "needs-auth" : "connected");
     },
     [],
@@ -138,8 +145,8 @@ export function FeaturedConnectionCard({
   }, [server, resolve]);
 
   useEffect(() => {
-    onStateChange?.(connection.id, state);
-  }, [connection.id, state, onStateChange]);
+    onStateChange?.(connection.id, state, toolNames);
+  }, [connection.id, state, toolNames, onStateChange]);
 
   return (
     <Card className="gap-3 p-4">
@@ -155,7 +162,7 @@ export function FeaturedConnectionCard({
         {state === "connected" ? (
           <span className="flex shrink-0 items-center gap-1.5 text-approve text-sm">
             <Check aria-hidden />
-            Connected · {toolCount} {toolCount === 1 ? "tool" : "tools"}
+            Connected · {toolNames.length} {toolNames.length === 1 ? "tool" : "tools"}
           </span>
         ) : (
           <Button

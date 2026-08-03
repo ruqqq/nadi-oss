@@ -1,15 +1,30 @@
 export const AUTOMATON_NUDGE_KEY = "nadi.onboarding.automatonNudge";
 
 /**
- * The prompt seeded into the composer after onboarding. It is tailored to what
- * the user actually connected: a briefing that asks for calendar data is a
- * broken promise if Composio was skipped, and the agent would have to say so on
- * the very first message.
+ * The prompt seeded into the composer after onboarding. It is tailored to
+ * whether a calendar tool actually resolved during setup — Composio finishing
+ * OAuth only means the integration platform itself is authorized; the user
+ * still connects individual accounts (Gmail, Calendar, Drive) inside it
+ * separately, and can finish the wizard with Composio authorized and no
+ * calendar attached at all. A briefing that promises calendar data in that
+ * case is a broken promise the agent has to apologize for on its first reply.
  */
-export function automatonNudgePrompt(input: { composioConnected: boolean }): string {
-  return input.composioConnected
+export function automatonNudgePrompt(input: { calendarConnected: boolean }): string {
+  return input.calendarConnected
     ? "Every weekday at 8am, send me a short briefing: my calendar for the day and anything I should know."
     : "Every weekday at 8am, ask me what my top three priorities are for the day.";
+}
+
+/**
+ * Loose, anchored substring match against "calendar". Vendor tool ids carry a
+ * service prefix (`GOOGLECALENDAR_FIND_EVENT`, `calendar_list_events`), so an
+ * exact-name allowlist would miss real tools. The failure direction is what
+ * matters: a missed match only costs the safe, service-agnostic prompt, while
+ * a false match promises calendar data that may not exist — so this stays
+ * loose-but-anchored on the word itself rather than enumerating vendor ids.
+ */
+export function hasCalendarTool(toolNames: readonly string[]): boolean {
+  return toolNames.some((name) => name.toLowerCase().includes("calendar"));
 }
 
 type NudgeStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
@@ -17,7 +32,7 @@ type NudgeStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 /** One-shot: armed when the wizard finishes, consumed by the next new chat. */
 export function armAutomatonNudge(
   storage: NudgeStorage,
-  input: { composioConnected: boolean },
+  input: { calendarConnected: boolean },
 ): void {
   storage.setItem(AUTOMATON_NUDGE_KEY, automatonNudgePrompt(input));
 }
