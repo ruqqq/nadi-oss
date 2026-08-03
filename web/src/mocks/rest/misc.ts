@@ -8,6 +8,7 @@
  */
 
 import { http, HttpResponse } from "msw";
+import { FEATURED_CONNECTIONS } from "../../lib/featured-connections";
 import type { McpServer, ToolPolicy } from "../../mcp-api";
 import { getStore } from "../store";
 import {
@@ -99,6 +100,11 @@ const mcpHandlers = [
       createdAt: Date.now(),
     };
     store.mcpServers.push(server);
+    // Both featured connections are OAuth servers, so a freshly added one comes
+    // back needing authorization — that is the state the empower step renders.
+    if (FEATURED_CONNECTIONS.some((c) => c.url === server.url)) {
+      store.mcpNeedsAuth[server.id] = true;
+    }
     return HttpResponse.json({ server }, { status: 201 });
   }),
   http.patch("/api/mcp/servers/:serverId", async ({ params, request }) => {
@@ -117,15 +123,32 @@ const mcpHandlers = [
     const id = pathParam(params, "serverId");
     store.mcpServers = store.mcpServers.filter((s) => s.id !== id);
     delete store.mcpTools[id];
+    delete store.mcpNeedsAuth[id];
     return HttpResponse.json({ ok: true });
   }),
-  http.get("/api/mcp/servers/:serverId/tools", ({ params }) =>
-    HttpResponse.json({
-      needsAuth: false,
-      tools: getStore().mcpTools[pathParam(params, "serverId")] ?? [],
-    }),
-  ),
-  http.post("/api/mcp/servers/:serverId/authorize", () => HttpResponse.json({ ready: true })),
+  http.get("/api/mcp/servers/:serverId/tools", ({ params }) => {
+    const id = pathParam(params, "serverId");
+    const store = getStore();
+    const needsAuth = store.mcpNeedsAuth[id] === true;
+    return HttpResponse.json({
+      needsAuth,
+      // A server that needs authorization has not been introspected yet, so it
+      // reports no tools — returning tools alongside needsAuth would let the UI
+      // render a state the real server cannot produce.
+      tools: needsAuth ? [] : (store.mcpTools[id] ?? []),
+    });
+  }),
+  http.post("/api/mcp/servers/:serverId/authorize", ({ params }) => {
+    const store = getStore();
+    const id = pathParam(params, "serverId");
+    if (store.mcpNeedsAuth[id]) {
+      // Consent completing is modelled as the authorization clearing; the mock
+      // cannot redirect, so it reports ready and the UI re-reads the tools.
+      store.mcpNeedsAuth[id] = false;
+      return HttpResponse.json({ ready: true });
+    }
+    return HttpResponse.json({ ready: true });
+  }),
   http.put("/api/mcp/servers/:serverId/policies", async ({ params, request }) => {
     const store = getStore();
     const id = pathParam(params, "serverId");
