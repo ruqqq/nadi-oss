@@ -147,7 +147,7 @@ async function insertThread(input: {
       input.workspaceId,
       input.agentId,
       input.id,
-      input.runtime ?? "legacy",
+      input.runtime ?? "think",
       input.kind ?? "regular",
       input.archivedAt ?? null,
       input.searchIndexedThrough ?? null,
