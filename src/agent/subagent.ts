@@ -1,7 +1,7 @@
 import { getAgentByName } from "agents";
 import type { TurnConfig, TurnContext } from "@cloudflare/think";
 import { ThinkThreadAgent, type SubagentContext } from "./think-thread-agent";
-import { resolveThreadRuntimeConfigForAgent } from "./thread-agent";
+import { resolveThreadRuntimeConfigForAgent } from "./thread-agent-config";
 import type { BackendReference } from "../compute/backend";
 import type { UsageSource } from "./usage-recorder";
 

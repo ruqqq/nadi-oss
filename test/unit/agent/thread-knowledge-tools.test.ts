@@ -27,7 +27,7 @@ vi.mock("../../../src/thread-knowledge/service", () => ({
   ThreadKnowledgeService: serviceCtor,
 }));
 
-vi.mock("../../../src/agent/thread-agent", () => ({
+vi.mock("../../../src/agent/thread-agent-config", () => ({
   resolveThreadRuntimeConfigForAgent: resolveRuntimeConfig,
 }));
 

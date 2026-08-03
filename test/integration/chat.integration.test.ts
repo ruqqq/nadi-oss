@@ -1,7 +1,7 @@
-import { env, runInDurableObject } from "cloudflare:test";
+import { env } from "cloudflare:test";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeAll, describe, expect, it } from "vitest";
-import type { ThreadAgent } from "../../src/agent/thread-agent";
+import { resolveThreadRuntimeConfigForAgent } from "../../src/agent/thread-agent-config";
 import { WorkbenchRepository } from "../../src/db/repositories/workbenches";
 import { ProjectRepository } from "../../src/db/repositories/projects";
 import { ThreadRepositorySnapshotRepository } from "../../src/db/repositories/thread-repository-snapshots";
@@ -97,39 +97,15 @@ beforeAll(async () => {
   await seedProjectRuntimeContext();
 });
 
-describe("ThreadAgent legacy runtime stub", () => {
-  it("does not run a model turn for legacy threads", async () => {
-    const stub = env.THREAD_AGENT.get(env.THREAD_AGENT.idFromName("legacy-stub-thread"));
-    const result = await runInDurableObject(stub, async (instance: ThreadAgent) => {
-      const beforeMessages = instance.messages.length;
-      const response = await instance.onChatMessage(async () => {});
-      return {
-        status: response?.status,
-        body: response ? ((await response.json()) as { error?: string; message?: string }) : null,
-        beforeMessages,
-        afterMessages: instance.messages.length,
-      };
-    });
+describe("thread runtime config", () => {
+  it("resolves registry config for an existing thread row", async () => {
+    const config = await resolveThreadRuntimeConfigForAgent(env, "legacy-stub-thread");
 
-    expect(result.status).toBe(410);
-    expect(result.body?.error).toBe("legacy_thread_runtime_unavailable");
-    expect(result.body?.message).toContain("Start a new Think thread");
-    expect(result.afterMessages).toBe(result.beforeMessages);
-  });
-
-  it("still resolves registry config for existing legacy rows", async () => {
-    const stub = env.THREAD_AGENT.get(env.THREAD_AGENT.idFromName("legacy-stub-thread"));
-
-    const result = await runInDurableObject(stub, async (instance: ThreadAgent) => {
-      const config = await instance.resolveRuntimeConfigForTest();
-      return {
-        workspaceId: config.workspaceId,
-        agentId: config.agentId,
-        provider: config.modelConfig.provider,
-      };
-    });
-
-    expect(result).toMatchObject({
+    expect({
+      workspaceId: config?.workspaceId,
+      agentId: config?.agentId,
+      provider: config?.modelConfig.provider,
+    }).toMatchObject({
       workspaceId: "workspace-test",
       agentId: "agent-workspace-test",
       provider: "mock",
@@ -137,25 +113,15 @@ describe("ThreadAgent legacy runtime stub", () => {
   });
 
   it("returns no project prompt context for unassigned threads", async () => {
-    const stub = env.THREAD_AGENT.get(env.THREAD_AGENT.idFromName("legacy-unassigned-runtime"));
+    const config = await resolveThreadRuntimeConfigForAgent(env, "legacy-unassigned-runtime");
 
-    const result = await runInDurableObject(stub, async (instance: ThreadAgent) => {
-      const config = await instance.resolveRuntimeConfigForTest();
-      return config.projectContext;
-    });
-
-    expect(result).toBeUndefined();
+    expect(config?.projectContext).toBeUndefined();
   });
 
   it("returns structured project prompt context for assigned threads", async () => {
-    const stub = env.THREAD_AGENT.get(env.THREAD_AGENT.idFromName("legacy-project-runtime"));
+    const config = await resolveThreadRuntimeConfigForAgent(env, "legacy-project-runtime");
 
-    const result = await runInDurableObject(stub, async (instance: ThreadAgent) => {
-      const config = await instance.resolveRuntimeConfigForTest();
-      return config.projectContext;
-    });
-
-    expect(result).toEqual({
+    expect(config?.projectContext).toEqual({
       name: "Nadi",
       description: "Main app",
       instructions: "Prefer focused tests.",

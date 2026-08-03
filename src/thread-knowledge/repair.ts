@@ -7,6 +7,7 @@ import {
   reconcileThreadSearchProjection,
   reconcileThreadSearchProjectionFromMessages,
 } from "./projector";
+import { hasLiveTranscript } from "../agent/thread-runtime";
 import { log } from "../log";
 
 export const SEARCH_REPAIR_BATCH = 10;
@@ -39,7 +40,12 @@ export async function repairStaleThreadSearchProjections(
         continue;
       }
 
-      if (thread.archivedAt === null) {
+      // `hasLiveTranscript`, not `archivedAt`, decides the source. A retired-runtime
+      // row is unarchived but has no DO to read, and it MUST still take the D1 path:
+      // a repair that merely skips never advances the projection checkpoint, so the
+      // row stays stale, stays oldest-first, and eats a batch slot on every run
+      // forever — the same starvation `recordRepairFailure` exists to prevent.
+      if (hasLiveTranscript(thread)) {
         await reconcileThreadSearchProjection(env, thread.id);
       } else {
         const messages = await new ArchivedMessageRepository(registryDb(env)).listForThread(

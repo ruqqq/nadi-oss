@@ -227,9 +227,10 @@ function toStructuredError(error: unknown, operation: Operation): ThreadKnowledg
 }
 
 async function defaultScope(env: Env, threadId: string): Promise<ThreadKnowledgeScope> {
-  // Deferred: thread-agent imports the agents runtime, which is not safe to load
-  // in every plain-node unit test. Tool execution happens in Workers/prod paths.
-  const { resolveThreadRuntimeConfigForAgent } = await import("./thread-agent");
+  // Deferred: thread-agent-config pulls the provider/model factory graph, which is
+  // not safe to load in every plain-node unit test. Tool execution happens in
+  // Workers/prod paths.
+  const { resolveThreadRuntimeConfigForAgent } = await import("./thread-agent-config");
   const config = await resolveThreadRuntimeConfigForAgent(env, threadId);
   if (!config) throw new ThreadKnowledgeToolError("not_found", "Thread not found.");
   return { workspaceId: config.workspaceId, callerThreadId: threadId };

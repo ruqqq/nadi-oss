@@ -39,7 +39,7 @@ export interface DetailedThreadHistory {
  * which is exactly what makes offline history tractable: a cache hit here makes
  * the history load succeed offline with no change to useAgentChat.
  *
- * The three route shapes (archived / think / legacy) are normalized to one
+ * Both route shapes (archived / think) are normalized to one
  * message array here, so the cache stores parsed messages and never learns
  * which route answered.
  *

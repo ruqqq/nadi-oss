@@ -14,7 +14,7 @@
  */
 import { env, runInDurableObject } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
-import type { ThreadAgentV2 } from "../../src/agent/thread-agent";
+import type { ThinkThreadAgent } from "../../src/agent/think-thread-agent";
 import { createComputeTools, type ComputeToolHostDeps } from "../../src/agent/compute-tools";
 import { FakeComputeBackend } from "../../src/compute/backends/fake";
 import type { BackendReference } from "../../src/compute/backend";
@@ -23,7 +23,7 @@ import { applyRegistryTestSchema, seedRegistryThread } from "./helpers/registry"
 
 const NOW = 1_800_000_000_000;
 
-function storageOf(agent: ThreadAgentV2): DurableObjectStorage {
+function storageOf(agent: ThinkThreadAgent): DurableObjectStorage {
   return (agent as unknown as { ctx: { storage: DurableObjectStorage } }).ctx.storage;
 }
 
@@ -77,8 +77,8 @@ describe("createComputeTools confirm_workbench_switch attached-runtime gating", 
     });
     await seedComputeEnabledWorkspace(workspaceId);
 
-    const stub = env.THREAD_AGENT.get(env.THREAD_AGENT.idFromName(threadId));
-    await runInDurableObject(stub, async (agent: ThreadAgentV2) => {
+    const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
+    await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
       const storage = storageOf(agent);
       const tools = await createComputeTools(baseDeps(threadId, workspaceId, agentId, storage));
       expect(tools.confirm_workbench_switch).toBeDefined();
@@ -99,8 +99,8 @@ describe("createComputeTools confirm_workbench_switch attached-runtime gating", 
       payload: { containerId: "container-gating-subagent" },
     };
 
-    const stub = env.THREAD_AGENT.get(env.THREAD_AGENT.idFromName(threadId));
-    await runInDurableObject(stub, async (agent: ThreadAgentV2) => {
+    const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
+    await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
       const storage = storageOf(agent);
       const tools = await createComputeTools(
         baseDeps(threadId, workspaceId, agentId, storage, attachedRuntime),

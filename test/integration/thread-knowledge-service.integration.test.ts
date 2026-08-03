@@ -134,7 +134,7 @@ async function insertThread(input: {
       input.agentId,
       input.projectId ?? null,
       input.title,
-      input.runtime ?? "legacy",
+      input.runtime ?? "think",
       input.source ?? "manual",
       input.source === "automaton" ? `automaton-${input.id}` : null,
       input.source === "automaton" ? `run-${input.id}` : null,
@@ -752,10 +752,7 @@ describe("ThreadKnowledgeService search_threads/read_thread/grep_thread", () => 
       order: "chronological",
       limit: 1,
     });
-    expect(activeTranscriptRpcMock).toHaveBeenCalledWith(env, {
-      id: seeded.ids.activeA,
-      runtime: "legacy",
-    });
+    expect(activeTranscriptRpcMock).toHaveBeenCalledWith(env, { id: seeded.ids.activeA });
 
     const grep = expectOk<GrepThreadResult>(
       await service.grepThread({ threadId: seeded.ids.activeA, pattern: "source" }),

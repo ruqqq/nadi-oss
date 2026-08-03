@@ -53,7 +53,10 @@ import { backgroundWorkEnabled } from "../flags";
 import { buildModel } from "../providers/model-factory";
 import { invalidatablePromiseCache } from "./promise-cache";
 import { chatErrorForClient, serializeErrorChain } from "../error-details";
-import { buildThreadModelForWorkspace, resolveThreadRuntimeConfigForAgent } from "./thread-agent";
+import {
+  buildThreadModelForWorkspace,
+  resolveThreadRuntimeConfigForAgent,
+} from "./thread-agent-config";
 import {
   AUTOMATON_OUTCOME_CONTRACT,
   AUTOMATON_OUTCOME_TOOL_NAME,

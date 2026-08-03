@@ -2,14 +2,14 @@
  * MCP policy keying integration tests.
  *
  * Verifies that getMcpToolPolicyMap keys policies by the SDK's namespaced
- * tool key (mcpToolKey), so wrapToolsWithPolicy lookups in ThreadAgent hit
+ * tool key (mcpToolKey), so wrapToolsWithPolicy lookups in the thread agent hit
  * correctly.
  *
  * Step 5 — live pin test decision:
  * A DO-level test that calls this.mcp.addMcpServer(..., { id }) and asserts
  * every getAITools() key equals mcpToolKey(id, toolName) is NOT included here.
- * The test harness has no connectable mock MCP server: mcp-approval.integration.test.ts
- * uses _testToolOverride to inject tools directly (bypassing the SDK's MCP client
+ * The test harness has no connectable mock MCP server; tests that need tools
+ * inject them directly via _testToolOverride (bypassing the SDK's MCP client
  * entirely), so getAITools() always returns an empty map in integration tests.
  * The live key format is covered by:
  *   1. The Task 1 spike (docs/superpowers/specs/2026-06-28-mcp-oauth-spike-findings.md),

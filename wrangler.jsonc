@@ -28,7 +28,6 @@
   },
   "durable_objects": {
     "bindings": [
-      { "name": "THREAD_AGENT", "class_name": "ThreadAgentV2" },
       { "name": "THINK_THREAD_AGENT", "class_name": "ThinkThreadAgent" },
       { "name": "WORKSPACE_MCP_AGENT", "class_name": "WorkspaceMcpAgent" },
       { "name": "USER_HUB", "class_name": "UserHub" },
@@ -78,6 +77,14 @@
       "new_sqlite_classes": ["NadiSandboxSmall", "NadiSandboxMedium"],
     },
     { "tag": "v8_voice_agent", "new_sqlite_classes": ["VoiceAgent"] },
+    // ThreadAgentV2 was the original chat runtime, superseded by ThinkThreadAgent.
+    // Every thread that ran on it was archived first — its transcript lives in D1
+    // `archived_message` — so deleting the class only reclaims storage that is no
+    // longer the source of truth for anything.
+    {
+      "tag": "v9_delete_thread_agent_v2_namespace",
+      "deleted_classes": ["ThreadAgentV2"],
+    },
   ],
   "d1_databases": [
     {

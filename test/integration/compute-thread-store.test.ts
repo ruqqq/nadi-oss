@@ -1,10 +1,10 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
-import type { ThreadAgentV2 } from "../../src/agent/thread-agent";
+import type { ThinkThreadAgent } from "../../src/agent/think-thread-agent";
 import { ThreadComputeStore } from "../../src/compute/thread-store";
 import { applyRegistryTestSchema, seedRegistryThread } from "./helpers/registry";
 
-function storageOf(agent: ThreadAgentV2): DurableObjectStorage {
+function storageOf(agent: ThinkThreadAgent): DurableObjectStorage {
   return (agent as unknown as { ctx: { storage: DurableObjectStorage } }).ctx.storage;
 }
 
@@ -97,10 +97,10 @@ describe("ThreadComputeStore (DO SQLite)", () => {
     };
 
     async function withStore(fn: (store: ThreadComputeStore) => void): Promise<void> {
-      const stub = env.THREAD_AGENT.get(
-        env.THREAD_AGENT.idFromName("thr_compute_store_generation"),
+      const stub = env.THINK_THREAD_AGENT.get(
+        env.THINK_THREAD_AGENT.idFromName("thr_compute_store_generation"),
       );
-      await runInDurableObject(stub, async (agent: ThreadAgentV2) => {
+      await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
         const store = new ThreadComputeStore(storageOf(agent));
         store.migrate();
         fn(store);
@@ -178,11 +178,11 @@ describe("ThreadComputeStore (DO SQLite)", () => {
   });
 
   it("snapshots provider config while compute exists and clears it when absent", async () => {
-    const stub = env.THREAD_AGENT.get(
-      env.THREAD_AGENT.idFromName("thr_compute_store_provider_config"),
+    const stub = env.THINK_THREAD_AGENT.get(
+      env.THINK_THREAD_AGENT.idFromName("thr_compute_store_provider_config"),
     );
 
-    await runInDurableObject(stub, async (agent: ThreadAgentV2) => {
+    await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
       const store = new ThreadComputeStore(storageOf(agent));
       store.migrate();
       const providerConfig = {
@@ -230,11 +230,11 @@ describe("ThreadComputeStore (DO SQLite)", () => {
   });
 
   it("persists the acquired host policy through recovery and clears it when absent", async () => {
-    const stub = env.THREAD_AGENT.get(
-      env.THREAD_AGENT.idFromName("thr_compute_store_allowed_hosts"),
+    const stub = env.THINK_THREAD_AGENT.get(
+      env.THINK_THREAD_AGENT.idFromName("thr_compute_store_allowed_hosts"),
     );
 
-    await runInDurableObject(stub, async (agent: ThreadAgentV2) => {
+    await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
       const store = new ThreadComputeStore(storageOf(agent));
       store.migrate();
       store.markAcquiring({
@@ -270,9 +270,11 @@ describe("ThreadComputeStore (DO SQLite)", () => {
   });
 
   it("backfills a ready legacy row into active compute state and reads only provider-neutral columns", async () => {
-    const stub = env.THREAD_AGENT.get(env.THREAD_AGENT.idFromName("thr_compute_store_ready"));
+    const stub = env.THINK_THREAD_AGENT.get(
+      env.THINK_THREAD_AGENT.idFromName("thr_compute_store_ready"),
+    );
 
-    await runInDurableObject(stub, async (agent: ThreadAgentV2) => {
+    await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
       const storage = storageOf(agent);
       createLegacyTables(storage);
       storage.sql.exec(
@@ -351,9 +353,11 @@ describe("ThreadComputeStore (DO SQLite)", () => {
   });
 
   it("backfills a suspended legacy row into recoverable compute state", async () => {
-    const stub = env.THREAD_AGENT.get(env.THREAD_AGENT.idFromName("thr_compute_store_suspended"));
+    const stub = env.THINK_THREAD_AGENT.get(
+      env.THINK_THREAD_AGENT.idFromName("thr_compute_store_suspended"),
+    );
 
-    await runInDurableObject(stub, async (agent: ThreadAgentV2) => {
+    await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
       const storage = storageOf(agent);
       createLegacyTables(storage);
       storage.sql.exec(
@@ -405,9 +409,11 @@ describe("ThreadComputeStore (DO SQLite)", () => {
   });
 
   it("eagerly backfills provider-neutral state from the legacy store migration", async () => {
-    const stub = env.THREAD_AGENT.get(env.THREAD_AGENT.idFromName("thr_compute_store_eager"));
+    const stub = env.THINK_THREAD_AGENT.get(
+      env.THINK_THREAD_AGENT.idFromName("thr_compute_store_eager"),
+    );
 
-    await runInDurableObject(stub, async (agent: ThreadAgentV2) => {
+    await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
       const storage = storageOf(agent);
       createLegacyTables(storage);
       storage.sql.exec(
@@ -445,9 +451,11 @@ describe("ThreadComputeStore (DO SQLite)", () => {
   });
 
   it("persists each compute lifecycle transition", async () => {
-    const stub = env.THREAD_AGENT.get(env.THREAD_AGENT.idFromName("thr_compute_store_transitions"));
+    const stub = env.THINK_THREAD_AGENT.get(
+      env.THINK_THREAD_AGENT.idFromName("thr_compute_store_transitions"),
+    );
 
-    await runInDurableObject(stub, async (agent: ThreadAgentV2) => {
+    await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
       const storage = storageOf(agent);
       const store = new ThreadComputeStore(storage);
       store.migrate();

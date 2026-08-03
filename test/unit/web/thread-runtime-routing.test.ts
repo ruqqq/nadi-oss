@@ -51,9 +51,11 @@ describe("thread runtime routing", () => {
     expect(() => agentConnectionOptionsForThread(thread("legacy"))).toThrow(
       "thread_read_only",
     );
+    // Reads from the D1 snapshot, exactly like an archived thread: the retired
+    // runtime's DO class is gone, so there is no live route left to target.
     expect(historyFetchTargetForThread(thread("legacy"))).toEqual({
-      kind: "legacy",
-      path: "/agents/thread-agent/thr%2Fa%20b/get-messages",
+      kind: "archived",
+      path: "/api/threads/thr%2Fa%20b/messages",
     });
   });
 

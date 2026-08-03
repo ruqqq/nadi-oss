@@ -1,6 +1,6 @@
 import { env } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { buildThreadModelForWorkspace } from "../../src/agent/thread-agent";
+import { buildThreadModelForWorkspace } from "../../src/agent/thread-agent-config";
 import { registryDb } from "../../src/db/client";
 import { WorkspaceRepository } from "../../src/db/repositories/workspaces";
 import { upsertProviderConfig } from "../../src/db/repositories/provider-configs";

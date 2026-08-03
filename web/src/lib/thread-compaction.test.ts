@@ -49,10 +49,9 @@ describe("getCompactionSummary", () => {
 });
 
 describe("shouldQueueSubmitForThreadState", () => {
-  it("queues Think messages while manual compaction is pending", () => {
+  it("queues messages while manual compaction is pending", () => {
     expect(
       shouldQueueSubmitForThreadState({
-        runtime: "think",
         busy: false,
         manualCompacting: true,
         hasContent: true,

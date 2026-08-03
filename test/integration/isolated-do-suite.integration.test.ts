@@ -1,11 +1,9 @@
 import "./archive-thread-core.integration.test";
-import "./attachment-chat.integration.test";
 import "./chat.integration.test";
 import "./export-history.integration.test";
 import "./injection-buffer.test";
 import "./injection-drain.test";
 import "./kv-oauth-provider.integration.test";
-import "./mcp-approval.integration.test";
 import "./compute-thread-store.test";
 import "./skill-script-runner-gating.integration.test";
 import "./subagent-detached-injection.test";

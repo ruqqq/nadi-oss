@@ -7,7 +7,6 @@ import {
   ArchivedCompactionRepository,
   type ArchivedCompactionRow,
 } from "../db/repositories/archived-compactions";
-import { normalizeThreadRuntime } from "./thread-runtime";
 import { log } from "../log";
 import { reconcileThreadSearchProjectionFromMessages } from "../thread-knowledge/projector";
 
@@ -15,7 +14,6 @@ export type ArchiveOutcome = "archived" | "already_archived" | "active_turn" | "
 
 interface ArchiveStub {
   hasActiveTurn(): boolean | Promise<boolean>;
-  exportHistory(): Promise<unknown[]>;
   exportRawHistory(): Promise<unknown[]>;
   exportCompactions(): Promise<ArchivedCompactionRow[]>;
   destroy(): void | Promise<void>;
@@ -24,15 +22,13 @@ interface ArchiveStub {
 /**
  * MUST be getAgentByName, not a raw `namespace.get(idFromName(...))` stub.
  * Think hydrates its transcript only in onStart(); a raw DO RPC skips onStart(),
- * so `this.messages` is still the empty cache the constructor set and
- * exportHistory() silently returns []. Archiving snapshots then destroys, so a
+ * so `this.messages` is still the empty cache the constructor set and the
+ * export silently returns []. Archiving snapshots then destroys, so a
  * cold DO (exactly what the idle auto-archive cron reaches) would have written
  * an empty snapshot and then wiped the real transcript.
  */
-async function archiveStub(env: Env, runtime: string, threadId: string): Promise<ArchiveStub> {
-  return normalizeThreadRuntime(runtime) === "think"
-    ? ((await getAgentByName(env.THINK_THREAD_AGENT, threadId)) as unknown as ArchiveStub)
-    : ((await getAgentByName(env.THREAD_AGENT, threadId)) as unknown as ArchiveStub);
+async function archiveStub(env: Env, threadId: string): Promise<ArchiveStub> {
+  return (await getAgentByName(env.THINK_THREAD_AGENT, threadId)) as unknown as ArchiveStub;
 }
 
 /**
@@ -60,7 +56,11 @@ export async function archiveThreadCore(env: Env, threadId: string): Promise<Arc
     return "archived";
   }
 
-  const stub = await archiveStub(env, thread.runtime, threadId);
+  // A `legacy` row predates ThinkThreadAgent and has no DO to export from — its
+  // transcript was snapshotted when the runtime was retired. Dialing Think for
+  // one would export nothing, which the empty-snapshot guard below refuses, so
+  // this stays safe without a second namespace.
+  const stub = await archiveStub(env, threadId);
   if (await stub.hasActiveTurn()) return "active_turn";
 
   // Archive the RAW transcript, not the compacted view. `exportHistory()` applies
@@ -68,13 +68,8 @@ export async function archiveThreadCore(env: Env, threadId: string): Promise<Arc
   // summary — and archiving DESTROYS the DO, so archiving that view would delete
   // every message behind a summary for good. The summaries are kept separately
   // below, so nothing is lost either way.
-  //
-  // Legacy (v2) threads never compacted and have no raw export; their exportHistory
-  // is already the whole transcript. An RPC stub is a proxy, so every method looks
-  // present — branch on the runtime, do not feature-detect.
-  const isThink = normalizeThreadRuntime(thread.runtime) === "think";
-  const messages = isThink ? await stub.exportRawHistory() : await stub.exportHistory();
-  const compactions = isThink ? await stub.exportCompactions() : [];
+  const messages = await stub.exportRawHistory();
+  const compactions = await stub.exportCompactions();
   // Fail safe on an empty snapshot rather than destroy on one. An empty export
   // is indistinguishable from an unhydrated read, and the next step is
   // irreversible, so we refuse the archive instead of betting on which it is.

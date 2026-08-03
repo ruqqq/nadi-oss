@@ -26,7 +26,7 @@ import type {
  * This is the single injection point used by BOTH:
  *   - WorkspaceMcpAgent (consent flow): saveClientInformation/saveTokens mirror
  *     the just-exchanged credentials to KV after the callback.
- *   - ThreadAgentV2 (live path): tokens() supplies the stored bearer so
+ *   - ThinkThreadAgent (live path): tokens() supplies the stored bearer so
  *     addMcpServer short-circuits to READY without re-consent; saveTokens()
  *     keeps KV current on the 401→refresh writeback.
  *

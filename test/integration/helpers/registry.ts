@@ -386,7 +386,7 @@ export async function seedRegistryThread(
       input?.projectId ?? null,
       input?.title ?? "Test Thread",
       input?.titleSet ? 1 : 0,
-      input?.runtime ?? "legacy",
+      input?.runtime ?? "think",
       "manual",
       null,
       null,

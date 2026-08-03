@@ -23,7 +23,7 @@ import { WorkspaceRepository } from "../db/repositories/workspaces";
 import { serializeThread, type ThreadSummary } from "./thread-serialize";
 import { decodeThreadCursor, encodeThreadCursor, fingerprintThreadQuery } from "./thread-cursor";
 import { notifyWorkspaceMembers } from "../agent/notify-user";
-import { normalizeThreadRuntime, parseThreadRuntimeDefault } from "../agent/thread-runtime";
+import { normalizeThreadRuntime } from "../agent/thread-runtime";
 import { archiveThreadCore } from "../agent/archive-thread";
 import { createThreadWithWorkbench } from "../agent/create-thread";
 import { WorkbenchRepository } from "../db/repositories/workbenches";
@@ -675,15 +675,20 @@ async function getThreadMessages(req: Request, env: Env, threadId: string): Prom
     return Response.json(await new ArchivedMessageRepository(db).listForThread(threadId));
   }
 
+  // An unarchived row on the retired runtime has no DO to read: its class is
+  // gone, and dialing Think would mint an empty phantom under a name that never
+  // belonged to it. Serve empty rather than fabricate a thread.
+  if (normalizeThreadRuntime(thread.runtime) !== "think") {
+    return Response.json([]);
+  }
+
   // Active thread: read the live DO. MUST be getAgentByName, not a raw
   // idFromName stub: Think hydrates its transcript in onStart(), which a native
   // DO RPC skips — a cold (idle, evicted) DO would report an empty history.
-  // Use a call-site ternary (not a union-typed `ns` variable) — a union
-  // namespace triggers TS2589 "excessively deep" here.
-  const stub: ThreadHistoryStub =
-    normalizeThreadRuntime(thread.runtime) === "think"
-      ? ((await getAgentByName(env.THINK_THREAD_AGENT, threadId)) as unknown as ThreadHistoryStub)
-      : ((await getAgentByName(env.THREAD_AGENT, threadId)) as unknown as ThreadHistoryStub);
+  const stub = (await getAgentByName(
+    env.THINK_THREAD_AGENT,
+    threadId,
+  )) as unknown as ThreadHistoryStub;
   return Response.json(await stub.exportHistory());
 }
 
@@ -1000,14 +1005,12 @@ async function deleteThread(
   // `archivedAt` is the switch: an archived thread had its DO destroyed at
   // archive time, so we never rehydrate it here — not to check for an active turn
   // (archiving already proved there was none) nor to destroy it again.
-  if (thread.archivedAt == null) {
-    const runtime = normalizeThreadRuntime(thread.runtime);
-    const stub: ThreadDeletionStub =
-      runtime === "think"
-        ? (env.THINK_THREAD_AGENT.get(
-            env.THINK_THREAD_AGENT.idFromName(threadId),
-          ) as ThreadDeletionStub)
-        : (env.THREAD_AGENT.get(env.THREAD_AGENT.idFromName(threadId)) as ThreadDeletionStub);
+  // A row on the retired runtime is skipped for the same reason: its DO class no
+  // longer exists, so there is nothing to guard or evict — only the D1 rows below.
+  if (thread.archivedAt == null && normalizeThreadRuntime(thread.runtime) === "think") {
+    const stub = env.THINK_THREAD_AGENT.get(
+      env.THINK_THREAD_AGENT.idFromName(threadId),
+    ) as ThreadDeletionStub;
 
     // Refuse to delete a thread whose turn is still streaming. destroy() would
     // abort the in-flight turn and orphan its partial reply, so guard on the DO —
@@ -1017,7 +1020,7 @@ async function deleteThread(
     }
 
     // Evict the Durable Object before deleting the index row: instantiating the DO
-    // runs ThreadAgentV2.onStart(), which throws if the thread_index row is gone.
+    // runs ThinkThreadAgent.onStart(), which throws if the thread_index row is gone.
     // destroy() deletes all DO storage then aborts the isolate, so the RPC rejects
     // even on success — swallow it and treat as fire-and-forget.
     try {
@@ -1091,7 +1094,7 @@ async function createThread(req: Request, env: Env, ctx: ExecutionContext): Prom
     modelSupportsReasoning: snapshot.value.modelSupportsReasoning,
     title: "New thread",
     titleSet: false,
-    runtime: parseThreadRuntimeDefault(env),
+    runtime: "think" as const,
     source: "manual" as const,
     automatonId: null,
     automatonRunId: null,

@@ -97,10 +97,9 @@ export interface ComputeToolHostDeps {
    * Whether this runtime can drive a PROACTIVE system-reminder turn (see
    * {@link deliverSystemReminder}). Manual watcher registration is only ever
    * surfaced via a proactive reminder on process exit, so runtimes that cannot
-   * deliver proactively (legacy `ThreadAgentV2`) MUST NOT be allowed to register
-   * one — that would be a silent black hole where the watch is accepted but the
-   * model is never told the process finished. `true` on the Think runtime,
-   * `false` on legacy.
+   * deliver proactively MUST NOT be allowed to register one — that would be a
+   * silent black hole where the watch is accepted but the model is never told
+   * the process finished. `true` on the Think runtime.
    */
   supportsProcessMonitor: boolean;
   /** Whether exec calls may background commands after the foreground window. */

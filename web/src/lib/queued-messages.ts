@@ -27,15 +27,13 @@ export interface QueuedMessage {
 }
 
 export function shouldUseQueuedSubmit({
-  runtime,
   busy,
   hasContent,
 }: {
-  runtime: "legacy" | "think";
   busy: boolean;
   hasContent: boolean;
 }): boolean {
-  return runtime === "think" && busy && hasContent;
+  return busy && hasContent;
 }
 
 // "running" only means the drain loop has claimed the submission — that
