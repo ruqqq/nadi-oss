@@ -32,6 +32,9 @@ export const bootstrapHandlers = [
       .sort((a, b) => b.updatedAt - a.updatedAt);
 
     return HttpResponse.json({
+      // The deployment name, which the app uses as its document title. Sent
+      // here so the mocked app titles its tab the same way the real one does.
+      appName: "Nadi",
       session: store.session,
       settings: store.settings,
       threads: active.slice(0, BOOTSTRAP_PAGE_SIZE),

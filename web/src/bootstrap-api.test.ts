@@ -62,6 +62,17 @@ describe("getBootstrap", () => {
     expect(data.session).toEqual({ authenticated: false });
   });
 
+  // The document title comes from here, so an absent or blank APP_NAME must
+  // land on the product name rather than an empty tab.
+  it("falls back to the product name when appName is absent or blank", () => {
+    expect(parseBootstrap({}).appName).toBe("Nadi");
+    expect(parseBootstrap({ appName: "   " }).appName).toBe("Nadi");
+  });
+
+  it("uses a self-hoster's configured appName, trimmed", () => {
+    expect(parseBootstrap({ appName: "  Acme Agent " }).appName).toBe("Acme Agent");
+  });
+
   it("throws on a non-ok response", async () => {
     await expect(getBootstrap(mockFetch(500, {}))).rejects.toThrow("bootstrap_failed_500");
   });

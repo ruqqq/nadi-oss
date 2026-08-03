@@ -1,4 +1,5 @@
 import type { Env } from "../env";
+import { resolveAppName } from "../app-name";
 import {
   backgroundWorkEnabled,
   isTruthyFlag,
@@ -32,7 +33,10 @@ export async function routeBootstrap(req: Request, env: Env): Promise<Response |
   if (req.method !== "GET") return new Response("Method not allowed", { status: 405 });
 
   const session = await validateRequestSession(env, req);
-  if (!session) return Response.json({ session: { authenticated: false } });
+  // appName rides on BOTH branches: the sign-in screen is already the app,
+  // not the landing page, so it needs the title before there is a session.
+  const appName = resolveAppName(env);
+  if (!session) return Response.json({ appName, session: { authenticated: false } });
 
   const [settings, { threads, nextCursor: threadsNextCursor }, projects, scope] = await Promise.all(
     [
@@ -53,6 +57,7 @@ export async function routeBootstrap(req: Request, env: Env): Promise<Response |
     : null;
 
   return Response.json({
+    appName,
     session: { authenticated: true, user: { id: session.user.id, email: session.user.email } },
     settings,
     threads,
