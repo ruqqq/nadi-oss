@@ -139,6 +139,8 @@ export const automataHandlers = [
       model: automaton.model ?? store.settings?.agent.model ?? "claude-sonnet-4-5",
       modelInputModalities: ["text"],
       showReasoning: false,
+      reasoningEffort: store.settings?.agent.reasoningEffort ?? "medium",
+      modelSupportsReasoning: store.settings?.agent.modelSupportsReasoning ?? null,
       runtime: "think",
       title: automaton.name,
       source: "automaton",

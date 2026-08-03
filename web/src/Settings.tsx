@@ -927,7 +927,8 @@ function AgentSettingsForm({
             <div className="space-y-0.5">
               <Label htmlFor="agent-show-reasoning">Show reasoning</Label>
               <p className="text-muted-foreground text-sm">
-                Display the model's thinking. Does not change how hard it thinks.
+                Display the model&apos;s thinking in every chat. Does not change how hard
+                it thinks.
               </p>
             </div>
             <Switch

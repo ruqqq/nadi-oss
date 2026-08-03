@@ -180,6 +180,7 @@ async function insertThread(input: {
   model?: string;
   modelInputModalities?: string[];
   showReasoning?: boolean;
+  reasoningEffort?: string;
   archivedAt?: number | null;
   projectId?: string | null;
   workbenchId?: string | null;
@@ -195,6 +196,7 @@ async function insertThread(input: {
     model: input.model ?? "mock",
     modelInputModalities: JSON.stringify(input.modelInputModalities ?? ["text"]),
     showReasoning: input.showReasoning ?? true,
+    reasoningEffort: input.reasoningEffort ?? null,
     title: input.title,
     runtime: input.runtime ?? "legacy",
     source: "manual",
@@ -653,6 +655,8 @@ describe("thread routes", () => {
           model: "mock",
           modelInputModalities: ["text"],
           showReasoning: true,
+          reasoningEffort: "medium",
+          modelSupportsReasoning: null,
           runtime: "legacy",
           ...defaultThreadActivityFields,
           title: "New",
@@ -678,6 +682,8 @@ describe("thread routes", () => {
           model: "mock",
           modelInputModalities: ["text"],
           showReasoning: true,
+          reasoningEffort: "medium",
+          modelSupportsReasoning: null,
           runtime: "legacy",
           ...defaultThreadActivityFields,
           title: "Old",
@@ -2845,6 +2851,61 @@ describe("thread routes", () => {
       .where(eq(schema.threadIndex.id, "thr_rename"))
       .get();
     expect(row).toMatchObject({ title: "My renamed thread", titleSet: true });
+  });
+
+  it("updates a member's thread reasoning effort", async () => {
+    const seeded = await seedUserWorkspace();
+    await insertThread({
+      id: "thr_effort",
+      workspaceId: seeded.workspaceId,
+      agentId: seeded.agentId,
+      title: "Effort thread",
+      reasoningEffort: "medium",
+      updatedAt: now + 1,
+    });
+
+    const res = await SELF.fetch("https://nadi.test/api/threads/thr_effort", {
+      method: "PATCH",
+      headers: {
+        "content-type": "application/json",
+        cookie: `better-auth.session_token=${seeded.token}`,
+      },
+      body: JSON.stringify({ reasoningEffort: "high" }),
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({
+      thread: { threadId: "thr_effort", reasoningEffort: "high" },
+    });
+    const db = drizzle(env.REGISTRY_DB, { schema });
+    const row = await db
+      .select()
+      .from(schema.threadIndex)
+      .where(eq(schema.threadIndex.id, "thr_effort"))
+      .get();
+    expect(row?.reasoningEffort).toBe("high");
+  });
+
+  it("rejects an invalid reasoning effort with 400", async () => {
+    const seeded = await seedUserWorkspace();
+    await insertThread({
+      id: "thr_effort_bad",
+      workspaceId: seeded.workspaceId,
+      agentId: seeded.agentId,
+      title: "Effort thread",
+      updatedAt: now + 1,
+    });
+
+    const res = await SELF.fetch("https://nadi.test/api/threads/thr_effort_bad", {
+      method: "PATCH",
+      headers: {
+        "content-type": "application/json",
+        cookie: `better-auth.session_token=${seeded.token}`,
+      },
+      body: JSON.stringify({ reasoningEffort: "max" }),
+    });
+
+    expect(res.status).toBe(400);
   });
 
   it("rejects an empty rename title with 400", async () => {

@@ -52,6 +52,8 @@ export function makeThread(overrides: Partial<ThreadSummary> = {}): ThreadSummar
     model: "claude-sonnet-4-5",
     modelInputModalities: ["text", "image"],
     showReasoning: false,
+    reasoningEffort: "medium",
+    modelSupportsReasoning: true,
     runtime: "think",
     title: "Untitled thread",
     source: "manual",

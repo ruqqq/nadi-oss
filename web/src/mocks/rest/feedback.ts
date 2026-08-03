@@ -29,6 +29,8 @@ function feedbackThread(): ThreadSummary {
     model: "@cf/moonshotai/kimi-k2.7-code",
     modelInputModalities: ["text", "image"],
     showReasoning: false,
+    reasoningEffort: "medium",
+    modelSupportsReasoning: null,
     runtime: "think",
     title: "Feedback",
     source: "manual",

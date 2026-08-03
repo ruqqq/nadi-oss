@@ -73,9 +73,6 @@ export const threadHandlers = [
       model?: string;
       modelInputModalities?: ThreadSummary["modelInputModalities"];
       showReasoning?: boolean;
-      // Accepted and deliberately not stored: ThreadSummary carries no effort
-      // field because nothing renders a thread's effort yet. Listed so the
-      // mock's view of the create contract stays complete.
       reasoningEffort?: string;
       modelSupportsReasoning?: boolean | null;
       projectId?: string | null;
@@ -93,6 +90,17 @@ export const threadHandlers = [
       model: input.model ?? store.settings?.agent.model ?? "claude-sonnet-4-5",
       modelInputModalities: input.modelInputModalities ?? ["text"],
       showReasoning: input.showReasoning ?? false,
+      reasoningEffort:
+        input.reasoningEffort === "off" ||
+        input.reasoningEffort === "low" ||
+        input.reasoningEffort === "medium" ||
+        input.reasoningEffort === "high"
+          ? input.reasoningEffort
+          : (store.settings?.agent.reasoningEffort ?? "medium"),
+      modelSupportsReasoning:
+        input.modelSupportsReasoning !== undefined
+          ? input.modelSupportsReasoning
+          : (store.settings?.agent.modelSupportsReasoning ?? null),
       runtime: "think",
       title: "New chat",
       source: "manual",
@@ -156,8 +164,19 @@ export const threadHandlers = [
       title?: string;
       projectId?: string | null;
       workbenchId?: string | null;
+      reasoningEffort?: string;
     };
     if (typeof patch.title === "string") thread.title = patch.title;
+    if (
+      patch.reasoningEffort === "off" ||
+      patch.reasoningEffort === "low" ||
+      patch.reasoningEffort === "medium" ||
+      patch.reasoningEffort === "high"
+    ) {
+      thread.reasoningEffort = patch.reasoningEffort;
+    } else if (patch.reasoningEffort !== undefined) {
+      return errorResponse(400, "reasoningEffort must be one of off, low, medium, high");
+    }
     if (patch.projectId !== undefined) {
       const project = store.projects.find((p) => p.id === patch.projectId);
       thread.projectId = project?.id ?? null;

@@ -96,6 +96,7 @@ const FeedbackInbox = lazy(() =>
 );
 import {
   getDefaultAgentSettings,
+  isSettingsProvider,
   type AgentSettingsResponse,
   type ModelInputModality,
   type ProviderModelSearchResult,
@@ -117,6 +118,7 @@ import {
   renameThread,
   setThreadRecentDismissed,
   switchThreadWorkbench,
+  updateThreadReasoningEffort,
   type ThreadSummary,
   fetchArchivedSummaries,
 } from "./threads-api";
@@ -255,7 +257,7 @@ import {
   selectNewChatProvider,
   typeNewChatModel,
 } from "./lib/new-chat-model";
-import { availableEffortOptions, shouldOfferEffortControl } from "./lib/reasoning-effort";
+import { availableEffortOptions, reasoningControlsForThreadModel, shouldOfferEffortControl } from "./lib/reasoning-effort";
 import { EffortDial } from "./components/model/EffortDial";
 import {
   manualCompactionNoticeForResult,
@@ -1647,7 +1649,7 @@ export function ChatApp({
   const [newChatModelInputModalities, setNewChatModelInputModalities] = useState(
     newChatSeed.modelInputModalities,
   );
-  const [newChatShowReasoning, setNewChatShowReasoning] = useState(newChatSeed.showReasoning);
+  const [agentShowReasoning, setAgentShowReasoning] = useState(newChatSeed.showReasoning);
   const [newChatReasoningEffort, setNewChatReasoningEffort] = useState(newChatSeed.reasoningEffort);
   const [newChatModelSupportsReasoning, setNewChatModelSupportsReasoning] = useState(
     newChatSeed.modelSupportsReasoning,
@@ -1680,7 +1682,7 @@ export function ChatApp({
         const state = deriveNewChatModelState(settings);
         setNewChatProviders(state.providers);
         setNewChatAnyUsable(state.anyUsableProvider);
-        setNewChatShowReasoning(state.showReasoning);
+        setAgentShowReasoning(state.showReasoning);
         setNewChatReasoningEffort(state.reasoningEffort);
 
         // The provider/model the user picked for the chat they're composing is
@@ -2204,6 +2206,20 @@ export function ChatApp({
       });
   }, []);
 
+  const handleThreadReasoningEffort = useCallback((threadId: string, effort: ReasoningEffort) => {
+    void updateThreadReasoningEffort(threadId, effort)
+      .then((updated) => {
+        setActiveThread((current) =>
+          current && current.threadId === threadId ? updated : current,
+        );
+        setThreads((current) => mergeThreadsExcluding(current, [updated], excludedThreadIds()));
+      })
+      .catch((error: unknown) => {
+        setThreadError(error instanceof Error ? error : new Error(String(error)));
+        toast.error("Couldn't update thinking effort");
+      });
+  }, []);
+
   /**
    * Deliver the first message into a thread that already exists, tracking it as
    * an optimistic bubble. `sending` disables that thread's composer so the first
@@ -2283,7 +2299,7 @@ export function ChatApp({
         provider: selectedProvider,
         model: newChatModel,
         modelInputModalities: newChatModelInputModalities,
-        showReasoning: newChatShowReasoning,
+        showReasoning: agentShowReasoning,
         reasoningEffort: newChatReasoningEffort,
         modelSupportsReasoning: newChatModelSupportsReasoning,
         ...(selectedProjectId ? { projectId: selectedProjectId } : {}),
@@ -2338,7 +2354,7 @@ export function ChatApp({
       newChatModel,
       newChatModelInputModalities,
       newChatProvider,
-      newChatShowReasoning,
+      agentShowReasoning,
       newChatReasoningEffort,
       newChatModelSupportsReasoning,
       projects,
@@ -3109,6 +3125,7 @@ export function ChatApp({
                 key={activeThread.threadId}
                 thread={activeThread}
                 projects={projects}
+                showReasoning={agentShowReasoning}
                 leading={threadNav}
                 onDeleteThread={deleteThread}
               />
@@ -3128,11 +3145,14 @@ export function ChatApp({
                 thread={activeThread}
                 historyReloadNonce={threadReloadNonce}
                 projects={projects}
+                providers={newChatProviders}
+                showReasoning={agentShowReasoning}
                 leading={threadNav}
                 pendingFirstMessage={pendingFirstMessage}
                 onRetryFirstMessage={retryFirstMessage}
                 onSettleFirstMessage={settleFirstMessage}
                 onRename={handleRenameThread}
+                onReasoningEffortChange={handleThreadReasoningEffort}
                 onMoveThread={moveThread}
                 onCreateProjectForThread={createProjectForThread}
                 onArchiveThread={archiveThread}
@@ -3185,7 +3205,7 @@ export function ChatApp({
                   provider: newChatProvider,
                   model: newChatModel,
                   modelInputModalities: newChatModelInputModalities,
-                  showReasoning: newChatShowReasoning,
+                  showReasoning: agentShowReasoning,
                   reasoningEffort: newChatReasoningEffort,
                   modelSupportsReasoning: newChatModelSupportsReasoning,
                   modelReasoningControls: newChatReasoningControls,
@@ -3203,7 +3223,7 @@ export function ChatApp({
                   provider: newChatProvider,
                   model: newChatModel,
                   modelInputModalities: newChatModelInputModalities,
-                  showReasoning: newChatShowReasoning,
+                  showReasoning: agentShowReasoning,
                   reasoningEffort: newChatReasoningEffort,
                   modelSupportsReasoning: newChatModelSupportsReasoning,
                   modelReasoningControls: newChatReasoningControls,
@@ -3220,7 +3240,7 @@ export function ChatApp({
                   provider: newChatProvider,
                   model: newChatModel,
                   modelInputModalities: newChatModelInputModalities,
-                  showReasoning: newChatShowReasoning,
+                  showReasoning: agentShowReasoning,
                   reasoningEffort: newChatReasoningEffort,
                   modelSupportsReasoning: newChatModelSupportsReasoning,
                   modelReasoningControls: newChatReasoningControls,
@@ -3981,11 +4001,14 @@ function PendingNewThreadView({
 function LegacyArchiveThread({
   thread,
   projects,
+  showReasoning = true,
   leading,
   onDeleteThread,
 }: {
   thread: ThreadSummary;
   projects: ProjectSummary[];
+  /** Workspace agent display preference — same source as live threads. */
+  showReasoning?: boolean;
   leading: React.ReactNode;
   onDeleteThread?: (threadId: string) => void;
 }) {
@@ -4080,6 +4103,7 @@ function LegacyArchiveThread({
               readOnly
               error={error}
               servers={toolServers}
+              showReasoning={showReasoning}
               emptyTitle="No archived messages"
               emptyDescription="This legacy thread has no persisted messages."
             />
@@ -4183,11 +4207,19 @@ interface ThreadChatProps {
   thread: ThreadSummary;
   historyReloadNonce: number;
   projects: ProjectSummary[];
+  /** Used to resolve per-model effort options for the composer dial. */
+  providers?: ProviderSettingsView[];
+  /**
+   * Workspace agent display preference — not the thread snapshot. Thinking
+   * effort is per-thread; whether reasoning text is shown follows Settings.
+   */
+  showReasoning?: boolean;
   leading: React.ReactNode;
   pendingFirstMessage?: PendingFirstMessageState | null;
   onRetryFirstMessage?: () => void;
   onSettleFirstMessage?: (threadId: string) => void;
   onRename?: (threadId: string, title: string) => void;
+  onReasoningEffortChange?: (threadId: string, effort: ReasoningEffort) => void;
   onMoveThread?: (threadId: string, projectId: string | null) => void;
   onCreateProjectForThread?: (threadId: string, name: string) => Promise<void>;
   onArchiveThread?: (threadId: string) => void;
@@ -4290,11 +4322,14 @@ function ThreadChat({
   thread,
   historyReloadNonce,
   projects,
+  providers = [],
+  showReasoning = true,
   leading,
   pendingFirstMessage,
   onRetryFirstMessage,
   onSettleFirstMessage,
   onRename,
+  onReasoningEffortChange,
   onMoveThread,
   onCreateProjectForThread,
   onArchiveThread,
@@ -5136,7 +5171,7 @@ function ThreadChat({
             compactionNotice={compactionNotice}
             error={error}
             servers={toolServers}
-            showReasoning={thread.showReasoning}
+            showReasoning={showReasoning}
             subagentRuns={subagentRuns}
             onFeedbackDraftSubmit={feedbackMode ? submitFeedbackDraftFromCard : undefined}
             onFeedbackDraftEdit={feedbackMode ? keepEditingFeedbackDraft : undefined}
@@ -5237,7 +5272,38 @@ function ThreadChat({
           safeAreaBottom
           voiceEnabled={voiceEnabled}
           placeholder={composerPlaceholder}
-          footerTrailing={feedbackMode ? undefined : <ThreadModelBadge model={thread.model} />}
+          footerTrailing={
+            feedbackMode ? undefined : (
+              <>
+                {shouldOfferEffortControl({
+                  provider: isSettingsProvider(thread.provider) ? thread.provider : null,
+                  modelSupportsReasoning: thread.modelSupportsReasoning,
+                }) &&
+                  onReasoningEffortChange && (
+                    <EffortDial
+                      triggerId={`thread-effort-${thread.threadId}`}
+                      effort={thread.reasoningEffort}
+                      options={availableEffortOptions(
+                        reasoningControlsForThreadModel(
+                          providers,
+                          thread.provider,
+                          thread.model,
+                        ),
+                      )}
+                      onEffortChange={(effort) =>
+                        onReasoningEffortChange(thread.threadId, effort)
+                      }
+                      disabled={
+                        (thread.runtime === "legacy" && busy) ||
+                        draftSeed === null ||
+                        sendingFirstMessage
+                      }
+                    />
+                  )}
+                <ThreadModelBadge model={thread.model} />
+              </>
+            )
+          }
         />
       </div>
     </div>

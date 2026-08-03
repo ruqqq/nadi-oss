@@ -16,6 +16,8 @@ function thread(runtime: ThreadSummary["runtime"], threadId = "thr/a b"): Thread
     model: "gpt-5.5",
     modelInputModalities: ["text"],
     showReasoning: true,
+    reasoningEffort: "medium",
+    modelSupportsReasoning: true,
     runtime,
     title: "Thread",
     source: "manual",

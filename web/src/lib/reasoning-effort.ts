@@ -54,6 +54,23 @@ export function shouldOfferEffortControl(input: {
   return providerSupportsReasoningEffort(input.provider);
 }
 
+/**
+ * Per-model effort vocabulary for a thread's current model, when the workspace
+ * whitelist (or a catalog-backed curated list) already carries it. Absent means
+ * unknown — callers keep the full default option set.
+ */
+export function reasoningControlsForThreadModel(
+  providers: Array<{
+    provider: string;
+    whitelistModels?: Array<{ id: string; reasoningControls?: ReasoningControl[] }> | null;
+  }>,
+  provider: string,
+  model: string,
+): ReasoningControl[] | undefined {
+  const entry = providers.find((item) => item.provider === provider);
+  return entry?.whitelistModels?.find((item) => item.id === model)?.reasoningControls;
+}
+
 export interface EffortOption {
   level: ReasoningEffort;
   /** The model's own word for this setting where it has one. */

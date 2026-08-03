@@ -50,6 +50,8 @@ function thread(over: Partial<ThreadSummary> & { threadId: string }): ThreadSumm
     model: "gpt-5.5",
     modelInputModalities: ["text"],
     showReasoning: false,
+    reasoningEffort: "medium",
+    modelSupportsReasoning: true,
     runtime: "think",
     title: `Thread ${over.threadId}`,
     source: "manual",

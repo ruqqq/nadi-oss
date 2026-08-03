@@ -29,6 +29,7 @@ import {
   renameThread,
   reconcileThreads,
   sendThreadMessage,
+  updateThreadReasoningEffort,
   type ThreadSummary,
 } from "../../../web/src/threads-api";
 
@@ -50,6 +51,8 @@ const thread: ThreadSummary = {
   model: "gpt-5.5",
   modelInputModalities: ["text", "image", "file"],
   showReasoning: true,
+  reasoningEffort: "medium",
+  modelSupportsReasoning: true,
   runtime: "legacy",
   title: "New thread",
   source: "manual" as const,
@@ -349,6 +352,20 @@ describe("thread api helpers", () => {
       credentials: "include",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ title: "Renamed" }),
+    });
+  });
+
+  it("updates a thread's reasoning effort with an encoded id and json body", async () => {
+    const updated = { ...thread, reasoningEffort: "high" as const };
+    const fetch = vi.fn(async () => Response.json({ thread: updated }));
+
+    await expect(updateThreadReasoningEffort("thr_1/x", "high", fetch)).resolves.toEqual(updated);
+
+    expect(fetch).toHaveBeenCalledWith("/api/threads/thr_1%2Fx", {
+      method: "PATCH",
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reasoningEffort: "high" }),
     });
   });
 

@@ -1,3 +1,8 @@
+import {
+  DEFAULT_REASONING_EFFORT,
+  parseReasoningEffort,
+  type ReasoningEffort,
+} from "../agent/reasoning-options";
 import type { ThreadRuntime } from "../agent/thread-runtime";
 import { DEFAULT_COMPUTE_RESOURCE_PROFILE, isComputeResourceProfile } from "../compute/config";
 import type { ComputeResourceProfile } from "../compute/types";
@@ -14,6 +19,10 @@ export interface ThreadSummary {
   model: string;
   modelInputModalities: string[];
   showReasoning: boolean;
+  /** Thread snapshot; missing/invalid values serialize as the runtime default. */
+  reasoningEffort: ReasoningEffort;
+  /** NULL = unknown — never conflate with false. */
+  modelSupportsReasoning: boolean | null;
   runtime: ThreadRuntime;
   activityStatus: ThreadActivityStatus;
   currentTurnStartedAt: number | null;
@@ -66,6 +75,8 @@ export function serializeThread(input: {
   model?: string | null;
   modelInputModalities?: string | null;
   showReasoning?: boolean | null;
+  reasoningEffort?: string | null;
+  modelSupportsReasoning?: boolean | null;
   runtime: ThreadRuntime;
   activityStatus?: ThreadActivityStatus | null;
   currentTurnStartedAt?: number | null;
@@ -106,6 +117,8 @@ export function serializeThread(input: {
     model: input.model ?? "",
     modelInputModalities: parseStoredModelInputModalities(input.modelInputModalities),
     showReasoning: input.showReasoning ?? true,
+    reasoningEffort: parseReasoningEffort(input.reasoningEffort) ?? DEFAULT_REASONING_EFFORT,
+    modelSupportsReasoning: input.modelSupportsReasoning ?? null,
     runtime: input.runtime,
     activityStatus: input.activityStatus ?? "idle",
     currentTurnStartedAt: input.currentTurnStartedAt ?? null,
