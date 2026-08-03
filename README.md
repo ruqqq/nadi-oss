@@ -55,7 +55,7 @@ hand-edited (`pnpm run db:generate`). Full workflow:
   work that needs one.
 - **Skills and memory.** Reusable procedures and durable facts, both editable
   from the app and by the agent.
-- **Subagents.** Parallel work on the parent's machine, feature-flagged.
+- **Subagents.** Parallel work on the parent's machine (Currently, feature-flagged off).
 - **Installable PWA.** Push notifications when unattended work finishes (needs
   VAPID keys), and read-only history when disconnected.
 
