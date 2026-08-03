@@ -100,8 +100,8 @@ function featuredToolsFor(server: McpServer): McpToolView[] {
   }
   if (match?.id === "composio") {
     return [
-      { name: "gmail_send_email", description: "Send an email from Gmail.", policy: "approval_required" },
-      { name: "calendar_list_events", description: "List upcoming calendar events.", policy: "auto_allow" },
+      { name: "GMAIL_SEND_EMAIL", description: "Send an email from Gmail.", policy: "approval_required" },
+      { name: "GOOGLECALENDAR_FIND_EVENT", description: "Find an event on the calendar.", policy: "auto_allow" },
     ];
   }
   return [];

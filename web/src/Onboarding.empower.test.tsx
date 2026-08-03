@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
+import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { McpServer } from "./mcp-api";
 import { AUTOMATON_NUDGE_KEY } from "./lib/automaton-nudge";
@@ -92,11 +93,32 @@ describe("Onboarding empower step", () => {
     expect(localStorage.getItem(AUTOMATON_NUDGE_KEY)).not.toMatch(/calendar/i);
   });
 
+  // The reported bug: Composio finishing OAuth means the PLATFORM is
+  // authorized, not that any calendar account is attached inside it. A user
+  // can connect Gmail only and finish the wizard with no calendar reachable
+  // at all — the nudge must not promise one.
+  it("REGRESSION does not promise calendar data when Composio is connected but no calendar tool exists", async () => {
+    mocks.listMcpServers.mockResolvedValue([composio]);
+    mocks.listMcpServerTools.mockResolvedValue({
+      needsAuth: false,
+      tools: [{ name: "GMAIL_SEND_EMAIL", description: null, policy: "auto_allow" as const }],
+    });
+    renderWizard({ initialStep: "empower" });
+
+    await screen.findByText(/Connected · 1 tool/);
+    await userEvent.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    await waitFor(() => {
+      expect(localStorage.getItem(AUTOMATON_NUDGE_KEY)).not.toBeNull();
+    });
+    expect(localStorage.getItem(AUTOMATON_NUDGE_KEY)).not.toMatch(/calendar/i);
+  });
+
   it("promises calendar data once Composio is authorized", async () => {
     mocks.listMcpServers.mockResolvedValue([composio]);
     mocks.listMcpServerTools.mockResolvedValue({
       needsAuth: false,
-      tools: [{ name: "calendar", description: null, policy: "auto_allow" as const }],
+      tools: [{ name: "GOOGLECALENDAR_FIND_EVENT", description: null, policy: "auto_allow" as const }],
     });
     renderWizard({ initialStep: "empower" });
 
@@ -106,6 +128,95 @@ describe("Onboarding empower step", () => {
     await waitFor(() => {
       expect(localStorage.getItem(AUTOMATON_NUDGE_KEY)).toMatch(/calendar/i);
     });
+  });
+
+  // One notch narrower than the reported bug: a server scoped to expose only
+  // WRITE calendar tools is calendar-named end to end, but there is still no
+  // tool that can read a calendar back. Promising a briefing here is the same
+  // broken promise, just triggered by a scope instead of a missing account.
+  it("does not promise calendar data when only write-shaped calendar tools resolve", async () => {
+    mocks.listMcpServers.mockResolvedValue([composio]);
+    mocks.listMcpServerTools.mockResolvedValue({
+      needsAuth: false,
+      tools: [
+        { name: "GOOGLECALENDAR_CREATE_EVENT", description: null, policy: "auto_allow" as const },
+        { name: "GOOGLECALENDAR_QUICK_ADD", description: null, policy: "auto_allow" as const },
+        { name: "GOOGLECALENDAR_DELETE_EVENT", description: null, policy: "auto_allow" as const },
+      ],
+    });
+    renderWizard({ initialStep: "empower" });
+
+    await screen.findByText(/Connected · 3 tools/);
+    await userEvent.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    await waitFor(() => {
+      expect(localStorage.getItem(AUTOMATON_NUDGE_KEY)).not.toBeNull();
+    });
+    expect(localStorage.getItem(AUTOMATON_NUDGE_KEY)).not.toMatch(/calendar/i);
+  });
+
+  // A setup/connect tool's only job is connecting a calendar account the
+  // user has NOT connected yet — matching on its name would arm the prompt
+  // before any calendar is actually reachable.
+  it("does not promise calendar data for a setup-shaped tool name", async () => {
+    mocks.listMcpServers.mockResolvedValue([composio]);
+    mocks.listMcpServerTools.mockResolvedValue({
+      needsAuth: false,
+      tools: [{ name: "CONNECT_CALENDAR_ACCOUNT", description: null, policy: "auto_allow" as const }],
+    });
+    renderWizard({ initialStep: "empower" });
+
+    await screen.findByText(/Connected · 1 tool/);
+    await userEvent.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    await waitFor(() => {
+      expect(localStorage.getItem(AUTOMATON_NUDGE_KEY)).not.toBeNull();
+    });
+    expect(localStorage.getItem(AUTOMATON_NUDGE_KEY)).not.toMatch(/calendar/i);
+  });
+
+  // Arming reads whatever has resolved so far, synchronously, at the moment
+  // Continue is pressed — it does not wait for cards still in flight. A
+  // refactor toward "await the resolve before arming" would silently let a
+  // late resolve retro-arm (or fail to arm) the calendar promise, which is
+  // exactly the failure mode this pins against.
+  it("arms the generic prompt if Continue is pressed before a card finishes resolving, and a later resolve does not retroactively change it", async () => {
+    mocks.listMcpServers.mockResolvedValue([composio]);
+    let resolveTools: (value: { needsAuth: boolean; tools: unknown[] }) => void = () => {};
+    mocks.listMcpServerTools.mockReturnValue(
+      new Promise((resolve) => {
+        resolveTools = resolve;
+      }),
+    );
+    renderWizard({ initialStep: "empower" });
+
+    // The Composio card specifically is still resolving: its own
+    // Connect/Authorize button is disabled, but the wizard's Continue is not
+    // gated on that at all — it's a different card (Markdump) that resolves
+    // immediately here, precisely to prove Continue doesn't wait for ALL
+    // cards, just reads whatever each one has reported so far.
+    const composioCard = (await screen.findByText("Connected accounts")).closest(
+      '[data-slot="card"]',
+    ) as HTMLElement;
+    await waitFor(() => {
+      expect(within(composioCard).getByRole("button")).toBeDisabled();
+    });
+    await userEvent.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    await waitFor(() => {
+      expect(localStorage.getItem(AUTOMATON_NUDGE_KEY)).not.toBeNull();
+    });
+    expect(localStorage.getItem(AUTOMATON_NUDGE_KEY)).not.toMatch(/calendar/i);
+
+    // Resolve AFTER arming, as a calendar tool — if arming were ever made to
+    // read live instead of at the moment of the click, this is what would
+    // start promising a calendar retroactively.
+    resolveTools({
+      needsAuth: false,
+      tools: [{ name: "GOOGLECALENDAR_FIND_EVENT", description: null, policy: "auto_allow" }],
+    });
+    await screen.findByText(/Connected · 1 tool/);
+    expect(localStorage.getItem(AUTOMATON_NUDGE_KEY)).not.toMatch(/calendar/i);
   });
 });
 

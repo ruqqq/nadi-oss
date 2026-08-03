@@ -21,7 +21,6 @@ import { Spinner } from "./components/ui/spinner";
 import { Textarea } from "./components/ui/textarea";
 import { Globe, Key } from "./icons";
 import { armAutomatonNudge } from "./lib/automaton-nudge";
-import type { FeaturedConnectionId } from "./lib/featured-connections";
 import { cn } from "./lib/utils";
 import {
   RECOMMENDED_ONBOARDING_PROVIDER,
@@ -182,11 +181,11 @@ export function Onboarding({
   const [exaError, setExaError] = useState<string | null>(null);
   const [exaAlreadySet, setExaAlreadySet] = useState(false);
 
-  // Empower step — the connections that resolved as AUTHORIZED, so completion
-  // can seed a nudge that never asks for data the agent can't get. A server row
-  // is not enough: consent can be denied, abandoned, or fail after the row
-  // exists.
-  const [connectedIds, setConnectedIds] = useState<FeaturedConnectionId[]>([]);
+  // Whether a calendar-named tool actually resolved on an authorized
+  // connection. Composio finishing OAuth is not the same as a calendar
+  // account being attached inside it, so this is derived from resolved tool
+  // names, never from which connections are authorized.
+  const [calendarConnected, setCalendarConnected] = useState(false);
 
   // Only reached once the required steps are done, so load the current state
   // lazily rather than paying for it on every onboarding mount.
@@ -255,10 +254,10 @@ export function Onboarding({
     const next = steps[index + 1];
     if (next) goToStep(next.id);
     else {
-      armAutomatonNudge(localStorage, { composioConnected: connectedIds.includes("composio") });
+      armAutomatonNudge(localStorage, { calendarConnected });
       onComplete();
     }
-  }, [steps, step, goToStep, onComplete, connectedIds]);
+  }, [steps, step, goToStep, onComplete, calendarConnected]);
 
   const secretName = useMemo(
     () => settings.providers.find((p) => p.provider === provider)?.configuredSecretName,
@@ -705,7 +704,7 @@ export function Onboarding({
             </Card>
           ) : step === "empower" ? (
             <EmpowerStep
-              onConnectedChange={setConnectedIds}
+              onCalendarConnectedChange={setCalendarConnected}
               exaCard={
                 <Card className="gap-3 p-4">
                   <form className="space-y-4" onSubmit={submitWebSearch}>

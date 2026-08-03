@@ -14,14 +14,14 @@ import {
   type McpServer,
 } from "../../mcp-api";
 
-export type FeaturedConnectionState = "unknown" | "not-added" | "busy" | "needs-auth" | "connected";
+type FeaturedConnectionState = "unknown" | "not-added" | "busy" | "needs-auth" | "connected";
 
 export function FeaturedConnectionCard({
   connection,
   icon,
   server,
   onAdded,
-  onStateChange,
+  onResolved,
 }: {
   connection: FeaturedConnection;
   icon: React.ReactNode;
@@ -35,15 +35,26 @@ export function FeaturedConnectionCard({
   server: McpServer | null | undefined;
   onAdded: (server: McpServer) => void;
   /**
-   * The card's RESOLVED state, lifted so the wizard can tell an authorized
-   * connection from a row that merely exists.
+   * The RESOLVED capability, lifted for the wizard — deliberately narrower
+   * than the card's own five-value state. `null` means "not connected" and
+   * collapses "unknown"/"not-added"/"busy"/"needs-auth" into one thing: no
+   * capability to consult. `string[]` means connected and introspected, with
+   * exactly the tool names that came back — including `[]` for a connected
+   * server with genuinely zero tools. Keep `null` and `[]` distinct rather
+   * than folding them together here: a past version of this wizard lifted
+   * the raw "authorized" state instead of "here is what it can do", and that
+   * let a reader infer a capability from a connection fact. Narrowing this
+   * signature doesn't make that inference impossible — a future consumer can
+   * still write `toolNames !== null` and call it "connected" — but it makes
+   * the inference unattractive: the natural thing to reach for at this call
+   * site is what the tools actually are, not whether the row is authorized.
    */
-  onStateChange?: (connectionId: FeaturedConnectionId, state: FeaturedConnectionState) => void;
+  onResolved?: (connectionId: FeaturedConnectionId, toolNames: string[] | null) => void;
 }) {
   const [state, setState] = useState<FeaturedConnectionState>(
     server === null ? "not-added" : "unknown",
   );
-  const [toolCount, setToolCount] = useState(0);
+  const [toolNames, setToolNames] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   /** Reads the server's live state; starts consent when it needs authorizing. */
@@ -51,7 +62,7 @@ export function FeaturedConnectionCard({
     async (target: McpServer, startAuth: boolean) => {
       const { needsAuth, tools } = await listMcpServerTools(target.id);
       if (!needsAuth) {
-        setToolCount(tools.length);
+        setToolNames(tools.map((t) => t.name));
         setState("connected");
         return;
       }
@@ -70,7 +81,7 @@ export function FeaturedConnectionCard({
       }
       // Already authorized server-side (no OAuth, or credentials cached).
       const after = await listMcpServerTools(target.id);
-      setToolCount(after.tools.length);
+      setToolNames(after.tools.map((t) => t.name));
       setState(after.needsAuth ? "needs-auth" : "connected");
     },
     [],
@@ -138,8 +149,8 @@ export function FeaturedConnectionCard({
   }, [server, resolve]);
 
   useEffect(() => {
-    onStateChange?.(connection.id, state);
-  }, [connection.id, state, onStateChange]);
+    onResolved?.(connection.id, state === "connected" ? toolNames : null);
+  }, [connection.id, state, toolNames, onResolved]);
 
   return (
     <Card className="gap-3 p-4">
@@ -155,7 +166,7 @@ export function FeaturedConnectionCard({
         {state === "connected" ? (
           <span className="flex shrink-0 items-center gap-1.5 text-approve text-sm">
             <Check aria-hidden />
-            Connected · {toolCount} {toolCount === 1 ? "tool" : "tools"}
+            Connected · {toolNames.length} {toolNames.length === 1 ? "tool" : "tools"}
           </span>
         ) : (
           <Button

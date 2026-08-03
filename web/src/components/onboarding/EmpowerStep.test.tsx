@@ -69,38 +69,73 @@ describe("EmpowerStep", () => {
 
   // A row that exists but has not been authorized is NOT a connection. Reporting
   // it as one is what makes the post-wizard nudge promise calendar data the
-  // agent cannot reach.
-  it("reports a connection only once it resolves as authorized", async () => {
+  // agent cannot reach — even if the (unresolved) tool list would otherwise
+  // have matched "calendar".
+  it("does not report calendarConnected for a row that only needs auth", async () => {
     mocks.listMcpServers.mockResolvedValue([markdump]);
     mocks.listMcpServerTools.mockResolvedValue({ needsAuth: true, tools: [] });
-    const onConnectedChange = vi.fn();
+    const onCalendarConnectedChange = vi.fn();
 
     render(
-      <EmpowerStep exaCard={null} onContinue={() => {}} onConnectedChange={onConnectedChange} />,
+      <EmpowerStep
+        exaCard={null}
+        onContinue={() => {}}
+        onCalendarConnectedChange={onCalendarConnectedChange}
+      />,
     );
 
     await screen.findByRole("button", { name: /authorize/i });
-    expect(onConnectedChange).toHaveBeenCalled();
-    for (const call of onConnectedChange.mock.calls) {
-      expect(call[0]).not.toContain("markdump");
-    }
+    await waitFor(() => {
+      expect(onCalendarConnectedChange).toHaveBeenCalled();
+    });
+    expect(onCalendarConnectedChange).toHaveBeenLastCalledWith(false);
   });
 
-  it("reports an authorized connection", async () => {
+  // The connection being authorized is not enough — the tool that resolved
+  // has to actually be calendar-named. This is the lift path for the
+  // reported bug: Composio (the platform) authorizing is not a calendar.
+  it("does not report calendarConnected when authorized with no calendar-named tool", async () => {
     mocks.listMcpServers.mockResolvedValue([markdump]);
     mocks.listMcpServerTools.mockResolvedValue({
       needsAuth: false,
-      tools: [{ name: "read", description: null, policy: "auto_allow" as const }],
+      tools: [{ name: "GMAIL_SEND_EMAIL", description: null, policy: "auto_allow" as const }],
     });
-    const onConnectedChange = vi.fn();
+    const onCalendarConnectedChange = vi.fn();
 
     render(
-      <EmpowerStep exaCard={null} onContinue={() => {}} onConnectedChange={onConnectedChange} />,
+      <EmpowerStep
+        exaCard={null}
+        onContinue={() => {}}
+        onCalendarConnectedChange={onCalendarConnectedChange}
+      />,
     );
 
     await screen.findByText(/Connected · 1 tool/);
     await waitFor(() => {
-      expect(onConnectedChange).toHaveBeenLastCalledWith(["markdump"]);
+      expect(onCalendarConnectedChange).toHaveBeenCalled();
+    });
+    expect(onCalendarConnectedChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("reports calendarConnected once a calendar-named tool resolves", async () => {
+    mocks.listMcpServers.mockResolvedValue([markdump]);
+    mocks.listMcpServerTools.mockResolvedValue({
+      needsAuth: false,
+      tools: [{ name: "GOOGLECALENDAR_FIND_EVENT", description: null, policy: "auto_allow" as const }],
+    });
+    const onCalendarConnectedChange = vi.fn();
+
+    render(
+      <EmpowerStep
+        exaCard={null}
+        onContinue={() => {}}
+        onCalendarConnectedChange={onCalendarConnectedChange}
+      />,
+    );
+
+    await screen.findByText(/Connected · 1 tool/);
+    await waitFor(() => {
+      expect(onCalendarConnectedChange).toHaveBeenLastCalledWith(true);
     });
   });
 });

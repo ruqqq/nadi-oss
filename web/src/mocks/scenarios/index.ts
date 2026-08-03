@@ -689,6 +689,35 @@ function onboardingEmpowerConnectedStore(): MockStore {
   };
 }
 
+/**
+ * The bug's exact shape: Composio has finished OAuth (the row is fully
+ * authorized, no `needsAuth`) but only a Gmail tool resolved — no calendar
+ * account was ever connected inside it. Drives the onboarding nudge test:
+ * the seeded automaton prompt must not promise a calendar briefing here.
+ */
+function onboardingEmpowerComposioNoCalendarStore(): MockStore {
+  const base = freshAccountStore();
+  const serverId = "mcp_composio";
+  return {
+    ...base,
+    mcpServers: [
+      {
+        id: serverId,
+        name: "Composio",
+        url: "https://connect.composio.dev/mcp",
+        enabled: true,
+        createdAt: NOW - DAY,
+      },
+    ],
+    mcpTools: {
+      [serverId]: [
+        { name: "GMAIL_SEND_EMAIL", description: "Send an email from Gmail.", policy: "approval_required" },
+      ],
+    },
+    mcpNeedsAuth: {},
+  };
+}
+
 const PROJECT_TITLES: Record<string, string[]> = {
   prj_platform: [
     "Migrate D1 schema for workbenches",
@@ -1392,6 +1421,7 @@ export const SCENARIOS: Record<string, () => MockStore> = {
   "fresh-account": freshAccountStore,
   "onboarding-empower": onboardingEmpowerStore,
   "onboarding-empower-connected": onboardingEmpowerConnectedStore,
+  "onboarding-empower-composio-no-calendar": onboardingEmpowerComposioNoCalendarStore,
   "busy-workspace": busyWorkspaceStore,
   "dismissed-threads": dismissedThreadsStore,
   // Seeded like `default`; the interesting part is the live traffic that

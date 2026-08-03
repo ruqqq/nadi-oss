@@ -3,8 +3,9 @@ import { Button } from "../ui/button";
 import { Notebook, PlugsConnected } from "../../icons";
 import { FEATURED_CONNECTIONS, findFeaturedServer } from "../../lib/featured-connections";
 import type { FeaturedConnectionId } from "../../lib/featured-connections";
+import { hasCalendarTool } from "../../lib/automaton-nudge";
 import { listMcpServers, type McpServer } from "../../mcp-api";
-import { FeaturedConnectionCard, type FeaturedConnectionState } from "./FeaturedConnectionCard";
+import { FeaturedConnectionCard } from "./FeaturedConnectionCard";
 
 const CONNECTION_ICONS = {
   markdump: <Notebook aria-hidden className="size-5" />,
@@ -14,24 +15,34 @@ const CONNECTION_ICONS = {
 export function EmpowerStep({
   exaCard,
   onContinue,
-  onConnectedChange,
+  onCalendarConnectedChange,
 }: {
   /** The web-search card, owned by the wizard because it holds the Exa form state. */
   exaCard: React.ReactNode;
   onContinue: () => void;
   /**
-   * The connections that are actually AUTHORIZED — not merely added. Completion
-   * seeds a prompt from this, and a row the user never consented to would make
-   * that prompt ask for data the agent cannot reach.
+   * Whether a calendar-named tool actually resolved on any authorized
+   * connection. This is deliberately NOT derived from which connections are
+   * authorized — Composio finishing OAuth means the platform is connected,
+   * not that a calendar account is attached inside it. Only a resolved tool
+   * name counts.
    */
-  onConnectedChange?: (connected: FeaturedConnectionId[]) => void;
+  onCalendarConnectedChange?: (calendarConnected: boolean) => void;
 }) {
   // `undefined` until the list resolves; the cards read that as "don't know yet"
   // and refuse to offer Connect, which is what stops a post-OAuth reload from
   // adding a second row for a server the user just authorized.
   const [servers, setServers] = useState<McpServer[] | undefined>(undefined);
-  type StateMap = Partial<Record<FeaturedConnectionId, FeaturedConnectionState>>;
-  const [states, setStates] = useState<StateMap>({});
+  // `null` = not connected (or not yet resolved); `string[]` = connected with
+  // exactly these tool names, including `[]` for zero. The two aren't
+  // conflated here — `?? []` below treats them the same only because both
+  // happen to mean "no calendar" for THIS check. Keep them distinct in the
+  // type anyway: a future consumer that cares about "connected" as its own
+  // fact (not just "has a calendar") needs that distinction preserved, and
+  // `FeaturedConnectionCard`'s `onResolved` doc explains why collapsing them
+  // at the source would be the wrong place to lose it.
+  type ResolvedMap = Partial<Record<FeaturedConnectionId, string[] | null>>;
+  const [resolvedTools, setResolvedTools] = useState<ResolvedMap>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -49,18 +60,24 @@ export function EmpowerStep({
     };
   }, []);
 
-  const handleStateChange = useCallback(
-    (id: FeaturedConnectionId, state: FeaturedConnectionState) => {
-      setStates((current) => (current[id] === state ? current : { ...current, [id]: state }));
-    },
-    [],
-  );
+  const handleResolved = useCallback((id: FeaturedConnectionId, toolNames: string[] | null) => {
+    setResolvedTools((current) => ({ ...current, [id]: toolNames }));
+  }, []);
 
   useEffect(() => {
-    onConnectedChange?.(
-      FEATURED_CONNECTIONS.filter((c) => states[c.id] === "connected").map((c) => c.id),
+    // `resolvedTools[id]` is `null` for anything short of a fully
+    // introspected connection, and `?? []` folds that into "no tools to
+    // check" — the same outcome a genuinely empty, connected tool list
+    // produces. `hasCalendarTool` only ever sees names that actually
+    // resolved, so this can't arm the calendar prompt off an unresolved or
+    // not-yet-connected row; it can still be bypassed by a future call site
+    // that reaches into `resolvedTools` directly instead of going through
+    // this derivation.
+    const calendarConnected = FEATURED_CONNECTIONS.some((c) =>
+      hasCalendarTool(resolvedTools[c.id] ?? []),
     );
-  }, [states, onConnectedChange]);
+    onCalendarConnectedChange?.(calendarConnected);
+  }, [resolvedTools, onCalendarConnectedChange]);
 
   return (
     <div className="mt-4 space-y-4">
@@ -78,7 +95,7 @@ export function EmpowerStep({
           icon={CONNECTION_ICONS[connection.id]}
           server={servers ? findFeaturedServer(servers, connection) : undefined}
           onAdded={(server) => setServers((current) => [...(current ?? []), server])}
-          onStateChange={handleStateChange}
+          onResolved={handleResolved}
         />
       ))}
 
