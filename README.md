@@ -89,8 +89,8 @@ hand-edited (`pnpm run db:generate`). Full workflow:
 Live constraints, not aspirations — you will meet these:
 
 - **MCP servers are not reachable from inside a Daytona sandbox.** Daytona's
-  `domainAllowList` *replaces* its org-default egress list rather than extending
-  it, and caps at 20 entries — too few to carry a working toolchain *and* a
+  `domainAllowList` _replaces_ its org-default egress list rather than extending
+  it, and caps at 20 entries — too few to carry a working toolchain _and_ a
   workspace's MCP hosts. New workspaces therefore default to Cloudflare Sandbox.
   This does not affect MCP tool calls themselves, which the Worker makes.
 - **Cloudflare Sandbox cannot honour a network allowlist.** It has no

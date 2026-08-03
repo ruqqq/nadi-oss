@@ -61,7 +61,7 @@ ran — a red run is not necessarily a broken test.
 ## Pull requests
 
 - Branch from `main`; one concern per PR.
-- Explain *why* in the description. The diff shows what changed.
+- Explain _why_ in the description. The diff shows what changed.
 - Include tests for behaviour changes. A test that cannot fail is not a test —
   break the code deliberately and confirm the test notices.
 - If you change UI, say what you looked at. The mocked app
