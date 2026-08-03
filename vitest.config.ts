@@ -44,34 +44,59 @@ const integrationGroupedIsolatedFiles = [
   "test/integration/workspace-mcp-agent.integration.test.ts",
 ];
 
-const integrationIsolatedEntryFiles = [
+// Under the workers pool, per-file isolation means a fresh workerd isolate that
+// re-imports the whole `src/index.ts` module graph — roughly 9s of import per
+// file, dwarfing the tests themselves. So a file earns its own isolate only if
+// it needs a pristine module registry, which is true in exactly two cases:
+//
+//   1. it calls `vi.mock` — a shared registry leaks the mock into later files;
+//   2. it asserts on shared module identity (e.g. `Think.prototype` method
+//      arity), which a shared registry can resolve to a different instance.
+//
+// Everything else shares one isolate (integration-shared) and pays the import
+// cost exactly once instead of once per file.
+const integrationPristineRegistryFiles = [
+  "test/integration/thread-search-repair.integration.test.ts",
+  // Source-level tests that use `cloudflare:workers` AND call vi.mock.
+  "test/unit/agent/turn-usage-wiring.test.ts",
+  "test/unit/agent/cancel-stops-processes.test.ts",
+  "test/unit/agent/alarm-rearm.test.ts",
+  "test/unit/agent/work-terminal-funnel.test.ts",
+  "test/unit/agent/subagent-ledger-wiring.test.ts",
+  // Pins SDK prototype methods, so it must observe an unshared module graph.
+  "test/unit/agent/think-sdk-contract.test.ts",
+];
+
+// Mock-free, but still need the workers pool — either for Durable Object /
+// storage semantics or for a `cloudflare:workers` specifier that the plain-node
+// `unit` environment cannot load. These all share a single isolate.
+const integrationSharedIsolateFiles = [
   "test/integration/isolated-do-suite.integration.test.ts",
   "test/integration/thread-transcript-adapters.integration.test.ts",
   "test/integration/thread-knowledge-tools.integration.test.ts",
   "test/integration/thread-search-projector.integration.test.ts",
   "test/integration/thread-search-lifecycle.integration.test.ts",
-  "test/integration/thread-search-repair.integration.test.ts",
   "test/integration/thread-knowledge-digest.integration.test.ts",
   "test/integration/user-hub-broadcast.integration.test.ts",
-  // These source-level tests use `cloudflare:workers` but need Vitest's
-  // default per-file module isolation for their mocks.
-  "test/unit/agent/think-sdk-contract.test.ts",
   "test/unit/agent/think-model-messages-override.test.ts",
   "test/unit/agent/thread-compaction-wiring.test.ts",
-  "test/unit/agent/turn-usage-wiring.test.ts",
-  "test/unit/agent/cancel-stops-processes.test.ts",
   "test/unit/agent/work-ledger-store.test.ts",
   "test/unit/agent/tool-call-timing-store.test.ts",
   "test/unit/agent/work-delivery-ownership.test.ts",
-  "test/unit/agent/alarm-rearm.test.ts",
-  "test/unit/agent/work-terminal-funnel.test.ts",
-  "test/unit/agent/subagent-ledger-wiring.test.ts",
   "test/unit/agent/workbench-switch-commit-wiring.test.ts",
 ];
 
+// Every `test/unit/**` file above runs under the workers pool instead of the
+// plain-node `unit` project, so `unit` has to skip exactly these.
+const unitFilesRunByWorkersPool = [
+  ...integrationPristineRegistryFiles,
+  ...integrationSharedIsolateFiles,
+].filter((file) => file.startsWith("test/unit/"));
+
 const integrationFastExcludeFiles = [
   ...integrationGroupedIsolatedFiles,
-  ...integrationIsolatedEntryFiles,
+  ...integrationPristineRegistryFiles,
+  ...integrationSharedIsolateFiles,
 ];
 
 function integrationPlugins() {
@@ -142,21 +167,10 @@ export default defineConfig({
             "**/node_modules/**",
             "**/.git/**",
             "test/unit/web/**/*.test.ts",
-            // Imports @cloudflare/think, which pulls in a `cloudflare:workers`
-            // specifier the plain-node unit environment can't load. Runs
-            // under the isolated integration workers pool instead.
-            "test/unit/agent/think-sdk-contract.test.ts",
-            "test/unit/agent/think-model-messages-override.test.ts",
-            "test/unit/agent/thread-compaction-wiring.test.ts",
-            "test/unit/agent/turn-usage-wiring.test.ts",
-            "test/unit/agent/cancel-stops-processes.test.ts",
-            "test/unit/agent/work-ledger-store.test.ts",
-            "test/unit/agent/tool-call-timing-store.test.ts",
-            "test/unit/agent/work-delivery-ownership.test.ts",
-            "test/unit/agent/alarm-rearm.test.ts",
-            "test/unit/agent/work-terminal-funnel.test.ts",
-            "test/unit/agent/subagent-ledger-wiring.test.ts",
-            "test/unit/agent/workbench-switch-commit-wiring.test.ts",
+            // Import @cloudflare/think, which pulls in a `cloudflare:workers`
+            // specifier the plain-node unit environment can't load. These run
+            // under the integration workers pool instead.
+            ...unitFilesRunByWorkersPool,
           ],
           environment: "node",
           clearMocks: true,
@@ -203,10 +217,20 @@ export default defineConfig({
       {
         plugins: integrationPlugins(),
         test: {
-          name: "integration-isolated",
-          include: integrationIsolatedEntryFiles,
-          maxWorkers: 1,
+          name: "integration-shared",
+          include: integrationSharedIsolateFiles,
+          isolate: false,
+          fileParallelism: false,
           sequence: { groupOrder: 4 },
+        },
+      },
+      {
+        plugins: integrationPlugins(),
+        test: {
+          name: "integration-isolated",
+          include: integrationPristineRegistryFiles,
+          maxWorkers: 1,
+          sequence: { groupOrder: 5 },
         },
       },
     ],
