@@ -72,7 +72,8 @@ import {
   type InvitePreview,
   type InviteQuota,
 } from "./invites-api";
-import { getBootstrap } from "./bootstrap-api";
+import { useDocumentTitle } from "./lib/use-document-title";
+import { DEFAULT_APP_NAME, getBootstrap } from "./bootstrap-api";
 import { purgeCachedBootstrap, readCachedBootstrap, writeCachedBootstrap } from "./lib/bootstrap-cache";
 import { maybeRenewSession } from "./lib/session-renewal";
 import { isNetworkFailure, type Reachability } from "./lib/offline-state";
@@ -5470,6 +5471,10 @@ export default function App({
   const [bootstrapThreadsNextCursor, setBootstrapThreadsNextCursor] = useState<string | null>(
     cachedBootstrap?.threadsNextCursor ?? null,
   );
+  // Defaulted rather than cache-versioned: an entry written before appName
+  // existed simply falls back, which is cheaper than invalidating everyone's
+  // cache and making one launch slow.
+  const [appName, setAppName] = useState(cachedBootstrap?.appName ?? DEFAULT_APP_NAME);
   const [voiceEnabled, setVoiceEnabled] = useState(cachedBootstrap?.voiceEnabled ?? false);
   const [backgroundWorkEnabled, setBackgroundWorkEnabled] = useState(
     cachedBootstrap?.backgroundWorkEnabled ?? false,
@@ -5556,6 +5561,7 @@ export default function App({
           setBootstrapProjects(data.projects);
           setBootstrapThreads(data.threads);
           setBootstrapThreadsNextCursor(data.threadsNextCursor);
+          setAppName(data.appName);
           setVoiceEnabled(data.voiceEnabled);
           setBackgroundWorkEnabled(data.backgroundWorkEnabled);
           setWorkbenchNetworkAllowlistEnabled(data.workbenchNetworkAllowlistEnabled);
@@ -5705,6 +5711,16 @@ export default function App({
     });
   }, [navigate]);
 
+  // Hoisted above the early returns because a hook cannot be called
+  // conditionally, and the title has to be decided on every branch — including
+  // the loader and the unreachable screen — not just the one that renders the
+  // app shell. `session === null` means "still loading", which is not the
+  // landing page unless the path says so.
+  const showsLanding =
+    path === "/about" ||
+    (session !== null && !session.authenticated && path === "/" && !hasPendingInvite());
+  useDocumentTitle(showsLanding ? null : appName);
+
   if (unreachable) {
     return (
       <OfflineProvider reachability={reachability}>
@@ -5736,10 +5752,7 @@ export default function App({
   // same page, but only to signed-out visitors with nothing better to do here —
   // a pending invite, a deep link, or an explicit /signin all mean this person
   // came to get in, not to be sold to.
-  const wantsLanding =
-    path === "/about" || (!session.authenticated && path === "/" && !hasPendingInvite());
-
-  if (wantsLanding) {
+  if (showsLanding) {
     return (
       <OfflineProvider reachability={reachability}>
         <Suspense fallback={<FullScreenLoader label="Loading" />}>

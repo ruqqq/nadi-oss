@@ -13,6 +13,7 @@ import {
 
 function signedIn(): BootstrapData {
   return {
+    appName: "Nadi",
     session: { authenticated: true, user: { id: "u1", email: "a@b.co" } },
     settings: null,
     threads: [],
