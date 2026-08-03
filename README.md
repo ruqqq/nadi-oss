@@ -18,6 +18,27 @@ history stays readable offline.
 
 Nine providers or any endpoint you can name, changeable mid-thread.
 
+## Getting started
+
+**Try it** — [nadiai.app](https://nadiai.app) runs the hosted beta. It is
+invite-only for now; without an invite you can still leave your email and we
+will write when there is room.
+
+**Run it yourself** — everything below works against your own Cloudflare
+account.
+
+```bash
+pnpm install
+cp .dev.vars.example .dev.vars   # add BETTER_AUTH_SECRET, TOOL_APPROVAL_SECRET, a model key
+pnpm run db:migrate:local
+pnpm run dev                     # Worker on :8787
+pnpm run web:dev                 # SPA on :5173, second terminal
+```
+
+Schema lives in `src/db/schema.ts`; migrations are drizzle-generated and never
+hand-edited (`pnpm run db:generate`). Full workflow:
+[`docs/runbooks/local-dev.md`](./docs/runbooks/local-dev.md).
+
 ## Features
 
 - **Threads with real work.** Every chat is a Durable Object with its own
@@ -70,20 +91,6 @@ flowchart LR
 **[`docs/architecture.md`](./docs/architecture.md) is the full tour** — request
 path, the DO model, how compute is abstracted, and where state actually lives.
 
-## Quickstart
-
-```bash
-pnpm install
-cp .dev.vars.example .dev.vars   # add BETTER_AUTH_SECRET, TOOL_APPROVAL_SECRET, a model key
-pnpm run db:migrate:local
-pnpm run dev                     # Worker on :8787
-pnpm run web:dev                 # SPA on :5173, second terminal
-```
-
-Schema lives in `src/db/schema.ts`; migrations are drizzle-generated and never
-hand-edited (`pnpm run db:generate`). Full workflow:
-[`docs/runbooks/local-dev.md`](./docs/runbooks/local-dev.md).
-
 ## Known issues
 
 Live constraints, not aspirations — you will meet these:
@@ -115,8 +122,8 @@ Milestones, not dates:
 4. **Coding depth** — subagents on by default, sturdier watchers, richer
    workbenches.
 
-A hosted service is deferred until the compute economics are understood. The
-self-hosted path is the product.
+The hosted beta is how this gets tested, not a product yet; a paid service
+waits until the compute economics are understood.
 
 ## Contributing
 
