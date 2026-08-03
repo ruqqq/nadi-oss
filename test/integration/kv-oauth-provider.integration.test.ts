@@ -30,16 +30,12 @@ describe("KvMcpOAuthProvider", () => {
     const stub = env.WORKSPACE_MCP_AGENT.get(env.WORKSPACE_MCP_AGENT.idFromName(`workspace:${WS}`));
     await runInDurableObject(stub, async (instance: WorkspaceMcpAgent) => {
       expect(instance.name).toBe(`workspace:${WS}`);
-      const previous = instance.env.APP_NAME;
-      instance.env.APP_NAME = "Acme";
-      try {
-        const provider = instance.createMcpOAuthProvider("https://nadi.test/cb");
-        // OAuth dynamic client registration sends clientMetadata.client_name to
-        // the authorization server — it must be APP_NAME, not workspace:<id>.
-        expect(provider.clientMetadata.client_name).toBe("Acme");
-      } finally {
-        instance.env.APP_NAME = previous;
-      }
+      const provider = instance.createMcpOAuthProvider("https://nadi.test/cb");
+      // OAuth dynamic client registration sends clientMetadata.client_name to the
+      // authorization server — resolveAppName(APP_NAME), never workspace:<id>.
+      // Custom APP_NAME values are covered by test/unit/app-name.test.ts.
+      expect(provider.clientMetadata.client_name).toBe("Nadi");
+      expect(provider.clientMetadata.client_name).not.toBe(instance.name);
     });
   });
 
