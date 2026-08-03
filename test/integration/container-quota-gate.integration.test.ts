@@ -88,18 +88,17 @@ describe("compute quota gate (real D1)", () => {
     await expect(gateFor("fresh", 1).admit()).resolves.toBeUndefined();
   });
 
-  // resolveComputeService's quota gate MUST only ever be built for the
-  // Cloudflare provider — a cap silently applied to Daytona (which has its own
-  // provider-side capacity) would be a regression. resolveComputeService
-  // itself needs a full DB-backed workspace/agent/secrets fixture to drive
-  // end to end, so this exercises the narrower, directly testable property
-  // that the gate-construction ternary is built on: buildComputeQuotaGate
-  // returns undefined for every non-cloudflare provider and a real,
-  // ledger-backed gate for cloudflare.
+  // The gate is built for providers whose capacity comes out of the operator's
+  // budget: Cloudflare always, Daytona only when system-managed. BYOK Daytona
+  // bills the workspace's own key, so capping it would ration someone else's
+  // account. resolveComputeService needs a full DB-backed workspace/agent/
+  // secrets fixture to drive end to end, so these exercise the narrower,
+  // directly testable property the gate construction is built on.
   it("builds a real quota gate for cloudflare", async () => {
     const gate = buildComputeQuotaGate({
       env: env as unknown as Env,
       effectiveConfig: effectiveConfig("cloudflare"),
+      daytonaMode: null,
       workspaceId: "ws1",
       threadId: "t-cf",
       now: () => NOW,
@@ -115,14 +114,66 @@ describe("compute quota gate (real D1)", () => {
     ).toBe(0);
   });
 
-  it("does not build a quota gate for a non-cloudflare provider, so Daytona is never capped by the ledger", () => {
+  // System-managed Daytona bills the operator's DAYTONA_API_KEY, and it is what
+  // new workspaces are provisioned with — leaving it exempt would leave every
+  // new account unbounded.
+  it("builds a real quota gate for system-managed daytona, and it consumes a ledger slot", async () => {
     const gate = buildComputeQuotaGate({
       env: env as unknown as Env,
       effectiveConfig: effectiveConfig("daytona"),
+      daytonaMode: "system",
       workspaceId: "ws1",
-      threadId: "t-daytona",
+      threadId: "t-daytona-system",
+      now: () => NOW,
+    });
+    expect(gate).toBeDefined();
+    await expect(gate!.admit()).resolves.toBeUndefined();
+    expect(
+      await new ContainerLedger(env.REGISTRY_DB).countActive({ workspaceId: "ws1", now: NOW }),
+    ).toBe(1);
+    await gate!.release();
+    expect(
+      await new ContainerLedger(env.REGISTRY_DB).countActive({ workspaceId: "ws1", now: NOW }),
+    ).toBe(0);
+  });
+
+  it("does not build a quota gate for BYOK daytona, which pays its own provider", () => {
+    const gate = buildComputeQuotaGate({
+      env: env as unknown as Env,
+      effectiveConfig: effectiveConfig("daytona"),
+      daytonaMode: "byok",
+      workspaceId: "ws1",
+      threadId: "t-daytona-byok",
       now: () => NOW,
     });
     expect(gate).toBeUndefined();
+  });
+
+  // A Daytona workspace whose mode could not be resolved must not be capped:
+  // fail open rather than refuse work on a mode we are unsure of.
+  it("does not build a quota gate for daytona with an unknown mode", () => {
+    const gate = buildComputeQuotaGate({
+      env: env as unknown as Env,
+      effectiveConfig: effectiveConfig("daytona"),
+      daytonaMode: null,
+      workspaceId: "ws1",
+      threadId: "t-daytona-unknown",
+      now: () => NOW,
+    });
+    expect(gate).toBeUndefined();
+  });
+
+  it("never caps the mock provider, whatever the daytona mode says", () => {
+    const mock = { ...effectiveConfig("daytona"), provider: "mock" } as EffectiveComputeConfig;
+    expect(
+      buildComputeQuotaGate({
+        env: env as unknown as Env,
+        effectiveConfig: mock,
+        daytonaMode: "system",
+        workspaceId: "ws1",
+        threadId: "t-mock",
+        now: () => NOW,
+      }),
+    ).toBeUndefined();
   });
 });

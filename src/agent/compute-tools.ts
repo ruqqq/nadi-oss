@@ -11,6 +11,7 @@ import { resolveComputeEnvVars } from "../compute/env-resolve";
 import { buildComputeBackend } from "../compute/registry";
 import { ComputeError } from "../compute/errors";
 import { ContainerLedger } from "../compute/container-ledger";
+import type { DaytonaConfigurationMode } from "../compute/daytona-config";
 import {
   createComputeQuotaGate,
   parseMaxActiveContainers,
@@ -403,6 +404,7 @@ export async function resolveComputeService(deps: ComputeToolHostDeps): Promise<
   const quota = buildComputeQuotaGate({
     env: deps.env,
     effectiveConfig,
+    daytonaMode: inputs.daytonaConfiguration?.mode ?? null,
     workspaceId,
     threadId: deps.threadId,
     now,
@@ -445,21 +447,49 @@ export async function resolveComputeService(deps: ComputeToolHostDeps): Promise<
 }
 
 /**
- * Builds the per-workspace container cap for Cloudflare, and ONLY Cloudflare —
- * Daytona has its own provider-side capacity and must never be gated by the
- * ledger. Split out from {@link resolveComputeService} so this provider gate
- * is a directly testable, pure property instead of something only observable
- * by driving the whole resolution pipeline (DB-backed settings, secrets, MCP
- * host lookups) end to end.
+ * Does this provider's capacity come out of OUR budget, and therefore need the
+ * per-workspace ledger cap?
+ *
+ * - **Cloudflare** — always. The containers run on the deployment's account.
+ * - **Daytona, system-managed** — yes. It bills the operator's
+ *   `DAYTONA_API_KEY`, so an uncapped workspace spends our money exactly the
+ *   way an uncapped Cloudflare one does. This was previously exempt on the
+ *   reasoning that "Daytona has its own provider-side capacity" — true, but
+ *   that capacity is the operator's, and Daytona is now what new workspaces are
+ *   provisioned with (`DEFAULT_SANDBOX_PROVIDER`), so the exemption would leave
+ *   every new account unbounded.
+ * - **Daytona, BYOK** — no. The workspace supplies its own key and pays its own
+ *   provider directly; capping that would be us rationing someone else's
+ *   account. This is the case the original exemption is still right about.
+ *
+ * Kept pure and exported so the rule is directly assertable, rather than only
+ * observable by driving the whole resolution pipeline (DB-backed settings,
+ * secrets, MCP host lookups) end to end.
+ */
+export function isQuotaGatedProvider(
+  provider: EffectiveComputeConfig["provider"],
+  daytonaMode: DaytonaConfigurationMode | null,
+): boolean {
+  if (provider === "cloudflare") return true;
+  if (provider === "daytona") return daytonaMode === "system";
+  return false;
+}
+
+/**
+ * Builds the per-workspace sandbox cap, for the providers that spend the
+ * operator's capacity — see {@link isQuotaGatedProvider}. Split out from
+ * {@link resolveComputeService} so that gate is testable on its own.
  */
 export function buildComputeQuotaGate(input: {
   env: Env;
   effectiveConfig: EffectiveComputeConfig;
+  /** The workspace's resolved Daytona mode; null when it is not a Daytona workspace. */
+  daytonaMode: DaytonaConfigurationMode | null;
   workspaceId: string;
   threadId: string;
   now: () => number;
 }): ComputeQuotaGate | undefined {
-  if (input.effectiveConfig.provider !== "cloudflare") return undefined;
+  if (!isQuotaGatedProvider(input.effectiveConfig.provider, input.daytonaMode)) return undefined;
   return createComputeQuotaGate({
     ledger: new ContainerLedger(input.env.REGISTRY_DB),
     workspaceId: input.workspaceId,
