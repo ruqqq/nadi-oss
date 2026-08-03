@@ -151,25 +151,14 @@ export function resolveEffectiveComputeConfig(input: {
     return { enabled: false, reason: "missing_source" };
   }
 
-  // The allowlist is the workspace domains (or the sensible defaults if none)
-  // unioned with enabled MCP server hosts. Workbench-specific additions are
-  // layered on later at compute acquisition (they need the thread's workbench,
-  // unknown here); the agent-level override was retired in favor of that.
-  //
-  // Daytona is ALWAYS restricted, whatever the workspace toggle says. "Off" was
-  // never actually unrestricted there: passing no `domainAllowList` leaves the
-  // sandbox on Daytona's ORG default, which permits a common-safe baseline and
-  // blocks everything else. So "off" meant "silently governed by a list we do
-  // not control and cannot read" — and, worse, it skipped this block, so the
-  // enabled MCP hosts never reached the sandbox at all. Since the toggle has no
-  // UI, that was every Daytona workspace.
-  //
-  // Cloudflare stays opt-in: its sandbox has no network-policy API and
-  // fails closed on a non-empty allowlist (cloudflare.ts `policy_rejected`),
-  // so forcing a list there would break every Cloudflare thread.
-  const restricted = workspace.provider === "daytona" || workspace.networkRestrictionEnabled;
+  // The workspace toggle is the master switch. When on, the allowlist is the
+  // workspace domains (or the sensible defaults if none) unioned with enabled
+  // MCP server hosts. Workbench-specific additions are layered on later at
+  // compute acquisition (they need the thread's workbench, unknown here); the
+  // agent-level override was retired in favor of that. When off, the network is
+  // unrestricted (null).
   let allowedHosts: string[] | null = null;
-  if (restricted) {
+  if (workspace.networkRestrictionEnabled) {
     const configured = parseDomainList(workspace.networkDomainAllowlist);
     const workspaceHosts = configured.length
       ? configured
