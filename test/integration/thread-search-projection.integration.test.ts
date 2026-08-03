@@ -263,7 +263,7 @@ describe("thread search projection reconciliation", () => {
       {
         id: threadId,
         workspaceId,
-        runtime: "legacy",
+        runtime: "think",
         archivedAt: null,
       },
     ]);
