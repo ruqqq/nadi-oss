@@ -20,7 +20,6 @@ import {
 } from "../compute/container-quota";
 import { buildComputeFileToolDefs } from "./compute-file-tools";
 import {
-  DEFAULT_COMPUTE_ALLOWED_HOSTS,
   defaultProviderConfig,
   isComputeResourceProfile,
   needsWorkbenchResourceProfile,
@@ -328,13 +327,12 @@ export async function resolveComputeService(deps: ComputeToolHostDeps): Promise<
     environmentSecretEnvNames = envSecretNames.map((n) => n.name);
   }
 
-  const baseAllowlist =
-    config.value.provider === "daytona" &&
-    config.value.allowedHosts === null &&
-    workbenchNetworkHosts.length > 0
-      ? DEFAULT_COMPUTE_ALLOWED_HOSTS
-      : config.value.allowedHosts;
-  const widenedAllowlist = unionAllowlistWithSkillDomains(baseAllowlist, [
+  // This used to seed DEFAULT_COMPUTE_ALLOWED_HOSTS when a Daytona workspace
+  // was "unrestricted" but a workbench brought its own hosts — a restriction
+  // activating from below needed a baseline to be self-contained. Daytona now
+  // always resolves a list upstream, so that case cannot arise and the branch
+  // was unreachable.
+  const widenedAllowlist = unionAllowlistWithSkillDomains(config.value.allowedHosts, [
     ...inputs.mcpHosts,
     ...skillDomains,
     ...workbenchNetworkHosts,
