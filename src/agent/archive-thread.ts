@@ -13,6 +13,18 @@ import { reconcileThreadSearchProjectionFromMessages } from "../thread-knowledge
 
 export type ArchiveOutcome = "archived" | "already_archived" | "active_turn" | "empty_snapshot";
 
+export interface ArchiveOptions {
+  /**
+   * Archive even when the DO exports nothing. The refusal below exists because
+   * an empty export is indistinguishable from an unhydrated read, and the next
+   * step destroys the DO — so the default is to bet on "unhydrated". Only a
+   * caller that is retiring the runtime entirely should override it: leaving the
+   * thread active is then the WORSE outcome, because the DO class it points at
+   * is about to stop existing.
+   */
+  allowEmptySnapshot?: boolean;
+}
+
 interface ArchiveStub {
   hasActiveTurn(): boolean | Promise<boolean>;
   exportHistory(): Promise<unknown[]>;
@@ -41,7 +53,11 @@ async function archiveStub(env: Env, runtime: string, threadId: string): Promise
  * never leaves a destroyed DO whose history was not yet captured. Idempotent:
  * an already-archived (or missing) thread is a no-op.
  */
-export async function archiveThreadCore(env: Env, threadId: string): Promise<ArchiveOutcome> {
+export async function archiveThreadCore(
+  env: Env,
+  threadId: string,
+  options: ArchiveOptions = {},
+): Promise<ArchiveOutcome> {
   const db = registryDb(env);
   const repo = new ThreadRepository(db);
   const thread = await repo.getById(threadId);
@@ -82,7 +98,7 @@ export async function archiveThreadCore(env: Env, threadId: string): Promise<Arc
   // holds nothing worth reclaiming, so it just stays active (the user can
   // delete it). The skip is stamped so the oldest-first auto-archive batch does
   // not re-pick this thread on every run and starve the threads behind it.
-  if (messages.length === 0) {
+  if (messages.length === 0 && !options.allowEmptySnapshot) {
     log.warn("thread.archive_skipped_empty_snapshot", { threadId, runtime: thread.runtime });
     await repo.markArchiveSkipped(threadId, thread.updatedAt);
     return "empty_snapshot";
