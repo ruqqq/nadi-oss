@@ -106,7 +106,12 @@ import {
   type ReasoningEffort,
   type SettingsProvider,
 } from "./settings-api";
-import { deriveNeedsOnboarding, isOnboardingForced } from "./lib/onboarding";
+import {
+  deriveNeedsOnboarding,
+  isOnboardingForced,
+  parseOnboardingStep,
+} from "./lib/onboarding";
+import { detectInstallPlatform } from "./lib/install-platform";
 import {
   compactThread as compactThreadApi,
   archiveThread as archiveThreadApi,
@@ -5360,7 +5365,25 @@ function clearForcedOnboarding(): void {
   if (!isOnboardingForced(window.location.search)) return;
   const url = new URL(window.location.href);
   url.searchParams.delete("onboarding");
+  url.searchParams.delete("step");
   window.history.replaceState(null, "", url.toString());
+}
+
+/**
+ * Returning from an MCP OAuth consent redirect lands on the app root; restore
+ * the screen the user left. MUST run before any state initializer that reads
+ * `window.location` — `computeOnboarding` reads `search` for `onboarding=force`,
+ * and useState initializers run in declaration order, so restoring later leaves
+ * the wizard resolved to "done" and the user stranded in chat.
+ *
+ * Returns the pathname only. `path` state is matched against pathname routes
+ * elsewhere; handing it a value with a query string breaks every route check.
+ */
+function restoreMcpReturnPath(): string {
+  const stored = typeof sessionStorage === "undefined" ? null : takeMcpReturnPath(sessionStorage);
+  if (stored === null) return window.location.pathname;
+  window.history.replaceState(null, "", stored);
+  return new URL(stored, window.location.origin).pathname;
 }
 
 function formatThreadMeta(thread: ThreadSummary): string {
@@ -5442,6 +5465,9 @@ export default function App({
   // spinner and no network wait.
   const [cachedBootstrap] = useState(readCachedBootstrap);
 
+  // Declaration order is load-bearing — see restoreMcpReturnPath.
+  const [path, setPath] = useState(restoreMcpReturnPath);
+
   const [session, setSession] = useState<AuthSession | null>(cachedBootstrap?.session ?? null);
   const [onboarding, setOnboarding] = useState<OnboardingState>(() =>
     cachedBootstrap
@@ -5489,17 +5515,6 @@ export default function App({
   // Cold launch, offline, and no cache: we genuinely cannot know who the user
   // is. Neither the app nor AuthGate is honest, so we say so.
   const [unreachable, setUnreachable] = useState(false);
-  const [path, setPath] = useState(() => {
-    // Returning from an OAuth consent redirect lands on the app root; restore the
-    // Settings screen — and the tab — the user left to start authorization.
-    const returnPath =
-      typeof sessionStorage === "undefined" ? null : takeMcpReturnPath(sessionStorage);
-    if (returnPath) {
-      window.history.replaceState(null, "", returnPath);
-      return returnPath;
-    }
-    return window.location.pathname;
-  });
 
   usePostHogPrivacySync({ session, consentWorkspaceId });
 
@@ -5775,6 +5790,8 @@ export default function App({
             user={session.user}
             settings={onboarding.settings}
             workersAiEnabled={workersAiEnabled}
+            initialStep={parseOnboardingStep(window.location.search) ?? undefined}
+            installed={detectInstallPlatform() === "installed"}
             onComplete={() => {
               clearForcedOnboarding();
               setOnboarding({ status: "done" });
