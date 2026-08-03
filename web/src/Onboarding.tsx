@@ -8,6 +8,7 @@ import { OfflineBanner } from "./components/OfflineBanner";
 import { Input } from "./components/ui/input";
 import { Label } from "./components/ui/label";
 import { ModelCombobox } from "./components/settings/ModelCombobox";
+import { EmpowerStep } from "./components/onboarding/EmpowerStep";
 import { InstallStep } from "./components/onboarding/InstallStep";
 import {
   Select,
@@ -671,82 +672,79 @@ export function Onboarding({
               </form>
             </Card>
           ) : step === "empower" ? (
-            <Card className="mt-4 p-4">
-              <form className="space-y-4" onSubmit={submitWebSearch}>
-                <div className="space-y-1">
-                  <h2 className="font-display font-semibold text-lg">Let Nadi search the web</h2>
-                  <p className="text-muted-foreground text-sm">
-                    With an Exa key, Nadi can search the web and cite what it finds. Without one, it
-                    can still read pages you link to.
-                  </p>
-                </div>
+            <EmpowerStep
+              exaCard={
+                <Card className="gap-3 p-4">
+                  <form className="space-y-4" onSubmit={submitWebSearch}>
+                    <div className="space-y-1">
+                      <h2 className="font-display font-semibold text-lg">
+                        Let Nadi search the web
+                      </h2>
+                      <p className="text-muted-foreground text-sm">
+                        With an Exa key, Nadi can search the web and cite what it finds. Without
+                        one, it can still read pages you link to.
+                      </p>
+                    </div>
 
-                {exaAlreadySet && (
-                  <Alert>
-                    <AlertDescription>
-                      Web search is already set up for this workspace. Saving a key replaces it.
-                    </AlertDescription>
-                  </Alert>
-                )}
+                    {exaAlreadySet && (
+                      <Alert>
+                        <AlertDescription>
+                          Web search is already set up for this workspace. Saving a key replaces
+                          it.
+                        </AlertDescription>
+                      </Alert>
+                    )}
 
-                <div className="space-y-1.5">
-                  <Label htmlFor="onboarding-exa-key">Exa API key</Label>
-                  <Input
-                    id="onboarding-exa-key"
-                    type="password"
-                    autoComplete="off"
-                    autoFocus
-                    placeholder="Starts with exa_…"
-                    value={exaKey}
-                    onChange={(e) => setExaKey(e.target.value)}
-                    disabled={savingExa}
-                  />
-                  <p className="text-muted-foreground text-xs">
-                    Stored encrypted for your workspace and never shown again.
-                  </p>
-                  {!exaAlreadySet && (
-                    <p className="text-muted-foreground text-xs">
-                      Don’t have a key?{" "}
-                      <a
-                        href={EXA_SIGN_UP}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="font-medium text-primary underline underline-offset-2"
-                      >
-                        Sign up for Exa
-                      </a>{" "}
-                      — or skip this and set it up later in Settings.
-                    </p>
-                  )}
-                </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="onboarding-exa-key">Exa API key</Label>
+                      <Input
+                        id="onboarding-exa-key"
+                        type="password"
+                        autoComplete="off"
+                        placeholder="Starts with exa_…"
+                        value={exaKey}
+                        onChange={(e) => setExaKey(e.target.value)}
+                        disabled={savingExa}
+                      />
+                      <p className="text-muted-foreground text-xs">
+                        Stored encrypted for your workspace and never shown again.
+                      </p>
+                      {!exaAlreadySet && (
+                        <p className="text-muted-foreground text-xs">
+                          Don’t have a key?{" "}
+                          <a
+                            href={EXA_SIGN_UP}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="font-medium text-primary underline underline-offset-2"
+                          >
+                            Sign up for Exa
+                          </a>{" "}
+                          — or skip this and set it up later in Settings.
+                        </p>
+                      )}
+                    </div>
 
-                {exaError !== null && (
-                  <Alert variant="destructive" role="alert">
-                    <AlertDescription>{exaError}</AlertDescription>
-                  </Alert>
-                )}
+                    {exaError !== null && (
+                      <Alert variant="destructive" role="alert">
+                        <AlertDescription>{exaError}</AlertDescription>
+                      </Alert>
+                    )}
 
-                <div className="flex gap-2">
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    onClick={skipWebSearch}
-                    disabled={savingExa}
-                  >
-                    {exaAlreadySet ? "Keep current key" : "Skip for now"}
-                  </Button>
-                  <Button
-                    type="submit"
-                    className="flex-1"
-                    disabled={savingExa || exaKey.trim().length === 0}
-                    aria-busy={savingExa}
-                  >
-                    {savingExa ? <Spinner label="Enabling web search" /> : <Globe aria-hidden />}
-                    {exaAlreadySet ? "Replace key" : "Enable web search"}
-                  </Button>
-                </div>
-              </form>
-            </Card>
+                    <Button
+                      type="submit"
+                      className="w-full"
+                      disabled={savingExa || exaKey.trim().length === 0}
+                      aria-busy={savingExa}
+                    >
+                      {savingExa ? <Spinner label="Enabling web search" /> : <Globe aria-hidden />}
+                      {exaAlreadySet ? "Replace key" : "Enable web search"}
+                    </Button>
+                  </form>
+                </Card>
+              }
+              onContinue={skipWebSearch}
+            />
           ) : step === "install" ? (
             <InstallStep onDone={advance} />
           ) : null}

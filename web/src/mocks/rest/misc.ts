@@ -8,8 +8,8 @@
  */
 
 import { http, HttpResponse } from "msw";
-import { FEATURED_CONNECTIONS } from "../../lib/featured-connections";
-import type { McpServer, ToolPolicy } from "../../mcp-api";
+import { FEATURED_CONNECTIONS, findFeaturedServer } from "../../lib/featured-connections";
+import type { McpServer, McpToolView, ToolPolicy } from "../../mcp-api";
 import { getStore } from "../store";
 import {
   TOOL_RUN_THREAD_ID,
@@ -87,6 +87,26 @@ const memoryHandlers = [
   }),
 ];
 
+/** Plausible tools for a freshly-authorized featured connection, by which one it is. */
+function featuredToolsFor(server: McpServer): McpToolView[] {
+  // findFeaturedServer expects (servers, connection); reuse the URL match the
+  // other direction instead of duplicating its normalization logic.
+  const match = FEATURED_CONNECTIONS.find((c) => findFeaturedServer([server], c) !== null);
+  if (match?.id === "markdump") {
+    return [
+      { name: "read", description: "Read a note.", policy: "approval_required" },
+      { name: "write", description: "Write a note.", policy: "approval_required" },
+    ];
+  }
+  if (match?.id === "composio") {
+    return [
+      { name: "gmail_send_email", description: "Send an email from Gmail.", policy: "approval_required" },
+      { name: "calendar_list_events", description: "List upcoming calendar events.", policy: "auto_allow" },
+    ];
+  }
+  return [];
+}
+
 const mcpHandlers = [
   http.get("/api/mcp/servers", () => HttpResponse.json({ servers: getStore().mcpServers })),
   http.post("/api/mcp/servers", async ({ request }) => {
@@ -143,8 +163,16 @@ const mcpHandlers = [
     const id = pathParam(params, "serverId");
     if (store.mcpNeedsAuth[id]) {
       // Consent completing is modelled as the authorization clearing; the mock
-      // cannot redirect, so it reports ready and the UI re-reads the tools.
+      // cannot redirect (the real endpoint would return an `authUrl` here), so
+      // it reports ready and the UI re-reads the tools.
       store.mcpNeedsAuth[id] = false;
+      // A server the real backend just finished authorizing has already been
+      // introspected — it would never come back with zero tools. Seed a couple
+      // so "Connected" doesn't render a state the real server can't produce.
+      if (!store.mcpTools[id] || store.mcpTools[id].length === 0) {
+        const server = store.mcpServers.find((s) => s.id === id);
+        if (server) store.mcpTools[id] = featuredToolsFor(server);
+      }
       return HttpResponse.json({ ready: true });
     }
     return HttpResponse.json({ ready: true });
