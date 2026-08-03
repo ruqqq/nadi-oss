@@ -32,6 +32,7 @@ import {
 import type { CSSProperties } from "react";
 import type { FileUIPart, UIMessage } from "ai";
 import { applyArchivedCompactions } from "./lib/archived-compaction";
+import { takeAutomatonNudge } from "./lib/automaton-nudge";
 import {
   backToHere,
   cameFrom,
@@ -176,6 +177,7 @@ import {
   Bell,
   BellRinging,
   WifiSlash,
+  XCircle,
 } from "./icons";
 import { BrandMark } from "./components/BrandMark";
 import { ThreadHistoryErrorBoundary } from "./components/ThreadHistoryErrorBoundary";
@@ -1639,6 +1641,11 @@ export function ChatApp({
   // Staged attachments captured at submit, kept alongside draftText so creation
   // failure can restore them to the composer.
   const [draftFiles, setDraftFiles] = useState<FileUIPart[]>([]);
+  // One-shot post-onboarding nudge, read exactly once from localStorage so a
+  // second new chat in the same session shows nothing.
+  const [nudgePrompt, setNudgePrompt] = useState<string | null>(() =>
+    typeof localStorage === "undefined" ? null : takeAutomatonNudge(localStorage),
+  );
   // Seed the new-chat provider/model from the synchronously-cached bootstrap
   // settings (localStorage) so the composer is usable immediately on load and
   // offline — with the last-known selected provider — instead of waiting on the
@@ -3273,6 +3280,8 @@ export function ChatApp({
               attachmentAccept={newChatAttachmentAccept}
               modelInputModalities={newChatModelInputModalities}
               voiceEnabled={voiceEnabled}
+              nudgePrompt={nudgePrompt}
+              onDismissNudge={() => setNudgePrompt(null)}
             />
           ) : (
             <ThreadStatusView
@@ -3798,6 +3807,8 @@ export function NewChatView({
   attachmentAccept,
   modelInputModalities,
   voiceEnabled,
+  nudgePrompt,
+  onDismissNudge,
 }: {
   onCreateAndSend: (text: string, files: FileUIPart[]) => void;
   leading: React.ReactNode;
@@ -3830,10 +3841,26 @@ export function NewChatView({
   attachmentAccept?: string;
   modelInputModalities: ModelInputModality[];
   voiceEnabled?: boolean;
+  /** One-shot post-onboarding prompt seeded into the composer, or null. */
+  nudgePrompt: string | null;
+  onDismissNudge: () => void;
 }) {
   const canSend = canStartNewChat({ provider, model });
   const offline = useOffline();
   const composerRef = useRef<ComposerHandle | null>(null);
+  const [nudgeVisible, setNudgeVisible] = useState(nudgePrompt !== null);
+  const seededRef = useRef(false);
+  useEffect(() => {
+    if (nudgePrompt === null || seededRef.current) return;
+    seededRef.current = true;
+    composerRef.current?.replaceText(nudgePrompt);
+  }, [nudgePrompt]);
+
+  const dismissNudge = useCallback(() => {
+    setNudgeVisible(false);
+    onDismissNudge();
+  }, [onDismissNudge]);
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <Topbar
@@ -3884,6 +3911,26 @@ export function NewChatView({
               </AlertDescription>
             </Alert>
           )}
+          {nudgeVisible && nudgePrompt !== null && (
+            <div
+              className="relative w-full rounded-lg border border-border bg-card p-3 pr-9"
+              role="status"
+            >
+              <p className="text-sm">
+                Your agent can work on a schedule. Send this to set up your first one.
+              </p>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                className="absolute top-1.5 right-1.5"
+                onClick={dismissNudge}
+                aria-label="Dismiss"
+              >
+                <XCircle aria-hidden />
+              </Button>
+            </div>
+          )}
         </div>
         {/* Project context docks as an extension of the composer: left-aligned
             to the card's edge (mx-3 mirrors the Composer's m-3) and sitting
@@ -3917,7 +3964,13 @@ export function NewChatView({
         <Composer
           key={seedText ?? "new"}
           controlRef={composerRef}
-          onSend={onCreateAndSend}
+          onSend={(text, files) => {
+            dismissNudge();
+            onCreateAndSend(text, files);
+          }}
+          onDraftChange={(text) => {
+            if (nudgeVisible && text !== nudgePrompt) dismissNudge();
+          }}
           uploadAttachments={canSend && attachmentAccept ? compressToDataUrlAttachments : undefined}
           attachmentAccept={canSend ? attachmentAccept : undefined}
           modelInputModalities={modelInputModalities}

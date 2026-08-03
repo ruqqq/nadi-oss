@@ -20,6 +20,8 @@ import {
 import { Spinner } from "./components/ui/spinner";
 import { Textarea } from "./components/ui/textarea";
 import { Globe, Key } from "./icons";
+import { armAutomatonNudge } from "./lib/automaton-nudge";
+import { FEATURED_CONNECTIONS, findFeaturedServer } from "./lib/featured-connections";
 import { cn } from "./lib/utils";
 import {
   RECOMMENDED_ONBOARDING_PROVIDER,
@@ -31,6 +33,7 @@ import {
 } from "./lib/onboarding";
 import type { OnboardingStepDef, OnboardingStepId } from "./lib/onboarding";
 import { track } from "./lib/posthog";
+import type { McpServer } from "./mcp-api";
 import {
   type AgentSettingsResponse,
   type ModelInputModality,
@@ -177,6 +180,10 @@ export function Onboarding({
   const [exaError, setExaError] = useState<string | null>(null);
   const [exaAlreadySet, setExaAlreadySet] = useState(false);
 
+  // Empower step — tracks what the user actually connected, so completion can
+  // seed a nudge that never asks for data the agent can't get.
+  const [connectedServers, setConnectedServers] = useState<McpServer[]>([]);
+
   // Only reached once the required steps are done, so load the current state
   // lazily rather than paying for it on every onboarding mount.
   useEffect(() => {
@@ -225,8 +232,17 @@ export function Onboarding({
     const index = steps.findIndex((s) => s.id === step);
     const next = steps[index + 1];
     if (next) goToStep(next.id);
-    else onComplete();
-  }, [steps, step, goToStep, onComplete]);
+    else {
+      armAutomatonNudge(localStorage, {
+        composioConnected:
+          findFeaturedServer(
+            connectedServers,
+            FEATURED_CONNECTIONS.find((c) => c.id === "composio")!,
+          ) !== null,
+      });
+      onComplete();
+    }
+  }, [steps, step, goToStep, onComplete, connectedServers]);
 
   const secretName = useMemo(
     () => settings.providers.find((p) => p.provider === provider)?.configuredSecretName,
@@ -673,6 +689,7 @@ export function Onboarding({
             </Card>
           ) : step === "empower" ? (
             <EmpowerStep
+              onConnectionsChange={setConnectedServers}
               exaCard={
                 <Card className="gap-3 p-4">
                   <form className="space-y-4" onSubmit={submitWebSearch}>
