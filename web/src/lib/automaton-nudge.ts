@@ -16,13 +16,50 @@ export function automatonNudgePrompt(input: { calendarConnected: boolean }): str
 }
 
 /**
- * Read-shaped tokens a calendar tool's name needs to carry before it counts.
- * Deliberately just the unambiguous verbs — "event" is left out on purpose:
- * it is a noun that shows up in write tools too (`CREATE_EVENT`,
- * `DELETE_EVENT`), so it does not discriminate read from write and would
- * reintroduce exactly the false-positive this list exists to prevent.
+ * Read-shaped VERB tokens a calendar tool's name needs to carry. "event" /
+ * "events" deliberately do NOT live here — they're nouns that show up in
+ * write tools too (`CREATE_EVENT`, `DELETE_EVENT`), so alone they don't
+ * discriminate read from write. `read`/`fetch`/`retrieve`/`view`/`query` are
+ * included even though no vendor example has needed them yet: there is no
+ * safety cost to a miss, and `read` in particular is the single most natural
+ * verb for a read tool to be named after.
  */
-const READ_SHAPED_TOKENS = new Set(["list", "find", "get", "search", "freebusy", "busy"]);
+const READ_VERB_TOKENS = new Set([
+  "list",
+  "find",
+  "get",
+  "search",
+  "read",
+  "fetch",
+  "retrieve",
+  "view",
+  "query",
+]);
+
+/**
+ * Nouns meaning the read actually reaches events or availability — not just
+ * calendar metadata. Required IN ADDITION to a read verb, which is exactly
+ * what "event"/"events" needs to be safe here: `CREATE_EVENT` and
+ * `DELETE_EVENT` still fail on the VERB gate, so treating "event" as a noun
+ * requirement only doesn't reopen the false positive it caused when it was a
+ * sufficient signal on its own.
+ *
+ * Deliberately excludes "calendars": `GOOGLECALENDAR_LIST_CALENDARS` lists
+ * which calendars exist (ids/names), not what's on any of them. That's
+ * calendar metadata, same category as `GET_SETTINGS`/`GET_ACL`/`GET_COLORS` —
+ * genuinely read-shaped by verb, but no more useful for "my calendar for the
+ * day" than those are, so it doesn't earn the noun gate either.
+ */
+const EVENT_OR_AVAILABILITY_TOKENS = new Set([
+  "event",
+  "events",
+  "slot",
+  "slots",
+  "busy",
+  "freebusy",
+  "schedule",
+  "agenda",
+]);
 
 /** Splits a tool name into lowercase words on camelCase, `_`, `-`, and spaces. */
 function tokenize(name: string): string[] {
@@ -34,18 +71,22 @@ function tokenize(name: string): string[] {
 }
 
 /**
- * True only for a tool name that is BOTH calendar-named AND read-shaped.
+ * True only for a tool name that is calendar-named AND read-shaped AND reads
+ * events or availability specifically — all three, not any two.
  *
  * `"calendar"` itself is matched as a plain substring, not a whole token —
  * vendor ids concatenate the service name onto the capability with no
  * separator (`GOOGLECALENDAR_FIND_EVENT`), so anchoring on word boundaries
- * would miss real tools. That substring test alone over-matches, though: a
- * server can be scoped to expose only calendar-*named* tools that cannot read
- * anything (`GOOGLECALENDAR_CREATE_EVENT`, `GOOGLECALENDAR_QUICK_ADD`,
- * `GOOGLECALENDAR_DELETE_EVENT`), or a setup tool whose only job is
- * connecting a calendar the user hasn't connected yet
- * (`connect_calendar_account`). Requiring a read-shaped token too rules both
- * out. The failure direction is still what justifies staying loose on each
+ * would miss real tools. That substring test alone over-matches: a server can
+ * be scoped to expose only calendar-*named* tools that cannot read anything
+ * (`GOOGLECALENDAR_CREATE_EVENT`, `GOOGLECALENDAR_QUICK_ADD`,
+ * `GOOGLECALENDAR_DELETE_EVENT`), or a setup tool whose only job is connecting
+ * a calendar the user hasn't connected yet (`connect_calendar_account`).
+ * Requiring a read verb rules both out, but a read verb alone still
+ * over-matches metadata reads that can't produce a daily briefing
+ * (`GOOGLECALENDAR_GET_SETTINGS`, `GET_ACL`, `GET_COLORS` all pass a
+ * verb-only gate) — hence the third requirement, an event-or-availability
+ * noun. The failure direction is still what justifies staying loose on each
  * half rather than enumerating vendor tool ids: a missed match only costs the
  * safe, service-agnostic prompt, while a false match promises data the agent
  * cannot fetch.
@@ -53,7 +94,12 @@ function tokenize(name: string): string[] {
 export function hasCalendarTool(toolNames: readonly string[]): boolean {
   return toolNames.some((name) => {
     if (!name.toLowerCase().includes("calendar")) return false;
-    return tokenize(name).some((token) => READ_SHAPED_TOKENS.has(token));
+    const tokens = tokenize(name);
+    const hasReadVerb = tokens.some((token) => READ_VERB_TOKENS.has(token));
+    const hasEventOrAvailabilityNoun = tokens.some((token) =>
+      EVENT_OR_AVAILABILITY_TOKENS.has(token),
+    );
+    return hasReadVerb && hasEventOrAvailabilityNoun;
   });
 }
 

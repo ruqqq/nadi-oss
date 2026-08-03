@@ -66,10 +66,32 @@ describe("hasCalendarTool", () => {
     expect(hasCalendarTool(["enable_calendar_toolkit"])).toBe(false);
   });
 
-  it("matches a genuine read-shaped calendar tool", () => {
+  it("matches a genuine read-shaped calendar tool that reaches events or availability", () => {
     expect(hasCalendarTool(["GOOGLECALENDAR_FIND_EVENT"])).toBe(true);
-    expect(hasCalendarTool(["GOOGLECALENDAR_LIST_CALENDARS"])).toBe(true);
     expect(hasCalendarTool(["GOOGLECALENDAR_FIND_FREE_SLOTS"])).toBe(true);
+  });
+
+  // Read-shaped by verb, but a metadata read: settings/ACL/colors say nothing
+  // about what's ON the calendar. Same broken-promise shape as the create-only
+  // set, just one gate narrower — the verb alone is not enough.
+  it("does not match a metadata-only read (verb present, no event/availability noun)", () => {
+    expect(hasCalendarTool(["GOOGLECALENDAR_GET_SETTINGS"])).toBe(false);
+    expect(hasCalendarTool(["GOOGLECALENDAR_GET_ACL"])).toBe(false);
+    expect(hasCalendarTool(["GOOGLECALENDAR_GET_COLORS"])).toBe(false);
+  });
+
+  // Listing which calendars exist is also metadata, not a daily briefing —
+  // deliberately NOT treated as sufficient even though it is read-shaped.
+  it("does not match listing calendars themselves (no event/availability noun)", () => {
+    expect(hasCalendarTool(["GOOGLECALENDAR_LIST_CALENDARS"])).toBe(false);
+  });
+
+  // "read"/"fetch"/"retrieve"/"view"/"query" are accepted read verbs even
+  // though no vendor example forced their addition — there is no cost to a
+  // miss, so there is no reason to leave a natural read verb unrecognized.
+  it("matches additional read verbs paired with an event noun", () => {
+    expect(hasCalendarTool(["CALENDAR_READ_EVENTS"])).toBe(true);
+    expect(hasCalendarTool(["GOOGLECALENDAR_RETRIEVE_EVENTS"])).toBe(true);
   });
 });
 
