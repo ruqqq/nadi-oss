@@ -1289,7 +1289,12 @@ describe("isNetworkRestricted derivation through getComputeSettingsView", () => 
     }
   });
 
-  it("does not flag network_restrictions when the effective allowlist is null (unrestricted)", async () => {
+  // THE INVERSION. This case used to assert a null allowlist, which read as
+  // "unrestricted" but meant "governed by Daytona's org default, which we can
+  // neither read nor extend" — and it skipped the block that unions in the
+  // enabled MCP hosts. Daytona now resolves a real, self-contained list whatever
+  // the toggle says, so `networkRestrictionEnabled: false` no longer disarms it.
+  it("still restricts a daytona workspace whose toggle is off, and carries the MCP hosts", async () => {
     const { token } = await seedUserWorkspace();
     await SELF.fetch("https://nadi.test/api/settings/sandbox", {
       method: "PUT",
@@ -1305,9 +1310,44 @@ describe("isNetworkRestricted derivation through getComputeSettingsView", () => 
       headers: { "Content-Type": "application/json", ...cookie(token) },
       body: JSON.stringify({ value: "dt_test_secret" }),
     });
+    await env.REGISTRY_DB.prepare(
+      `INSERT INTO mcp_servers (id, workspace_id, name, url, enabled, created_at)
+       VALUES ('mcp-on', ?, 'On', 'https://mcp.example.com/sse', 1, 1),
+              ('mcp-off', ?, 'Off', 'https://disabled.example.com/sse', 0, 1)`,
+    )
+      .bind(workspaceId, workspaceId)
+      .run();
 
     const view = await getComputeSettingsView({ env, workspaceId, agentId: "agent-default" });
     expect(view.effective.enabled).toBe(true);
+    const hosts = view.effective.enabled ? (view.effective.value.allowedHosts ?? []) : [];
+    expect(hosts).toContain("mcp.example.com");
+    // A disabled server is not a reason to open the sandbox to its host.
+    expect(hosts).not.toContain("disabled.example.com");
+    // Daytona's domainAllowList REPLACES its org default, so the list has to be
+    // self-contained — the curated baseline must ride along, not be assumed.
+    expect(hosts).toContain("registry.npmjs.org");
+    // And the knock-on: a restricted workspace cannot run Cloudflare, whose
+    // sandbox has no network-policy API.
+    expect(view.readiness.cloudflare.unsupported).toEqual(["network_restrictions"]);
+  });
+
+  // Cloudflare must NOT be swept up in the Daytona rule: its backend fails
+  // closed on any non-empty allowlist, so forcing one breaks every thread.
+  it("leaves a cloudflare workspace unrestricted when its toggle is off", async () => {
+    const { token } = await seedUserWorkspace();
+    await SELF.fetch("https://nadi.test/api/settings/sandbox", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...cookie(token) },
+      body: JSON.stringify({
+        enabled: true,
+        provider: "cloudflare",
+        providerConfig: { kind: "cloudflare" },
+        networkRestrictionEnabled: false,
+      }),
+    });
+
+    const view = await getComputeSettingsView({ env, workspaceId, agentId: "agent-default" });
     expect(view.effective.enabled ? view.effective.value.allowedHosts : "n/a").toBeNull();
     expect(view.readiness.cloudflare.unsupported).toEqual([]);
   });
