@@ -37,7 +37,6 @@ interface __BaseEnv_Env {
   VAPID_PUBLIC_KEY: string;
   VAPID_PRIVATE_KEY: string;
   VAPID_SUBJECT: string;
-  THREAD_AGENT: DurableObjectNamespace<import("./src/index").ThreadAgentV2>;
   THINK_THREAD_AGENT: DurableObjectNamespace<import("./src/index").ThinkThreadAgent>;
   WORKSPACE_MCP_AGENT: DurableObjectNamespace<import("./src/index").WorkspaceMcpAgent>;
   USER_HUB: DurableObjectNamespace<import("./src/index").UserHub>;
@@ -46,7 +45,7 @@ interface __BaseEnv_Env {
 declare namespace Cloudflare {
   interface GlobalProps {
     mainModule: typeof import("./src/index");
-    durableNamespaces: "ThreadAgentV2" | "WorkspaceMcpAgent" | "UserHub" | "ThinkThreadAgent";
+    durableNamespaces: "WorkspaceMcpAgent" | "UserHub" | "ThinkThreadAgent";
   }
   interface Env extends __BaseEnv_Env {}
 }

@@ -9,7 +9,6 @@ import { log, setLogLevel } from "./log";
 import { autoArchiveIdleThreads } from "./agent/auto-archive";
 import { AUTOMATA_CRON, fireDueAutomata } from "./automata/fire-due";
 import { repairStaleThreadSearchProjections } from "./thread-knowledge/repair";
-export { ThreadAgentV2 } from "./agent/thread-agent";
 export { ThinkThreadAgent } from "./agent/think-thread-agent";
 export { SubAgent } from "./agent/subagent";
 export { WorkspaceMcpAgent } from "./agent/workspace-mcp-agent";

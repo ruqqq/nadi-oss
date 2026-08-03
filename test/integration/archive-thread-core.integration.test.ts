@@ -139,23 +139,6 @@ describe("archiveThreadCore", () => {
     expect(row?.archivedAt).toBeNull();
   });
 
-  it("archives an empty thread anyway when allowEmptySnapshot is set", async () => {
-    const { threadId } = await seedRegistryThread(env.REGISTRY_DB, {
-      threadId: "thr_core_empty_forced",
-      runtime: "think",
-    });
-
-    expect(await archiveThreadCore(env, threadId, { allowEmptySnapshot: true })).toBe("archived");
-
-    expect(await new ArchivedMessageRepository(db()).listForThread(threadId)).toEqual([]);
-    const row = await db()
-      .select({ archivedAt: schema.threadIndex.archivedAt })
-      .from(schema.threadIndex)
-      .where(eq(schema.threadIndex.id, threadId))
-      .get();
-    expect(row?.archivedAt).not.toBeNull();
-  });
-
   /**
    * `this.messages` is a hydration cache bounded by `hydrationByteBudget`: on a
    * transcript larger than the budget it holds only a recent window. Archiving

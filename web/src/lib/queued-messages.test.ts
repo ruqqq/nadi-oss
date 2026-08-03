@@ -35,11 +35,10 @@ const message = (
 });
 
 describe("shouldUseQueuedSubmit", () => {
-  it("only queues busy think submits that still have content", () => {
-    expect(shouldUseQueuedSubmit({ runtime: "think", busy: true, hasContent: true })).toBe(true);
-    expect(shouldUseQueuedSubmit({ runtime: "think", busy: true, hasContent: false })).toBe(false);
-    expect(shouldUseQueuedSubmit({ runtime: "think", busy: false, hasContent: true })).toBe(false);
-    expect(shouldUseQueuedSubmit({ runtime: "legacy", busy: true, hasContent: true })).toBe(false);
+  it("only queues busy submits that still have content", () => {
+    expect(shouldUseQueuedSubmit({ busy: true, hasContent: true })).toBe(true);
+    expect(shouldUseQueuedSubmit({ busy: true, hasContent: false })).toBe(false);
+    expect(shouldUseQueuedSubmit({ busy: false, hasContent: true })).toBe(false);
   });
 });
 

@@ -12,7 +12,7 @@
  */
 import { env, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import type { ThreadAgentV2 } from "../../src/agent/thread-agent";
+import type { ThinkThreadAgent } from "../../src/agent/think-thread-agent";
 import {
   adoptCommittedWorkbenchResourceProfile,
   resolveComputeService,
@@ -44,7 +44,7 @@ import { applyRegistryTestSchema, seedRegistryThread } from "./helpers/registry"
 
 const NOW = 1_800_000_000_000;
 
-function storageOf(agent: ThreadAgentV2): DurableObjectStorage {
+function storageOf(agent: ThinkThreadAgent): DurableObjectStorage {
   return (agent as unknown as { ctx: { storage: DurableObjectStorage } }).ctx.storage;
 }
 
@@ -249,8 +249,8 @@ describe("resolveComputeService (real D1 + real DO storage)", () => {
       .bind(threadId, workspaceId, workbenchId, NOW)
       .run();
 
-    const stub = env.THREAD_AGENT.get(env.THREAD_AGENT.idFromName(threadId));
-    await runInDurableObject(stub, async (agent: ThreadAgentV2) => {
+    const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
+    await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
       const storage = storageOf(agent);
       // No prior compute state exists on this fresh DO, so
       // `store.getComputeState()?.resourceProfile` cannot mask what this task
@@ -300,8 +300,8 @@ describe("resolveComputeService (real D1 + real DO storage)", () => {
       .bind(threadId, workspaceId, workbenchId, NOW)
       .run();
 
-    const stub = env.THREAD_AGENT.get(env.THREAD_AGENT.idFromName(threadId));
-    await runInDurableObject(stub, async (agent: ThreadAgentV2) => {
+    const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
+    await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
       const storage = storageOf(agent);
       const resolved = await resolveComputeService(
         baseDeps(threadId, workspaceId, agentId, storage),
@@ -373,8 +373,8 @@ describe("resolveComputeService (real D1 + real DO storage)", () => {
       .bind(workspaceId, NOW, workspaceId, NOW)
       .run();
 
-    const stub = env.THREAD_AGENT.get(env.THREAD_AGENT.idFromName(threadId));
-    await runInDurableObject(stub, async (agent: ThreadAgentV2) => {
+    const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
+    await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
       const resolved = await resolveComputeService(
         baseDeps(threadId, workspaceId, agentId, storageOf(agent)),
       );
@@ -405,8 +405,8 @@ describe("resolveComputeService (real D1 + real DO storage)", () => {
       "listWorkbenchSnapshot",
     );
 
-    const stub = env.THREAD_AGENT.get(env.THREAD_AGENT.idFromName(threadId));
-    await runInDurableObject(stub, async (agent: ThreadAgentV2) => {
+    const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
+    await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
       const storage = storageOf(agent);
       const resolved = await resolveComputeService(
         baseDeps(threadId, workspaceId, agentId, storage),
@@ -471,8 +471,8 @@ describe("resolveComputeService (real D1 + real DO storage)", () => {
     await snapshotTo("wb_switch_small", "Small bench", "small");
 
     const backend = new FakeComputeBackend();
-    const stub = env.THREAD_AGENT.get(env.THREAD_AGENT.idFromName(threadId));
-    await runInDurableObject(stub, async (agent: ThreadAgentV2) => {
+    const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
+    await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
       const storage = storageOf(agent);
       const deps: ComputeToolHostDeps = {
         ...baseDeps(threadId, workspaceId, agentId, storage),
@@ -520,9 +520,9 @@ describe("resolveComputeService (real D1 + real DO storage)", () => {
 
     const daytona = new ProviderCheckingBackend("daytona");
     const cloudflare = new ProviderCheckingBackend("cloudflare");
-    const stub = env.THREAD_AGENT.get(env.THREAD_AGENT.idFromName(threadId));
+    const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
 
-    await runInDurableObject(stub, async (agent: ThreadAgentV2) => {
+    await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
       const storage = storageOf(agent);
       const store = new ThreadComputeStore(storage);
       store.migrate();
@@ -586,9 +586,9 @@ describe("resolveComputeService (real D1 + real DO storage)", () => {
 
     const daytona = new ProviderCheckingBackend("daytona");
     const cloudflare = new ProviderCheckingBackend("cloudflare");
-    const stub = env.THREAD_AGENT.get(env.THREAD_AGENT.idFromName(threadId));
+    const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
 
-    await runInDurableObject(stub, async (agent: ThreadAgentV2) => {
+    await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
       const storage = storageOf(agent);
       const store = new ThreadComputeStore(storage);
       store.migrate();

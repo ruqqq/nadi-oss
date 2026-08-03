@@ -4106,7 +4106,7 @@ function LegacyArchiveThread({
               servers={toolServers}
               showReasoning={showReasoning}
               emptyTitle="No archived messages"
-              emptyDescription="This legacy thread has no persisted messages."
+              emptyDescription="This thread has no persisted messages."
             />
           </Suspense>
         )}
@@ -4444,7 +4444,7 @@ function ThreadChat({
   const { watchers } = useWatcherRuns(
     agent,
     messages,
-    backgroundWorkEnabled && thread.runtime === "think",
+    backgroundWorkEnabled,
   );
 
   const trackThreadEvent = useCallback(
@@ -4533,13 +4533,13 @@ function ThreadChat({
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]);
   const previousQueuedCountRef = useRef(0);
   const refreshQueuedMessages = useCallback(async () => {
-    if (feedbackMode || thread.runtime !== "think") {
+    if (feedbackMode) {
       setQueuedMessages([]);
       return;
     }
     const rows = (await agentRef.current.call("listQueuedUserMessages", [])) as QueuedMessage[];
     setQueuedMessages((current) => mergeQueuedMessages(current, rows));
-  }, [feedbackMode, thread.runtime, thread.threadId]);
+  }, [feedbackMode, thread.threadId]);
 
   // Self-heal the conversation across tab background/resume. partysocket has no
   // visibility/online listener or heartbeat, so a frozen tab can strand a
@@ -4580,20 +4580,20 @@ function ThreadChat({
   }, [refreshQueuedMessages]);
 
   useEffect(() => {
-    if (feedbackMode || thread.runtime !== "think" || queuedMessages.length === 0) return;
+    if (feedbackMode || queuedMessages.length === 0) return;
     const id = window.setInterval(() => {
       void refreshQueuedMessages().catch(() => {});
     }, 1500);
     return () => window.clearInterval(id);
-  }, [feedbackMode, queuedMessages.length, refreshQueuedMessages, thread.runtime]);
+  }, [feedbackMode, queuedMessages.length, refreshQueuedMessages]);
 
   useEffect(() => {
     const previous = previousQueuedCountRef.current;
     previousQueuedCountRef.current = queuedMessages.length;
-    if (thread.runtime === "think" && previous > 0 && queuedMessages.length === 0) {
+    if (previous > 0 && queuedMessages.length === 0) {
       void syncThreadHistory().catch(() => {});
     }
-  }, [queuedMessages.length, syncThreadHistory, thread.runtime]);
+  }, [queuedMessages.length, syncThreadHistory]);
 
   // Debounced persistence; flush the pending write when the thread changes/unmounts.
   const saveDraft = useMemo(
@@ -4660,7 +4660,6 @@ function ThreadChat({
     compactionPhaseRef.current = "idle";
     setCompactionPhase("idle");
     setCompactionNotice("none");
-    if (thread.runtime !== "think") return;
     // Wait for the socket before asking. /compact/status resolves through
     // getAgentByName, so it wakes and then queues on the SAME single-threaded DO
     // as the WebSocket upgrade and the history fetch. Firing it during the cold
@@ -4695,10 +4694,10 @@ function ThreadChat({
     return () => {
       active = false;
     };
-  }, [everConnected, syncThreadHistory, thread.runtime, thread.threadId]);
+  }, [everConnected, syncThreadHistory, thread.threadId]);
 
   useEffect(() => {
-    if (thread.runtime !== "think" || compactionPhase !== "compacting") return;
+    if (compactionPhase !== "compacting") return;
     let active = true;
     const poll = () => {
       getThreadCompactionStatus(thread.threadId)
@@ -4727,10 +4726,9 @@ function ThreadChat({
       active = false;
       window.clearInterval(id);
     };
-  }, [compactionPhase, syncThreadHistory, thread.runtime, thread.threadId]);
+  }, [compactionPhase, syncThreadHistory, thread.threadId]);
 
   useEffect(() => {
-    if (thread.runtime !== "think") return;
     const socket = agent as unknown as {
       addEventListener?: (type: "message", listener: (event: MessageEvent) => void) => void;
       removeEventListener?: (type: "message", listener: (event: MessageEvent) => void) => void;
@@ -4757,7 +4755,7 @@ function ThreadChat({
     return () => {
       socket.removeEventListener?.("message", onMessage);
     };
-  }, [agent, syncThreadHistory, thread.runtime]);
+  }, [agent, syncThreadHistory]);
 
   // The strip renders a pure derivation of the queue mirror, NOT a separate
   // piece of state: every non-terminal submission whose user message has not
@@ -4835,7 +4833,7 @@ function ThreadChat({
     pendingKeys: pendingSteerKeys,
     seenKeys: seenSteerKeys,
     refresh: refreshSteers,
-  } = usePendingSteers(agent, thread.runtime === "think", steeringMessages.length > 0);
+  } = usePendingSteers(agent, true, steeringMessages.length > 0);
   const steeringChips = useMemo(
     () => deriveSteeringChips(steeringMessages, pendingSteerKeys, seenSteerKeys, messageIds),
     [steeringMessages, pendingSteerKeys, seenSteerKeys, messageIds],
@@ -4846,10 +4844,6 @@ function ThreadChat({
   // (Sent) one reappears when its turn settles into the transcript. Clear first
   // so a previous thread's chips never leak into this one.
   useEffect(() => {
-    if (thread.runtime !== "think") {
-      setSteeringMessages([]);
-      return;
-    }
     setSteeringMessages([]);
     let cancelled = false;
     void (
@@ -4875,7 +4869,7 @@ function ThreadChat({
     return () => {
       cancelled = true;
     };
-  }, [thread.threadId, thread.runtime]);
+  }, [thread.threadId]);
 
   // Rename / move / archive / delete + metadata live in the detail sheet now,
   // so the top bar stays uncluttered.
@@ -4915,7 +4909,7 @@ function ThreadChat({
         }
         return;
       }
-      if (thread.runtime === "think" && isCompactCommand(text)) {
+      if (isCompactCommand(text)) {
         if (compactionPhase === "compacting") {
           toast.info("Compaction is already running.");
           return;
@@ -4958,7 +4952,6 @@ function ThreadChat({
       // which preserves them.
       const shouldSteer =
         Boolean(opts?.steer) &&
-        thread.runtime === "think" &&
         busy &&
         text.trim().length > 0 &&
         files.length === 0;
@@ -4982,7 +4975,6 @@ function ThreadChat({
       }
 
       const shouldQueue = shouldQueueSubmitForThreadState({
-        runtime: thread.runtime,
         busy,
         manualCompacting: compactionPhase === "compacting",
         hasContent,
@@ -5034,7 +5026,6 @@ function ThreadChat({
       saveDraft,
       sendMessage,
       syncThreadHistory,
-      thread.runtime,
       thread.threadId,
       trackThreadEvent,
       feedbackMode,
@@ -5258,7 +5249,6 @@ function ThreadChat({
           maxFiles={maxFiles}
           modelInputModalities={thread.modelInputModalities ?? ["text"]}
           disabled={
-            (thread.runtime === "legacy" && busy) ||
             draftSeed === null ||
             // Hold the composer until the first message has actually landed, so a
             // second send can't overtake it and invert the conversation.
@@ -5266,8 +5256,8 @@ function ThreadChat({
           }
           sendBlocked={readiness.sendBlocked}
           statusHint={sendingFirstMessage ? "Sending…" : readinessHint}
-          allowBusySend={feedbackMode ? false : thread.runtime === "think"}
-          allowSteer={feedbackMode ? false : thread.runtime === "think"}
+          allowBusySend={!feedbackMode}
+          allowSteer={!feedbackMode}
           defaultValue={draftSeed ?? undefined}
           status={isStreaming ? "streaming" : status === "submitted" ? "submitted" : undefined}
           safeAreaBottom
@@ -5294,11 +5284,7 @@ function ThreadChat({
                       onEffortChange={(effort) =>
                         onReasoningEffortChange(thread.threadId, effort)
                       }
-                      disabled={
-                        (thread.runtime === "legacy" && busy) ||
-                        draftSeed === null ||
-                        sendingFirstMessage
-                      }
+                      disabled={draftSeed === null || sendingFirstMessage}
                     />
                   )}
                 <ThreadModelBadge model={thread.model} />

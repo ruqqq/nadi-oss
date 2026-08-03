@@ -1,10 +1,10 @@
-import { SELF, env, runInDurableObject } from "cloudflare:test";
+import { SELF, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { drizzle } from "drizzle-orm/d1";
 import { eq } from "drizzle-orm";
 import * as schema from "../../src/db/schema";
 import { authorizeAgentRequest } from "../../src/agent-routing/authorize";
-import { resolveThreadRuntimeConfigForAgent, type ThreadAgent } from "../../src/agent/thread-agent";
+import { resolveThreadRuntimeConfigForAgent } from "../../src/agent/thread-agent-config";
 
 const now = 1_800_000_000_000;
 
@@ -100,9 +100,11 @@ async function seedRegisteredThread(input?: {
 }
 
 describe("agent routing", () => {
-  it("returns 401 for /agents/* without a session cookie", async () => {
+  // The retired runtime's route is no longer a route at all, so it 404s before
+  // the session is even looked at. Unauthenticated callers still never reach a DO.
+  it("returns 404 for the retired /agents/thread-agent route without a session cookie", async () => {
     const res = await SELF.fetch("https://nadi.test/agents/thread-agent/thr_registered");
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(404);
   });
 
   it("returns 401 for /think-agents/* without a session cookie", async () => {
@@ -114,17 +116,21 @@ describe("agent routing", () => {
 
   it("returns 401 for a fake session cookie", async () => {
     await seedRegisteredThread();
-    const res = await SELF.fetch("https://nadi.test/agents/thread-agent/thr_registered", {
-      headers: { cookie: "better-auth.session_token=fake-token" },
-    });
+    const res = await SELF.fetch(
+      "https://nadi.test/think-agents/think-thread-agent/thr_registered",
+      { headers: { cookie: "better-auth.session_token=fake-token" } },
+    );
     expect(res.status).toBe(401);
   });
 
   it("returns 401 for an expired session", async () => {
     const seeded = await seedRegisteredThread({ token: "expired-token", expiresAt: 1 });
-    const res = await SELF.fetch(`https://nadi.test/agents/thread-agent/${seeded.threadId}`, {
-      headers: { cookie: `better-auth.session_token=${seeded.token}` },
-    });
+    const res = await SELF.fetch(
+      `https://nadi.test/think-agents/think-thread-agent/${seeded.threadId}`,
+      {
+        headers: { cookie: `better-auth.session_token=${seeded.token}` },
+      },
+    );
     expect(res.status).toBe(401);
   });
 
@@ -132,7 +138,7 @@ describe("agent routing", () => {
     const seeded = await seedRegisteredThread();
     const db = drizzle(env.REGISTRY_DB, { schema });
     const buildReq = () =>
-      new Request(`https://nadi.test/agents/thread-agent/${seeded.threadId}`, {
+      new Request(`https://nadi.test/think-agents/think-thread-agent/${seeded.threadId}`, {
         headers: { cookie: `better-auth.session_token=${seeded.token}` },
       });
 
@@ -151,7 +157,7 @@ describe("agent routing", () => {
 
   it("returns 404 for an unknown thread with a valid session", async () => {
     const seeded = await seedRegisteredThread();
-    const res = await SELF.fetch("https://nadi.test/agents/thread-agent/thr_missing", {
+    const res = await SELF.fetch("https://nadi.test/think-agents/think-thread-agent/thr_missing", {
       headers: { cookie: `better-auth.session_token=${seeded.token}` },
     });
     expect(res.status).toBe(404);
@@ -165,19 +171,36 @@ describe("agent routing", () => {
     expect(res.status).toBe(404);
   });
 
-  it("returns 404 when the valid session is not a workspace member", async () => {
-    const seeded = await seedRegisteredThread({ membership: false });
-    const res = await SELF.fetch(`https://nadi.test/agents/thread-agent/${seeded.threadId}`, {
+  it("404s the retired /agents/thread-agent route even for a registered thread", async () => {
+    const seeded = await seedRegisteredThread({ threadId: "thr_retired_route" });
+    const req = new Request(`https://nadi.test/agents/thread-agent/${seeded.threadId}`, {
       headers: { cookie: `better-auth.session_token=${seeded.token}` },
     });
+
+    const result = await authorizeAgentRequest(req, env);
+    expect(result.authorized).toBe(false);
+    if (!result.authorized) expect(result.response.status).toBe(404);
+  });
+
+  it("returns 404 when the valid session is not a workspace member", async () => {
+    const seeded = await seedRegisteredThread({ membership: false });
+    const res = await SELF.fetch(
+      `https://nadi.test/think-agents/think-thread-agent/${seeded.threadId}`,
+      {
+        headers: { cookie: `better-auth.session_token=${seeded.token}` },
+      },
+    );
     expect(res.status).toBe(404);
   });
 
   it("authorizes a valid session for a registered workspace thread", async () => {
     const seeded = await seedRegisteredThread();
-    const req = new Request(`https://nadi.test/agents/thread-agent/${seeded.threadId}`, {
-      headers: { cookie: `better-auth.session_token=${seeded.token}` },
-    });
+    const req = new Request(
+      `https://nadi.test/think-agents/think-thread-agent/${seeded.threadId}`,
+      {
+        headers: { cookie: `better-auth.session_token=${seeded.token}` },
+      },
+    );
 
     await expect(authorizeAgentRequest(req, env)).resolves.toEqual({
       authorized: true,
@@ -191,7 +214,7 @@ describe("agent routing", () => {
     const seeded = await seedRegisteredThread({ archivedAt: now + 1 });
 
     const websocket = await authorizeAgentRequest(
-      new Request(`https://nadi.test/agents/thread-agent/${seeded.threadId}`, {
+      new Request(`https://nadi.test/think-agents/think-thread-agent/${seeded.threadId}`, {
         headers: {
           cookie: `better-auth.session_token=${seeded.token}`,
           upgrade: "websocket",
@@ -204,37 +227,30 @@ describe("agent routing", () => {
 
     await expect(
       authorizeAgentRequest(
-        new Request(`https://nadi.test/agents/thread-agent/${seeded.threadId}/get-messages`, {
-          headers: { cookie: `better-auth.session_token=${seeded.token}` },
-        }),
+        new Request(
+          `https://nadi.test/think-agents/think-thread-agent/${seeded.threadId}/get-messages`,
+          {
+            headers: { cookie: `better-auth.session_token=${seeded.token}` },
+          },
+        ),
         env,
       ),
     ).resolves.toMatchObject({ authorized: true, threadId: seeded.threadId });
   });
 
-  it("uses the registered thread workspace instead of DEFAULT_WORKSPACE_ID inside the agent", async () => {
+  it("uses the registered thread workspace instead of DEFAULT_WORKSPACE_ID", async () => {
     const seeded = await seedRegisteredThread({
       threadId: "thr_workspace_resolution",
       workspaceId: "workspace-thread",
     });
 
-    const stub = env.THREAD_AGENT.get(env.THREAD_AGENT.idFromName(seeded.threadId));
-    const workspaceId = await runInDurableObject(stub, async (instance: ThreadAgent) =>
-      instance.resolveWorkspaceIdForTest(),
-    );
+    const config = await resolveThreadRuntimeConfigForAgent(env, seeded.threadId);
 
-    expect(workspaceId).toBe("workspace-thread");
+    expect(config?.workspaceId).toBe("workspace-thread");
   });
 
-  it("fails fast when the agent thread has no registry row", async () => {
-    const threadId = "thr_unregistered";
-    const stub = env.THREAD_AGENT.get(env.THREAD_AGENT.idFromName(threadId));
-
-    await expect(
-      runInDurableObject(stub, async (instance: ThreadAgent) =>
-        instance.resolveWorkspaceIdForTest(),
-      ),
-    ).rejects.toThrow(`thread_workspace_not_registered:${threadId}`);
+  it("resolves to null when the agent thread has no registry row", async () => {
+    expect(await resolveThreadRuntimeConfigForAgent(env, "thr_unregistered")).toBeNull();
   });
 });
 
@@ -342,10 +358,10 @@ describe("mcp oauth callback routing", () => {
     expect(res.status).not.toBe(401);
   });
 
-  it("still gates other /agents/* paths behind auth", async () => {
-    const res = await SELF.fetch("https://nadi.test/agents/thread-agent/some-thread", {
+  it("still refuses other /agents/* paths to anonymous callers", async () => {
+    const res = await SELF.fetch("https://nadi.test/agents/some-other-agent/some-thread", {
       redirect: "manual",
     });
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(404);
   });
 });

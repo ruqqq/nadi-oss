@@ -7,7 +7,7 @@ import { ThreadRepository } from "../db/repositories/threads";
 import { sha256Hex } from "../compute/files/hash";
 import { log } from "../log";
 import { normalizeProseMessage } from "./prose-normalizer";
-import { activeTranscriptRpc } from "./adapters/active-transcript";
+import { activeTranscriptRpc, hasLiveTranscript } from "./adapters/active-transcript";
 import {
   THREAD_LAST_MESSAGE_PREVIEW_CHARS,
   THREAD_PROJECTION_DIGEST_PAGE,
@@ -28,11 +28,10 @@ export async function reconcileThreadSearchProjection(
 ): Promise<"indexed" | "skipped"> {
   const thread = await loadProjectableThread(env, threadId);
   if (!thread) return "skipped";
+  // No live DO to walk on the retired runtime; the archive path projects those.
+  if (!hasLiveTranscript(thread)) return "skipped";
 
-  const source = await activeTranscriptRpc(env, {
-    id: thread.id,
-    runtime: thread.runtime,
-  });
+  const source = await activeTranscriptRpc(env, { id: thread.id });
   await reconcileThreadSearchProjectionFromSource(env, thread, source);
   return "indexed";
 }

@@ -332,13 +332,6 @@ const historyHandlers = [
     if (seeded) return HttpResponse.json({ messages: seeded });
     return HttpResponse.json({ messages: [] });
   }),
-  http.get("*/agents/thread-agent/:threadId/get-messages", ({ params }) => {
-    const threadId = pathParam(params, "threadId");
-    if (historyUnreachable(threadId)) return HttpResponse.error();
-    const seeded = seededHistory(threadId);
-    if (seeded) return HttpResponse.json({ messages: seeded });
-    return HttpResponse.json({ messages: [] });
-  }),
 ];
 
 export const miscHandlers = [

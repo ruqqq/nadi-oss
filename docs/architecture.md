@@ -22,8 +22,7 @@ in a Durable Object. That split explains most of the codebase.
 
 | Binding | Class | Holds |
 | --- | --- | --- |
-| `THINK_THREAD_AGENT` | `ThinkThreadAgent` | One chat thread: history, tool loop, compute lease. The current runtime. |
-| `THREAD_AGENT` | `ThreadAgentV2` | The legacy runtime. Still bound for old threads; not where new work goes. |
+| `THINK_THREAD_AGENT` | `ThinkThreadAgent` | One chat thread: history, tool loop, compute lease. The only chat runtime. |
 | `WORKSPACE_MCP_AGENT` | `WorkspaceMcpAgent` | MCP client connections, shared per workspace so every thread does not redial. |
 | `USER_HUB` | `UserHub` | Per-user fan-out: thread list updates, unread state, push. |
 | `VOICE_AGENT` | `VoiceAgent` | Composer dictation sessions. |

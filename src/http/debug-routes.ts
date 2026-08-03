@@ -23,7 +23,6 @@ import { isProviderConfigProvider } from "../db/repositories/provider-configs";
 import { getProviderEndpointConfig, getProviderSecretValue } from "../settings/provider-settings";
 import { modelListUrl, searchProviderModels } from "../providers/model-search";
 import { repairStaleThreadSearchProjections } from "../thread-knowledge/repair";
-import { archiveThreadCore } from "../agent/archive-thread";
 import {
   analyzeAnswer,
   answerFromVision,
@@ -1128,65 +1127,6 @@ export async function routeDebug(req: Request, env: Env): Promise<Response | nul
         });
       }
       return { payload, sent: results.length, results };
-    });
-  }
-
-  // GET  /api/debug/legacy-threads          — inventory of `runtime: "legacy"` rows.
-  // POST /api/debug/legacy-threads?limit=25 — archive the still-active ones.
-  //
-  // Retirement tooling for ThreadAgentV2. Archiving snapshots each legacy DO's
-  // transcript into D1 and destroys the DO, which is what lets the class be
-  // removed from the Worker: after this reports `remaining: 0`, no request path
-  // can reach a legacy Durable Object. `allowEmptySnapshot` is on because the
-  // usual refusal (see archiveThreadCore) would strand exactly the threads this
-  // sweep exists to drain — an empty legacy thread has nothing to lose, and
-  // leaving it active points a live row at a class that is about to be deleted.
-  if (url.pathname === "/api/debug/legacy-threads") {
-    if (req.method !== "GET" && req.method !== "POST") {
-      return new Response("method not allowed", { status: 405 });
-    }
-    return tryJson(async () => {
-      const db = registryDb(env);
-      const legacy = await db
-        .select({
-          id: threadIndex.id,
-          workspaceId: threadIndex.workspaceId,
-          title: threadIndex.title,
-          updatedAt: threadIndex.updatedAt,
-          archivedAt: threadIndex.archivedAt,
-        })
-        .from(threadIndex)
-        .where(eq(threadIndex.runtime, "legacy"))
-        .orderBy(threadIndex.updatedAt)
-        .all();
-
-      const active = legacy.filter((row) => row.archivedAt === null);
-      if (req.method === "GET") {
-        return {
-          total: legacy.length,
-          archived: legacy.length - active.length,
-          active: active.length,
-          threads: active,
-        };
-      }
-
-      const limit = Math.min(Math.max(Number(url.searchParams.get("limit") ?? 25), 1), 200);
-      const results: Array<{ threadId: string; outcome: string }> = [];
-      for (const row of active.slice(0, limit)) {
-        try {
-          results.push({
-            threadId: row.id,
-            outcome: await archiveThreadCore(env, row.id, { allowEmptySnapshot: true }),
-          });
-        } catch (error) {
-          results.push({ threadId: row.id, outcome: `error: ${String(error)}` });
-        }
-      }
-      return {
-        attempted: results.length,
-        remaining: active.length - results.filter((r) => r.outcome === "archived").length,
-        results,
-      };
     });
   }
 

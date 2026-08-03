@@ -6,7 +6,7 @@ import {
   type EligibleThread,
   type PendingThreadCount,
 } from "../db/repositories/thread-knowledge";
-import { activeTranscriptRpc } from "./adapters/active-transcript";
+import { activeTranscriptRpc, hasLiveTranscript } from "./adapters/active-transcript";
 import { ArchivedTranscriptAdapter } from "./adapters/archived-transcript";
 import { decodeKnowledgeCursor, encodeKnowledgeCursor, fingerprintKnowledgeQuery } from "./cursors";
 import { parseDateInterval } from "./date-interval";
@@ -166,10 +166,9 @@ export class ThreadKnowledgeService {
         order: normalized.order,
         limit: normalized.limit,
       };
-      const result =
-        thread.archivedAt === null
-          ? await this.readActive(thread, request)
-          : await readTranscriptPage(this.archivedAdapter(thread.id), request);
+      const result = hasLiveTranscript(thread)
+        ? await this.readActive(thread, request)
+        : await readTranscriptPage(this.archivedAdapter(thread.id), request);
       return {
         thread,
         messages: result.messages,
@@ -192,10 +191,9 @@ export class ThreadKnowledgeService {
         ...input,
         includeAutomata: normalized.includeAutomata,
       };
-      const result =
-        thread.archivedAt === null
-          ? await this.grepActive(thread, request)
-          : await grepTranscript(this.archivedAdapter(thread.id), request);
+      const result = hasLiveTranscript(thread)
+        ? await this.grepActive(thread, request)
+        : await grepTranscript(this.archivedAdapter(thread.id), request);
       return {
         thread,
         matches: result.matches,
@@ -229,18 +227,12 @@ export class ThreadKnowledgeService {
   }
 
   private async readActive(thread: EligibleThread, input: InternalReadRequest) {
-    const rpc = await activeTranscriptRpc(this.deps.env, {
-      id: thread.id,
-      runtime: thread.runtime,
-    });
+    const rpc = await activeTranscriptRpc(this.deps.env, { id: thread.id });
     return rpc.readThreadProsePage(input);
   }
 
   private async grepActive(thread: EligibleThread, input: InternalGrepRequest) {
-    const rpc = await activeTranscriptRpc(this.deps.env, {
-      id: thread.id,
-      runtime: thread.runtime,
-    });
+    const rpc = await activeTranscriptRpc(this.deps.env, { id: thread.id });
     return rpc.grepThreadProse(input);
   }
 

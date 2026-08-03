@@ -4,7 +4,7 @@ import type { Env } from "../env";
 import { registryDb } from "../db/client";
 import { WorkspaceRepository } from "../db/repositories/workspaces";
 import { WorkbenchRepository } from "../db/repositories/workbenches";
-import type { resolveThreadRuntimeConfigForAgent } from "./thread-agent";
+import type { resolveThreadRuntimeConfigForAgent } from "./thread-agent-config";
 import { describeSchedule, parseSchedule } from "../automata/schedule";
 import {
   AutomatonService,
@@ -91,12 +91,12 @@ export function createAutomatonManagementTools(input: { env: Env; threadId: stri
     const db = registryDb(env);
     let config: Awaited<ReturnType<typeof resolveThreadRuntimeConfigForAgent>>;
     try {
-      // Deferred: statically importing thread-agent.ts pulls in the "agents"
-      // package, which imports "cloudflare:workers" unconditionally at module
-      // load — fatal under the plain-node unit test environment. A dynamic
-      // import defers that load to execute()-time, which only ever runs
+      // Deferred: statically importing thread-agent-config.ts pulls in the
+      // provider/model factory graph, which is not safe to load under the
+      // plain-node unit test environment. A dynamic import defers that load to
+      // execute()-time, which only ever runs
       // under the Workers pool (integration tests) or in production.
-      const { resolveThreadRuntimeConfigForAgent } = await import("./thread-agent");
+      const { resolveThreadRuntimeConfigForAgent } = await import("./thread-agent-config");
       config = await resolveThreadRuntimeConfigForAgent(env, threadId);
     } catch {
       return { ok: false, error: "This thread is not fully set up yet." };

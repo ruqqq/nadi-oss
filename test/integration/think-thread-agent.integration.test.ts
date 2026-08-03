@@ -14,7 +14,7 @@ import {
   ThinkThreadAgent,
   type ThinkThreadAgent as ThinkThreadAgentType,
 } from "../../src/agent/think-thread-agent";
-import * as threadAgentModule from "../../src/agent/thread-agent";
+import * as threadAgentModule from "../../src/agent/thread-agent-config";
 import { resolveContextBudget } from "../../src/agent/context-budget";
 import { DEFAULT_TOOL_OUTPUT_CAP_CHARS } from "../../src/agent/tool-output-cap";
 import { CODING_MAX_TOOL_STEPS, MAX_TOOL_STEPS } from "../../src/agent/tool-step-limit";

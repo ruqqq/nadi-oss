@@ -7,27 +7,13 @@ import {
   ArchivedCompactionRepository,
   type ArchivedCompactionRow,
 } from "../db/repositories/archived-compactions";
-import { normalizeThreadRuntime } from "./thread-runtime";
 import { log } from "../log";
 import { reconcileThreadSearchProjectionFromMessages } from "../thread-knowledge/projector";
 
 export type ArchiveOutcome = "archived" | "already_archived" | "active_turn" | "empty_snapshot";
 
-export interface ArchiveOptions {
-  /**
-   * Archive even when the DO exports nothing. The refusal below exists because
-   * an empty export is indistinguishable from an unhydrated read, and the next
-   * step destroys the DO — so the default is to bet on "unhydrated". Only a
-   * caller that is retiring the runtime entirely should override it: leaving the
-   * thread active is then the WORSE outcome, because the DO class it points at
-   * is about to stop existing.
-   */
-  allowEmptySnapshot?: boolean;
-}
-
 interface ArchiveStub {
   hasActiveTurn(): boolean | Promise<boolean>;
-  exportHistory(): Promise<unknown[]>;
   exportRawHistory(): Promise<unknown[]>;
   exportCompactions(): Promise<ArchivedCompactionRow[]>;
   destroy(): void | Promise<void>;
@@ -36,15 +22,13 @@ interface ArchiveStub {
 /**
  * MUST be getAgentByName, not a raw `namespace.get(idFromName(...))` stub.
  * Think hydrates its transcript only in onStart(); a raw DO RPC skips onStart(),
- * so `this.messages` is still the empty cache the constructor set and
- * exportHistory() silently returns []. Archiving snapshots then destroys, so a
+ * so `this.messages` is still the empty cache the constructor set and the
+ * export silently returns []. Archiving snapshots then destroys, so a
  * cold DO (exactly what the idle auto-archive cron reaches) would have written
  * an empty snapshot and then wiped the real transcript.
  */
-async function archiveStub(env: Env, runtime: string, threadId: string): Promise<ArchiveStub> {
-  return normalizeThreadRuntime(runtime) === "think"
-    ? ((await getAgentByName(env.THINK_THREAD_AGENT, threadId)) as unknown as ArchiveStub)
-    : ((await getAgentByName(env.THREAD_AGENT, threadId)) as unknown as ArchiveStub);
+async function archiveStub(env: Env, threadId: string): Promise<ArchiveStub> {
+  return (await getAgentByName(env.THINK_THREAD_AGENT, threadId)) as unknown as ArchiveStub;
 }
 
 /**
@@ -53,11 +37,7 @@ async function archiveStub(env: Env, runtime: string, threadId: string): Promise
  * never leaves a destroyed DO whose history was not yet captured. Idempotent:
  * an already-archived (or missing) thread is a no-op.
  */
-export async function archiveThreadCore(
-  env: Env,
-  threadId: string,
-  options: ArchiveOptions = {},
-): Promise<ArchiveOutcome> {
+export async function archiveThreadCore(env: Env, threadId: string): Promise<ArchiveOutcome> {
   const db = registryDb(env);
   const repo = new ThreadRepository(db);
   const thread = await repo.getById(threadId);
@@ -76,7 +56,11 @@ export async function archiveThreadCore(
     return "archived";
   }
 
-  const stub = await archiveStub(env, thread.runtime, threadId);
+  // A `legacy` row predates ThinkThreadAgent and has no DO to export from — its
+  // transcript was snapshotted when the runtime was retired. Dialing Think for
+  // one would export nothing, which the empty-snapshot guard below refuses, so
+  // this stays safe without a second namespace.
+  const stub = await archiveStub(env, threadId);
   if (await stub.hasActiveTurn()) return "active_turn";
 
   // Archive the RAW transcript, not the compacted view. `exportHistory()` applies
@@ -84,13 +68,8 @@ export async function archiveThreadCore(
   // summary — and archiving DESTROYS the DO, so archiving that view would delete
   // every message behind a summary for good. The summaries are kept separately
   // below, so nothing is lost either way.
-  //
-  // Legacy (v2) threads never compacted and have no raw export; their exportHistory
-  // is already the whole transcript. An RPC stub is a proxy, so every method looks
-  // present — branch on the runtime, do not feature-detect.
-  const isThink = normalizeThreadRuntime(thread.runtime) === "think";
-  const messages = isThink ? await stub.exportRawHistory() : await stub.exportHistory();
-  const compactions = isThink ? await stub.exportCompactions() : [];
+  const messages = await stub.exportRawHistory();
+  const compactions = await stub.exportCompactions();
   // Fail safe on an empty snapshot rather than destroy on one. An empty export
   // is indistinguishable from an unhydrated read, and the next step is
   // irreversible, so we refuse the archive instead of betting on which it is.
@@ -98,7 +77,7 @@ export async function archiveThreadCore(
   // holds nothing worth reclaiming, so it just stays active (the user can
   // delete it). The skip is stamped so the oldest-first auto-archive batch does
   // not re-pick this thread on every run and starve the threads behind it.
-  if (messages.length === 0 && !options.allowEmptySnapshot) {
+  if (messages.length === 0) {
     log.warn("thread.archive_skipped_empty_snapshot", { threadId, runtime: thread.runtime });
     await repo.markArchiveSkipped(threadId, thread.updatedAt);
     return "empty_snapshot";

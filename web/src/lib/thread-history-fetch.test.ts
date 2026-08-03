@@ -13,7 +13,7 @@ vi.mock("./thread-history-cache", () => ({
 const readCachedHistoryMock = vi.mocked(readCachedHistory);
 const writeCachedHistoryMock = vi.mocked(writeCachedHistory);
 
-const target = { kind: "legacy" as const, path: "/agents/thread-agent/t1/get-messages" };
+const target = { kind: "think" as const, path: "/think-agents/think-thread-agent/t1/get-messages" };
 
 function jsonResponse(body: unknown, ok = true): Response {
   return {
@@ -70,7 +70,7 @@ describe("fetchThreadHistory", () => {
 });
 
 describe("fetchThreadHistory cache read-through", () => {
-  const cacheTarget = { kind: "legacy" as const, path: "/agents/thread-agent/t1/get-messages" };
+  const cacheTarget = { kind: "think" as const, path: "/think-agents/think-thread-agent/t1/get-messages" };
   const cached = [{ id: "cached" }] as CachedMessages;
 
   beforeEach(() => {

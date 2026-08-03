@@ -26,13 +26,11 @@ const luxonEntry = createRequire(require.resolve("cron-parser/package.json")).re
 
 const integrationGroupedIsolatedFiles = [
   "test/integration/archive-thread-core.integration.test.ts",
-  "test/integration/attachment-chat.integration.test.ts",
   "test/integration/chat.integration.test.ts",
   "test/integration/export-history.integration.test.ts",
   "test/integration/injection-buffer.test.ts",
   "test/integration/injection-drain.test.ts",
   "test/integration/kv-oauth-provider.integration.test.ts",
-  "test/integration/mcp-approval.integration.test.ts",
   "test/integration/sandbox-thread-store.test.ts",
   "test/integration/skill-script-runner-gating.integration.test.ts",
   "test/integration/subagent-detached-injection.test.ts",
@@ -88,7 +86,6 @@ function integrationPlugins() {
         d1Databases: ["REGISTRY_DB"],
         r2Buckets: ["ATTACHMENTS_BUCKET"],
         durableObjects: {
-          THREAD_AGENT: { className: "ThreadAgentV2", useSQLite: true },
           THINK_THREAD_AGENT: { className: "ThinkThreadAgent", useSQLite: true },
           WORKSPACE_MCP_AGENT: { className: "WorkspaceMcpAgent", useSQLite: true },
           USER_HUB: { className: "UserHub", useSQLite: true },

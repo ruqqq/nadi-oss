@@ -404,13 +404,12 @@ async function makeComputeAcquiring(threadId: string, workspaceId: string): Prom
 const FAKE_HISTORY = [{ id: "fake1", role: "user", parts: [{ type: "text", text: "hi" }] }];
 
 function makeDeleteRouteEnv(input: {
-  legacyActive: boolean;
   thinkActive: boolean;
   calls: string[];
   /** Archiving aborts on an empty snapshot, so the default stub has history. */
   history?: unknown[];
 }): Env {
-  const fakeBinding = (label: "legacy" | "think", active: boolean) => ({
+  const fakeBinding = (label: "think", active: boolean) => ({
     idFromName(name: string) {
       input.calls.push(`${label}:idFromName:${name}`);
       return name;
@@ -456,7 +455,6 @@ function makeDeleteRouteEnv(input: {
   // mock for every later test in the `isolate:false` pool.
   return {
     ...env,
-    THREAD_AGENT: fakeBinding("legacy", input.legacyActive),
     THINK_THREAD_AGENT: fakeBinding("think", input.thinkActive),
   } as unknown as Env;
 }
@@ -1000,7 +998,7 @@ describe("thread routes", () => {
 
     await expect(
       authorizeAgentRequest(
-        new Request(`https://nadi.test/agents/thread-agent/${body.thread.threadId}`, {
+        new Request(`https://nadi.test/think-agents/think-thread-agent/${body.thread.threadId}`, {
           headers: { cookie: `better-auth.session_token=${seeded.token}` },
         }),
         env,
@@ -1495,7 +1493,7 @@ describe("thread routes", () => {
 
     await expect(
       authorizeAgentRequest(
-        new Request("https://nadi.test/agents/thread-agent/thr_history/get-messages", {
+        new Request("https://nadi.test/think-agents/think-thread-agent/thr_history/get-messages", {
           headers: { cookie: `better-auth.session_token=${seeded.token}` },
         }),
         env,
@@ -1507,11 +1505,14 @@ describe("thread routes", () => {
       userId: seeded.userId,
     });
 
-    const res = await SELF.fetch("https://nadi.test/agents/thread-agent/thr_history/get-messages", {
-      headers: {
-        cookie: `better-auth.session_token=${seeded.token}`,
+    const res = await SELF.fetch(
+      "https://nadi.test/think-agents/think-thread-agent/thr_history/get-messages",
+      {
+        headers: {
+          cookie: `better-auth.session_token=${seeded.token}`,
+        },
       },
-    });
+    );
 
     expect(res.status).toBe(200);
     await expect(res.json()).resolves.toEqual([]);
@@ -1534,7 +1535,7 @@ describe("thread routes", () => {
         method: "POST",
         headers: { cookie: `better-auth.session_token=${seeded.token}` },
       }),
-      makeDeleteRouteEnv({ legacyActive: false, thinkActive: false, calls }),
+      makeDeleteRouteEnv({ thinkActive: false, calls }),
       makeExecutionContext(),
     );
 
@@ -1635,7 +1636,7 @@ describe("thread routes", () => {
         method: "POST",
         headers: { cookie: `better-auth.session_token=${seeded.token}` },
       }),
-      makeDeleteRouteEnv({ legacyActive: false, thinkActive: false, calls: [] }),
+      makeDeleteRouteEnv({ thinkActive: false, calls: [] }),
       makeExecutionContext(),
     );
 
@@ -1669,7 +1670,7 @@ describe("thread routes", () => {
         method: "POST",
         headers: { cookie: `better-auth.session_token=${seeded.token}` },
       }),
-      makeDeleteRouteEnv({ legacyActive: false, thinkActive: false, calls: [] }),
+      makeDeleteRouteEnv({ thinkActive: false, calls: [] }),
       makeExecutionContext(),
     );
 
@@ -2420,7 +2421,7 @@ describe("thread routes", () => {
     // The thread is no longer authorizable for agent access.
     await expect(
       authorizeAgentRequest(
-        new Request("https://nadi.test/agents/thread-agent/thr_delete", {
+        new Request("https://nadi.test/think-agents/think-thread-agent/thr_delete", {
           headers: { cookie: `better-auth.session_token=${seeded.token}` },
         }),
         env,
@@ -2428,7 +2429,11 @@ describe("thread routes", () => {
     ).resolves.toMatchObject({ authorized: false });
   });
 
-  it("deletes legacy runtime threads through THREAD_AGENT", async () => {
+  // A retired-runtime row has no DO of any kind: its class is deleted, and the
+  // Think namespace must NOT be dialed in its place — that would mint (and
+  // persist) an empty phantom under a name that was never a Think thread. The
+  // D1 rows are still deleted, so the row does disappear.
+  it("deletes a retired-runtime thread without touching any Durable Object", async () => {
     const seeded = await seedUserWorkspace({
       userId: "delete-runtime-legacy-user",
       token: "delete-runtime-legacy-token",
@@ -2450,14 +2455,18 @@ describe("thread routes", () => {
           cookie: `better-auth.session_token=${seeded.token}`,
         },
       }),
-      makeDeleteRouteEnv({ legacyActive: false, thinkActive: true, calls }),
+      makeDeleteRouteEnv({ thinkActive: true, calls }),
       makeExecutionContext(),
     );
 
     expect(res?.status).toBe(204);
-    expect(calls).toContain("legacy:hasActiveTurn");
-    expect(calls).toContain("legacy:destroy");
-    expect(calls).not.toContain("think:hasActiveTurn");
+    expect(calls).toEqual([]);
+    await expect(
+      drizzle(env.REGISTRY_DB, { schema })
+        .select()
+        .from(schema.threadIndex)
+        .where(eq(schema.threadIndex.id, "delete-runtime-legacy")),
+    ).resolves.toEqual([]);
   });
 
   it("deletes Think runtime threads through THINK_THREAD_AGENT", async () => {
@@ -2482,14 +2491,13 @@ describe("thread routes", () => {
           cookie: `better-auth.session_token=${seeded.token}`,
         },
       }),
-      makeDeleteRouteEnv({ legacyActive: true, thinkActive: false, calls }),
+      makeDeleteRouteEnv({ thinkActive: false, calls }),
       makeExecutionContext(),
     );
 
     expect(res?.status).toBe(204);
     expect(calls).toContain("think:hasActiveTurn");
     expect(calls).toContain("think:destroy");
-    expect(calls).not.toContain("legacy:hasActiveTurn");
   });
 
   it("deleting an archived thread drops its snapshot rows", async () => {
@@ -2553,7 +2561,7 @@ describe("thread routes", () => {
         method: "DELETE",
         headers: { cookie: `better-auth.session_token=${token}` },
       }),
-      makeDeleteRouteEnv({ legacyActive: false, thinkActive: false, calls: [] }),
+      makeDeleteRouteEnv({ thinkActive: false, calls: [] }),
       makeExecutionContext(),
     );
 
@@ -2579,7 +2587,7 @@ describe("thread routes", () => {
         method: "DELETE",
         headers: { cookie: `better-auth.session_token=${token}` },
       }),
-      makeDeleteRouteEnv({ legacyActive: false, thinkActive: true, calls }),
+      makeDeleteRouteEnv({ thinkActive: true, calls }),
       makeExecutionContext(),
     );
 

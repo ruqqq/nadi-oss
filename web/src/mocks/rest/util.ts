@@ -14,10 +14,10 @@ import { getStore } from "../store";
 /**
  * Whether this thread's history load should fail at the transport level.
  *
- * Shared because the three history routes (archived / think / legacy) are split
- * across two handler modules and must agree — reaching the error state depends
- * on which route the thread's runtime picks, so failing only one of them means
- * the state is reachable for some threads and silently not for others.
+ * Shared because both history routes (archived / think) are split across two
+ * handler modules and must agree — reaching the error state depends on which
+ * route the thread picks, so failing only one of them means the state is
+ * reachable for some threads and silently not for others.
  */
 export function historyUnreachable(threadId: string): boolean {
   return getStore().faults.historyUnreachableThreadIds.includes(threadId);

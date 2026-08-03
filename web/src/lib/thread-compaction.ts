@@ -54,21 +54,15 @@ export function getCompactionSummary(message: UIMessage): string {
 }
 
 export function shouldQueueSubmitForThreadState({
-  runtime,
   busy,
   manualCompacting,
   hasContent,
 }: {
-  runtime: "legacy" | "think";
   busy: boolean;
   manualCompacting: boolean;
   hasContent: boolean;
 }): boolean {
-  return shouldUseQueuedSubmit({
-    runtime,
-    busy: busy || manualCompacting,
-    hasContent,
-  });
+  return shouldUseQueuedSubmit({ busy: busy || manualCompacting, hasContent });
 }
 
 export type CompactionNotice = "none" | "not-needed";

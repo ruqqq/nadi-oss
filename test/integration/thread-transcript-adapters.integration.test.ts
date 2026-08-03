@@ -3,7 +3,10 @@ import { drizzle } from "drizzle-orm/d1";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "../../src/db/schema";
 import { ArchivedMessageRepository } from "../../src/db/repositories/archived-messages";
-import { activeTranscriptRpc } from "../../src/thread-knowledge/adapters/active-transcript";
+import {
+  activeTranscriptRpc,
+  hasLiveTranscript,
+} from "../../src/thread-knowledge/adapters/active-transcript";
 import { ArchivedTranscriptAdapter } from "../../src/thread-knowledge/adapters/archived-transcript";
 import { readTranscriptPage } from "../../src/thread-knowledge/transcript-reader";
 import { applyRegistryTestSchema, seedRegistryThread } from "./helpers/registry";
@@ -201,7 +204,7 @@ describe("active transcript adapter", () => {
     });
     await evictThinkThread(threadId);
 
-    const rpc = await activeTranscriptRpc(env, { id: threadId, runtime: "think" });
+    const rpc = await activeTranscriptRpc(env, { id: threadId });
     const first = await rpc.readThreadProsePage({ threadId, limit: 1 });
     expect(first.messages).toHaveLength(1);
     expect(first.messages[0]).toMatchObject({
@@ -241,67 +244,19 @@ describe("active transcript adapter", () => {
     ]);
   });
 
-  it("reads legacy messages and caps search digest/document RPCs", async () => {
+  // The retired runtime has no DO to read from. `hasLiveTranscript` is the gate
+  // that keeps such a thread off `activeTranscriptRpc` and on the D1 archive
+  // adapter instead — without it the Think namespace would mint an empty phantom
+  // DO under a name that never belonged to it, and persist it.
+  it("does not treat a retired-runtime thread as having a live transcript", async () => {
     const { threadId } = await seedRegistryThread(env.REGISTRY_DB, {
       threadId: "thread-active-legacy",
       runtime: "legacy",
     });
-    const messages = Array.from({ length: 210 }, (_, index) => ({
-      id: `legacy-${index}`,
-      role: index % 2 === 0 ? "user" : "assistant",
-      createdAt: index === 0 ? null : Date.parse("2026-07-10T00:00:00.000Z") + index,
-      parts: [
-        {
-          type: "text",
-          text: index === 1 ? "legacy needle assistant" : `legacy visible ${index}`,
-        },
-      ],
-    }));
-    const stub = env.THREAD_AGENT.get(env.THREAD_AGENT.idFromName(threadId));
-    await runInDurableObject(stub, async (instance: unknown) => {
-      (instance as { messages: unknown[] }).messages = messages;
-    });
 
-    const rpc = await activeTranscriptRpc(env, { id: threadId, runtime: "legacy" });
-    const dated = await rpc.readThreadProsePage({
-      threadId,
-      since: "2026-07-01T00:00:00.000Z",
-      until: "2026-08-01T00:00:00.000Z",
-      limit: 2,
-    });
-    expect(dated.messages.map((message) => message.id)).toEqual(["legacy-1", "legacy-2"]);
-    expect(dated.omittedPartCount).toBe(1);
-    expect(dated.nextCursor).toEqual(expect.any(String));
-
-    const grep = await rpc.grepThreadProse({ threadId, pattern: "needle" });
-    expect(grep.matches).toEqual([
-      expect.objectContaining({
-        messageId: "legacy-1",
-        role: "assistant",
-        text: "legacy needle assistant",
-        createdAt: Date.parse("2026-07-10T00:00:00.000Z") + 1,
-      }),
-    ]);
-
-    const digestPage = await rpc.listThreadSearchDigests({ limit: 1_000 });
-    expect(digestPage.digests).toHaveLength(200);
-    expect(digestPage.nextPosition).toBe(199);
-    expect(digestPage.lastMessagePreview).toBe("legacy visible 199");
-    expect(digestPage.digests[0]).toMatchObject({
-      messageId: "legacy-0",
-      indexable: true,
-    });
-    expectSha256Hex(digestPage.digests[0]?.sourceHash ?? "");
-
-    const documents = await rpc.getThreadSearchDocuments(
-      messages.slice(0, 30).map((message) => message.id),
-    );
-    expect(documents).toHaveLength(25);
-    expect(documents[0]?.message).toEqual({
-      id: "legacy-0",
-      role: "user",
-      text: "legacy visible 0",
-      createdAt: null,
-    });
+    expect(hasLiveTranscript({ runtime: "legacy", archivedAt: null })).toBe(false);
+    expect(hasLiveTranscript({ runtime: "think", archivedAt: null })).toBe(true);
+    expect(hasLiveTranscript({ runtime: "think", archivedAt: 1 })).toBe(false);
+    expect(threadId).toBe("thread-active-legacy");
   });
 });
