@@ -69,39 +69,26 @@ describe("EmpowerStep", () => {
 
   // A row that exists but has not been authorized is NOT a connection. Reporting
   // it as one is what makes the post-wizard nudge promise calendar data the
-  // agent cannot reach.
-  it("reports a connection only once it resolves as authorized", async () => {
+  // agent cannot reach — even if the (unresolved) tool list would otherwise
+  // have matched "calendar".
+  it("does not report calendarConnected for a row that only needs auth", async () => {
     mocks.listMcpServers.mockResolvedValue([markdump]);
     mocks.listMcpServerTools.mockResolvedValue({ needsAuth: true, tools: [] });
-    const onConnectedChange = vi.fn();
+    const onCalendarConnectedChange = vi.fn();
 
     render(
-      <EmpowerStep exaCard={null} onContinue={() => {}} onConnectedChange={onConnectedChange} />,
+      <EmpowerStep
+        exaCard={null}
+        onContinue={() => {}}
+        onCalendarConnectedChange={onCalendarConnectedChange}
+      />,
     );
 
     await screen.findByRole("button", { name: /authorize/i });
-    expect(onConnectedChange).toHaveBeenCalled();
-    for (const call of onConnectedChange.mock.calls) {
-      expect(call[0]).not.toContain("markdump");
-    }
-  });
-
-  it("reports an authorized connection", async () => {
-    mocks.listMcpServers.mockResolvedValue([markdump]);
-    mocks.listMcpServerTools.mockResolvedValue({
-      needsAuth: false,
-      tools: [{ name: "read", description: null, policy: "auto_allow" as const }],
-    });
-    const onConnectedChange = vi.fn();
-
-    render(
-      <EmpowerStep exaCard={null} onContinue={() => {}} onConnectedChange={onConnectedChange} />,
-    );
-
-    await screen.findByText(/Connected · 1 tool/);
     await waitFor(() => {
-      expect(onConnectedChange).toHaveBeenLastCalledWith(["markdump"]);
+      expect(onCalendarConnectedChange).toHaveBeenCalled();
     });
+    expect(onCalendarConnectedChange).toHaveBeenLastCalledWith(false);
   });
 
   // The connection being authorized is not enough — the tool that resolved

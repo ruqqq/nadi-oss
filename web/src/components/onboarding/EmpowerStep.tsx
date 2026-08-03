@@ -15,18 +15,11 @@ const CONNECTION_ICONS = {
 export function EmpowerStep({
   exaCard,
   onContinue,
-  onConnectedChange,
   onCalendarConnectedChange,
 }: {
   /** The web-search card, owned by the wizard because it holds the Exa form state. */
   exaCard: React.ReactNode;
   onContinue: () => void;
-  /**
-   * The connections that are actually AUTHORIZED — not merely added. Completion
-   * seeds a prompt from this, and a row the user never consented to would make
-   * that prompt ask for data the agent cannot reach.
-   */
-  onConnectedChange?: (connected: FeaturedConnectionId[]) => void;
   /**
    * Whether a calendar-named tool actually resolved on any authorized
    * connection. This is deliberately NOT derived from which connections are
@@ -68,12 +61,6 @@ export function EmpowerStep({
     },
     [],
   );
-
-  useEffect(() => {
-    onConnectedChange?.(
-      FEATURED_CONNECTIONS.filter((c) => states[c.id] === "connected").map((c) => c.id),
-    );
-  }, [states, onConnectedChange]);
 
   useEffect(() => {
     // Impossible to arm the calendar prompt without a resolved calendar-named

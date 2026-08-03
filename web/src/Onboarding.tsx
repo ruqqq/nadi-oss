@@ -21,7 +21,6 @@ import { Spinner } from "./components/ui/spinner";
 import { Textarea } from "./components/ui/textarea";
 import { Globe, Key } from "./icons";
 import { armAutomatonNudge } from "./lib/automaton-nudge";
-import type { FeaturedConnectionId } from "./lib/featured-connections";
 import { cn } from "./lib/utils";
 import {
   RECOMMENDED_ONBOARDING_PROVIDER,
@@ -182,11 +181,6 @@ export function Onboarding({
   const [exaError, setExaError] = useState<string | null>(null);
   const [exaAlreadySet, setExaAlreadySet] = useState(false);
 
-  // Empower step — the connections that resolved as AUTHORIZED, so completion
-  // can seed a nudge that never asks for data the agent can't get. A server row
-  // is not enough: consent can be denied, abandoned, or fail after the row
-  // exists.
-  const [connectedIds, setConnectedIds] = useState<FeaturedConnectionId[]>([]);
   // Whether a calendar-named tool actually resolved on an authorized
   // connection. Composio finishing OAuth is not the same as a calendar
   // account being attached inside it, so this is derived from resolved tool
@@ -710,7 +704,6 @@ export function Onboarding({
             </Card>
           ) : step === "empower" ? (
             <EmpowerStep
-              onConnectedChange={setConnectedIds}
               onCalendarConnectedChange={setCalendarConnected}
               exaCard={
                 <Card className="gap-3 p-4">
