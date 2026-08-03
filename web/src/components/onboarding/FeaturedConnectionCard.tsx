@@ -62,29 +62,55 @@ export function FeaturedConnectionCard({
     [],
   );
 
+  // Guards two different kinds of reentrancy:
+  // - `busyRef` makes "one connect at a time" a synchronous invariant instead
+  //   of leaning on `disabled` + React's click scheduling.
+  // - `probedRef` remembers every server id this card has already resolved
+  //   (via either `connect` or the mount probe below), keyed by id rather
+  //   than a plain boolean, so it survives the `server` prop flipping from
+  //   `null` to the row `connect` itself just created.
+  const busyRef = useRef(false);
+  const probedRef = useRef<Set<string>>(new Set());
+
   const connect = useCallback(() => {
-    if (state === "busy") return;
+    if (busyRef.current) return;
+    busyRef.current = true;
     setState("busy");
     setError(null);
     void (async () => {
+      let target = server;
       try {
-        const target = server ?? (await createMcpServer({ name: connection.serverName, url: connection.url }));
-        if (!server) onAdded(target);
+        if (!target) {
+          target = await createMcpServer({ name: connection.serverName, url: connection.url });
+          // Mark before `onAdded` so the mount-probe effect — which re-runs
+          // once the parent's server list update flows back into `server` —
+          // sees this id as already handled and does not issue a second,
+          // overlapping `resolve()` while this one is still in flight.
+          probedRef.current.add(target.id);
+          onAdded(target);
+        }
         await resolve(target, true);
       } catch {
         setError("Couldn't connect just now. You can add this later in Settings.");
-        setState(server ? "needs-auth" : "not-added");
+        // `target` is set whenever a server row exists — either it was
+        // already there, or creation above succeeded and only the resolve/
+        // authorize step failed. Only a null `target` means creation itself
+        // never happened. (Checking the `target` local, not the `server`
+        // prop, matters here: the prop is a stale closure over the
+        // pre-`onAdded` value for a row this same call just created.)
+        setState(target ? "needs-auth" : "not-added");
+      } finally {
+        busyRef.current = false;
       }
     })();
-  }, [state, server, connection, onAdded, resolve]);
+  }, [server, connection, onAdded, resolve]);
 
   // A server that already exists needs one read to learn which state it is in.
   // In an effect, not during render — `resolve` calls the network and sets
   // state, and a render-phase call would fire again on every re-render.
-  const probedRef = useRef(false);
   useEffect(() => {
-    if (!server || probedRef.current) return;
-    probedRef.current = true;
+    if (!server || probedRef.current.has(server.id)) return;
+    probedRef.current.add(server.id);
     void resolve(server, false).catch(() => setState("needs-auth"));
   }, [server, resolve]);
 
