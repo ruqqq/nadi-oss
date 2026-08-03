@@ -48,8 +48,8 @@ hand-edited (`pnpm run db:generate`). Full workflow:
   markdown notes the agent reads and writes like a second brain, or your own —
   and set each tool to `auto_allow`, `approval_required`, or `deny`. Approvals
   are signed, not trusted.
-- **Automata.** Scheduled agent runs that post back only when they have
-  something to say.
+- **Automata.** Scheduled agent runs that report into a thread — every run, or
+  only the ones that fail.
 - **Sandboxed execution.** Workbenches define a repo, a machine size and an
   environment; the agent gets a shell, a filesystem and a git identity — for the
   work that needs one.
@@ -66,7 +66,7 @@ flowchart LR
   SPA["React 19 SPA<br/>(PWA)"]
   W["Cloudflare Worker<br/>routing · auth · REST"]
   DO["Durable Objects<br/>ThinkThreadAgent · UserHub<br/>WorkspaceMcpAgent · VoiceAgent"]
-  D1[("D1<br/>control plane")]
+  D1[("D1<br/>everything but<br/>the live thread")]
   R2[("R2<br/>attachments · backups")]
   CMP["Compute<br/>Daytona · CF Sandbox"]
   MCP["MCP servers"]
@@ -83,8 +83,9 @@ flowchart LR
 - **Worker** — authenticates, serves the SPA, routes agent traffic.
 - **Durable Objects** — one per thread; the SDK owns message persistence in DO
   SQLite, so there is no hand-rolled message store.
-- **D1** — the control plane: workspaces, agents, MCP servers, tool policy,
-  workbenches, automata, the thread index.
+- **D1** — everything but the live conversation: workspaces, agents, MCP servers
+  and tool policy, workbenches, automata, invites, plus the thread index, the
+  message search index and archived threads.
 - **Compute** — provider-neutral (`src/compute`); Daytona and Cloudflare Sandbox
   Containers implement one backend contract.
 

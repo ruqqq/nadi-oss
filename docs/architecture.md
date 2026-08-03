@@ -40,12 +40,18 @@ without its MCP servers or its scheduled alarms.
 
 ## Where state lives
 
-- **DO SQLite** — the message history. The Agents SDK owns it; there is no
-  hand-rolled message store, and `cf_agent_chat_messages` is the SDK's table,
-  not ours.
-- **D1 (`REGISTRY_DB`)** — the control plane: workspaces, agents, MCP servers
-  and tool policy, workbenches, projects, automata, invites, the thread index
-  that powers search and the sidebar, and the active-container ledger.
+- **DO SQLite** — the live conversation. The Agents SDK and the Think runtime own
+  the schema here (`cf_agents_*`, `cf_think_*`); there is no hand-rolled message
+  store, and none of these tables are ours to migrate.
+- **D1 (`REGISTRY_DB`)** — everything else: workspaces, agents, MCP servers and
+  tool policy, workbenches, projects, automata, invites, and the
+  active-container ledger.
+
+  It is **not** only a control plane, whatever the binding name suggests.
+  Conversation content lives here too, in three places: `thread_index`
+  carries `last_message_preview`, `thread_search_messages` is a full-text index
+  over messages, and `archived_message` holds the messages of archived threads.
+  Worth knowing before you reason about where a user's words end up.
 - **R2** — `ATTACHMENTS_BUCKET` for uploads, `BACKUP_BUCKET` for sandbox
   `/workspace` snapshots taken when a container is released.
 - **KV (`SECRETS_KV`)** — encrypted workspace secrets: provider keys, sandbox
