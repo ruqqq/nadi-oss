@@ -21,7 +21,7 @@ export function FeaturedConnectionCard({
   icon,
   server,
   onAdded,
-  onStateChange,
+  onResolved,
 }: {
   connection: FeaturedConnection;
   icon: React.ReactNode;
@@ -35,17 +35,18 @@ export function FeaturedConnectionCard({
   server: McpServer | null | undefined;
   onAdded: (server: McpServer) => void;
   /**
-   * The card's RESOLVED state, lifted so the wizard can tell an authorized
-   * connection from a row that merely exists — plus the tool names that
-   * resolved with it, so the wizard can tell what capabilities (e.g. a
-   * calendar) are actually reachable rather than assuming from the connection
-   * alone. Empty whenever the state isn't a freshly-resolved "connected".
+   * The RESOLVED capability, lifted for the wizard — deliberately narrower
+   * than the card's own five-value state. `null` means "not connected" and
+   * collapses "unknown"/"not-added"/"busy"/"needs-auth" into one thing: no
+   * capability to consult. `string[]` means connected and introspected, with
+   * exactly the tool names that came back — including `[]` for a connected
+   * server with genuinely zero tools. That distinction is load-bearing:
+   * `null` and `[]` must never be conflated, because a lifted contract that
+   * exposed the granular "authorized" state (instead of only "here is what it
+   * can do") is exactly what let a past version of this wizard infer a
+   * calendar from a connection that never had one.
    */
-  onStateChange?: (
-    connectionId: FeaturedConnectionId,
-    state: FeaturedConnectionState,
-    toolNames: string[],
-  ) => void;
+  onResolved?: (connectionId: FeaturedConnectionId, toolNames: string[] | null) => void;
 }) {
   const [state, setState] = useState<FeaturedConnectionState>(
     server === null ? "not-added" : "unknown",
@@ -145,8 +146,8 @@ export function FeaturedConnectionCard({
   }, [server, resolve]);
 
   useEffect(() => {
-    onStateChange?.(connection.id, state, toolNames);
-  }, [connection.id, state, toolNames, onStateChange]);
+    onResolved?.(connection.id, state === "connected" ? toolNames : null);
+  }, [connection.id, state, toolNames, onResolved]);
 
   return (
     <Card className="gap-3 p-4">

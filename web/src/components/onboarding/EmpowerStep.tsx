@@ -5,7 +5,7 @@ import { FEATURED_CONNECTIONS, findFeaturedServer } from "../../lib/featured-con
 import type { FeaturedConnectionId } from "../../lib/featured-connections";
 import { hasCalendarTool } from "../../lib/automaton-nudge";
 import { listMcpServers, type McpServer } from "../../mcp-api";
-import { FeaturedConnectionCard, type FeaturedConnectionState } from "./FeaturedConnectionCard";
+import { FeaturedConnectionCard } from "./FeaturedConnectionCard";
 
 const CONNECTION_ICONS = {
   markdump: <Notebook aria-hidden className="size-5" />,
@@ -33,10 +33,11 @@ export function EmpowerStep({
   // and refuse to offer Connect, which is what stops a post-OAuth reload from
   // adding a second row for a server the user just authorized.
   const [servers, setServers] = useState<McpServer[] | undefined>(undefined);
-  type StateMap = Partial<Record<FeaturedConnectionId, FeaturedConnectionState>>;
-  const [states, setStates] = useState<StateMap>({});
-  type ToolsMap = Partial<Record<FeaturedConnectionId, string[]>>;
-  const [toolsByConnection, setToolsByConnection] = useState<ToolsMap>({});
+  // `null` = not connected (or not yet resolved); `string[]` = connected with
+  // exactly these tool names, including `[]` for zero. Never conflate the two
+  // — see `FeaturedConnectionCard`'s `onResolved` doc for why.
+  type ResolvedMap = Partial<Record<FeaturedConnectionId, string[] | null>>;
+  const [resolvedTools, setResolvedTools] = useState<ResolvedMap>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -54,23 +55,20 @@ export function EmpowerStep({
     };
   }, []);
 
-  const handleStateChange = useCallback(
-    (id: FeaturedConnectionId, state: FeaturedConnectionState, toolNames: string[]) => {
-      setStates((current) => (current[id] === state ? current : { ...current, [id]: state }));
-      setToolsByConnection((current) => ({ ...current, [id]: toolNames }));
-    },
-    [],
-  );
+  const handleResolved = useCallback((id: FeaturedConnectionId, toolNames: string[] | null) => {
+    setResolvedTools((current) => ({ ...current, [id]: toolNames }));
+  }, []);
 
   useEffect(() => {
     // Impossible to arm the calendar prompt without a resolved calendar-named
-    // tool: a connection contributes only while it is actually "connected",
-    // and only its own resolved tool names are consulted.
-    const calendarConnected = FEATURED_CONNECTIONS.some(
-      (c) => states[c.id] === "connected" && hasCalendarTool(toolsByConnection[c.id] ?? []),
+    // tool: `resolvedTools[id]` is `null` for anything short of a fully
+    // introspected connection, and `hasCalendarTool` only ever sees the tool
+    // names of one that resolved.
+    const calendarConnected = FEATURED_CONNECTIONS.some((c) =>
+      hasCalendarTool(resolvedTools[c.id] ?? []),
     );
     onCalendarConnectedChange?.(calendarConnected);
-  }, [states, toolsByConnection, onCalendarConnectedChange]);
+  }, [resolvedTools, onCalendarConnectedChange]);
 
   return (
     <div className="mt-4 space-y-4">
@@ -88,7 +86,7 @@ export function EmpowerStep({
           icon={CONNECTION_ICONS[connection.id]}
           server={servers ? findFeaturedServer(servers, connection) : undefined}
           onAdded={(server) => setServers((current) => [...(current ?? []), server])}
-          onStateChange={handleStateChange}
+          onResolved={handleResolved}
         />
       ))}
 
