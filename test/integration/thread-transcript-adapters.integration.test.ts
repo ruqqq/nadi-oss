@@ -3,10 +3,8 @@ import { drizzle } from "drizzle-orm/d1";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "../../src/db/schema";
 import { ArchivedMessageRepository } from "../../src/db/repositories/archived-messages";
-import {
-  activeTranscriptRpc,
-  hasLiveTranscript,
-} from "../../src/thread-knowledge/adapters/active-transcript";
+import { activeTranscriptRpc } from "../../src/thread-knowledge/adapters/active-transcript";
+import { hasLiveTranscript } from "../../src/agent/thread-runtime";
 import { ArchivedTranscriptAdapter } from "../../src/thread-knowledge/adapters/archived-transcript";
 import { readTranscriptPage } from "../../src/thread-knowledge/transcript-reader";
 import { applyRegistryTestSchema, seedRegistryThread } from "./helpers/registry";

@@ -17,3 +17,17 @@ export type ThreadRuntime = (typeof THREAD_RUNTIMES)[number];
 export function normalizeThreadRuntime(value: unknown): ThreadRuntime {
   return value === "think" ? "think" : "legacy";
 }
+
+/**
+ * Whether this thread's transcript is live in a Durable Object, as opposed to
+ * frozen in the D1 archive. Two ways to fail: it was archived (DO destroyed at
+ * archive time), or it is on the retired runtime (class deleted).
+ *
+ * Deliberately NOT in the active-transcript adapter next to `activeTranscriptRpc`.
+ * Tests mock that module to stub the DO transport, and a whole-module mock would
+ * blank this predicate out with it — turning the gate off in exactly the tests
+ * that exercise the paths it guards.
+ */
+export function hasLiveTranscript(thread: { runtime: string; archivedAt: number | null }): boolean {
+  return thread.archivedAt === null && normalizeThreadRuntime(thread.runtime) === "think";
+}

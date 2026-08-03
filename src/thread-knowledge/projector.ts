@@ -7,7 +7,8 @@ import { ThreadRepository } from "../db/repositories/threads";
 import { sha256Hex } from "../compute/files/hash";
 import { log } from "../log";
 import { normalizeProseMessage } from "./prose-normalizer";
-import { activeTranscriptRpc, hasLiveTranscript } from "./adapters/active-transcript";
+import { activeTranscriptRpc } from "./adapters/active-transcript";
+import { hasLiveTranscript } from "../agent/thread-runtime";
 import {
   THREAD_LAST_MESSAGE_PREVIEW_CHARS,
   THREAD_PROJECTION_DIGEST_PAGE,

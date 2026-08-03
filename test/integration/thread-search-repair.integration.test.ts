@@ -226,7 +226,7 @@ describe("thread search stale projection repair", () => {
     await insertThread({
       id: "thr_repair_active_new",
       ...workspace,
-      runtime: "legacy",
+      runtime: "think",
       updatedAt: baseTime + 50,
       searchIndexedThrough: null,
     });
@@ -277,6 +277,46 @@ describe("thread search stale projection repair", () => {
         messageId: "archived-repair",
         content: "archived repairtoken",
         indexedRevision: baseTime + 30,
+      },
+    ]);
+  });
+
+  // Regression: gating the DO read on the runtime made an unarchived `legacy` row
+  // return "skipped" without advancing its checkpoint, so it stayed stale and
+  // re-occupied the oldest-first batch on every subsequent run. It must DRAIN —
+  // via the D1 archive source, which is where such a thread's transcript lives.
+  it("drains a retired-runtime thread from D1 instead of starving the batch", async () => {
+    const workspace = await seedWorkspace("ws_repair_retired");
+    await insertThread({
+      id: "thr_repair_retired",
+      ...workspace,
+      runtime: "legacy",
+      updatedAt: baseTime + 20,
+      searchIndexedThrough: null,
+    });
+    await new ArchivedMessageRepository(drizzle(env.REGISTRY_DB, { schema })).replaceForThread(
+      "thr_repair_retired",
+      [message({ id: "retired-repair", text: "retired repairtoken" })],
+    );
+    activeTranscriptRpcMock.mockImplementation(async () => {
+      throw new Error("retired-runtime thread must not dial a Durable Object");
+    });
+
+    const { repairStaleThreadSearchProjections } =
+      await import("../../src/thread-knowledge/repair");
+
+    await expect(repairStaleThreadSearchProjections(env)).resolves.toEqual({
+      selected: 1,
+      succeeded: 1,
+      failed: 0,
+      remaining: 0,
+    });
+    expect(activeTranscriptRpcMock).not.toHaveBeenCalled();
+    await expect(projectionRows("thr_repair_retired")).resolves.toEqual([
+      {
+        messageId: "retired-repair",
+        content: "retired repairtoken",
+        indexedRevision: baseTime + 20,
       },
     ]);
   });

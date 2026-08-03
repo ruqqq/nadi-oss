@@ -6,7 +6,8 @@ import {
   type EligibleThread,
   type PendingThreadCount,
 } from "../db/repositories/thread-knowledge";
-import { activeTranscriptRpc, hasLiveTranscript } from "./adapters/active-transcript";
+import { activeTranscriptRpc } from "./adapters/active-transcript";
+import { hasLiveTranscript } from "../agent/thread-runtime";
 import { ArchivedTranscriptAdapter } from "./adapters/archived-transcript";
 import { decodeKnowledgeCursor, encodeKnowledgeCursor, fingerprintKnowledgeQuery } from "./cursors";
 import { parseDateInterval } from "./date-interval";
