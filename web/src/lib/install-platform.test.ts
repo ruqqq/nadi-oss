@@ -1,0 +1,95 @@
+import { describe, expect, it } from "vitest";
+import { classifyInstallPlatform } from "./install-platform";
+
+const IOS_SAFARI =
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
+const IOS_CHROME =
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/126.0 Mobile/15E148 Safari/604.1";
+const ANDROID_CHROME =
+  "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36";
+const DESKTOP_CHROME =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+const DESKTOP_SAFARI =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15";
+const DESKTOP_FIREFOX =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:127.0) Gecko/20100101 Firefox/127.0";
+const IOS_OPERA =
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) OPiOS/76.2.4027.75093 Mobile/15E148 Safari/605.1.15";
+// Stock iPadOS 13+ Safari: desktop Mac UA, no iPad token, but touch-capable.
+const IPADOS_SAFARI_DESKTOP_UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15";
+
+describe("classifyInstallPlatform", () => {
+  it("reports installed regardless of browser when standalone", () => {
+    expect(
+      classifyInstallPlatform({ userAgent: IOS_SAFARI, standalone: true, maxTouchPoints: 5 }),
+    ).toBe("installed");
+    expect(
+      classifyInstallPlatform({ userAgent: ANDROID_CHROME, standalone: true, maxTouchPoints: 5 }),
+    ).toBe("installed");
+  });
+
+  it("separates iOS Safari from other iOS browsers", () => {
+    // Both can Add to Home Screen, but the menu differs, so the instructions do.
+    expect(
+      classifyInstallPlatform({ userAgent: IOS_SAFARI, standalone: false, maxTouchPoints: 5 }),
+    ).toBe("ios-safari");
+    expect(
+      classifyInstallPlatform({ userAgent: IOS_CHROME, standalone: false, maxTouchPoints: 5 }),
+    ).toBe("ios-other");
+  });
+
+  it("classifies Opera for iOS as ios-other, not ios-safari", () => {
+    // Opera-iOS sends OPiOS/, not OPT/ — it must not fall through to Safari's
+    // Share-button instructions.
+    expect(
+      classifyInstallPlatform({ userAgent: IOS_OPERA, standalone: false, maxTouchPoints: 5 }),
+    ).toBe("ios-other");
+  });
+
+  it("classifies touch-capable iPadOS Safari (desktop UA) as ios-safari", () => {
+    // Stock iPadOS 13+ Safari sends a desktop Mac UA with no iPad token; a real
+    // Mac has maxTouchPoints === 0, so touch support is the disambiguator.
+    expect(
+      classifyInstallPlatform({
+        userAgent: IPADOS_SAFARI_DESKTOP_UA,
+        standalone: false,
+        maxTouchPoints: 5,
+      }),
+    ).toBe("ios-safari");
+  });
+
+  it("classifies Chromium by form factor", () => {
+    expect(
+      classifyInstallPlatform({ userAgent: ANDROID_CHROME, standalone: false, maxTouchPoints: 5 }),
+    ).toBe("android-chromium");
+    expect(
+      classifyInstallPlatform({ userAgent: DESKTOP_CHROME, standalone: false, maxTouchPoints: 0 }),
+    ).toBe("desktop-chromium");
+  });
+
+  it("classifies a touch-capable Mac running desktop Chrome as desktop-chromium, not ios-safari", () => {
+    // A touch-capable external display, or DevTools touch emulation, gives a
+    // real Mac maxTouchPoints > 0. The Mac-UA + touch check must not shadow
+    // Chromium's own detection — that would tell a working Chrome install
+    // path to go tap a Share button that doesn't exist.
+    expect(
+      classifyInstallPlatform({ userAgent: DESKTOP_CHROME, standalone: false, maxTouchPoints: 5 }),
+    ).toBe("desktop-chromium");
+  });
+
+  it("classifies a touch-capable Mac running desktop Firefox as unsupported, not ios-safari", () => {
+    expect(
+      classifyInstallPlatform({ userAgent: DESKTOP_FIREFOX, standalone: false, maxTouchPoints: 5 }),
+    ).toBe("unsupported");
+  });
+
+  it("reports unsupported where there is nothing to offer", () => {
+    expect(
+      classifyInstallPlatform({ userAgent: DESKTOP_SAFARI, standalone: false, maxTouchPoints: 0 }),
+    ).toBe("unsupported");
+    expect(
+      classifyInstallPlatform({ userAgent: DESKTOP_FIREFOX, standalone: false, maxTouchPoints: 0 }),
+    ).toBe("unsupported");
+  });
+});

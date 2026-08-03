@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { toast } from "sonner";
 import { Alert, AlertDescription } from "./components/ui/alert";
@@ -8,6 +8,8 @@ import { OfflineBanner } from "./components/OfflineBanner";
 import { Input } from "./components/ui/input";
 import { Label } from "./components/ui/label";
 import { ModelCombobox } from "./components/settings/ModelCombobox";
+import { EmpowerStep } from "./components/onboarding/EmpowerStep";
+import { InstallStep } from "./components/onboarding/InstallStep";
 import {
   Select,
   SelectContent,
@@ -18,13 +20,19 @@ import {
 import { Spinner } from "./components/ui/spinner";
 import { Textarea } from "./components/ui/textarea";
 import { Globe, Key } from "./icons";
+import { armAutomatonNudge } from "./lib/automaton-nudge";
+import type { FeaturedConnectionId } from "./lib/featured-connections";
 import { cn } from "./lib/utils";
 import {
-  ONBOARDING_STEPS,
   RECOMMENDED_ONBOARDING_PROVIDER,
   isKeylessOnboardingProvider,
   onboardingProviderOptions,
+  onboardingStepPath,
+  parseOnboardingStep,
+  resolveOnboardingStep,
+  visibleOnboardingSteps,
 } from "./lib/onboarding";
+import type { OnboardingStepDef, OnboardingStepId } from "./lib/onboarding";
 import { track } from "./lib/posthog";
 import {
   type AgentSettingsResponse,
@@ -84,8 +92,6 @@ const DEFAULT_ONBOARDING_BASE_URLS: Partial<Record<SettingsProvider, string>> = 
   "openai-compatible": "",
 };
 
-type OnboardingStep = 1 | 2 | 3;
-
 function statusFromError(err: unknown): string | null {
   return err instanceof Error ? (err.message.match(/\((\d+)\)/)?.[1] ?? null) : null;
 }
@@ -117,14 +123,23 @@ export function Onboarding({
   user,
   settings,
   workersAiEnabled = false,
+  initialStep,
+  installed = false,
   onComplete,
 }: {
   user: { email?: string };
   settings: AgentSettingsResponse;
   workersAiEnabled?: boolean;
+  /** Resume target when returning from an MCP OAuth redirect. */
+  initialStep?: OnboardingStepId;
+  /** Hides the install step for a user already running the installed PWA. */
+  installed?: boolean;
   onComplete: () => void;
 }) {
-  const [step, setStep] = useState<OnboardingStep>(1);
+  const steps = useMemo(() => visibleOnboardingSteps({ installed }), [installed]);
+  const [step, setStep] = useState<OnboardingStepId>(() =>
+    resolveOnboardingStep(initialStep, steps),
+  );
   const providerOptions = useMemo(
     () => onboardingProviderOptions({ workersAi: workersAiEnabled }),
     [workersAiEnabled],
@@ -167,10 +182,16 @@ export function Onboarding({
   const [exaError, setExaError] = useState<string | null>(null);
   const [exaAlreadySet, setExaAlreadySet] = useState(false);
 
+  // Empower step — the connections that resolved as AUTHORIZED, so completion
+  // can seed a nudge that never asks for data the agent can't get. A server row
+  // is not enough: consent can be denied, abandoned, or fail after the row
+  // exists.
+  const [connectedIds, setConnectedIds] = useState<FeaturedConnectionId[]>([]);
+
   // Only reached once the required steps are done, so load the current state
   // lazily rather than paying for it on every onboarding mount.
   useEffect(() => {
-    if (step !== 3) return;
+    if (step !== "empower") return;
     let cancelled = false;
     getWebToolsSettings()
       .then((settings) => {
@@ -183,6 +204,61 @@ export function Onboarding({
       cancelled = true;
     };
   }, [step]);
+
+  // The wizard lives at "/", so only the query changes between steps — App's own
+  // path state never moves and cannot drive this. The wizard owns its own history.
+  useEffect(() => {
+    // Base entry, so the FIRST step is a real history entry to come back to.
+    window.history.replaceState(null, "", onboardingStepPath(step));
+    // Intentionally mount-only: later steps push (see `goToStep`).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // How many entries this wizard has pushed and not yet popped. `history.back()`
+  // is only ours to call while this is above zero — a tab opened straight at
+  // `?step=assistant` has no wizard entry behind it (the mount effect REPLACED
+  // that one), so an unguarded back would leave the app entirely.
+  const pushDepthRef = useRef(0);
+
+  useEffect(() => {
+    const onPop = () => {
+      const next = parseOnboardingStep(window.location.search);
+      // A back that leaves the wizard's own entries (no step param) is not ours
+      // to handle — App's router owns that navigation.
+      if (!next) return;
+      pushDepthRef.current = Math.max(0, pushDepthRef.current - 1);
+      setStep(resolveOnboardingStep(next, steps));
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [steps]);
+
+  /** Forward navigation pushes, so back returns to the previous step. */
+  const goToStep = useCallback((next: OnboardingStepId) => {
+    window.history.pushState(null, "", onboardingStepPath(next));
+    pushDepthRef.current += 1;
+    setStep(next);
+  }, []);
+
+  /** Back within the wizard, without ever escaping the app. */
+  const goBack = useCallback(
+    (fallback: OnboardingStepId) => {
+      if (pushDepthRef.current > 0) window.history.back();
+      else goToStep(fallback);
+    },
+    [goToStep],
+  );
+
+  /** Move to the next visible step, or finish if this was the last one. */
+  const advance = useCallback(() => {
+    const index = steps.findIndex((s) => s.id === step);
+    const next = steps[index + 1];
+    if (next) goToStep(next.id);
+    else {
+      armAutomatonNudge(localStorage, { composioConnected: connectedIds.includes("composio") });
+      onComplete();
+    }
+  }, [steps, step, goToStep, onComplete, connectedIds]);
 
   const secretName = useMemo(
     () => settings.providers.find((p) => p.provider === provider)?.configuredSecretName,
@@ -207,7 +283,7 @@ export function Onboarding({
     if (keyless) {
       track("settings_saved", { source: "onboarding", provider });
       setKeyError(null);
-      setStep(2);
+      goToStep("assistant");
       return;
     }
     const endpointConfig: ProviderEndpointConfig | undefined = isCompatibleOnboardingProvider(
@@ -234,7 +310,7 @@ export function Onboarding({
 
       // Nothing to verify or save — the stored key stays as it is.
       if (keepSavedKey) {
-        setStep(2);
+        goToStep("assistant");
         return;
       }
       // Verify the key with the provider first. Only a definitive rejection
@@ -270,7 +346,7 @@ export function Onboarding({
         toast("Key saved — we couldn't verify it just now.");
       }
       setApiKey("");
-      setStep(2);
+      goToStep("assistant");
     } catch (err) {
       setKeyError(
         statusFromError(err) === "400"
@@ -301,7 +377,7 @@ export function Onboarding({
         }),
       );
       track("settings_saved", { source: "onboarding", provider, model });
-      setStep(3);
+      goToStep("empower");
     } catch (err) {
       setAgentError(
         statusFromError(err) === "400"
@@ -317,7 +393,7 @@ export function Onboarding({
     if (savingExa) return;
     // Skipping with a key already stored keeps it — don't imply otherwise.
     if (!exaAlreadySet) toast("You can add a web search key anytime in Settings → Tools.");
-    onComplete();
+    advance();
   };
 
   const submitWebSearch = async (event: FormEvent) => {
@@ -352,7 +428,7 @@ export function Onboarding({
           ? "Key saved — we couldn't verify it just now."
           : "Web search enabled",
       );
-      onComplete();
+      advance();
     } catch (err) {
       setExaError(
         statusFromError(err) === "400"
@@ -378,7 +454,7 @@ export function Onboarding({
 
       <main className="flex-1 overflow-y-auto">
         <div className="mx-auto w-full max-w-xl p-4 md:p-6">
-          {step === 1 && (
+          {step === "provider" && (
             <div className="mb-6 space-y-1">
               <h1 className="font-display font-semibold text-2xl">Welcome to Nadi</h1>
               <p className="text-muted-foreground text-sm">
@@ -388,9 +464,9 @@ export function Onboarding({
             </div>
           )}
 
-          <StepIndicator step={step} />
+          <StepIndicator steps={steps} step={step} />
 
-          {step === 1 ? (
+          {step === "provider" ? (
             <Card className="mt-4 p-4">
               <form className="space-y-4" onSubmit={submitKey}>
                 <div className="space-y-1.5">
@@ -556,7 +632,7 @@ export function Onboarding({
                 </Button>
               </form>
             </Card>
-          ) : step === 2 ? (
+          ) : step === "assistant" ? (
             <Card className="mt-4 p-4">
               <form className="space-y-4" onSubmit={submitAgent}>
                 <div className="space-y-1.5">
@@ -607,7 +683,7 @@ export function Onboarding({
                     variant="ghost"
                     onClick={() => {
                       setAgentError(null);
-                      setStep(1);
+                      goBack("provider");
                     }}
                     disabled={savingAgent}
                   >
@@ -627,102 +703,104 @@ export function Onboarding({
                 </div>
               </form>
             </Card>
-          ) : (
-            <Card className="mt-4 p-4">
-              <form className="space-y-4" onSubmit={submitWebSearch}>
-                <div className="space-y-1">
-                  <h2 className="font-display font-semibold text-lg">Let Nadi search the web</h2>
-                  <p className="text-muted-foreground text-sm">
-                    With an Exa key, Nadi can search the web and cite what it finds. Without one, it
-                    can still read pages you link to.
-                  </p>
-                </div>
+          ) : step === "empower" ? (
+            <EmpowerStep
+              onConnectedChange={setConnectedIds}
+              exaCard={
+                <Card className="gap-3 p-4">
+                  <form className="space-y-4" onSubmit={submitWebSearch}>
+                    <div className="space-y-1">
+                      <h2 className="font-display font-semibold text-lg">
+                        Let Nadi search the web
+                      </h2>
+                      <p className="text-muted-foreground text-sm">
+                        With an Exa key, Nadi can search the web and cite what it finds. Without
+                        one, it can still read pages you link to.
+                      </p>
+                    </div>
 
-                {exaAlreadySet && (
-                  <Alert>
-                    <AlertDescription>
-                      Web search is already set up for this workspace. Saving a key replaces it.
-                    </AlertDescription>
-                  </Alert>
-                )}
+                    {exaAlreadySet && (
+                      <Alert>
+                        <AlertDescription>
+                          Web search is already set up for this workspace. Saving a key replaces
+                          it.
+                        </AlertDescription>
+                      </Alert>
+                    )}
 
-                <div className="space-y-1.5">
-                  <Label htmlFor="onboarding-exa-key">Exa API key</Label>
-                  <Input
-                    id="onboarding-exa-key"
-                    type="password"
-                    autoComplete="off"
-                    autoFocus
-                    placeholder="Starts with exa_…"
-                    value={exaKey}
-                    onChange={(e) => setExaKey(e.target.value)}
-                    disabled={savingExa}
-                  />
-                  <p className="text-muted-foreground text-xs">
-                    Stored encrypted for your workspace and never shown again.
-                  </p>
-                  {!exaAlreadySet && (
-                    <p className="text-muted-foreground text-xs">
-                      Don’t have a key?{" "}
-                      <a
-                        href={EXA_SIGN_UP}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="font-medium text-primary underline underline-offset-2"
-                      >
-                        Sign up for Exa
-                      </a>{" "}
-                      — or skip this and set it up later in Settings.
-                    </p>
-                  )}
-                </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="onboarding-exa-key">Exa API key</Label>
+                      <Input
+                        id="onboarding-exa-key"
+                        type="password"
+                        autoComplete="off"
+                        placeholder="Starts with exa_…"
+                        value={exaKey}
+                        onChange={(e) => setExaKey(e.target.value)}
+                        disabled={savingExa}
+                      />
+                      <p className="text-muted-foreground text-xs">
+                        Stored encrypted for your workspace and never shown again.
+                      </p>
+                      {!exaAlreadySet && (
+                        <p className="text-muted-foreground text-xs">
+                          Don’t have a key?{" "}
+                          <a
+                            href={EXA_SIGN_UP}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="font-medium text-primary underline underline-offset-2"
+                          >
+                            Sign up for Exa
+                          </a>{" "}
+                          — or skip this and set it up later in Settings.
+                        </p>
+                      )}
+                    </div>
 
-                {exaError !== null && (
-                  <Alert variant="destructive" role="alert">
-                    <AlertDescription>{exaError}</AlertDescription>
-                  </Alert>
-                )}
+                    {exaError !== null && (
+                      <Alert variant="destructive" role="alert">
+                        <AlertDescription>{exaError}</AlertDescription>
+                      </Alert>
+                    )}
 
-                <div className="flex gap-2">
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    onClick={skipWebSearch}
-                    disabled={savingExa}
-                  >
-                    {exaAlreadySet ? "Keep current key" : "Skip for now"}
-                  </Button>
-                  <Button
-                    type="submit"
-                    className="flex-1"
-                    disabled={savingExa || exaKey.trim().length === 0}
-                    aria-busy={savingExa}
-                  >
-                    {savingExa ? <Spinner label="Enabling web search" /> : <Globe aria-hidden />}
-                    {exaAlreadySet ? "Replace key" : "Enable web search"}
-                  </Button>
-                </div>
-              </form>
-            </Card>
-          )}
+                    <Button
+                      type="submit"
+                      className="w-full"
+                      disabled={savingExa || exaKey.trim().length === 0}
+                      aria-busy={savingExa}
+                    >
+                      {savingExa ? <Spinner label="Enabling web search" /> : <Globe aria-hidden />}
+                      {exaAlreadySet ? "Replace key" : "Enable web search"}
+                    </Button>
+                  </form>
+                </Card>
+              }
+              onContinue={skipWebSearch}
+            />
+          ) : step === "install" ? (
+            <InstallStep onDone={advance} />
+          ) : null}
         </div>
       </main>
     </div>
   );
 }
 
-function StepIndicator({ step }: { step: OnboardingStep }) {
-  const label = ONBOARDING_STEPS[step - 1]?.label ?? "";
+function StepIndicator({ steps, step }: { steps: OnboardingStepDef[]; step: OnboardingStepId }) {
+  const index = steps.findIndex((s) => s.id === step);
+  const current = index < 0 ? 0 : index;
+  const label = steps[current]?.label ?? "";
   return (
     <div className="space-y-2">
       <p className="font-medium text-muted-foreground text-xs uppercase tracking-wide">
-        Step {step} of {ONBOARDING_STEPS.length} · {label}
+        Step {current + 1} of {steps.length} · {label}
       </p>
       <div className="flex gap-1.5" aria-hidden="true">
-        {ONBOARDING_STEPS.map((entry, index) => (
+        {steps.map((entry, i) => (
           <span
             key={entry.id}
-            className={cn("h-1 flex-1 rounded-full", index < step ? "bg-primary" : "bg-border")}
+            className={cn("h-1 flex-1 rounded-full", i <= current ? "bg-primary" : "bg-border")}
           />
         ))}
       </div>

@@ -32,6 +32,7 @@ import {
 import type { CSSProperties } from "react";
 import type { FileUIPart, UIMessage } from "ai";
 import { applyArchivedCompactions } from "./lib/archived-compaction";
+import { peekAutomatonNudge, takeAutomatonNudge } from "./lib/automaton-nudge";
 import {
   backToHere,
   cameFrom,
@@ -106,7 +107,12 @@ import {
   type ReasoningEffort,
   type SettingsProvider,
 } from "./settings-api";
-import { deriveNeedsOnboarding, isOnboardingForced } from "./lib/onboarding";
+import {
+  deriveNeedsOnboarding,
+  isOnboardingForced,
+  parseOnboardingStep,
+} from "./lib/onboarding";
+import { detectInstallPlatform } from "./lib/install-platform";
 import {
   compactThread as compactThreadApi,
   archiveThread as archiveThreadApi,
@@ -171,6 +177,7 @@ import {
   Bell,
   BellRinging,
   WifiSlash,
+  XCircle,
 } from "./icons";
 import { BrandMark } from "./components/BrandMark";
 import { ThreadHistoryErrorBoundary } from "./components/ThreadHistoryErrorBoundary";
@@ -1634,6 +1641,14 @@ export function ChatApp({
   // Staged attachments captured at submit, kept alongside draftText so creation
   // failure can restore them to the composer.
   const [draftFiles, setDraftFiles] = useState<FileUIPart[]>([]);
+  // One-shot post-onboarding nudge. PEEKED here — the new-chat view that shows
+  // it only mounts once the thread fetch resolves, so consuming at mount would
+  // silently throw the nudge away on a transient failure. It is cleared when it
+  // is actually rendered (`onNudgeShown`), and the in-memory state below is what
+  // keeps a second new chat in the same session from showing it again.
+  const [nudgePrompt, setNudgePrompt] = useState<string | null>(() =>
+    typeof localStorage === "undefined" ? null : peekAutomatonNudge(localStorage),
+  );
   // Seed the new-chat provider/model from the synchronously-cached bootstrap
   // settings (localStorage) so the composer is usable immediately on load and
   // offline — with the last-known selected provider — instead of waiting on the
@@ -3268,6 +3283,11 @@ export function ChatApp({
               attachmentAccept={newChatAttachmentAccept}
               modelInputModalities={newChatModelInputModalities}
               voiceEnabled={voiceEnabled}
+              nudgePrompt={nudgePrompt}
+              onNudgeShown={() => {
+                if (typeof localStorage !== "undefined") takeAutomatonNudge(localStorage);
+              }}
+              onDismissNudge={() => setNudgePrompt(null)}
             />
           ) : (
             <ThreadStatusView
@@ -3793,6 +3813,9 @@ export function NewChatView({
   attachmentAccept,
   modelInputModalities,
   voiceEnabled,
+  nudgePrompt,
+  onNudgeShown,
+  onDismissNudge,
 }: {
   onCreateAndSend: (text: string, files: FileUIPart[]) => void;
   leading: React.ReactNode;
@@ -3825,10 +3848,33 @@ export function NewChatView({
   attachmentAccept?: string;
   modelInputModalities: ModelInputModality[];
   voiceEnabled?: boolean;
+  /** One-shot post-onboarding prompt seeded into the composer, or null. */
+  nudgePrompt: string | null;
+  /** Fired the first time the nudge actually reaches the screen, so the stored
+   *  one-shot is consumed at render rather than at app mount. */
+  onNudgeShown: () => void;
+  onDismissNudge: () => void;
 }) {
   const canSend = canStartNewChat({ provider, model });
   const offline = useOffline();
   const composerRef = useRef<ComposerHandle | null>(null);
+  const [nudgeVisible, setNudgeVisible] = useState(nudgePrompt !== null);
+  // The seeded text is not a gesture, so it must not raise the software
+  // keyboard — on a phone that would cover the callout explaining the text.
+  const [suppressAutoFocus] = useState(nudgePrompt !== null);
+  const seededRef = useRef(false);
+  useEffect(() => {
+    if (nudgePrompt === null || seededRef.current) return;
+    seededRef.current = true;
+    composerRef.current?.replaceText(nudgePrompt, { focus: false });
+    onNudgeShown();
+  }, [nudgePrompt, onNudgeShown]);
+
+  const dismissNudge = useCallback(() => {
+    setNudgeVisible(false);
+    onDismissNudge();
+  }, [onDismissNudge]);
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <Topbar
@@ -3879,6 +3925,26 @@ export function NewChatView({
               </AlertDescription>
             </Alert>
           )}
+          {nudgeVisible && nudgePrompt !== null && (
+            <div
+              className="relative w-full rounded-lg border border-border bg-card p-3 pr-9"
+              role="status"
+            >
+              <p className="text-sm">
+                Your agent can work on a schedule. Send this to set up your first one.
+              </p>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                className="absolute top-1.5 right-1.5"
+                onClick={dismissNudge}
+                aria-label="Dismiss"
+              >
+                <XCircle aria-hidden />
+              </Button>
+            </div>
+          )}
         </div>
         {/* Project context docks as an extension of the composer: left-aligned
             to the card's edge (mx-3 mirrors the Composer's m-3) and sitting
@@ -3912,7 +3978,13 @@ export function NewChatView({
         <Composer
           key={seedText ?? "new"}
           controlRef={composerRef}
-          onSend={onCreateAndSend}
+          onSend={(text, files) => {
+            dismissNudge();
+            onCreateAndSend(text, files);
+          }}
+          onDraftChange={(text) => {
+            if (nudgeVisible && text !== nudgePrompt) dismissNudge();
+          }}
           uploadAttachments={canSend && attachmentAccept ? compressToDataUrlAttachments : undefined}
           attachmentAccept={canSend ? attachmentAccept : undefined}
           modelInputModalities={modelInputModalities}
@@ -3924,7 +3996,7 @@ export function NewChatView({
           defaultValue={seedText ?? undefined}
           safeAreaBottom
           voiceEnabled={voiceEnabled}
-          autoFocus={canSend}
+          autoFocus={canSend && !suppressAutoFocus}
           footerTrailing={
             provider && (
               <>
@@ -5360,7 +5432,25 @@ function clearForcedOnboarding(): void {
   if (!isOnboardingForced(window.location.search)) return;
   const url = new URL(window.location.href);
   url.searchParams.delete("onboarding");
+  url.searchParams.delete("step");
   window.history.replaceState(null, "", url.toString());
+}
+
+/**
+ * Returning from an MCP OAuth consent redirect lands on the app root; restore
+ * the screen the user left. MUST run before any state initializer that reads
+ * `window.location` — `computeOnboarding` reads `search` for `onboarding=force`,
+ * and useState initializers run in declaration order, so restoring later leaves
+ * the wizard resolved to "done" and the user stranded in chat.
+ *
+ * Returns the pathname only. `path` state is matched against pathname routes
+ * elsewhere; handing it a value with a query string breaks every route check.
+ */
+function restoreMcpReturnPath(): string {
+  const stored = typeof sessionStorage === "undefined" ? null : takeMcpReturnPath(sessionStorage);
+  if (stored === null) return window.location.pathname;
+  window.history.replaceState(null, "", stored);
+  return new URL(stored, window.location.origin).pathname;
 }
 
 function formatThreadMeta(thread: ThreadSummary): string {
@@ -5442,6 +5532,9 @@ export default function App({
   // spinner and no network wait.
   const [cachedBootstrap] = useState(readCachedBootstrap);
 
+  // Declaration order is load-bearing — see restoreMcpReturnPath.
+  const [path, setPath] = useState(restoreMcpReturnPath);
+
   const [session, setSession] = useState<AuthSession | null>(cachedBootstrap?.session ?? null);
   const [onboarding, setOnboarding] = useState<OnboardingState>(() =>
     cachedBootstrap
@@ -5489,17 +5582,6 @@ export default function App({
   // Cold launch, offline, and no cache: we genuinely cannot know who the user
   // is. Neither the app nor AuthGate is honest, so we say so.
   const [unreachable, setUnreachable] = useState(false);
-  const [path, setPath] = useState(() => {
-    // Returning from an OAuth consent redirect lands on the app root; restore the
-    // Settings screen — and the tab — the user left to start authorization.
-    const returnPath =
-      typeof sessionStorage === "undefined" ? null : takeMcpReturnPath(sessionStorage);
-    if (returnPath) {
-      window.history.replaceState(null, "", returnPath);
-      return returnPath;
-    }
-    return window.location.pathname;
-  });
 
   usePostHogPrivacySync({ session, consentWorkspaceId });
 
@@ -5642,8 +5724,29 @@ export default function App({
     return () => clearInterval(id);
   }, [reachability, revalidateBootstrap]);
 
+  // The wizard's steps are addressable, so it pushes one history entry per
+  // forward step — and those entries outlive it. Every one of them has pathname
+  // "/", so `setPath` below is a no-op and a Back after setup looks broken; worse,
+  // they still carry `onboarding=force`, so reloading on one reopens the wizard
+  // and finishing it arms a second nudge. Once onboarding is done these entries
+  // are dead: rewrite each as it is popped (so a reload can never re-force
+  // setup) and keep going back, which is what the wizard's own pushes displaced.
+  const onboardingDoneRef = useRef(onboarding.status === "done");
   useEffect(() => {
-    const onPop = () => setPath(window.location.pathname);
+    onboardingDoneRef.current = onboarding.status === "done";
+  }, [onboarding.status]);
+  useEffect(() => {
+    const onPop = () => {
+      if (onboardingDoneRef.current && isOnboardingForced(window.location.search)) {
+        clearForcedOnboarding();
+        // Bounded: only a wizard entry can trigger this, and there are finitely
+        // many. With nothing behind, `back()` is a no-op and the loop ends with
+        // a URL that no longer re-forces setup.
+        window.history.back();
+        return;
+      }
+      setPath(window.location.pathname);
+    };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
@@ -5775,6 +5878,8 @@ export default function App({
             user={session.user}
             settings={onboarding.settings}
             workersAiEnabled={workersAiEnabled}
+            initialStep={parseOnboardingStep(window.location.search) ?? undefined}
+            installed={detectInstallPlatform() === "installed"}
             onComplete={() => {
               clearForcedOnboarding();
               setOnboarding({ status: "done" });

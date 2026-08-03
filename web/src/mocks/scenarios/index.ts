@@ -446,6 +446,7 @@ function richExtras(): Pick<
   | "memories"
   | "mcpServers"
   | "mcpTools"
+  | "mcpNeedsAuth"
   | "invites"
   | "github"
   | "githubRepositories"
@@ -549,6 +550,7 @@ function richExtras(): Pick<
       ],
       mcp_notes: [{ name: "read", description: "Read a note.", policy: "approval_required" }],
     },
+    mcpNeedsAuth: {},
     invites: {
       invites: [
         {
@@ -633,6 +635,7 @@ function emptyStore(): MockStore {
     memories: [],
     mcpServers: [],
     mcpTools: {},
+    mcpNeedsAuth: {},
     ...baseExtras(),
     features: noFeatures(),
     feedback: emptyFeedback(),
@@ -648,6 +651,42 @@ function emptyStore(): MockStore {
  */
 function freshAccountStore(): MockStore {
   return { ...emptyStore(), settings: makeSettings({ anyConfigured: false }) };
+}
+
+/**
+ * The empower step's baseline: a fresh account (no provider, no threads) with
+ * no MCP servers connected yet.
+ */
+function onboardingEmpowerStore(): MockStore {
+  return { ...freshAccountStore(), mcpServers: [], mcpTools: {}, mcpNeedsAuth: {} };
+}
+
+/**
+ * Same fresh account, but Markdump is already connected and fully authorized
+ * with a couple of tools — the "already connected on first paint" case.
+ */
+function onboardingEmpowerConnectedStore(): MockStore {
+  const base = freshAccountStore();
+  const serverId = "mcp_markdump";
+  return {
+    ...base,
+    mcpServers: [
+      {
+        id: serverId,
+        name: "Markdump",
+        url: "https://markdump.com/mcp",
+        enabled: true,
+        createdAt: NOW - DAY,
+      },
+    ],
+    mcpTools: {
+      [serverId]: [
+        { name: "read", description: "Read a note.", policy: "approval_required" },
+        { name: "write", description: "Write a note.", policy: "approval_required" },
+      ],
+    },
+    mcpNeedsAuth: {},
+  };
 }
 
 const PROJECT_TITLES: Record<string, string[]> = {
@@ -1351,6 +1390,8 @@ export const SCENARIOS: Record<string, () => MockStore> = {
   "tool-run": toolRunStore,
   "empty-account": emptyStore,
   "fresh-account": freshAccountStore,
+  "onboarding-empower": onboardingEmpowerStore,
+  "onboarding-empower-connected": onboardingEmpowerConnectedStore,
   "busy-workspace": busyWorkspaceStore,
   "dismissed-threads": dismissedThreadsStore,
   // Seeded like `default`; the interesting part is the live traffic that

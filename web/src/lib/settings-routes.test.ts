@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  MCP_RETURN_PATH_KEY,
   SETTINGS_TABS,
+  isOnboardingPath,
   isSettingsPath,
   parseSettingsTab,
   parseWorkbenchesRoute,
   settingsPath,
+  takeMcpReturnPath,
   workbenchesPath,
 } from "./settings-routes";
 
@@ -81,5 +84,48 @@ describe("workbenchesPath", () => {
   it("still parses as the workbenches tab via parseSettingsTab", () => {
     expect(parseSettingsTab(workbenchesPath("wb_1"))).toBe("workbenches");
     expect(parseSettingsTab(workbenchesPath("new"))).toBe("workbenches");
+  });
+});
+
+function storageWith(value: string | null) {
+  const removed: string[] = [];
+  return {
+    removed,
+    getItem: () => value,
+    removeItem: (key: string) => removed.push(key),
+  };
+}
+
+describe("isOnboardingPath", () => {
+  it("accepts the forced-onboarding root with a step", () => {
+    expect(isOnboardingPath("/?onboarding=force&step=empower")).toBe(true);
+  });
+
+  it("rejects the root without the force flag", () => {
+    expect(isOnboardingPath("/")).toBe(false);
+    expect(isOnboardingPath("/?step=empower")).toBe(false);
+  });
+
+  it("rejects any other path even when it carries the flag", () => {
+    expect(isOnboardingPath("/threads/abc?onboarding=force")).toBe(false);
+    expect(isOnboardingPath("https://evil.example/?onboarding=force")).toBe(false);
+  });
+});
+
+describe("takeMcpReturnPath", () => {
+  it("restores an onboarding path", () => {
+    const storage = storageWith("/?onboarding=force&step=empower");
+    expect(takeMcpReturnPath(storage)).toBe("/?onboarding=force&step=empower");
+    expect(storage.removed).toEqual([MCP_RETURN_PATH_KEY]);
+  });
+
+  it("still restores a settings path", () => {
+    expect(takeMcpReturnPath(storageWith("/settings/tools"))).toBe("/settings/tools");
+  });
+
+  it("still rejects anything else, and consumes it either way", () => {
+    const storage = storageWith("/threads/abc");
+    expect(takeMcpReturnPath(storage)).toBe(null);
+    expect(storage.removed).toEqual([MCP_RETURN_PATH_KEY]);
   });
 });

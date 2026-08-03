@@ -11,6 +11,7 @@ import { TooltipProvider } from "./components/ui/tooltip";
 import { installServiceWorker } from "./lib/register-sw";
 import { installEdgeSwipeGuard } from "./lib/edge-swipe-guard";
 import { installStaleBundleRecovery } from "./lib/stale-bundle";
+import { startInstallPromptCapture } from "./lib/install-prompt";
 import { RootErrorBoundary } from "./components/RootErrorBoundary";
 
 const rootEl = document.getElementById("root");
@@ -29,6 +30,10 @@ installStaleBundleRecovery();
 // In an installed PWA, cancel the OS edge-swipe history navigation (back/forward)
 // so it can't fire under the app's own gestures. No-op in a browser tab.
 installEdgeSwipeGuard();
+
+// `beforeinstallprompt` fires once, early — before the wizard's install step
+// exists to use it. Capture it now or it's gone.
+startInstallPromptCapture();
 
 const posthogKey = import.meta.env.VITE_POSTHOG_KEY;
 

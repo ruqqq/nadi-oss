@@ -65,6 +65,7 @@ export {
   Sun,
   Notebook,
   Toolbox,
+  DeviceMobile,
 } from "@phosphor-icons/react";
 
 /**

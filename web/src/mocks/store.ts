@@ -68,6 +68,8 @@ export interface MockStore {
   mcpServers: McpServer[];
   /** Keyed by MCP server id. Absent = the server exposes no tools. */
   mcpTools: Record<string, McpToolView[]>;
+  /** Server ids that report `needsAuth` until authorize is called for them. */
+  mcpNeedsAuth: Record<string, boolean>;
   invites: InvitesResponse;
   github: GithubSettings;
   /** Flat list; the handler pages over it by `installationId`. */
