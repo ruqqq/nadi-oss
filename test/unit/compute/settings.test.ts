@@ -406,7 +406,10 @@ describe("buildComputeBackend Sprites dispatch", () => {
 
     const calls: Array<{ apiKey: string; env: Record<string, string> }> = [];
     const fakeBackend = { id: "sprites" } as ComputeBackend;
-    const spritesFactory = (config: { apiKey: string; env: Record<string, string> }): ComputeBackend => {
+    const spritesFactory = (config: {
+      apiKey: string;
+      env: Record<string, string>;
+    }): ComputeBackend => {
       calls.push(config);
       return fakeBackend;
     };
