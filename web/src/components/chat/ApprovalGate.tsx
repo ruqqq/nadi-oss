@@ -1,4 +1,5 @@
 import { getToolName, isToolUIPart, type UIMessage } from "ai";
+import { useState } from "react";
 import { getToolApproval, getToolInput } from "@cloudflare/ai-chat/react";
 import {
   Confirmation,
@@ -35,12 +36,28 @@ export function ApprovalGate({
   onApprove: () => void;
   onReject: () => void;
 }) {
+  const [responding, setResponding] = useState(false);
+
   if (!isToolUIPart(part)) return null;
   const approval = getToolApproval(part);
   if (!approval) return null;
 
+  const gateDisabled = disabled || responding;
+
   const name = resolveToolName(getToolName(part), servers).label;
   const input = getToolInput(part);
+
+  const handleApprove = () => {
+    if (gateDisabled) return;
+    setResponding(true);
+    onApprove();
+  };
+
+  const handleReject = () => {
+    if (gateDisabled) return;
+    setResponding(true);
+    onReject();
+  };
 
   return (
     <Confirmation approval={approval} state={part.state} className="border-gate/50 bg-gate-bg">
@@ -67,16 +84,16 @@ export function ApprovalGate({
         <ConfirmationActions className="mt-3">
           <ConfirmationAction
             variant="outline"
-            disabled={disabled}
-            onClick={onReject}
+            disabled={gateDisabled}
+            onClick={handleReject}
             className="gap-1.5 border-reject/50 text-reject hover:bg-reject/10 hover:text-reject"
           >
             <X />
             Reject
           </ConfirmationAction>
           <ConfirmationAction
-            disabled={disabled}
-            onClick={onApprove}
+            disabled={gateDisabled}
+            onClick={handleApprove}
             className="gap-1.5 bg-approve text-approve-foreground hover:bg-approve/90"
           >
             <Check />
