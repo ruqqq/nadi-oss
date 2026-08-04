@@ -30,6 +30,15 @@ export interface SpritesExecResult {
   exitCode: number;
   stdout: string;
   stderr: string;
+  /**
+   * `true` when the server served this run from its REPLAY history and that
+   * history hit the 64KiB cap, i.e. `stdout`/`stderr` are a PREFIX of what the
+   * command actually wrote. Absent otherwise — never `false` — so a result the
+   * caller compares structurally stays the three-field shape it always was.
+   *
+   * See `execCollect`'s doc for how this is detected.
+   */
+  truncated?: boolean;
 }
 
 export interface SpritesSessionInfo {
@@ -77,10 +86,26 @@ export interface SpritesClient {
    * Which path a given call takes is a race between the command's runtime and
    * the upgrade round-trip (~25ms), so it is not a stable property of the
    * command: a fast command that produces a lot of output is the exposed case.
-   * There is no flag to raise the cap and no marker in the result, so this
-   * cannot be detected or worked around here — the sentinel-file route
+   * There is no flag to raise the cap, and the sentinel-file route
    * (`startProcess` + `readProcessOutput`, which reads the output from the
-   * sandbox filesystem) is the only way to get large output back intact.
+   * sandbox filesystem) is still the only way to get large output back INTACT.
+   *
+   * **It is, however, DETECTABLE — and detected.** An earlier revision of this
+   * comment claimed there was "no marker in the result"; that was wrong, and
+   * the evidence was already in our own captures. The server names the path in
+   * a `debug` text frame, verbatim (LIVE 2026-08-04):
+   *
+   * ```
+   * {"msg":"fast_path attach_err=session has exited exit_code=0 history_len=65536","pid":333,"t_ms":22,"type":"debug"}
+   * {"msg":"normal_path history_len=0","pid":23,"t_ms":17,"type":"debug"}
+   * ```
+   *
+   * A `fast_path` frame whose `history_len` is at the 65536 cap means the
+   * replay was cut (a fast_path replay UNDER the cap is complete — the same
+   * probe saw `history_len=3` for `echo hi`). `execCollect` parses that frame
+   * and sets `truncated: true` on the result, which `SpritesComputeBackend`
+   * propagates as `RunCommandResult.stdoutTruncated` so the model is TOLD its
+   * output is a prefix rather than acting on a silently halved `git diff`.
    */
   execCollect(name: string, options: SpritesExecOptions): Promise<SpritesExecResult>;
   /**
@@ -128,11 +153,23 @@ const FS_WORKING_DIR = "/";
 
 /**
  * How long `execCollect` waits for the authoritative binary exit frame after the
- * server has ANNOUNCED an exit in text. Long enough for the frame that always
- * followed it live, short enough that a server which only ever sends the text
- * form does not hang the caller until its own timeout.
+ * server has ANNOUNCED an exit in text — RENEWED on every data frame that
+ * follows, so it measures silence rather than elapsed time since the notice.
+ *
+ * It was 250ms and armed exactly once, which made it a SILENT TRUNCATION: any
+ * trailing output arriving later than a quarter second after the text exit was
+ * dropped and the run resolved with the announced code and no error. Live, one
+ * command's 349528 bytes arrived over 13 frames, so a backpressure gap past
+ * 250ms is entirely plausible.
+ *
+ * Both halves of the fix matter. The renewal means a stream that keeps talking
+ * is never cut mid-flight; the larger budget means the FIRST trailing frame,
+ * which has no earlier frame to renew from, is not cut either. It costs nothing
+ * on the observed path — live, the binary frame followed the text notice inside
+ * the same tick — and is only ever paid by a server that announces an exit in
+ * text and then goes silent without closing the socket.
  */
-const TEXT_EXIT_GRACE_MS = 250;
+const TEXT_EXIT_GRACE_MS = 2_000;
 
 /**
  * How long `execDetached` waits for the `session_info` frame that names the
@@ -174,12 +211,26 @@ function toEntryType(raw: string): SpritesFsEntryType {
  * Does this 404 body say "that FILE does not exist" (as opposed to "that sprite
  * does not exist")?
  *
- * The `/fs` routes answer errors as `{error, code, path}` and the vendor SDK's
- * `parseErrorCode` maps the `code` field through a fixed table whose absent-file
- * member is `ENOENT` (`src/filesystem.ts`, `src/types.ts:FilesystemErrorCode`) —
- * that is where the string comes from. `code` is typed optional there, so a
- * body with no code falls back to the error TEXT, matched narrowly enough that
- * a sprite-level "sprite not found" cannot satisfy it.
+ * LIVE-VERIFIED (2026-08-04) — the two 404 bodies, quoted exactly as the API
+ * returned them:
+ *
+ *  - absent FILE on a live sprite:
+ *    `{"error":"open /tmp/x: no such file or directory","path":"/tmp/x"}`
+ *  - absent SPRITE:
+ *    `{"error":"sprite not found"}`
+ *
+ * **There is NO `code` field on either.** The SDK-derived `ENOENT` branch below
+ * therefore never fires against the real server, and the error-TEXT fallback is
+ * what actually does all the work. Do not "simplify" the fallback away as
+ * redundant with the `code` check — it is the only arm that runs. The `code`
+ * arm is kept because the vendor SDK's `parseErrorCode` maps a `code` field
+ * through a fixed table whose absent-file member is `ENOENT`
+ * (`src/filesystem.ts`, `src/types.ts:FilesystemErrorCode`), so a server that
+ * starts sending one must keep answering correctly.
+ *
+ * A `path` field is additional file-scoped evidence: the sprite-level 404
+ * carries none, and a body that names the path it failed to open is talking
+ * about a path inside a sprite it found.
  *
  * Consumes the response body; only ever called on a path that will not read it
  * again.
@@ -191,11 +242,15 @@ async function isFileNotFound(response: Response): Promise<boolean> {
   } catch {
     return false;
   }
-  const row = payload as { code?: unknown; error?: unknown } | null;
+  const row = payload as { code?: unknown; error?: unknown; path?: unknown } | null;
   if (typeof row?.code === "string" && row.code.length > 0) {
     return row.code.toUpperCase() === "ENOENT";
   }
-  return typeof row?.error === "string" && /no such file|does not exist/i.test(row.error);
+  if (typeof row?.error !== "string") return false;
+  if (/no such file|does not exist/i.test(row.error)) return true;
+  // Path-scoped body with a message we do not recognise: still a file-level
+  // answer, because the sprite-level 404 never names a path.
+  return typeof row.path === "string" && row.path.length > 0;
 }
 
 /**
@@ -276,6 +331,60 @@ export function parseTextExitCode(data: string): number | undefined {
   if (row?.type !== "exit") return undefined;
   if (typeof row.exit_code !== "number" || !Number.isInteger(row.exit_code)) return undefined;
   return row.exit_code;
+}
+
+/**
+ * The `pid` a `debug` frame carries, as a session-id string.
+ *
+ * LIVE (2026-08-04): the two are the SAME number. Three probes in one run:
+ * `{"msg":"session_created cmd=bash","pid":333,…}` was followed by
+ * `{"type":"session_info","session_id":"333",…}`, and likewise 23/23 and
+ * 346/346. This is used ONLY as a cleanup handle in `execDetached`'s reject
+ * path — never as the id we return — because the `debug` frame arrives first
+ * and is therefore the only handle available when `session_info` never does.
+ */
+export function parseDebugSessionId(data: string): string | undefined {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(data);
+  } catch {
+    return undefined;
+  }
+  const row = payload as { type?: unknown; pid?: unknown } | null;
+  if (row?.type !== "debug") return undefined;
+  if (typeof row.pid !== "number" || !Number.isInteger(row.pid) || row.pid <= 0) return undefined;
+  return String(row.pid);
+}
+
+/**
+ * The exact size the server's replay history is capped at. A `fast_path` frame
+ * reporting this many bytes means the recorded output was CUT; anything less is
+ * the whole thing (live: `history_len=3` for `echo hi`).
+ */
+export const FAST_PATH_HISTORY_CAP_BYTES = 65_536;
+
+/**
+ * Is this text frame the server's `debug` notice that it replayed a CAPPED
+ * history? See `execCollect`'s doc for the verbatim live frames.
+ *
+ * `msg` is a flat `key=value` log line, not a structured object, so the two
+ * facts are read out of it by pattern: the leading path name and `history_len`.
+ * A `normal_path` frame (streamed live) is never truncation, whatever its
+ * `history_len` says.
+ */
+export function isTruncatedReplayFrame(data: string): boolean {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(data);
+  } catch {
+    return false;
+  }
+  const row = payload as { type?: unknown; msg?: unknown } | null;
+  if (row?.type !== "debug" || typeof row.msg !== "string") return false;
+  if (!/^fast_path\b/.test(row.msg)) return false;
+  const matched = /\bhistory_len=(\d+)\b/.exec(row.msg);
+  if (!matched?.[1]) return false;
+  return Number.parseInt(matched[1], 10) >= FAST_PATH_HISTORY_CAP_BYTES;
 }
 
 /**
@@ -630,11 +739,29 @@ class SpritesHttpClient implements SpritesClient {
     try {
       response = await this.doFetch(this.execUrl(name, options), {
         headers: { Upgrade: "websocket", Authorization: `Bearer ${this.apiKey}` },
+        // Every REST call is bounded; so is this one. `execCollect`'s own timer
+        // only arms AFTER this await resolves, so without a bound here a
+        // stalled upgrade pins the Durable Object turn indefinitely — the exact
+        // failure `REQUEST_TIMEOUT_MS` exists to prevent.
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
     } catch (error) {
+      // SECRET SAFETY: the transport error is NOT interpolated. workerd's fetch
+      // rejections routinely embed the request URL, and the exec URL carries
+      // `env=GH_TOKEN=ghs_…` plus every workbench secret (see `execUrl`). This
+      // message is returned to the MODEL as `compute-tools.ts`'s `detail` and
+      // lands in the persisted transcript and the logs, so nothing derived from
+      // the transport may appear in it. Only the abort/non-abort distinction is
+      // carried through, which is the only part that changes what to do next.
+      // (The REST path in `request()` may interpolate freely — its query
+      // strings carry no secrets.)
+      const name_ = error instanceof Error ? error.name : "";
+      if (name_ === "TimeoutError" || name_ === "AbortError") {
+        throw new ComputeError("provider_transient", "sprites_exec_upgrade_timeout");
+      }
       throw new ComputeError(
         "provider_transient",
-        `sprites_exec_upgrade_failed: ${error instanceof Error ? error.message : String(error)}`,
+        "sprites_exec_upgrade_failed: transport error (detail withheld: the exec URL carries secrets)",
       );
     }
     const ws = (response as unknown as { webSocket?: ExecSocket | null }).webSocket;
@@ -654,6 +781,29 @@ class SpritesHttpClient implements SpritesClient {
       /** The text `exit` code, held until the binary frame or the socket close. */
       let textExitCode: number | undefined;
       let graceTimer: ReturnType<typeof setTimeout> | undefined;
+      let truncated = false;
+
+      /**
+       * (Re)start the post-text-exit grace window.
+       *
+       * Called both when the text `exit` arrives AND on every data frame that
+       * follows it. The grace is "how long since the last thing the server
+       * said", not "how long since the exit notice": live, 349528 bytes arrived
+       * over 13 frames, so trailing output landing more than
+       * `TEXT_EXIT_GRACE_MS` after the announcement is entirely plausible under
+       * backpressure — and a timer that only ever armed once resolved the run
+       * with the announced code and the output SILENTLY CUT.
+       */
+      const armGrace = (announced: number) => {
+        if (graceTimer !== undefined) clearTimeout(graceTimer);
+        graceTimer = setTimeout(() => {
+          stdout += stdoutDecoder.decode();
+          stderr += stderrDecoder.decode();
+          settle(() =>
+            resolve({ exitCode: announced, stdout, stderr, ...(truncated ? { truncated } : {}) }),
+          );
+        }, TEXT_EXIT_GRACE_MS);
+      };
 
       const settle = (fn: () => void) => {
         if (settled) return;
@@ -708,6 +858,10 @@ class SpritesHttpClient implements SpritesClient {
         // `port_opened`) — and `exit`, which is a completion signal in its own
         // right; see `parseTextExitCode`.
         if (typeof data === "string") {
+          // The `debug` frame that names the serving path is the ONLY signal
+          // that a fast-path replay was cut at the 64KiB cap; it arrives before
+          // any output. See `execCollect`'s doc.
+          if (isTruncatedReplayFrame(data)) truncated = true;
           const announced = parseTextExitCode(data);
           if (announced === undefined) return;
           // RECORD, do not settle: the text notification can arrive before the
@@ -715,13 +869,7 @@ class SpritesHttpClient implements SpritesClient {
           // stream-3 frame is authoritative; this code is the fallback for a
           // close (or a stalled server) that never sends one.
           textExitCode = announced;
-          if (graceTimer === undefined) {
-            graceTimer = setTimeout(() => {
-              stdout += stdoutDecoder.decode();
-              stderr += stderrDecoder.decode();
-              settle(() => resolve({ exitCode: announced, stdout, stderr }));
-            }, TEXT_EXIT_GRACE_MS);
-          }
+          armGrace(announced);
           return;
         }
         // Anything non-string that is not already bytes means `binaryType` did
@@ -752,10 +900,14 @@ class SpritesHttpClient implements SpritesClient {
         }
         if (frame.stream === 1) {
           stdout += stdoutDecoder.decode(frame.payload, { stream: true });
+          // Output after the text exit means the run is still talking; push the
+          // grace window out rather than let a fixed 250ms deadline cut it.
+          if (textExitCode !== undefined) armGrace(textExitCode);
           return;
         }
         if (frame.stream === 2) {
           stderr += stderrDecoder.decode(frame.payload, { stream: true });
+          if (textExitCode !== undefined) armGrace(textExitCode);
           return;
         }
         const exitCode = frame.payload[0];
@@ -769,7 +921,7 @@ class SpritesHttpClient implements SpritesClient {
         // Flush any trailing partial multi-byte sequence.
         stdout += stdoutDecoder.decode();
         stderr += stderrDecoder.decode();
-        settle(() => resolve({ exitCode, stdout, stderr }));
+        settle(() => resolve({ exitCode, stdout, stderr, ...(truncated ? { truncated } : {}) }));
       });
 
       ws.addEventListener("close", (event: never) => {
@@ -779,7 +931,9 @@ class SpritesHttpClient implements SpritesClient {
           const announced = textExitCode;
           stdout += stdoutDecoder.decode();
           stderr += stderrDecoder.decode();
-          settle(() => resolve({ exitCode: announced, stdout, stderr }));
+          settle(() =>
+            resolve({ exitCode: announced, stdout, stderr, ...(truncated ? { truncated } : {}) }),
+          );
           return;
         }
         // No exit frame means the command's outcome is unknown — reporting a
@@ -833,9 +987,49 @@ class SpritesHttpClient implements SpritesClient {
    * never work: the listing reports the INNER argv (`sleep 120`), so the marker
    * is not in it, every background process read as `failed`, and every
    * `stopProcess` silently killed nothing.
+   *
+   * Every REJECT path best-effort reaps what it may have launched. `detachable`
+   * means the server keeps the session running after we disconnect, so a launch
+   * we could not get an id for is a process that runs to its
+   * `max_run_after_disconnect` deadline holding memory against the sprite's cap
+   * with nothing able to address it. The handle used is the `debug` frame's
+   * `pid` (see `parseDebugSessionId`), which arrives before `session_info` and
+   * is the same number; the kill is confirmed against `listSessions` first and
+   * every error is swallowed, because this is cleanup for a call that is
+   * already failing.
    */
   async execDetached(name: string, options: SpritesExecOptions): Promise<string> {
     const ws = await this.openExecSocket(name, { ...options, detachable: true });
+    /** Cleanup handle only; never returned as the session id. */
+    let candidateSessionId: string | undefined;
+    const reap = async () => {
+      const sessionId = candidateSessionId;
+      if (sessionId === undefined) return;
+      try {
+        const sessions = await this.listSessions(name);
+        if (!sessions.some((session) => session.sessionId === sessionId)) return;
+        await this.killSession(name, sessionId, "SIGKILL");
+      } catch {
+        // Best effort: the launch already failed, and a failed reap must not
+        // replace that error with a less informative one.
+      }
+    };
+
+    try {
+      return await this.awaitSessionInfo(ws, (id) => {
+        candidateSessionId = id;
+      });
+    } catch (error) {
+      await reap();
+      throw error;
+    }
+  }
+
+  /** The `session_info` wait, split out so `execDetached` can reap on any throw. */
+  private async awaitSessionInfo(
+    ws: ExecSocket,
+    noteCandidate: (sessionId: string) => void,
+  ): Promise<string> {
     return await new Promise<string>((resolve, reject) => {
       let settled = false;
       const settle = (fn: () => void) => {
@@ -863,8 +1057,13 @@ class SpritesHttpClient implements SpritesClient {
       ws.addEventListener("message", (event: never) => {
         const data = (event as { data: unknown }).data;
         if (typeof data !== "string") return;
+        // Recorded before the `session_info` check: on a launch that never gets
+        // one, this is the only handle the reap path will have.
+        const debugId = parseDebugSessionId(data);
+        if (debugId !== undefined) noteCandidate(debugId);
         const sessionId = parseSessionId(data);
         if (sessionId === undefined) return;
+        noteCandidate(sessionId);
         settle(() => resolve(sessionId));
       });
 

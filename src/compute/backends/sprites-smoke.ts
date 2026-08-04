@@ -566,16 +566,34 @@ export async function runSpritesSmoke(env: Env): Promise<SpritesSmokeReport> {
         }
         const length = r.stdout.trim().length;
         if (length === FAST_PATH_REPLAY_CAP_BYTES) {
+          // The cut must be VISIBLE. `execCollect` reads the server's own
+          // `fast_path … history_len=65536` debug frame and the backend
+          // propagates it here, so a truncated run that still claimed complete
+          // output would be the silent-wrong-answer this whole step is about.
+          if (r.stdoutTruncated !== true) {
+            throw new Error(
+              `truncated to ${length} bytes but stdoutTruncated=${String(r.stdoutTruncated)} — ` +
+                `the fast_path replay cap was NOT detected, so the model would read a halved ` +
+                `stdout as complete`,
+            );
+          }
           return (
-            `fast_path replay: got ${length} of ${LARGE_PAYLOAD_BASE64_LENGTH} bytes with exitCode=0 and no error — ` +
-            `the documented 64KiB truncation. Large output must go through startProcess + readProcessOutput.`
+            `fast_path replay: got ${length} of ${LARGE_PAYLOAD_BASE64_LENGTH} bytes with exitCode=0, ` +
+            `and stdoutTruncated=true — the documented 64KiB truncation, now DETECTED from the server's ` +
+            `debug frame. Large output must still go through startProcess + readProcessOutput.`
           );
         }
         if (length === LARGE_PAYLOAD_BASE64_LENGTH) {
+          if (r.stdoutTruncated === true) {
+            throw new Error(
+              `all ${length} bytes arrived but stdoutTruncated=true — a FALSE truncation signal ` +
+                `would make the model discard complete output`,
+            );
+          }
           return (
             `normal_path this run: the command did not finish inside the upgrade round-trip, so all ` +
-            `${length} bytes streamed. The cap is still real (see 6f's comment); which path a fast ` +
-            `command takes is a race, which is why this step accepts both.`
+            `${length} bytes streamed and stdoutTruncated is false. The cap is still real (see 6f's ` +
+            `comment); which path a fast command takes is a race, which is why this step accepts both.`
           );
         }
         throw new Error(

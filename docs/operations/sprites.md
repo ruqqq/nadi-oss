@@ -148,31 +148,65 @@ The smoke test covers:
 
 ## 5. Provider limitations you will meet in production
 
-### `runCommand` output above 64KiB can be silently truncated
+### `runCommand` output above 64KiB is truncated — but the cut is now DETECTED
 
 The exec WebSocket serves a session down one of two paths, and the server names
-which in its `debug` text frames:
+which in its `debug` text frames. These are the frames verbatim, live
+2026-08-04:
 
 | Debug frame | When | Output |
 | --- | --- | --- |
-| `normal_path history_len=0` | we attached BEFORE the command finished | streamed live, complete at any size (349528 bytes over 13 frames, live 2026-08-04) |
-| `fast_path … history_len=65536` | the command had ALREADY EXITED when the socket opened | a RECORDED history, capped at exactly **65536 bytes** |
+| `{"msg":"normal_path history_len=0","pid":23,"t_ms":17,"type":"debug"}` | we attached BEFORE the command finished | streamed live, complete at any size (349528 bytes over 13 frames) |
+| `{"msg":"fast_path attach_err=session has exited exit_code=0 history_len=65536","pid":333,"t_ms":22,"type":"debug"}` | the command had ALREADY EXITED when the socket opened | a RECORDED history, capped at exactly **65536 bytes** |
 
-On the `fast_path` the truncated output comes back with `exitCode: 0` and no
-error of any kind — there is no flag to raise the cap and no marker in the
-result, so nothing in `sprites-client.ts` can detect or work around it.
+On the `fast_path` the truncated output still comes back with `exitCode: 0` and
+no error, and there is no flag to raise the cap — but an earlier version of this
+runbook (and of `execCollect`'s doc comment) claimed there was "no marker in the
+result, so nothing can detect it", **and that was false**. The `debug` frame
+above is the marker, and `execCollect` already receives and parses text frames.
+
+It now parses this one: a `fast_path` frame whose `history_len` is at the 65536
+cap sets `truncated: true` on the exec result, which `SpritesComputeBackend`
+propagates as `RunCommandResult.stdoutTruncated` and `ThreadComputeService`
+surfaces as the `exec` tool's `stdoutTruncated` — the same flag the
+start-and-poll path already uses to tell the model "you did not see all of
+this". A fast_path replay UNDER the cap is complete and is not flagged (live:
+`history_len=3` for `echo hi`). Smoke step 6g asserts both directions.
 
 Which path a given call takes is a race between the command's runtime and the
 upgrade round-trip (~25 ms), so it is **not a stable property of a command**: a
 command that produces a lot of output quickly is the exposed case. `sleep 2`
 before the output is what the smoke uses to force the streaming path.
 
-**Consequence:** `runCommand` is not safe for large output. The
-sentinel-file route — `startProcess` then `readProcessOutput`, which reads the
-recorded stdout back out of the sandbox filesystem — has no such cap. In nadi
-the exposed caller is `ThreadComputeService`'s foreground `exec`
-(`src/compute/thread-service.ts`, the `backend.runCommand(...)` call); its
-background path already uses `startProcess`.
+**Consequence:** `runCommand` output above 64KiB is still CUT — detection makes
+it visible, not complete. The sentinel-file route — `startProcess` then
+`readProcessOutput`, which reads the recorded stdout back out of the sandbox
+filesystem — has no such cap. In nadi the exposed caller is
+`ThreadComputeService`'s foreground `exec` (`src/compute/thread-service.ts`, the
+`backend.runCommand(...)` call); its background path already uses
+`startProcess`.
+
+### Session ids are a small per-sprite counter — recycling is an open unknown
+
+The id returned in the server's `session_info` frame is a small integer string,
+not a uuid: live ids were `"15"`, `"23"`, `"332"`, `"333"`, `"346"` (and the
+`debug` frames' `pid` field carries the same number). `getProcessStatus` and
+`stopProcess` both address a session by exact-match on that id.
+
+**Nothing establishes that the counter does not reset when a sprite restarts or
+wakes from hibernation.** If ids recycle, a stale process reference could match
+a session belonging to a different process, and `stopProcess` would kill an
+unrelated one.
+
+Mitigation shipped, deliberately cheap: `stopProcess` reads the per-launch rc
+sentinel FIRST (the sentinel is keyed by a uuid, so it cannot be confused) and
+returns `{status:"exited"}` without looking at the session listing when the
+process already recorded an exit. That removes the exposure for every
+already-finished process, which is what a stale reference almost always is. A
+reference to a still-RUNNING process whose id was recycled remains theoretically
+exposed. A full fix means an identity redesign (verify `command`/`created` on
+the session row before signalling it, or stop trusting server ids across a
+restart) and has not been done.
 
 ### The sprite's create-time `environment` never reaches a command
 

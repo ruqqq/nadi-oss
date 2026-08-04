@@ -311,6 +311,24 @@ describe("SpritesComputeBackend process lifecycle", () => {
     ).toEqual({ status: "running" });
   });
 
+  // A raw ZodError escaping here reaches the model as an unmapped stack-shaped
+  // blob, and no caller can key on it — every other reference fault in this
+  // file is a ComputeError from the compute taxonomy.
+  it("rejects a malformed process reference as process_missing, not a ZodError", async () => {
+    const { backend } = createFakeSpritesBackend();
+    const runtime = await backend.acquire(SPEC);
+    const malformed = { provider: "sprites", version: 1, payload: { kind: "process" } } as never;
+
+    for (const call of [
+      backend.getProcessStatus(runtime, malformed),
+      backend.readProcessOutput(runtime, malformed),
+      backend.stopProcess(runtime, malformed, "kill"),
+    ]) {
+      await expect(call).rejects.toBeInstanceOf(ComputeError);
+      await expect(call).rejects.toMatchObject({ code: "process_missing" });
+    }
+  });
+
   it("rejects a process reference minted for a different sprite", async () => {
     const { backend } = createFakeSpritesBackend();
     const runtime = await backend.acquire(SPEC);
@@ -337,6 +355,33 @@ describe("SpritesComputeBackend process lifecycle", () => {
 
     expect(client.killCalls.map((call) => call.signal)).toEqual(["SIGINT", "SIGTERM", "SIGKILL"]);
     expect(client.killCalls.map((call) => call.sessionId)).toEqual(["sess-0", "sess-1", "sess-2"]);
+  });
+
+  // Session ids are a small per-sprite counter, not a uuid (live: "15", "332",
+  // "333"), and nothing establishes that the counter does not reset across a
+  // sprite restart or hibernate/wake. If ids recycle, matching a stale
+  // reference by equality against the listing kills an UNRELATED process.
+  // Reading the uuid-keyed rc sentinel first removes the exposure for every
+  // process that already recorded an exit.
+  it("reads the rc sentinel before the session list, so a recycled id kills nothing", async () => {
+    const { backend, client } = createFakeSpritesBackend();
+    const runtime = await backend.acquire(SPEC);
+    const spriteName = spriteNameOf(runtime);
+    // OUR process finished and recorded its exit.
+    client.seedFile(spriteName, "/tmp/.nadi-rc-pid-finished", "0");
+    // Someone ELSE's live session now holds the id our stale reference names.
+    client.seedSession(spriteName, "sess-recycled", "sleep 300");
+
+    expect(
+      await backend.stopProcess(
+        runtime,
+        processReference(spriteName, "pid-finished", "sess-recycled"),
+        "kill",
+      ),
+    ).toEqual({ status: "exited", exitCode: 0 });
+
+    expect(client.killCalls).toEqual([]);
+    expect(client.calls.some((call) => call.startsWith("listSessions"))).toBe(false);
   });
 
   it("is a no-op when the process already exited (no matching session)", async () => {
@@ -490,6 +535,32 @@ describe("SpritesComputeBackend.runCommand", () => {
     await expect(
       backend.runCommand(runtime, { command: "echo hi", timeoutMs: 1_000 }),
     ).rejects.toMatchObject({ code: "provider_transient" });
+  });
+
+  // The server's 64KiB fast-path replay cap. The client detects it from the
+  // `debug` frame; the exposed caller here is the foreground `exec` tool, whose
+  // stdout a MODEL acts on, so a halved `git diff` has to be visibly halved.
+  it("propagates the client's truncation verdict as stdoutTruncated", async () => {
+    const { backend, client } = createFakeSpritesBackend();
+    const runtime = await backend.acquire(SPEC);
+    client.nextExecResult = { exitCode: 0, stdout: "AAAA", stderr: "", truncated: true };
+
+    expect(await backend.runCommand(runtime, { command: "big", timeoutMs: 1_000 })).toEqual({
+      status: "exited",
+      exitCode: 0,
+      stdout: "AAAA",
+      stderr: "",
+      stdoutTruncated: true,
+    });
+  });
+
+  it("omits stdoutTruncated entirely when the run was not cut", async () => {
+    const { backend } = createFakeSpritesBackend();
+    const runtime = await backend.acquire(SPEC);
+
+    const result = await backend.runCommand(runtime, { command: "echo hi", timeoutMs: 1_000 });
+
+    expect("stdoutTruncated" in result).toBe(false);
   });
 });
 
@@ -767,6 +838,27 @@ describe("SpritesComputeBackend file operations", () => {
     await expect(backend.inspectPath(runtime, "/workspace/keep.txt")).rejects.toMatchObject({
       code: "provider_transient",
       message: expect.stringContaining("sprites_stat_unanswered") as unknown as string,
+    });
+  });
+
+  // The fast_path replay merges stderr onto stdout, so a warning line can
+  // precede `stat`'s own answer. Parsing the whole blob takes `lastIndexOf(":")`
+  // across BOTH lines, so `…warning\ndirectory:4096` described
+  // `…warning\ndirectory` — which is not `directory`, so a DIRECTORY read as a
+  // file. `writeFile({overwrite:false})` and `movePath` act on that.
+  it("parses the LAST line of a stat whose output carries a preceding warning", async () => {
+    const { backend, client } = createFakeSpritesBackend();
+    const runtime = await backend.acquire(SPEC);
+    client.nextExecResult = {
+      exitCode: 0,
+      stdout: "stat: WARNING: unrecognized flag\ndirectory:4096\n",
+      stderr: "",
+    };
+
+    expect(await backend.inspectPath(runtime, "/workspace/sub")).toEqual({
+      type: "directory",
+      size: 4096,
+      resolvedPath: "/workspace/sub",
     });
   });
 

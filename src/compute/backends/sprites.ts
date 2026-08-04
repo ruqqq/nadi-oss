@@ -249,6 +249,11 @@ export class SpritesComputeBackend implements ComputeBackend {
       exitCode: result.exitCode,
       stdout: result.stdout,
       stderr: result.stderr,
+      // The 64KiB fast-path replay cap, when the server said it applied. The
+      // exposed caller is the foreground `exec` tool, whose stdout a MODEL acts
+      // on — a silently halved `git diff` is a wrong-answer generator, so the
+      // cut is reported rather than hidden. See `execCollect`'s doc.
+      ...(result.truncated === true ? { stdoutTruncated: true } : {}),
     };
   }
 
@@ -382,6 +387,23 @@ export class SpritesComputeBackend implements ComputeBackend {
     const spriteName = this.runtimeName(runtime);
     const payload = this.processPayload(process);
     this.requireProcessRuntime(spriteName, payload.spriteName);
+    // Read the rc sentinel FIRST, the same ordering `getProcessStatus` uses,
+    // and for a sharper reason here.
+    //
+    // A session id is a small per-sprite counter, not a uuid — live ids were
+    // "15", "332", "333", "346" — and nothing establishes that the counter does
+    // not reset when a sprite restarts or wakes from hibernation. If ids
+    // recycle, a stale process reference matching by equality below would kill
+    // an UNRELATED process. The rc sentinel is keyed by a per-launch uuid and
+    // cannot be confused: when it says this process already recorded an exit,
+    // there is nothing to signal, so we never look at the session listing and
+    // the recycled-id kill is unreachable for every already-finished process
+    // (which is the overwhelmingly common case for a stale reference).
+    //
+    // Not a full identity fix — a reference to a still-RUNNING process whose id
+    // was recycled remains theoretically exposed. See docs/operations/sprites.md.
+    const recorded = await this.readRc(spriteName, payload.processId);
+    if (recorded !== undefined) return { status: "exited", exitCode: recorded };
     const sessions = await this.client.listSessions(spriteName);
     const session = sessions.find((entry) => entry.sessionId === payload.sessionId);
     // No session: the command already exited. Nothing to signal.
@@ -667,11 +689,17 @@ export class SpritesComputeBackend implements ComputeBackend {
   }
 
   private processPayload(process: BackendProcessReference) {
-    const parsed = spritesReferenceSchema.parse(process);
-    if (parsed.payload.kind !== "process") {
+    // A malformed reference is a `process_missing` ComputeError, not a raw
+    // ZodError: callers key on the compute taxonomy, and a ZodError escaping
+    // here reaches the model as an unmapped stack-shaped blob.
+    const parsed = spritesReferenceSchema.safeParse(process);
+    if (!parsed.success) {
       throw new ComputeError("process_missing", "sprites_process_reference_invalid");
     }
-    return parsed.payload;
+    if (parsed.data.payload.kind !== "process") {
+      throw new ComputeError("process_missing", "sprites_process_reference_invalid");
+    }
+    return parsed.data.payload;
   }
 
   private requireProcessRuntime(runtimeName: string, processSpriteName: string): void {
@@ -713,9 +741,19 @@ function sentinelPath(kind: "in" | "out" | "err" | "rc", processId: string): str
   return `/tmp/.nadi-${kind}-${processId}`;
 }
 
-/** `%F:%s` output, e.g. `regular file:120` / `directory:4096`. */
+/**
+ * `%F:%s` output, e.g. `regular file:120` / `directory:4096`.
+ *
+ * The LAST non-empty line, never the whole blob. On the server's fast_path
+ * replay stderr is merged onto stdout, so a warning line can precede `stat`'s
+ * own answer — and parsing the blob then takes `lastIndexOf(":")` across BOTH,
+ * making `some warning\ndirectory:4096` read as a description of
+ * `some warning\ndirectory`, i.e. type `file` for a directory. `pathExists`,
+ * `movePath` and `inspectPath` all sit on that answer.
+ */
 function parseStat(stdout: string): { type: PathInfo["type"]; size: number } | null {
-  const trimmed = stdout.trim();
+  const lines = stdout.split("\n").filter((line) => line.trim().length > 0);
+  const trimmed = (lines[lines.length - 1] ?? "").trim();
   const separator = trimmed.lastIndexOf(":");
   if (separator <= 0) return null;
   const description = trimmed.slice(0, separator).trim().toLowerCase();

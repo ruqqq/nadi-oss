@@ -40,6 +40,14 @@ export interface RunCommandResult {
   exitCode: number;
   stdout: string;
   stderr: string;
+  /**
+   * `true` when the backend KNOWS `stdout` is a prefix of what the command
+   * wrote. Optional and absent by default: a backend that cannot tell must not
+   * claim `false`, and `ThreadComputeService` already treats the default as
+   * "complete". Today only the sprites backend sets it, from the server's own
+   * 64KiB replay-cap notice.
+   */
+  stdoutTruncated?: boolean;
 }
 
 export interface ProcessStatus {

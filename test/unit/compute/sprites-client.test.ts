@@ -329,6 +329,32 @@ describe("filesystem", () => {
     await expect(client.fsRead("s1", "/nope")).resolves.toBeNull();
   });
 
+  // LIVE-CAPTURED BODIES (2026-08-04), verbatim. Neither carries a `code`
+  // field, so the SDK-derived ENOENT branch never fires against the real
+  // server and the error-TEXT fallback is what does all the work. These two
+  // cases are the record of that; if a "simplification" ever drops the
+  // fallback, the first of them fails.
+  it("discriminates the LIVE absent-file 404 from the LIVE absent-sprite 404", async () => {
+    const absentFile = harness(
+      json({ error: "open /tmp/x: no such file or directory", path: "/tmp/x" }, 404),
+    );
+    await expect(absentFile.client.fsRead("s1", "/tmp/x")).resolves.toBeNull();
+
+    const absentSprite = harness(json({ error: "sprite not found" }, 404));
+    await expect(codeOf(absentSprite.client.fsRead("s1", "/tmp/x"))).resolves.toBe(
+      "runtime_missing",
+    );
+  });
+
+  // Sturdier discrimination: the sprite-level 404 never names a path, so a body
+  // that does is talking about a path inside a sprite it found — even if the
+  // message wording changes out from under the regex.
+  it("treats a path-scoped 404 body as file-level even with an unrecognised message", async () => {
+    const { client } = harness(json({ error: "open /tmp/x: unlinked", path: "/tmp/x" }, 404));
+
+    await expect(client.fsRead("s1", "/tmp/x")).resolves.toBeNull();
+  });
+
   it("maps a 500 read to provider_transient", async () => {
     const { client } = harness({ status: 500 });
 
@@ -959,6 +985,158 @@ describe("execCollect", () => {
     expect(message).toContain("Blob");
     expect(ws.closed).toBe(true);
   });
+
+  // SECRET LEAK REGRESSION. The exec URL carries `env=GH_TOKEN=ghs_…` and every
+  // workbench secret, and workerd's fetch rejections routinely embed the
+  // request URL in their message. That message is NOT swallowed: it is returned
+  // to the model as `compute-tools.ts`'s `detail`, so it lands in the persisted
+  // transcript and the logs.
+  //
+  // MUTATION CHECK: restore the interpolation
+  // (`` `sprites_exec_upgrade_failed: ${error.message}` ``) in `openExecSocket`
+  // and this test fails on all three assertions.
+  it("never leaks the exec URL's secrets when the upgrade fetch rejects", async () => {
+    const token = "ghs_supersecrettokenvalue";
+    // The rejection message a real transport failure produces: the whole URL.
+    const leak = new Error(
+      `Fetch API cannot load: https://api.sprites.dev/v1/sprites/s1/exec?cmd=bash&env=GH_TOKEN=${token}&env=NPM_TOKEN=npm_alsosecret`,
+    );
+    const { client } = harness({ throws: leak });
+
+    const message = await messageOf(
+      client.execCollect("s1", { argv: ["bash"], env: { GH_TOKEN: token } }),
+    );
+
+    expect(message).toContain("sprites_exec_upgrade_failed");
+    expect(message).not.toContain(token);
+    expect(message).not.toContain("env=");
+    expect(message).not.toContain("api.sprites.dev");
+  });
+
+  // The REST path is deliberately NOT scrubbed — its query strings carry no
+  // secrets and the detail is worth having. Pinned so the scrub above is not
+  // "helpfully" generalised into the one place it costs diagnosis.
+  it("still interpolates the transport error on the REST path", async () => {
+    const { client } = harness({ throws: new Error("connect ECONNREFUSED 10.0.0.1:443") });
+
+    await expect(messageOf(client.listSprites())).resolves.toContain("ECONNREFUSED");
+  });
+
+  it("bounds the upgrade itself, mapping the abort to provider_transient", async () => {
+    // Without a signal on the upgrade fetch, `execCollect`'s own timer never
+    // arms (it is set up after the await) and a stalled upgrade pins the
+    // Durable Object turn indefinitely.
+    const aborted = new Error("The operation was aborted due to timeout");
+    aborted.name = "TimeoutError";
+    const { calls, client } = harness({ throws: aborted });
+
+    const pending = client.execCollect("s1", { argv: ["bash"] });
+    await expect(codeOf(pending)).resolves.toBe("provider_transient");
+    expect(calls[0]?.init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  // SILENT TRUNCATION REGRESSION. The text `exit` notification can precede the
+  // last output frames — live, 349528 bytes arrived over 13 frames — so a grace
+  // timer that arms once and is never renewed DROPS everything that lands after
+  // it and resolves with the announced code and no error at all.
+  //
+  // The gaps below (700ms, then 1200ms cumulative) are far past the 250ms the
+  // grace used to be, which is exactly the window that dropped output.
+  //
+  // MUTATION CHECK, both halves independently:
+  //  - restore `TEXT_EXIT_GRACE_MS = 250` → stdout is `"before"`, exit 0, no
+  //    error (the silent-wrong-answer this test exists for);
+  //  - restore the `if (graceTimer === undefined)` guard around the arm →
+  //    stdout is `"before-after"`, because the un-renewed 2s timer fires while
+  //    the third frame is still coming.
+  it("re-arms the text-exit grace on every data frame, so trailing output survives", async () => {
+    const ws = new FakeWebSocket();
+    const { client } = harness({ webSocket: ws });
+
+    const pending = client.execCollect("s1", { argv: ["bash"] });
+    await flush();
+    ws.emitFrame(1, "before");
+    ws.emit("message", { data: JSON.stringify({ type: "exit", exit_code: 0 }) });
+    // A server under backpressure, drip-feeding what it had buffered.
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    ws.emitFrame(1, "-after");
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    ws.emitFrame(1, "-later");
+    ws.emitFrame(3, new Uint8Array([0]));
+
+    await expect(pending).resolves.toEqual({
+      exitCode: 0,
+      stdout: "before-after-later",
+      stderr: "",
+    });
+  });
+
+  // The other half of the contract: a server that only ever announces in text
+  // and then goes silent must still not hang the caller — the renewed timer has
+  // to actually fire once the frames stop.
+  it("still settles on the grace once trailing output stops arriving", async () => {
+    const ws = new FakeWebSocket();
+    const { client } = harness({ webSocket: ws });
+
+    const pending = client.execCollect("s1", { argv: ["bash"] });
+    await flush();
+    ws.emit("message", { data: JSON.stringify({ type: "exit", exit_code: 5 }) });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    ws.emitFrame(1, "tail");
+
+    await expect(pending).resolves.toEqual({ exitCode: 5, stdout: "tail", stderr: "" });
+  });
+
+  // The 64KiB fast-path replay cap IS detectable: the server names the path and
+  // the history length in a `debug` frame. Both frames below are LIVE captures,
+  // verbatim (2026-08-04).
+  it("flags a fast_path replay at the 64KiB cap as truncated", async () => {
+    const ws = new FakeWebSocket();
+    const { client } = harness({ webSocket: ws });
+
+    const pending = client.execCollect("s1", { argv: ["bash"] });
+    await flush();
+    ws.emit("message", {
+      data: '{"msg":"session_created cmd=bash","pid":333,"t_ms":22,"type":"debug"}',
+    });
+    ws.emit("message", {
+      data: '{"msg":"fast_path attach_err=session has exited exit_code=0 history_len=65536","pid":333,"t_ms":22,"type":"debug"}',
+    });
+    ws.emitFrame(1, "AAAA");
+    ws.emitFrame(3, new Uint8Array([0]));
+
+    await expect(pending).resolves.toEqual({
+      exitCode: 0,
+      stdout: "AAAA",
+      stderr: "",
+      truncated: true,
+    });
+  });
+
+  it("does not flag a streamed run, or a fast_path replay under the cap", async () => {
+    const streamed = new FakeWebSocket();
+    const a = harness({ webSocket: streamed });
+    const streaming = a.client.execCollect("s1", { argv: ["bash"] });
+    await flush();
+    streamed.emit("message", {
+      data: '{"msg":"normal_path history_len=0","pid":23,"t_ms":17,"type":"debug"}',
+    });
+    streamed.emitFrame(3, new Uint8Array([0]));
+    await expect(streaming).resolves.toEqual({ exitCode: 0, stdout: "", stderr: "" });
+
+    // A replay UNDER the cap is complete output; live, `echo hi` replayed with
+    // `history_len=3`. Flagging it would train callers to ignore the flag.
+    const small = new FakeWebSocket();
+    const b = harness({ webSocket: small });
+    const short = b.client.execCollect("s1", { argv: ["bash"] });
+    await flush();
+    small.emit("message", {
+      data: '{"msg":"fast_path attach_err=session has exited exit_code=0 history_len=3","pid":346,"t_ms":22,"type":"debug"}',
+    });
+    small.emitFrame(1, "hi\n");
+    small.emitFrame(3, new Uint8Array([0]));
+    await expect(short).resolves.toEqual({ exitCode: 0, stdout: "hi\n", stderr: "" });
+  });
 });
 
 describe("execDetached", () => {
@@ -1026,6 +1204,74 @@ describe("execDetached", () => {
 
     await expect(codeOf(client.execDetached("s1", { argv: ["bash"] }))).resolves.toBe(
       "compute_unavailable",
+    );
+  });
+
+  // `detachable` means the server keeps the session running after we
+  // disconnect, so a launch we never got an id for is a process nothing can
+  // address, holding memory against the sprite's cap until its
+  // `max_run_after_disconnect` deadline. The `debug` frame's `pid` is the same
+  // number as the session id (live: 333/333, 23/23, 346/346) and arrives first,
+  // which is why it is the only handle available here.
+  it("best-effort reaps the launched session when it never gets a session_info", async () => {
+    const ws = new FakeWebSocket();
+    ws.onAccept = (socket) => {
+      socket.emit("message", {
+        data: '{"msg":"session_created cmd=bash","pid":333,"t_ms":22,"type":"debug"}',
+      });
+      socket.emit("close", { code: 1006 });
+    };
+    const { calls, client } = harness([
+      { webSocket: ws },
+      json({ count: 1, sessions: [{ id: "333", command: "bash" }] }),
+      { status: 200, body: "" },
+    ]);
+
+    await expect(messageOf(client.execDetached("s1", { argv: ["bash"] }))).resolves.toContain(
+      "sprites_exec_no_session_info",
+    );
+
+    expect(calls[1]?.url).toBe("https://api.sprites.dev/v1/sprites/s1/exec");
+    expect(calls[2]?.url).toBe(
+      "https://api.sprites.dev/v1/sprites/s1/exec/333/kill?signal=SIGKILL",
+    );
+  });
+
+  it("does not kill a session id the listing does not confirm", async () => {
+    const ws = new FakeWebSocket();
+    ws.onAccept = (socket) => {
+      socket.emit("message", {
+        data: '{"msg":"session_created cmd=bash","pid":333,"t_ms":22,"type":"debug"}',
+      });
+      socket.emit("close", { code: 1006 });
+    };
+    const { calls, client } = harness([
+      { webSocket: ws },
+      json({ count: 0, sessions: [] }),
+      { status: 200, body: "" },
+    ]);
+
+    await expect(codeOf(client.execDetached("s1", { argv: ["bash"] }))).resolves.toBe(
+      "provider_transient",
+    );
+
+    expect(calls.map((call) => call.url).filter((url) => url.includes("/kill"))).toEqual([]);
+  });
+
+  it("keeps the launch error when the reap itself fails", async () => {
+    const ws = new FakeWebSocket();
+    ws.onAccept = (socket) => {
+      socket.emit("message", {
+        data: '{"msg":"session_created cmd=bash","pid":333,"t_ms":22,"type":"debug"}',
+      });
+      socket.emit("close", { code: 1006 });
+    };
+    const { client } = harness([{ webSocket: ws }, { status: 500 }]);
+
+    // A failed cleanup must not replace the error that says why the launch
+    // failed with a less informative one.
+    await expect(messageOf(client.execDetached("s1", { argv: ["bash"] }))).resolves.toContain(
+      "sprites_exec_no_session_info",
     );
   });
 });
