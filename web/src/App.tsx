@@ -835,8 +835,17 @@ function ThreadRow({
       style={isMobile ? { transitionDuration: pressing ? `${LONG_PRESS_MS}ms` : "150ms" } : undefined}
       role="listitem"
       // Long-pressing a row must open its menu, not select the text under the
-      // finger or raise the browser's own menu.
-      {...(isMobile ? handlers : {})}
+      // finger or raise the browser's own menu. On desktop, right-click is the
+      // same affordance — especially in a PWA where there is no hover chrome.
+      {...(isMobile
+        ? handlers
+        : {
+            onContextMenu: (event) => {
+              if (disabled) return;
+              event.preventDefault();
+              setMenuOpen(true);
+            },
+          })}
     >
       <button
         className={cn(

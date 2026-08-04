@@ -900,4 +900,13 @@ describe("RailContent row menu", () => {
     await openMenu("Keep me");
     expect(screen.queryByRole("menuitem", { name: /archive/i })).toBeNull();
   });
+
+  it("opens the row menu on right-click", async () => {
+    wideLayout();
+    const target = thread({ threadId: "t1", title: "Right click me" });
+    render(<RailContent {...baseProps({ threads: [target] })} />);
+
+    fireEvent.contextMenu(screen.getByText("Right click me"));
+    await waitFor(() => expect(screen.getByRole("menuitem", { name: "Dismiss" })).toBeTruthy());
+  });
 });
