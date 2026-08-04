@@ -470,6 +470,23 @@ export class SpritesComputeBackend implements ComputeBackend {
     return Number.isSafeInteger(code) ? code : undefined;
   }
 
+  /**
+   * Read one output sentinel, capped.
+   *
+   * The cap is PER STREAM, deliberately: stdout and stderr are separate files
+   * read independently, so a process can return up to 2x
+   * `maxProcessOutputBytes` from `readProcessOutput`. A shared budget would mean
+   * a chatty stderr could starve stdout of its allowance, and the two reads
+   * would have to be ordered — the tail limits that actually protect storage and
+   * the model's context are applied above this, per stream, by
+   * `ComputeThreadService`.
+   *
+   * The slice is a RAW BYTE cut, so a multi-byte codepoint straddling the
+   * boundary decodes to a single U+FFFD. That is acceptable for a 20MB
+   * truncation of program output (the alternative is scanning back for a
+   * codepoint boundary, which buys one character), but it means the tail of a
+   * capped stream is not guaranteed to be valid text.
+   */
   private async readSentinelText(spriteName: string, path: string): Promise<string> {
     const result = await this.client.fsRead(spriteName, path);
     if (!result) return "";

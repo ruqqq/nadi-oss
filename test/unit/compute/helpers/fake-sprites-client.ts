@@ -52,6 +52,17 @@ export interface RecordedKill {
   signal: SpritesSignal;
 }
 
+/**
+ * How an exec shows up in the call log. `dir` is included — it is the working
+ * directory the command actually runs in, so a backend that dropped it would
+ * otherwise be indistinguishable here from one that passed it.
+ */
+function describeExec(options: SpritesExecOptions): string {
+  return options.dir === undefined
+    ? options.argv.join(" ")
+    : `${options.argv.join(" ")} @${options.dir}`;
+}
+
 const ENCODER = new TextEncoder();
 const DECODER = new TextDecoder();
 
@@ -136,12 +147,12 @@ export class FakeSpritesClient implements SpritesClient {
   }
 
   async execCollect(name: string, options: SpritesExecOptions): Promise<SpritesExecResult> {
-    this.calls.push(`execCollect:${options.argv.join(" ")}`);
+    this.calls.push(`execCollect:${describeExec(options)}`);
     return this.runExec(name, options);
   }
 
   async execDetached(name: string, options: SpritesExecOptions): Promise<void> {
-    this.calls.push(`execDetached:${options.argv.join(" ")}`);
+    this.calls.push(`execDetached:${describeExec(options)}`);
     this.runExec(name, options);
   }
 
@@ -172,13 +183,18 @@ export class FakeSpritesClient implements SpritesClient {
     if (!session) throw new ComputeError("runtime_missing", "sprites_kill_failed: 404");
     session.killed = true;
     sprite.sessions.delete(sessionId);
-    const paths = wrapperPaths(session.command);
-    if (paths) {
-      const code = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 137;
-      sprite.files.set(paths.rc, ENCODER.encode(String(code)));
-      if (!sprite.files.has(paths.out)) sprite.files.set(paths.out, new Uint8Array());
-      if (!sprite.files.has(paths.err)) sprite.files.set(paths.err, new Uint8Array());
-    }
+    // NO rc sentinel is written, deliberately. The signal goes to the wrapper's
+    // process group, so the killed `bash` never reaches its trailing
+    // `printf %s "$?" > <rc>`: the real aftermath of a kill is a process with no
+    // session AND no exit evidence, which is exactly the `failed` arm of
+    // `getProcessStatus`. Writing 137/143/130 here would have been the fake
+    // agreeing with a hope — and it would have hidden the only outcome a
+    // caller actually sees in production.
+    //
+    // A wrapper CAN still record an rc after a kill, if the signal reached only
+    // the inner command and bash survived to run the `printf`. That is why the
+    // backend reads the rc file FIRST and only falls back to the session list —
+    // both orderings are handled, but only the no-rc one is modelled here.
   }
 
   async fsRead(
@@ -416,17 +432,6 @@ export function createFakeSpritesBackend(): {
  */
 const WRAPPER_RE =
   /^cd (?<cwd>.+?) && timeout (?<secs>\d+) bash -c (?<cmd>.+) < (?<stdin>\S+) > (?<out>\S+) 2> (?<err>\S+); printf %s "\$\?" > (?<rc>\S+)$/;
-
-/** The sentinel paths a wrapper script writes, or null if it is not a wrapper. */
-function wrapperPaths(script: string): { out: string; err: string; rc: string } | null {
-  const match = WRAPPER_RE.exec(script);
-  if (!match?.groups) return null;
-  return {
-    out: match.groups.out ?? "",
-    err: match.groups.err ?? "",
-    rc: match.groups.rc ?? "",
-  };
-}
 
 interface InnerResult {
   stdout: string;

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { BackendReference, ComputeSpec } from "../../../src/compute/backend";
 import { SPRITES_PROFILE_MEMORY_MB } from "../../../src/compute/backends/sprites";
+import { DEFAULT_COMPUTE_LIMITS } from "../../../src/compute/config";
 import { ComputeError } from "../../../src/compute/errors";
 import { createFakeSpritesBackend } from "./helpers/fake-sprites-client";
 
@@ -304,7 +305,7 @@ describe("SpritesComputeBackend process lifecycle", () => {
     ).rejects.toMatchObject({ code: "runtime_missing" });
   });
 
-  it("runs a background command end to end: running, stopped, then its signal's exit code", async () => {
+  it("runs a background command end to end: running, then stopped and terminal", async () => {
     const { backend } = createFakeSpritesBackend();
     const runtime = await backend.acquire(SPEC);
 
@@ -318,10 +319,18 @@ describe("SpritesComputeBackend process lifecycle", () => {
 
     await backend.stopProcess(runtime, started.process, "kill");
 
-    expect(await backend.getProcessStatus(runtime, started.process)).toEqual({
-      status: "exited",
-      exitCode: 137,
-    });
+    // Deliberately loose about WHICH terminal status. A SIGKILL to the wrapper's
+    // process group means the killed `bash` never reaches its trailing
+    // `printf %s "$?"`, so the realistic aftermath is no rc file and no session
+    // -> `failed`. But a signal that reaches only the inner command can leave
+    // bash alive to record an rc, giving `exited`. The backend handles both; the
+    // property that matters — and the only one this fake can honestly witness —
+    // is that the process is no longer reported as running.
+    const status = await backend.getProcessStatus(runtime, started.process);
+    expect(status.status).not.toBe("running");
+    expect(["failed", "exited"]).toContain(status.status);
+    // What THIS fake models is the kill-leaves-no-evidence path.
+    expect(status).toEqual({ status: "failed" });
   });
 
   it("feeds stdin through a sentinel file", async () => {
@@ -362,6 +371,25 @@ describe("SpritesComputeBackend.runCommand", () => {
       stdout: "hi\n",
       stderr: "",
     });
+  });
+
+  it("runs in the requested cwd, defaulting to the workspace root", async () => {
+    // `dir` is what the command actually runs in; dropping it would silently run
+    // every command from the sprite's home directory instead.
+    const { backend, client } = createFakeSpritesBackend();
+    const runtime = await backend.acquire(SPEC);
+
+    await backend.runCommand(runtime, {
+      command: "true",
+      cwd: "/workspace/repo",
+      timeoutMs: 1_000,
+    });
+    await backend.runCommand(runtime, { command: "true", timeoutMs: 1_000 });
+
+    expect(client.calls.filter((call) => call.includes("bash -c true"))).toEqual([
+      "execCollect:bash -c true @/workspace/repo",
+      "execCollect:bash -c true @/workspace",
+    ]);
   });
 
   it("lets a provider fault throw rather than fabricating an exit code", async () => {
@@ -459,6 +487,50 @@ describe("SpritesComputeBackend file operations", () => {
     await expect(backend.listDirectory(runtime, "/workspace")).rejects.toMatchObject({
       code: "provider_transient",
     });
+  });
+
+  // `statPath` is the whole of `pathExists`, so each arm that could WRONGLY
+  // answer "absent" has to be pinned separately. `No such file` in stderr is the
+  // ONLY evidence of absence; every other non-zero outcome is unanswerable.
+  it("throws — never answers absent — when a non-zero stat carries no stderr", async () => {
+    const { backend, client } = createFakeSpritesBackend();
+    const runtime = await backend.acquire(SPEC);
+    client.nextExecResult = { exitCode: 1, stdout: "", stderr: "" };
+
+    await expect(backend.pathExists(runtime, "/workspace/keep.txt")).rejects.toMatchObject({
+      code: "provider_transient",
+      message: expect.stringContaining("sprites_stat_unanswered") as unknown as string,
+    });
+  });
+
+  it("throws when stat exits 0 with output it cannot parse", async () => {
+    // A zero exit is not an answer on its own — a proxy or a busybox `stat` with
+    // different flags could return 0 and prose. Reading that as a file would
+    // report a directory (or a nonexistent path) as a writable file.
+    const { backend, client } = createFakeSpritesBackend();
+    const runtime = await backend.acquire(SPEC);
+    client.nextExecResult = { exitCode: 0, stdout: "usage: stat [-L] file", stderr: "" };
+
+    await expect(backend.inspectPath(runtime, "/workspace/keep.txt")).rejects.toMatchObject({
+      code: "provider_transient",
+      message: expect.stringContaining("sprites_stat_unanswered") as unknown as string,
+    });
+  });
+
+  it("caps process output at the per-stream budget instead of returning it whole", async () => {
+    const { backend, client } = createFakeSpritesBackend();
+    const runtime = await backend.acquire(SPEC);
+    const spriteName = spriteNameOf(runtime);
+    const limit = DEFAULT_COMPUTE_LIMITS.maxProcessOutputBytes;
+    client.seedFile(spriteName, "/tmp/.nadi-out-pid-big", "a".repeat(limit + 1_000));
+
+    const output = await backend.readProcessOutput(
+      runtime,
+      processReference(spriteName, "pid-big"),
+    );
+
+    expect(output.stdout).toHaveLength(limit);
+    expect(output.stderr).toBe("");
   });
 
   it("deletes recursively and answers absent afterwards", async () => {
