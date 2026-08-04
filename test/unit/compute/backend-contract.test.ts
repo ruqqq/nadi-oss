@@ -1130,3 +1130,33 @@ describe("Daytona write guards fail closed on an unanswerable probe", () => {
     expect(read(files, "/workspace/fresh.txt")).toBe("NEW");
   });
 });
+
+/**
+ * DATA LOSS GUARD. `nativeIdleSuspend` is what stops `resolveIdleDisposition`
+ * from destroying an idle sandbox on an inference. Deleting the one line that
+ * sets it on Sprites is silent everywhere else — the bug it guards against
+ * (a real user's workspace deleted 15 minutes after going idle) simply comes
+ * back — so the flag is asserted per backend here.
+ */
+describe("ComputeBackend.nativeIdleSuspend", () => {
+  it("is true for Sprites, which hibernates on its own", () => {
+    const { backend } = createFakeSpritesBackend();
+    expect(backend.nativeIdleSuspend).toBe(true);
+  });
+
+  it("is not set for backends whose idle runtime keeps billing", () => {
+    // Daytona passes autoStopInterval: 0 and Cloudflare keepAlive: true, so an
+    // idle runtime there bills until something releases it; the inferred
+    // discards are what stop the meter and must stay on.
+    // Read through the interface: the concrete classes do not declare the
+    // optional property at all, and "absent" is exactly the claim under test.
+    const backends: ComputeBackend[] = [
+      new DaytonaComputeBackend({ apiKey: "test" }),
+      createFakeCloudflareBackend().backend,
+      new FakeComputeBackend(),
+    ];
+    for (const backend of backends) {
+      expect(backend.nativeIdleSuspend).toBeUndefined();
+    }
+  });
+});

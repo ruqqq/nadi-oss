@@ -97,13 +97,46 @@ describe("probeWorkspaceCleanliness", () => {
     expect(result.state === "dirty" && result.repos[0]?.path).toBe("/workspace/wt/feature-branch");
   });
 
-  it("does not count unpushed when no upstream is configured", async () => {
-    // A repo with no remote has nowhere to push; refusing forever would make
-    // the declaration unreachable for local-only work.
+  /**
+   * The parser sees only a number, so "no upstream, 2 local-only commits" and
+   * "2 commits ahead of an upstream" are the SAME input to it — a matrix here
+   * that names both is the same test twice, and it is exactly what failed to
+   * catch a script that counted the whole history. The repo-shape matrix lives
+   * where the distinction is decided, in
+   * `workspace-cleanliness-script.test.ts`, which runs the real script against
+   * real repos. What is left for the parser is the count → verdict mapping.
+   */
+  it("maps a non-zero count to dirty and zero to clean", async () => {
+    expect(
+      (await probeWorkspaceCleanliness(fakeExec({ PROBE: { stdout: "/workspace/app\t\t2\n" } })))
+        .state,
+    ).toBe("dirty");
+    expect(
+      (await probeWorkspaceCleanliness(fakeExec({ PROBE: { stdout: "/workspace/app\t\t0\n" } })))
+        .state,
+    ).toBe("clean");
+  });
+
+  it("asks git only for commits no remote already has, when there is no upstream", async () => {
+    // A bare `rev-list --count HEAD` counts the WHOLE history of any branch
+    // without an upstream — the normal shape of a coding thread between
+    // `checkout -b` and its first `push -u`.
+    let command = "";
+    await probeWorkspaceCleanliness(async (script) => {
+      command = script;
+      return { exitCode: 0, stdout: "/workspace/app\t\t0\n", stderr: "" };
+    });
+    expect(command).toContain("rev-list --count HEAD --not --remotes");
+    expect(command).not.toContain("NOUPSTREAM");
+  });
+
+  it("reports probe_failed on the retired NOUPSTREAM sentinel rather than clean", async () => {
+    // A sandbox running an older probe (or any third field that is not a
+    // count) must preserve, not be read as "nothing to lose".
     const result = await probeWorkspaceCleanliness(
       fakeExec({ PROBE: { stdout: "/workspace/app\t\tNOUPSTREAM\n" } }),
     );
-    expect(result.state).toBe("clean");
+    expect(result.state).toBe("probe_failed");
   });
 
   /**

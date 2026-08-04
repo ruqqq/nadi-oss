@@ -103,6 +103,29 @@ Two mechanisms guard against it:
 **That `destroy()` call is what STOPS STORAGE BILLING.** Orphaned sprites are a
 data leak until explicitly deleted.
 
+### The TTL is the only reclaim path on Sprites
+
+An idle Sprites thread **always** releases as `recoverable`, so the recovery TTL
+is what deletes it. The backend declares `nativeIdleSuspend = true`
+(`ComputeBackend.nativeIdleSuspend`), and `resolveIdleDisposition` reads that as
+"the provider already stopped the compute meter" and skips the two INFERRED
+discards — "git says every repo is clean" and "the workspace is empty" — that
+apply on Daytona and Cloudflare, where an idle runtime keeps billing because we
+disable their native idle handling (`autoStopInterval: 0` / `keepAlive: true`).
+On those providers a fast discard stops the meter; on Sprites it would only free
+disk, and it has already destroyed a real user's workspace that way. The
+decision is logged as `compute.retention_decision` with
+`reason: "provider_native_idle"`.
+
+The one exception is an EXPLICIT `confirm_work_saved` declaration, which still
+discards immediately — stated intent, not an inference.
+
+So on Sprites, **`recoveryTtlMs` (default 24h) is the lever for disk cost**: it
+is how long a hibernated sprite keeps billing storage after its thread goes
+idle. Lower it to reclaim sooner; raise it to give people longer to come back to
+their work. `idleTimeoutMs` no longer decides whether the work survives here,
+only when it hibernates and the TTL clock starts.
+
 ## 4. Real-provider smoke checklist
 
 Every claim below that depends on a live sprites.dev account or a live Worker is

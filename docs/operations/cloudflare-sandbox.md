@@ -68,6 +68,17 @@ longest TTL Nadi will ever set. It exists purely as a backstop against orphaned
 backup objects (a GC bug, a crashed cleanup pass); it is not the mechanism that
 enforces Nadi's TTL policy, which is application-level.
 
+**Expect more backup objects than before.** The idle-retention probe used to read
+a repo with no upstream branch as clean, so a coding thread that had committed
+but not pushed was discarded at the idle timeout and wrote no backup. It now
+counts commits no remote already has (`rev-list --count HEAD --not --remotes`)
+and releases such a thread as `recoverable`, which writes an R2 backup that lives
+out `recoveryTtlMs`. This is the intended trade — those commits were being
+destroyed — but it moves cost from zero to one backup object per affected thread.
+`recoveryTtlMs` is the lever. The full retention rules, including the
+provider-specific part that does NOT apply to Cloudflare or Daytona, are in
+`docs/architecture.md` under "Idle retention".
+
 ## 2. Deploying: three ways to run `wrangler deploy`
 
 `wrangler.jsonc` points both containers (`NadiSandboxSmall`, `NadiSandboxMedium`)

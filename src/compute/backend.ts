@@ -125,6 +125,24 @@ export interface ReleaseOptions {
 
 export interface ComputeBackend {
   readonly id: ComputeProviderId;
+  /**
+   * The provider suspends an idle runtime on its own, so the service does not
+   * need to discard early to stop billing.
+   *
+   * Optional and absent by default. Daytona (`autoStopInterval: 0`) and
+   * Cloudflare (`keepAlive: true`) deliberately DISABLE native idle handling,
+   * so an idle runtime there bills continuously and discarding on the idle
+   * timer is what stops the meter. Sprites hibernates ~30s after activity with
+   * no way to disable it, so by the time our 15-minute timer fires compute
+   * billing has long since stopped and an INFERRED discard buys only disk —
+   * paid for by destroying work.
+   *
+   * A NEW BACKEND MUST DECIDE THIS. Omitting it is not a neutral default: it
+   * opts the provider into the inferred discards, so a backend that does
+   * suspend itself and forgets to declare it will have idle sandboxes deleted
+   * on a guess, which is how a real user lost work.
+   */
+  readonly nativeIdleSuspend?: boolean;
   acquire(spec: ComputeSpec, recovery?: BackendReference): Promise<BackendReference>;
   release(runtime: BackendReference, options: ReleaseOptions): Promise<BackendReference | null>;
   destroy(reference: BackendReference): Promise<void>;
