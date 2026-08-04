@@ -118,12 +118,13 @@ export function MessageRow({
           if (node.kind === "approval") {
             const part = node.part as ToolUIPart;
             const approval = getToolApproval(part);
+            const waitingApproval = getToolPartState(part) === "waiting-approval";
             return (
               <ApprovalGate
                 key={node.key}
                 part={part}
                 servers={servers}
-                disabled={readOnly || busy || !approval}
+                disabled={readOnly || !approval || !waitingApproval}
                 onApprove={() =>
                   approval && addToolApprovalResponse({ id: approval.id, approved: true })
                 }
