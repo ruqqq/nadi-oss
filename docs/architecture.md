@@ -94,6 +94,13 @@ provider:
   README's Known issues.
 - **Cloudflare Sandbox** (`backends/cloudflare.ts`) — containers as Durable
   Objects. No network-policy API, so it fails closed on a non-empty allowlist.
+- **Sprites** (`backends/sprites.ts`) — REST/WebSocket client to sprites.dev
+  fixed 8-vCPU machines with memory-cap profiles (small: 2048 MB, medium: 4096 MB).
+  Supports live-updatable DNS network policy applied at acquire, detachable
+  sessions, and `/tmp` sentinel files for background process bookkeeping. System mode
+  uses the operator's `SPRITES_API_KEY`; BYOK is available per workspace.
+  Critical: sprites has no auto-destroy; deletion is explicit, and recovery-TTL
+  eviction stops storage billing.
 - **Mock** (`backends/mock.ts`) — in-memory, for local dev and tests.
   `DEFAULT_SANDBOX_PROVIDER=mock` in `.dev.vars`.
 
