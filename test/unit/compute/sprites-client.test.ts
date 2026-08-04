@@ -135,13 +135,34 @@ describe("createSpritesClient REST surface", () => {
     expect(bodyJson(calls[0]!)).toEqual({ rules: [{ domain: "example.com", action: "allow" }] });
   });
 
-  it("posts the memory policy with an autoscaling limit", async () => {
+  // `autoscale: true` makes the limit advisory: the sprite grows past the
+  // profile's memory cap and bills for it. The cap has to be a cap.
+  it("posts the memory policy as a hard cap, not an autoscaling hint", async () => {
     const { calls, client } = harness({ status: 204 });
 
     await client.setMemoryPolicy("s1", 4096);
 
     expect(calls[0]?.url).toBe("https://api.sprites.dev/v1/sprites/s1/policy/resources");
-    expect(bodyJson(calls[0]!)).toEqual({ memory: { limit_mb: 4096, autoscale: true } });
+    expect(bodyJson(calls[0]!)).toEqual({ memory: { limit_mb: 4096, autoscale: false } });
+  });
+
+  it("bounds every request, giving creation the longer budget", async () => {
+    // Nothing else stops a stalled REST call from pinning the Durable Object
+    // turn it runs inside.
+    const { calls, client } = harness({ status: 201 });
+
+    await client.createSprite("s1", {});
+    await client.setMemoryPolicy("s1", 2048);
+
+    for (const call of calls) expect(call.init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("maps an aborted request to provider_transient", async () => {
+    const timeout = new Error("The operation was aborted due to timeout");
+    timeout.name = "TimeoutError";
+    const { client } = harness({ throws: timeout });
+
+    await expect(messageOf(client.listSprites())).resolves.toContain("sprites_request_timeout");
   });
 
   it("resolves deleteSprite on a 404 so cleanup stays idempotent", async () => {
@@ -170,30 +191,67 @@ describe("createSpritesClient REST surface", () => {
 });
 
 describe("sessions", () => {
-  it("accepts both session_id and id keys", async () => {
+  // LIVE (2026-08-04), verbatim: `GET /exec` answers a WRAPPER and names the
+  // session `id`. The previous bare-array parse threw on every real response, so
+  // `getProcessStatus` and `stopProcess` could never work.
+  it("parses the sessions wrapper and reads the id key", async () => {
     const { client } = harness(
-      json([
-        { session_id: "sess-1", command: "sleep 1" },
-        { id: "sess-2", command: "sleep 2" },
-      ]),
+      json({
+        count: 1,
+        sessions: [
+          {
+            id: "15",
+            created: "2026-08-04T00:00:00Z",
+            command: "sleep 120",
+            workdir: "/home/sprite",
+            tty: false,
+            bytes_per_second: 0,
+            is_active: false,
+            last_activity: "2026-08-04T00:00:01Z",
+          },
+        ],
+      }),
     );
 
     await expect(client.listSessions("s1")).resolves.toEqual([
-      { sessionId: "sess-1", command: "sleep 1" },
-      { sessionId: "sess-2", command: "sleep 2" },
+      { sessionId: "15", command: "sleep 120" },
     ]);
   });
 
+  it("still accepts a session_id alias", async () => {
+    const { client } = harness(json({ sessions: [{ session_id: "sess-1", command: "sleep 1" }] }));
+
+    await expect(client.listSessions("s1")).resolves.toEqual([
+      { sessionId: "sess-1", command: "sleep 1" },
+    ]);
+  });
+
+  it("parses an empty sessions wrapper as no sessions", async () => {
+    const { client } = harness(json({ count: 0, sessions: [] }));
+
+    await expect(client.listSessions("s1")).resolves.toEqual([]);
+  });
+
   it("throws sprites_sessions_unexpected_shape when command is missing", async () => {
-    const { client } = harness(json([{ session_id: "sess-1" }]));
+    const { client } = harness(json({ sessions: [{ id: "sess-1" }] }));
 
     await expect(messageOf(client.listSessions("s1"))).resolves.toBe(
       "sprites_sessions_unexpected_shape",
     );
   });
 
-  it("throws sprites_sessions_unexpected_shape when the payload is a wrapper object", async () => {
-    const { client } = harness(json({ sessions: [] }));
+  it("throws when the body carries no sessions key at all", async () => {
+    // A missing key is not evidence of "no sessions" — callers read an empty
+    // listing as "the process is gone".
+    const { client } = harness(json({ count: 0 }));
+
+    await expect(messageOf(client.listSessions("s1"))).resolves.toBe(
+      "sprites_sessions_unexpected_shape",
+    );
+  });
+
+  it("throws when sessions is not an array", async () => {
+    const { client } = harness(json({ sessions: "nope" }));
 
     await expect(messageOf(client.listSessions("s1"))).resolves.toBe(
       "sprites_sessions_unexpected_shape",
@@ -221,7 +279,12 @@ describe("filesystem", () => {
 
     const result = await client.fsRead("s1", "/tmp/a.txt");
 
-    expect(calls[0]?.url).toBe("https://api.sprites.dev/v1/sprites/s1/fs/read?path=%2Ftmp%2Fa.txt");
+    const url = new URL(calls[0]!.url);
+    expect(url.pathname).toBe("/v1/sprites/s1/fs/read");
+    expect(url.searchParams.get("path")).toBe("/tmp/a.txt");
+    // The SDK sends `workingDir` on every /fs call; ours are absolute, but a
+    // server default we never observed is not something to depend on.
+    expect(url.searchParams.get("workingDir")).toBe("/");
     expect(new TextDecoder().decode(result?.bytes)).toBe("hello");
     expect(result?.mimeType).toBe("text/plain");
   });
@@ -237,8 +300,31 @@ describe("filesystem", () => {
     expect(result?.mimeType).toBeUndefined();
   });
 
-  it("returns null when the path is absent", async () => {
-    const { client } = harness({ status: 404 });
+  it("returns null for a 404 whose body says ENOENT", async () => {
+    const { client } = harness(
+      json({ error: "no such file or directory", code: "ENOENT", path: "/nope" }, 404),
+    );
+
+    await expect(client.fsRead("s1", "/nope")).resolves.toBeNull();
+  });
+
+  // A DELETED SPRITE 404s here too. Reading that as "empty file" made
+  // `readSentinelText` report a dead sprite's process as having produced no
+  // output — a silent empty transcript instead of a fault.
+  it("maps a 404 that is not a missing FILE to runtime_missing", async () => {
+    const { client } = harness(json({ error: "sprite not found" }, 404));
+
+    await expect(codeOf(client.fsRead("s1", "/tmp/a"))).resolves.toBe("runtime_missing");
+  });
+
+  it("maps a 404 with a non-ENOENT filesystem code to runtime_missing", async () => {
+    const { client } = harness(json({ error: "not a directory", code: "ENOTDIR" }, 404));
+
+    await expect(codeOf(client.fsRead("s1", "/tmp/a/b"))).resolves.toBe("runtime_missing");
+  });
+
+  it("falls back to the error text when the 404 body carries no code", async () => {
+    const { client } = harness(json({ error: "open /nope: no such file or directory" }, 404));
 
     await expect(client.fsRead("s1", "/nope")).resolves.toBeNull();
   });
@@ -267,15 +353,20 @@ describe("filesystem", () => {
     await expect(codeOf(client.fsRead("s1", "/tmp/a"))).resolves.toBe("provider_transient");
   });
 
-  it("writes raw bytes with mkdir and an octet-stream content type", async () => {
+  it("writes raw bytes with mkdirParents and an octet-stream content type", async () => {
     const { calls, client } = harness({ status: 204 });
     const bytes = new TextEncoder().encode("payload").buffer as ArrayBuffer;
 
     await client.fsWrite("s1", "/tmp/out.txt", bytes, true);
 
-    expect(calls[0]?.url).toBe(
-      "https://api.sprites.dev/v1/sprites/s1/fs/write?path=%2Ftmp%2Fout.txt&mkdir=true",
-    );
+    const url = new URL(calls[0]!.url);
+    expect(url.pathname).toBe("/v1/sprites/s1/fs/write");
+    expect(url.searchParams.get("path")).toBe("/tmp/out.txt");
+    expect(url.searchParams.get("workingDir")).toBe("/");
+    // `mkdirParents` is the SDK's spelling. LIVE: parents were created under
+    // both spellings AND under neither, so `false` is a request the server does
+    // not enforce — we send it, and claim nothing about it.
+    expect(url.searchParams.get("mkdirParents")).toBe("true");
     expect(calls[0]?.init.method).toBe("PUT");
     expect((calls[0]!.init.headers as Record<string, string>)["Content-Type"]).toBe(
       "application/octet-stream",
@@ -283,31 +374,102 @@ describe("filesystem", () => {
     expect(calls[0]?.init.body).toBe(bytes);
   });
 
-  it("writes with mkdir=false when not requested", async () => {
+  it("writes with mkdirParents=false when not requested", async () => {
     const { calls, client } = harness({ status: 204 });
 
     await client.fsWrite("s1", "/tmp/out.txt", new ArrayBuffer(0), false);
 
-    expect(calls[0]?.url).toContain("mkdir=false");
+    expect(calls[0]?.url).toContain("mkdirParents=false");
   });
 
-  it("lists entries, accepting is_dir or isDir", async () => {
+  // LIVE (2026-08-04), verbatim: `/fs/list` answers a WRAPPER carrying `entries`
+  // and a `count`, and each entry names its own `type`. The previous bare-array
+  // parse threw on every real response, so `listDirectory` never worked at all.
+  it("parses the entries wrapper and reads each entry's type", async () => {
     const { calls, client } = harness(
-      json([
-        { name: "a.txt", is_dir: false, size: 12 },
-        { name: "sub", isDir: true, size: 0 },
-      ]),
+      json({
+        path: "/work",
+        count: 3,
+        entries: [
+          {
+            name: "newdir",
+            path: "/work/newdir",
+            type: "directory",
+            size: 4096,
+            mode: "755",
+            modTime: "2026-08-04T00:00:00Z",
+            isDir: true,
+          },
+          {
+            name: "a.txt",
+            path: "/work/a.txt",
+            type: "file",
+            size: 12,
+            mode: "644",
+            modTime: "2026-08-04T00:00:00Z",
+            isDir: false,
+          },
+          // `isDir` is FALSE for a link, which is why reading it demoted every
+          // symlink to a regular file.
+          {
+            name: "link",
+            path: "/work/link",
+            type: "symlink",
+            size: 11,
+            mode: "777",
+            modTime: "2026-08-04T00:00:00Z",
+            isDir: false,
+          },
+        ],
+      }),
     );
 
     await expect(client.fsList("s1", "/work")).resolves.toEqual([
-      { name: "a.txt", isDir: false, size: 12 },
-      { name: "sub", isDir: true, size: 0 },
+      { name: "newdir", type: "directory", size: 4096 },
+      { name: "a.txt", type: "file", size: 12 },
+      { name: "link", type: "symlink", size: 11 },
     ]);
-    expect(calls[0]?.url).toBe("https://api.sprites.dev/v1/sprites/s1/fs/list?path=%2Fwork");
+    const url = new URL(calls[0]!.url);
+    expect(url.pathname).toBe("/v1/sprites/s1/fs/list");
+    expect(url.searchParams.get("path")).toBe("/work");
+    expect(url.searchParams.get("workingDir")).toBe("/");
   });
 
-  it("throws sprites_list_unexpected_shape for a wrapper object instead of returning []", async () => {
-    const { client } = harness(json({ entries: [] }));
+  it("parses an empty entries wrapper as an empty directory", async () => {
+    const { client } = harness(json({ path: "/work", entries: [], count: 0 }));
+
+    await expect(client.fsList("s1", "/work")).resolves.toEqual([]);
+  });
+
+  it("maps a type it does not recognise to other rather than throwing", async () => {
+    // A socket or device node is a listable entry, not a malformed response.
+    const { client } = harness(json({ entries: [{ name: "sock", type: "socket", size: 0 }] }));
+
+    await expect(client.fsList("s1", "/work")).resolves.toEqual([
+      { name: "sock", type: "other", size: 0 },
+    ]);
+  });
+
+  it("throws sprites_list_unexpected_shape when the body carries no entries key", async () => {
+    // A shape mismatch is not evidence that the directory is empty — callers act
+    // on `[]` destructively.
+    const { client } = harness(json({ path: "/work", count: 0 }));
+
+    await expect(messageOf(client.fsList("s1", "/work"))).resolves.toBe(
+      "sprites_list_unexpected_shape",
+    );
+  });
+
+  it("throws sprites_list_unexpected_shape when entries is not an array", async () => {
+    const { client } = harness(json({ entries: "nope" }));
+
+    await expect(messageOf(client.fsList("s1", "/work"))).resolves.toBe(
+      "sprites_list_unexpected_shape",
+    );
+  });
+
+  it("throws sprites_list_unexpected_shape when an entry has no type", async () => {
+    const { client } = harness(json({ entries: [{ name: "a.txt", isDir: false, size: 1 }] }));
 
     await expect(messageOf(client.fsList("s1", "/work"))).resolves.toBe(
       "sprites_list_unexpected_shape",
@@ -315,7 +477,7 @@ describe("filesystem", () => {
   });
 
   it("throws sprites_list_unexpected_shape when an entry name carries a slash", async () => {
-    const { client } = harness(json([{ name: "/work/a.txt", is_dir: false, size: 1 }]));
+    const { client } = harness(json({ entries: [{ name: "/work/a.txt", type: "file", size: 1 }] }));
 
     await expect(messageOf(client.fsList("s1", "/work"))).resolves.toBe(
       "sprites_list_unexpected_shape",
@@ -323,7 +485,7 @@ describe("filesystem", () => {
   });
 
   it("throws sprites_list_unexpected_shape when an entry name is empty", async () => {
-    const { client } = harness(json([{ name: "", is_dir: false, size: 1 }]));
+    const { client } = harness(json({ entries: [{ name: "", type: "file", size: 1 }] }));
 
     await expect(messageOf(client.fsList("s1", "/work"))).resolves.toBe(
       "sprites_list_unexpected_shape",
@@ -564,7 +726,39 @@ describe("execCollect", () => {
     await expect(messageOf(pending)).resolves.toBe("sprites_exec_no_exit: code=unknown");
   });
 
-  it("settles on the text exit notification when it lands first", async () => {
+  // The text notification can PRECEDE trailing output, so settling on it
+  // truncates stdout. The binary stream-3 frame is the one that settles the run.
+  it("keeps output that arrives after the text exit notification", async () => {
+    const ws = new FakeWebSocket();
+    const { client } = harness({ webSocket: ws });
+
+    const pending = client.execCollect("s1", { argv: ["bash"] });
+    await flush();
+    ws.emitFrame(1, "out");
+    ws.emit("message", { data: JSON.stringify({ type: "exit", exit_code: 7 }) });
+    ws.emitFrame(1, "-trailing");
+    ws.emitFrame(3, new Uint8Array([7]));
+
+    await expect(pending).resolves.toEqual({ exitCode: 7, stdout: "out-trailing", stderr: "" });
+    expect(ws.closed).toBe(true);
+  });
+
+  it("falls back to the announced text code when the socket closes with no binary frame", async () => {
+    const ws = new FakeWebSocket();
+    const { client } = harness({ webSocket: ws });
+
+    const pending = client.execCollect("s1", { argv: ["bash"] });
+    await flush();
+    ws.emitFrame(1, "out");
+    ws.emit("message", { data: JSON.stringify({ type: "exit", exit_code: 7 }) });
+    ws.emit("close", { code: 1000 });
+
+    await expect(pending).resolves.toEqual({ exitCode: 7, stdout: "out", stderr: "" });
+  });
+
+  it("falls back to the announced text code after a short grace, without a close", async () => {
+    // A server that only ever sends the text form must not hang the caller until
+    // its own timeout.
     const ws = new FakeWebSocket();
     const { client } = harness({ webSocket: ws });
 
@@ -574,7 +768,6 @@ describe("execCollect", () => {
     ws.emit("message", { data: JSON.stringify({ type: "exit", exit_code: 7 }) });
 
     await expect(pending).resolves.toEqual({ exitCode: 7, stdout: "out", stderr: "" });
-    expect(ws.closed).toBe(true);
   });
 
   it("ignores an exit notification whose code is missing rather than reporting success", async () => {
@@ -690,21 +883,63 @@ describe("execCollect", () => {
 });
 
 describe("execDetached", () => {
-  it("passes detachable and max_run_after_disconnect, then closes the socket", async () => {
+  /** The frame the live server sends on connect, verbatim. */
+  function sessionInfo(sessionId: string): string {
+    return JSON.stringify({
+      type: "session_info",
+      session_id: sessionId,
+      command: "bash",
+      created: "2026-08-04T00:00:00Z",
+      cols: 0,
+      rows: 0,
+      is_owner: false,
+      tty: false,
+    });
+  }
+
+  // The session listing reports the INNER process's argv, so nothing we embed in
+  // the wrapper is ever findable. This frame is the only disclosure of the id,
+  // and returning it is what makes a background process addressable at all.
+  it("returns the session id from the server's session_info frame", async () => {
     const ws = new FakeWebSocket();
     const { calls, client } = harness({ webSocket: ws });
+    ws.emit("message", { data: JSON.stringify({ type: "debug", msg: "session_created" }) });
+    ws.emit("message", { data: sessionInfo("15") });
 
-    await client.execDetached("s1", {
-      argv: ["bash", "-c", "long"],
-      detachable: true,
-      maxRunAfterDisconnect: "600s",
-    });
+    await expect(
+      client.execDetached("s1", {
+        argv: ["bash", "-c", "long"],
+        detachable: true,
+        maxRunAfterDisconnect: "600s",
+      }),
+    ).resolves.toBe("15");
 
     const url = new URL(calls[0]!.url);
     expect(url.searchParams.get("detachable")).toBe("true");
     expect(url.searchParams.get("max_run_after_disconnect")).toBe("600s");
     expect(ws.accepted).toBe(true);
+    // Closing does not stop the run — `detachable=true` outlives the socket.
     expect(ws.closed).toBe(true);
+    expect(ws.dropped).toEqual([]);
+  });
+
+  it("takes the session id from a frame delivered the instant the socket is accepted", async () => {
+    const ws = new FakeWebSocket();
+    ws.onAccept = (socket) => socket.emit("message", { data: sessionInfo("42") });
+    const { client } = harness({ webSocket: ws });
+
+    await expect(client.execDetached("s1", { argv: ["bash"] })).resolves.toBe("42");
+    expect(ws.dropped).toEqual([]);
+  });
+
+  it("fails rather than returning an unaddressable process when the socket closes first", async () => {
+    const ws = new FakeWebSocket();
+    ws.onAccept = (socket) => socket.emit("close", { code: 1006 });
+    const { client } = harness({ webSocket: ws });
+
+    await expect(messageOf(client.execDetached("s1", { argv: ["bash"] }))).resolves.toContain(
+      "sprites_exec_no_session_info",
+    );
   });
 
   it("maps a failed upgrade to compute_unavailable on 403", async () => {

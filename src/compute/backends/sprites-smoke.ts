@@ -348,11 +348,11 @@ export async function runSpritesSmoke(env: Env): Promise<SpritesSmokeReport> {
       return `type=file size=${info.size}`;
     });
 
-    // 6c also probes the is-dir KEY NAME: `listDirectory` maps `entry.isDir` to
-    // `type`, and a provider that spells that field differently (`is_dir`)
-    // would report every subdirectory as a file — silently, with no error, in
-    // every directory listing the model ever sees. A real subdirectory is the
-    // only thing that can catch it.
+    // 6c also probes the entry TYPE field: `listDirectory` reads each entry's
+    // `type` string (`directory`/`file`/`symlink`), and a provider that renamed
+    // or dropped it would report every subdirectory as a file — silently, with
+    // no error, in every directory listing the model ever sees. A real
+    // subdirectory is the only thing that can catch it.
     await timed(
       "6c. listDirectory shows the file, and a subdirectory as type=directory",
       async () => {

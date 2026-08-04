@@ -74,7 +74,15 @@ const recoveryPayloadSchema = z.object({
 const processPayloadSchema = z.object({
   kind: z.literal("process"),
   spriteName: z.string().min(1),
+  /** Keys the /tmp sentinel files (stdout/stderr/rc/stdin). */
   processId: z.string().min(1),
+  /**
+   * The server's own id for the detached session, captured from `session_info`
+   * at launch. Required: without it a process is unaddressable — the session
+   * listing reports the inner argv, so nothing we embedded in the wrapper is
+   * findable, and both liveness and kill would silently no-op.
+   */
+  sessionId: z.string().min(1),
 });
 const spritesReferenceSchema = z.object({
   provider: z.literal("sprites"),
@@ -210,7 +218,7 @@ export class SpritesComputeBackend implements ComputeBackend {
       `timeout ${timeoutSecs} bash -c ${shellQuote(input.command)} ` +
       `< ${stdinPath} > ${outPath} 2> ${errPath}; ` +
       `printf %s "$?" > ${rcPath}`;
-    await this.client.execDetached(spriteName, {
+    const sessionId = await this.client.execDetached(spriteName, {
       argv: ["bash", "-c", wrapper],
       detachable: true,
       // Outlive the command's own timeout, so the wrapper always gets to write
@@ -219,7 +227,7 @@ export class SpritesComputeBackend implements ComputeBackend {
       ...(input.env === undefined ? {} : { env: input.env }),
     });
 
-    const process = this.processReference(spriteName, processId);
+    const process = this.processReference(spriteName, processId, sessionId);
     // Settle-quickly poll: most commands (an `echo`, a `git status`) are done
     // before the caller could poll, and reporting them `running` costs a whole
     // extra round-trip upstream.
@@ -250,7 +258,11 @@ export class SpritesComputeBackend implements ComputeBackend {
     const exitCode = await this.readRc(spriteName, payload.processId);
     if (exitCode !== undefined) return { status: "exited", exitCode };
     const sessions = await this.client.listSessions(spriteName);
-    if (sessions.some((session) => session.command.includes(payload.processId))) {
+    // Presence of the session id is the ONLY liveness signal. Not the row's
+    // `is_active` (live, that read `false` for a running `sleep 120` — it means
+    // "a client is attached"), and never a substring of `command`, which carries
+    // the inner process's argv rather than our wrapper.
+    if (sessions.some((session) => session.sessionId === payload.sessionId)) {
       return { status: "running" };
     }
     // No session and no rc file: the process went away without recording an
@@ -282,7 +294,7 @@ export class SpritesComputeBackend implements ComputeBackend {
     const payload = this.processPayload(process);
     this.requireProcessRuntime(spriteName, payload.spriteName);
     const sessions = await this.client.listSessions(spriteName);
-    const session = sessions.find((entry) => entry.command.includes(payload.processId));
+    const session = sessions.find((entry) => entry.sessionId === payload.sessionId);
     // No session: the command already exited. Nothing to signal.
     if (session) {
       try {
@@ -319,10 +331,9 @@ export class SpritesComputeBackend implements ComputeBackend {
     // The client validates the shape and throws on a 404 or a malformed body —
     // it can never answer `[]` for a directory it failed to read.
     const entries = await this.client.fsList(this.runtimeName(runtime), path);
-    return entries.map((entry) => ({
-      name: entry.name,
-      type: entry.isDir ? ("directory" as const) : ("file" as const),
-    }));
+    // The client resolved the entry's own `type` string; a symlink stays a
+    // symlink here rather than being flattened into a file.
+    return entries.map((entry) => ({ name: entry.name, type: entry.type }));
   }
 
   async readFile(
@@ -354,6 +365,9 @@ export class SpritesComputeBackend implements ComputeBackend {
     if (!options.overwrite && (await this.pathExists(runtime, path))) {
       throw new ComputeError("provider_transient", "sprites_file_already_exists");
     }
+    // `createParents:false` is a request the server does not honour — it creates
+    // parents either way (live probe). See `fsWrite`; we do not simulate the
+    // constraint locally rather than pretend it is enforced.
     await this.client.fsWrite(this.runtimeName(runtime), path, bytes, options.createParents);
   }
 
@@ -464,10 +478,17 @@ export class SpritesComputeBackend implements ComputeBackend {
         `sprites_stat_unanswered: unparsable output ${JSON.stringify(result.stdout)}`,
       );
     }
-    if (/No such file/i.test(result.stderr)) return null;
+    // Matched against BOTH streams: a session that has already exited replays
+    // through the server's "fast_path", where stdout and stderr arrive MERGED on
+    // stream 1 and no stream-2 frame is sent at all (live, 2026-08-04, for this
+    // exact `stat`). Reading `stderr` alone turned "absent" into
+    // `sprites_stat_unanswered`, breaking `pathExists`, `writeFile({overwrite:
+    // false})`, `movePath` and `inspectPath`. When we attach before the exit,
+    // stderr does arrive on stream 2 — both shapes must answer.
+    if (/No such file/i.test(`${result.stdout}\n${result.stderr}`)) return null;
     throw new ComputeError(
       "provider_transient",
-      `sprites_stat_unanswered: exit ${result.exitCode} ${result.stderr.trim()}`,
+      `sprites_stat_unanswered: exit ${result.exitCode} ${(result.stderr.trim() || result.stdout.trim()).slice(0, 200)}`,
     );
   }
 
@@ -547,16 +568,26 @@ export class SpritesComputeBackend implements ComputeBackend {
     return { provider: this.id, version: 1, payload: { kind: "recovery", spriteName } };
   }
 
-  private processReference(spriteName: string, processId: string): BackendProcessReference {
-    return { provider: this.id, version: 1, payload: { kind: "process", spriteName, processId } };
+  private processReference(
+    spriteName: string,
+    processId: string,
+    sessionId: string,
+  ): BackendProcessReference {
+    return {
+      provider: this.id,
+      version: 1,
+      payload: { kind: "process", spriteName, processId, sessionId },
+    };
   }
 }
 
 /**
  * Where a process's stdout/stderr/exit-code/stdin live. Keyed by a per-launch
- * uuid, so a sentinel can never be read for the wrong process — and the id's
- * presence inside the wrapper's own command string is what makes the session
- * findable in `listSessions`.
+ * uuid, so a sentinel can never be read for the wrong process.
+ *
+ * The id is NOT how the session is found: the listing reports the inner
+ * process's argv, not our wrapper, so the session is addressed by the id the
+ * server disclosed at launch (`sessionId` on the process reference).
  */
 function sentinelPath(kind: "in" | "out" | "err" | "rc", processId: string): string {
   return `/tmp/.nadi-${kind}-${processId}`;

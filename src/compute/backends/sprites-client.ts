@@ -6,8 +6,9 @@ import { ComputeError } from "../errors";
  * This file is deliberately the ONLY place that knows sprites wire shapes:
  * paths, snake_case field names, and the exec frame protocol. The backend above
  * it speaks the provider-neutral compute vocabulary, so correcting a wrong
- * assumption here (several of the endpoint details below are inferred from the
- * vendor's JS SDK, not from a live probe) never reaches past this seam.
+ * assumption here never reaches past this seam. The wire shapes marked LIVE
+ * below were captured against the real API on 2026-08-04; the rest still comes
+ * from the vendor's JS SDK.
  *
  * Exec runs over a WebSocket upgrade exclusively — the plain `POST /exec` route
  * is not used, because it cannot express detachable sessions.
@@ -36,9 +37,16 @@ export interface SpritesSessionInfo {
   command: string;
 }
 
+export type SpritesFsEntryType = "file" | "directory" | "symlink" | "other";
+
 export interface SpritesFsEntry {
   name: string;
-  isDir: boolean;
+  /**
+   * Derived from the entry's own `type` string, NOT from `isDir`: the live
+   * listing reports a symlink as `type:"symlink"` with `isDir:false`, so reading
+   * `isDir` silently demotes every link to a file.
+   */
+  type: SpritesFsEntryType;
   size: number;
 }
 
@@ -53,13 +61,20 @@ export interface SpritesClient {
   setMemoryPolicy(name: string, limitMb: number): Promise<void>;
   /** WS exec, buffered to completion. */
   execCollect(name: string, options: SpritesExecOptions): Promise<SpritesExecResult>;
-  /** WS exec with detachable=true; connects, confirms launch, disconnects. */
-  execDetached(name: string, options: SpritesExecOptions): Promise<void>;
+  /**
+   * WS exec with detachable=true; connects, waits for the server's
+   * `session_info` frame, disconnects, and RETURNS that session id.
+   *
+   * The id is the only durable handle on a detached run: the session listing
+   * reports the INNER process's argv (`sleep 120`), never the wrapper script we
+   * sent, so nothing we embed in the command is findable afterwards.
+   */
+  execDetached(name: string, options: SpritesExecOptions): Promise<string>;
   listSessions(name: string): Promise<SpritesSessionInfo[]>;
   killSession(name: string, sessionId: string, signal: SpritesSignal): Promise<void>;
-  /** `null` = 404, i.e. the path is absent. */
+  /** `null` = the path is absent (a 404 whose body says ENOENT). */
   fsRead(name: string, path: string): Promise<{ bytes: ArrayBuffer; mimeType?: string } | null>;
-  fsWrite(name: string, path: string, bytes: ArrayBuffer, mkdir: boolean): Promise<void>;
+  fsWrite(name: string, path: string, bytes: ArrayBuffer, mkdirParents: boolean): Promise<void>;
   fsList(name: string, path: string): Promise<SpritesFsEntry[]>;
 }
 
@@ -74,6 +89,37 @@ export interface SpritesClientOptions {
 
 export const SPRITES_DEFAULT_BASE_URL = "https://api.sprites.dev/v1";
 
+/**
+ * Every REST call is bounded, matching the vendor SDK (30s per request, 120s
+ * for creation). Nothing else stops a stalled `fsRead`/`listSessions` from
+ * pinning the Durable Object turn it runs inside until the platform kills it.
+ */
+const REQUEST_TIMEOUT_MS = 30_000;
+const CREATE_TIMEOUT_MS = 120_000;
+
+/**
+ * The `workingDir` every `/fs` route resolves relative paths against. We only
+ * ever send absolute paths, so this is belt-and-braces — but the SDK sends it on
+ * every call and a server default we never observed is not something to rely on.
+ */
+const FS_WORKING_DIR = "/";
+
+/**
+ * How long `execCollect` waits for the authoritative binary exit frame after the
+ * server has ANNOUNCED an exit in text. Long enough for the frame that always
+ * followed it live, short enough that a server which only ever sends the text
+ * form does not hang the caller until its own timeout.
+ */
+const TEXT_EXIT_GRACE_MS = 250;
+
+/**
+ * How long `execDetached` waits for the `session_info` frame that names the
+ * session it just launched. The live server sent it inside the same tick as the
+ * upgrade; without it we have no handle on the process at all, so waiting is
+ * mandatory and failing is better than returning an unaddressable run.
+ */
+const SESSION_INFO_TIMEOUT_MS = 10_000;
+
 type QueryValue = string | number | boolean | undefined;
 
 /**
@@ -87,6 +133,47 @@ function mapError(status: number, context: string): ComputeError {
     return new ComputeError("compute_unavailable", `${context}: ${status}`);
   }
   return new ComputeError("provider_transient", `${context}: ${status}`);
+}
+
+/**
+ * The listing's `type` string -> our vocabulary. Anything outside the three the
+ * SDK names (`file`, `directory`, `symlink`) becomes `other` rather than a
+ * throw: a socket or device node in a directory is a listable entry, not a
+ * malformed response.
+ */
+function toEntryType(raw: string): SpritesFsEntryType {
+  if (raw === "directory") return "directory";
+  if (raw === "symlink") return "symlink";
+  if (raw === "file") return "file";
+  return "other";
+}
+
+/**
+ * Does this 404 body say "that FILE does not exist" (as opposed to "that sprite
+ * does not exist")?
+ *
+ * The `/fs` routes answer errors as `{error, code, path}` and the vendor SDK's
+ * `parseErrorCode` maps the `code` field through a fixed table whose absent-file
+ * member is `ENOENT` (`src/filesystem.ts`, `src/types.ts:FilesystemErrorCode`) —
+ * that is where the string comes from. `code` is typed optional there, so a
+ * body with no code falls back to the error TEXT, matched narrowly enough that
+ * a sprite-level "sprite not found" cannot satisfy it.
+ *
+ * Consumes the response body; only ever called on a path that will not read it
+ * again.
+ */
+async function isFileNotFound(response: Response): Promise<boolean> {
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    return false;
+  }
+  const row = payload as { code?: unknown; error?: unknown } | null;
+  if (typeof row?.code === "string" && row.code.length > 0) {
+    return row.code.toUpperCase() === "ENOENT";
+  }
+  return typeof row?.error === "string" && /no such file|does not exist/i.test(row.error);
 }
 
 /**
@@ -121,12 +208,35 @@ export function parseExecFrame(data: ArrayBuffer): { stream: 1 | 2 | 3; payload:
 }
 
 /**
+ * `{"type":"session_info","session_id":"15",...}` -> `"15"`, anything else ->
+ * `undefined`.
+ *
+ * This frame is the ONLY place the server names the session it just created.
+ * The session listing reports the inner process's argv, so nothing we put in
+ * the command line comes back — capturing this id at launch is the only way to
+ * ever address a detached run again.
+ */
+export function parseSessionId(data: string): string | undefined {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(data);
+  } catch {
+    return undefined;
+  }
+  const row = payload as { type?: unknown; session_id?: unknown } | null;
+  if (row?.type !== "session_info") return undefined;
+  if (typeof row.session_id !== "string" || row.session_id.length === 0) return undefined;
+  return row.session_id;
+}
+
+/**
  * `{"type":"exit","exit_code":N}` -> N, anything else -> `undefined`.
  *
  * The server announces completion TWICE: this text notification and the binary
- * stream-3 frame (the live probe saw both, text first). Either is authoritative
- * and whichever lands first settles the run — the socket is FIFO, so all output
- * frames precede both.
+ * stream-3 frame (the live probe saw both, text first). The BINARY frame is the
+ * one we settle on: the text notification can precede trailing output, so
+ * resolving on it truncates stdout. The code it carries is recorded and used
+ * only if the socket closes (or a short grace elapses) with no binary frame.
  *
  * An `exit` message whose `exit_code` is absent or not an integer returns
  * `undefined` rather than `0`, for the same reason `parseExecFrame` rejects a
@@ -197,6 +307,7 @@ class SpritesHttpClient implements SpritesClient {
     query?: Record<string, QueryValue>,
     body?: unknown,
     rawBody?: ArrayBuffer,
+    timeoutMs: number = REQUEST_TIMEOUT_MS,
   ): Promise<Response> {
     const headers: Record<string, string> = { Authorization: `Bearer ${this.apiKey}` };
     let payload: BodyInit | undefined;
@@ -211,10 +322,16 @@ class SpritesHttpClient implements SpritesClient {
       return await this.doFetch(this.url(path, query).toString(), {
         method,
         headers,
+        signal: AbortSignal.timeout(timeoutMs),
         ...(payload === undefined ? {} : { body: payload }),
       });
     } catch (error) {
-      // Transport failure — never a provider verdict, always worth a retry.
+      // Transport failure — never a provider verdict, always worth a retry. An
+      // abort is the timeout above firing, and is named so the log says which.
+      const name = error instanceof Error ? error.name : "";
+      if (name === "TimeoutError" || name === "AbortError") {
+        throw new ComputeError("provider_transient", `sprites_request_timeout: ${path}`);
+      }
       throw new ComputeError(
         "provider_transient",
         `sprites_request_failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -231,10 +348,15 @@ class SpritesHttpClient implements SpritesClient {
   }
 
   async createSprite(name: string, input: { environment?: Record<string, string> }): Promise<void> {
-    const response = await this.request("POST", "/sprites", undefined, {
-      name,
-      environment: input.environment ?? {},
-    });
+    const response = await this.request(
+      "POST",
+      "/sprites",
+      undefined,
+      { name, environment: input.environment ?? {} },
+      undefined,
+      // Creation provisions a machine; the SDK gives it four times the budget.
+      CREATE_TIMEOUT_MS,
+    );
     if (!response.ok) throw mapError(response.status, "sprites_create_failed");
   }
 
@@ -286,7 +408,9 @@ class SpritesHttpClient implements SpritesClient {
       "POST",
       `/sprites/${encodeURIComponent(name)}/policy/resources`,
       undefined,
-      { memory: { limit_mb: limitMb, autoscale: true } },
+      // `autoscale: true` makes `limit_mb` advisory — the sprite grows past it
+      // and the bill grows with it. The profile limit is meant to be a CAP.
+      { memory: { limit_mb: limitMb, autoscale: false } },
     );
     if (!response.ok) throw mapError(response.status, "sprites_memory_policy_failed");
   }
@@ -295,12 +419,22 @@ class SpritesHttpClient implements SpritesClient {
     const response = await this.request("GET", `/sprites/${encodeURIComponent(name)}/exec`);
     if (!response.ok) throw mapError(response.status, "sprites_sessions_failed");
     const payload = await this.json(response, "sprites_sessions_unexpected_shape");
-    if (!Array.isArray(payload)) {
+    // LIVE (2026-08-04): `{"count":1,"sessions":[{"id":"15","command":"sleep
+    // 120",...}]}`. A bare array is NOT what this route returns; a missing or
+    // non-array `sessions` still throws rather than degrading to "no sessions",
+    // because callers read an empty listing as "the process is gone".
+    const sessions = (payload as { sessions?: unknown } | null)?.sessions;
+    if (!Array.isArray(sessions)) {
       throw new ComputeError("provider_transient", "sprites_sessions_unexpected_shape");
     }
-    return payload.map((entry) => {
+    return sessions.map((entry) => {
+      // `id` is the live key; `session_id` is kept as a tolerated alias.
+      //
+      // NOTE: the row also carries `is_active`, which is NOT liveness — live, it
+      // read `false` while `sleep 120` was genuinely running. It means "a client
+      // is attached". Presence in this list is the only liveness signal.
       const row = entry as { session_id?: unknown; id?: unknown; command?: unknown } | null;
-      const sessionId = typeof row?.session_id === "string" ? row.session_id : row?.id;
+      const sessionId = typeof row?.id === "string" ? row.id : row?.session_id;
       if (typeof sessionId !== "string" || sessionId.length === 0) {
         throw new ComputeError("provider_transient", "sprites_sessions_unexpected_shape");
       }
@@ -329,9 +463,16 @@ class SpritesHttpClient implements SpritesClient {
   ): Promise<{ bytes: ArrayBuffer; mimeType?: string } | null> {
     const response = await this.request("GET", `/sprites/${encodeURIComponent(name)}/fs/read`, {
       path,
+      workingDir: FS_WORKING_DIR,
     });
-    // The one endpoint where 404 is an answer, not a fault.
-    if (response.status === 404) return null;
+    // The one endpoint where 404 CAN be an answer rather than a fault — but only
+    // when the body says the FILE is missing. A deleted sprite 404s here too,
+    // and reading that as "empty file" reported a dead sprite's process as
+    // having produced no output at all.
+    if (response.status === 404) {
+      if (await isFileNotFound(response)) return null;
+      throw mapError(404, "sprites_fs_read_failed");
+    }
     if (!response.ok) throw mapError(response.status, "sprites_fs_read_failed");
     const bytes = await response.arrayBuffer();
     const contentType = response.headers.get("Content-Type")?.split(";")[0]?.trim();
@@ -340,11 +481,25 @@ class SpritesHttpClient implements SpritesClient {
       : { bytes };
   }
 
-  async fsWrite(name: string, path: string, bytes: ArrayBuffer, mkdir: boolean): Promise<void> {
+  /**
+   * `mkdirParents` is the SDK's spelling of the parent-creation flag.
+   *
+   * LIVE PROBE (2026-08-04): parents were created under BOTH `mkdir` and
+   * `mkdirParents`, and under neither — the server appears to create them
+   * unconditionally. So `false` here is a REQUEST, not an enforced constraint,
+   * and no caller may treat a write as having failed because a parent was
+   * missing. We do not fake the enforcement locally.
+   */
+  async fsWrite(
+    name: string,
+    path: string,
+    bytes: ArrayBuffer,
+    mkdirParents: boolean,
+  ): Promise<void> {
     const response = await this.request(
       "PUT",
       `/sprites/${encodeURIComponent(name)}/fs/write`,
-      { path, mkdir },
+      { path, workingDir: FS_WORKING_DIR, mkdirParents },
       undefined,
       bytes,
     );
@@ -354,30 +509,33 @@ class SpritesHttpClient implements SpritesClient {
   async fsList(name: string, path: string): Promise<SpritesFsEntry[]> {
     const response = await this.request("GET", `/sprites/${encodeURIComponent(name)}/fs/list`, {
       path,
+      workingDir: FS_WORKING_DIR,
     });
     if (!response.ok) throw mapError(response.status, "sprites_fs_list_failed");
     const payload = await this.json(response, "sprites_list_unexpected_shape");
+    // LIVE (2026-08-04): `{"path":"/workspace","entries":[...],"count":2}` — a
+    // WRAPPER, not a bare array.
+    //
     // Mirrors `daytona.ts:652-661`: a listing that does not parse must throw,
     // never map to `[]`. An empty list is a positive claim ("this directory is
-    // empty") that higher layers act on destructively; a shape mismatch is not
-    // evidence for it.
-    if (!Array.isArray(payload)) {
+    // empty") that higher layers act on destructively; a missing or non-array
+    // `entries` is not evidence for it.
+    const entries = (payload as { entries?: unknown } | null)?.entries;
+    if (!Array.isArray(entries)) {
       throw new ComputeError("provider_transient", "sprites_list_unexpected_shape");
     }
-    return payload.map((entry) => {
-      const row = entry as {
-        name?: unknown;
-        is_dir?: unknown;
-        isDir?: unknown;
-        size?: unknown;
-      } | null;
+    return entries.map((entry) => {
+      const row = entry as { name?: unknown; type?: unknown; size?: unknown } | null;
       const entryName = row?.name;
       if (typeof entryName !== "string" || entryName.length === 0 || entryName.includes("/")) {
         throw new ComputeError("provider_transient", "sprites_list_unexpected_shape");
       }
+      if (typeof row?.type !== "string" || row.type.length === 0) {
+        throw new ComputeError("provider_transient", "sprites_list_unexpected_shape");
+      }
       return {
         name: entryName,
-        isDir: row?.is_dir === true || row?.isDir === true,
+        type: toEntryType(row.type),
         size: typeof row?.size === "number" ? row.size : 0,
       };
     });
@@ -444,11 +602,15 @@ class SpritesHttpClient implements SpritesClient {
       let stderr = "";
       let settled = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
+      /** The text `exit` code, held until the binary frame or the socket close. */
+      let textExitCode: number | undefined;
+      let graceTimer: ReturnType<typeof setTimeout> | undefined;
 
       const settle = (fn: () => void) => {
         if (settled) return;
         settled = true;
         if (timer !== undefined) clearTimeout(timer);
+        if (graceTimer !== undefined) clearTimeout(graceTimer);
         try {
           ws.close();
         } catch {
@@ -497,11 +659,20 @@ class SpritesHttpClient implements SpritesClient {
         // `port_opened`) — and `exit`, which is a completion signal in its own
         // right; see `parseTextExitCode`.
         if (typeof data === "string") {
-          const textExitCode = parseTextExitCode(data);
-          if (textExitCode === undefined) return;
-          stdout += stdoutDecoder.decode();
-          stderr += stderrDecoder.decode();
-          settle(() => resolve({ exitCode: textExitCode, stdout, stderr }));
+          const announced = parseTextExitCode(data);
+          if (announced === undefined) return;
+          // RECORD, do not settle: the text notification can arrive before the
+          // last output frames, and settling here truncates them. The binary
+          // stream-3 frame is authoritative; this code is the fallback for a
+          // close (or a stalled server) that never sends one.
+          textExitCode = announced;
+          if (graceTimer === undefined) {
+            graceTimer = setTimeout(() => {
+              stdout += stdoutDecoder.decode();
+              stderr += stderrDecoder.decode();
+              settle(() => resolve({ exitCode: announced, stdout, stderr }));
+            }, TEXT_EXIT_GRACE_MS);
+          }
           return;
         }
         if (!(data instanceof ArrayBuffer) && !ArrayBuffer.isView(data)) return;
@@ -535,6 +706,15 @@ class SpritesHttpClient implements SpritesClient {
       });
 
       ws.addEventListener("close", (event: never) => {
+        // A close after an announced text exit is a complete run: every output
+        // frame preceded the close, so the recorded code is now safe to use.
+        if (textExitCode !== undefined) {
+          const announced = textExitCode;
+          stdout += stdoutDecoder.decode();
+          stderr += stderrDecoder.decode();
+          settle(() => resolve({ exitCode: announced, stdout, stderr }));
+          return;
+        }
         // No exit frame means the command's outcome is unknown — reporting a
         // fabricated exit code here would let a killed run read as success.
         //
@@ -576,20 +756,73 @@ class SpritesHttpClient implements SpritesClient {
     });
   }
 
-  async execDetached(name: string, options: SpritesExecOptions): Promise<void> {
+  /**
+   * Launch a detached session and return the server's id for it.
+   *
+   * Waiting for `session_info` is not an optimisation — it is the only moment
+   * the session id is ever disclosed. The alternative we shipped before (embed a
+   * marker in the wrapper script and substring-match the session listing) can
+   * never work: the listing reports the INNER argv (`sleep 120`), so the marker
+   * is not in it, every background process read as `failed`, and every
+   * `stopProcess` silently killed nothing.
+   */
+  async execDetached(name: string, options: SpritesExecOptions): Promise<string> {
     const ws = await this.openExecSocket(name, { ...options, detachable: true });
-    // Nothing is read off this socket, so there is nothing to attach — but the
-    // ordering rule still holds: `accept()` is the last thing before the wait,
-    // and any future listener belongs above it, not after.
-    ws.accept();
-    // The command is launched server-side on connection, so one macrotask after
-    // the socket is accepted is enough to confirm the launch. The macrotask is
-    // sequenced strictly after the 101 upgrade resolved AND after `accept()`,
-    // so it cannot fire on a socket that is not yet open; it observes no frame,
-    // so no dropped frame can affect it. The process's survival does not depend
-    // on this socket — the detachable session does.
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    ws.close();
+    return await new Promise<string>((resolve, reject) => {
+      let settled = false;
+      const settle = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try {
+          // Closing the socket does NOT stop the run: `detachable=true` keeps
+          // the session alive past the disconnect (verified live).
+          ws.close();
+        } catch {
+          // Already closed by the peer.
+        }
+        fn();
+      };
+
+      const timer = setTimeout(() => {
+        settle(() =>
+          reject(new ComputeError("provider_transient", "sprites_exec_no_session_info")),
+        );
+      }, SESSION_INFO_TIMEOUT_MS);
+
+      // Listeners FIRST, `accept()` last — see `openExecSocket`. A dropped
+      // `session_info` here is an unaddressable process, not a lost log line.
+      ws.addEventListener("message", (event: never) => {
+        const data = (event as { data: unknown }).data;
+        if (typeof data !== "string") return;
+        const sessionId = parseSessionId(data);
+        if (sessionId === undefined) return;
+        settle(() => resolve(sessionId));
+      });
+
+      ws.addEventListener("close", () => {
+        settle(() =>
+          reject(new ComputeError("provider_transient", "sprites_exec_no_session_info: closed")),
+        );
+      });
+
+      ws.addEventListener("error", () => {
+        settle(() => reject(new ComputeError("provider_transient", "sprites_exec_socket_error")));
+      });
+
+      try {
+        ws.accept();
+      } catch (error) {
+        settle(() =>
+          reject(
+            new ComputeError(
+              "provider_transient",
+              `sprites_exec_upgrade_failed: ${error instanceof Error ? error.message : String(error)}`,
+            ),
+          ),
+        );
+      }
+    });
   }
 }
 

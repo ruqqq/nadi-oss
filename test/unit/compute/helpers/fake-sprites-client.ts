@@ -22,6 +22,16 @@ import { ComputeError } from "../../../../src/compute/errors";
  *  - The exec interpreter understands ONLY the argv shapes the backend
  *    generates. Anything else exits 127 with `command not found` — a loud
  *    signal to extend this file rather than to special-case the backend.
+ *
+ * Two fidelity rules this file learned the hard way, both from live probes:
+ *
+ *  - A launched session's `command` is the INNER process's argv (`sleep 30`),
+ *    NOT the wrapper script we sent. Modelling the wrapper here is what let a
+ *    "find the session by the process id in its command" backend stay green
+ *    while being unable to find anything in production.
+ *  - `execDetached` returns the server's session id, and that id has no
+ *    relationship to our process id. Any backend that tries to derive one from
+ *    the other fails here.
  */
 
 interface FakeSession {
@@ -98,9 +108,16 @@ export class FakeSpritesClient implements SpritesClient {
    * session — a process that exits between the list and the kill.
    */
   dropSessionsOnNextList = false;
+  /**
+   * When set, every `execCollect` comes back with stderr folded into stdout and
+   * an EMPTY stderr — the shape a replayed (already-exited) session has live.
+   */
+  mergeExecStreams = false;
 
   private readonly sprites = new Map<string, FakeSprite>();
   private sessionSeq = 0;
+  /** The id `execDetached` handed out, for the wrapper interpreter to register. */
+  private pendingSessionId: string | undefined;
 
   async createSprite(name: string, input: { environment?: Record<string, string> }): Promise<void> {
     this.calls.push(`createSprite:${name}`);
@@ -156,12 +173,31 @@ export class FakeSpritesClient implements SpritesClient {
   async execCollect(name: string, options: SpritesExecOptions): Promise<SpritesExecResult> {
     this.calls.push(`execCollect:${describeExec(options)}`);
     this.execCollectOptions.push({ ...options });
-    return this.runExec(name, options);
+    const result = this.runExec(name, options);
+    if (!this.mergeExecStreams) return result;
+    // The server's "fast_path": a session that already exited replays with
+    // stdout and stderr MERGED on stream 1 and no stream-2 frame at all, so
+    // `stderr` arrives empty with its content sitting in `stdout`.
+    return {
+      exitCode: result.exitCode,
+      stdout: `${result.stderr}${result.stdout}`,
+      stderr: "",
+    };
   }
 
-  async execDetached(name: string, options: SpritesExecOptions): Promise<void> {
+  /**
+   * Returns the session id the server discloses in its `session_info` frame.
+   * The id is minted here and deliberately shares nothing with the process id —
+   * the real one is a small integer counter on the server.
+   */
+  async execDetached(name: string, options: SpritesExecOptions): Promise<string> {
     this.calls.push(`execDetached:${describeExec(options)}`);
+    this.sessionSeq += 1;
+    const sessionId = String(this.sessionSeq);
+    this.pendingSessionId = sessionId;
     this.runExec(name, options);
+    this.pendingSessionId = undefined;
+    return sessionId;
   }
 
   async listSessions(name: string): Promise<SpritesSessionInfo[]> {
@@ -217,10 +253,18 @@ export class FakeSpritesClient implements SpritesClient {
     return { bytes: toArrayBuffer(file) };
   }
 
-  async fsWrite(name: string, path: string, bytes: ArrayBuffer, mkdir: boolean): Promise<void> {
+  async fsWrite(
+    name: string,
+    path: string,
+    bytes: ArrayBuffer,
+    mkdirParents: boolean,
+  ): Promise<void> {
     this.calls.push(`fsWrite:${path}`);
     const sprite = this.alive(name);
-    if (mkdir) addDirs(sprite, parentPath(path));
+    // Parents are created REGARDLESS of the flag: the live server does that, and
+    // a fake that enforced `false` would test a constraint nothing upholds.
+    void mkdirParents;
+    addDirs(sprite, parentPath(path));
     sprite.files.set(path, new Uint8Array(bytes.slice(0)));
   }
 
@@ -237,15 +281,22 @@ export class FakeSpritesClient implements SpritesClient {
     if (!sprite.dirs.has(path)) {
       throw new ComputeError("runtime_missing", "sprites_fs_list_failed: 404");
     }
+    // The real listing carries a `type` string per entry, which is why a symlink
+    // survives as one here instead of being flattened by an `isDir` boolean.
     const entries: SpritesFsEntry[] = [];
     for (const [filePath, contents] of sprite.files) {
       if (parentPath(filePath) === path) {
-        entries.push({ name: baseName(filePath), isDir: false, size: contents.byteLength });
+        entries.push({ name: baseName(filePath), type: "file", size: contents.byteLength });
       }
     }
     for (const dir of sprite.dirs) {
       if (dir !== path && parentPath(dir) === path) {
-        entries.push({ name: baseName(dir), isDir: true, size: 0 });
+        entries.push({ name: baseName(dir), type: "directory", size: 0 });
+      }
+    }
+    for (const [linkPath, size] of sprite.links) {
+      if (parentPath(linkPath) === path) {
+        entries.push({ name: baseName(linkPath), type: "symlink", size });
       }
     }
     return entries;
@@ -347,8 +398,12 @@ export class FakeSpritesClient implements SpritesClient {
       return { exitCode: 0, stdout: "", stderr: "" };
     }
     if (/^\s*sleep\b/.test(inner)) {
-      this.sessionSeq += 1;
-      sprite.sessions.set(`sess-${this.sessionSeq}`, { command: script, killed: false });
+      if (this.pendingSessionId === undefined) {
+        throw new Error("a long-running command must be launched through execDetached");
+      }
+      // `command` is the INNER argv, exactly as the live listing reports it —
+      // the wrapper script, and therefore the process id, is NOT in it.
+      sprite.sessions.set(this.pendingSessionId, { command: inner, killed: false });
       return { exitCode: 0, stdout: "", stderr: "" };
     }
     const stdin =

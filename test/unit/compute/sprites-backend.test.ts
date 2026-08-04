@@ -18,8 +18,21 @@ function spriteNameOf(reference: BackendReference): string {
   return (reference.payload as { spriteName: string }).spriteName;
 }
 
-function processReference(spriteName: string, processId: string): BackendReference {
-  return { provider: "sprites", version: 1, payload: { kind: "process", spriteName, processId } };
+/**
+ * `sessionId` is the server's own id for the detached run, captured at launch —
+ * the only handle that can find or kill it. It shares nothing with `processId`,
+ * which keys the /tmp sentinels.
+ */
+function processReference(
+  spriteName: string,
+  processId: string,
+  sessionId = "sess-unknown",
+): BackendReference {
+  return {
+    provider: "sprites",
+    version: 1,
+    payload: { kind: "process", spriteName, processId, sessionId },
+  };
 }
 
 describe("SpritesComputeBackend.acquire", () => {
@@ -201,26 +214,45 @@ describe("SpritesComputeBackend process lifecycle", () => {
     ).toEqual({ status: "failed" });
   });
 
-  it("reports running while a session's command carries the process id", async () => {
+  // LIVE (2026-08-04): the session listing reports the INNER process's argv, so
+  // the wrapper we sent — and every marker in it — is absent from `command`.
+  // Liveness is decided by the captured session id and nothing else.
+  it("reports running from the captured session id, with the process id nowhere in the command", async () => {
     const { backend, client } = createFakeSpritesBackend();
     const runtime = await backend.acquire(SPEC);
     const spriteName = spriteNameOf(runtime);
-    client.seedSession(spriteName, "sess-live", "timeout 60 bash -c 'sleep 30' > /tmp/x-pid-live");
+    client.seedSession(spriteName, "15", "sleep 30");
 
     expect(
-      await backend.getProcessStatus(runtime, processReference(spriteName, "pid-live")),
+      await backend.getProcessStatus(runtime, processReference(spriteName, "pid-live", "15")),
     ).toEqual({ status: "running" });
+  });
+
+  it("does NOT report running for a foreign session that happens to mention the process id", async () => {
+    // The old substring match would have called this running. It is a different
+    // session; ours is gone, and `failed` is the honest answer.
+    const { backend, client } = createFakeSpritesBackend();
+    const runtime = await backend.acquire(SPEC);
+    const spriteName = spriteNameOf(runtime);
+    client.seedSession(spriteName, "99", "bash -c 'echo pid-live'");
+
+    expect(
+      await backend.getProcessStatus(runtime, processReference(spriteName, "pid-live", "15")),
+    ).toEqual({ status: "failed" });
   });
 
   it("prefers the rc file over the session list — an exit may only move forward", async () => {
     const { backend, client } = createFakeSpritesBackend();
     const runtime = await backend.acquire(SPEC);
     const spriteName = spriteNameOf(runtime);
-    client.seedSession(spriteName, "sess-stale", "bash -c ... pid-both ...");
+    client.seedSession(spriteName, "sess-stale", "sleep 30");
     client.seedFile(spriteName, "/tmp/.nadi-rc-pid-both", "3");
 
     expect(
-      await backend.getProcessStatus(runtime, processReference(spriteName, "pid-both")),
+      await backend.getProcessStatus(
+        runtime,
+        processReference(spriteName, "pid-both", "sess-stale"),
+      ),
     ).toEqual({ status: "exited", exitCode: 3 });
   });
 
@@ -228,12 +260,15 @@ describe("SpritesComputeBackend process lifecycle", () => {
     const { backend, client } = createFakeSpritesBackend();
     const runtime = await backend.acquire(SPEC);
     const spriteName = spriteNameOf(runtime);
-    client.seedSession(spriteName, "sess-partial", "bash -c ... pid-partial ...");
+    client.seedSession(spriteName, "sess-partial", "sleep 30");
     // A partial write of the sentinel: not a number, so not an answer.
     client.seedFile(spriteName, "/tmp/.nadi-rc-pid-partial", "");
 
     expect(
-      await backend.getProcessStatus(runtime, processReference(spriteName, "pid-partial")),
+      await backend.getProcessStatus(
+        runtime,
+        processReference(spriteName, "pid-partial", "sess-partial"),
+      ),
     ).toEqual({ status: "running" });
   });
 
@@ -251,9 +286,13 @@ describe("SpritesComputeBackend process lifecycle", () => {
     const runtime = await backend.acquire(SPEC);
     const spriteName = spriteNameOf(runtime);
     for (const [index, mode] of (["interrupt", "terminate", "kill"] as const).entries()) {
-      client.seedSession(spriteName, `sess-${index}`, `bash -c ... pid-${index} ...`);
+      client.seedSession(spriteName, `sess-${index}`, "sleep 30");
       expect(
-        await backend.stopProcess(runtime, processReference(spriteName, `pid-${index}`), mode),
+        await backend.stopProcess(
+          runtime,
+          processReference(spriteName, `pid-${index}`, `sess-${index}`),
+          mode,
+        ),
       ).toEqual({ status: "stopped" });
     }
 
@@ -284,13 +323,17 @@ describe("SpritesComputeBackend process lifecycle", () => {
     const { backend, client } = createFakeSpritesBackend();
     const runtime = await backend.acquire(SPEC);
     const spriteName = spriteNameOf(runtime);
-    client.seedSession(spriteName, "sess-racy", "bash -c ... pid-racy ...");
+    client.seedSession(spriteName, "sess-racy", "sleep 30");
     // The session disappears between the list and the kill, so `killSession`
     // 404s on a sprite that is demonstrably alive.
     client.dropSessionsOnNextList = true;
 
     expect(
-      await backend.stopProcess(runtime, processReference(spriteName, "pid-racy"), "kill"),
+      await backend.stopProcess(
+        runtime,
+        processReference(spriteName, "pid-racy", "sess-racy"),
+        "kill",
+      ),
     ).toEqual({ status: "stopped" });
     expect(client.killCalls).toHaveLength(1);
   });
@@ -306,7 +349,7 @@ describe("SpritesComputeBackend process lifecycle", () => {
   });
 
   it("runs a background command end to end: running, then stopped and terminal", async () => {
-    const { backend } = createFakeSpritesBackend();
+    const { backend, client } = createFakeSpritesBackend();
     const runtime = await backend.acquire(SPEC);
 
     const started = await backend.startProcess(runtime, {
@@ -315,9 +358,17 @@ describe("SpritesComputeBackend process lifecycle", () => {
     });
 
     expect(started.status).toBe("running");
+    // The reference carries the SERVER's session id — the only thing that can
+    // find this run again — and it is not derived from the sentinel key.
+    const payload = started.process.payload as { processId: string; sessionId: string };
+    expect(payload.sessionId).toMatch(/^\d+$/);
+    expect(payload.sessionId).not.toBe(payload.processId);
     expect(await backend.getProcessStatus(runtime, started.process)).toEqual({ status: "running" });
 
     await backend.stopProcess(runtime, started.process, "kill");
+
+    // It killed OUR session, by the id captured at launch.
+    expect(client.killCalls.map((call) => call.sessionId)).toEqual([payload.sessionId]);
 
     // Deliberately loose about WHICH terminal status. A SIGKILL to the wrapper's
     // process group means the killed `bash` never reaches its trailing
@@ -501,6 +552,60 @@ describe("SpritesComputeBackend file operations", () => {
       size: 11,
       resolvedPath: "/workspace/link",
     });
+  });
+
+  // LIVE (2026-08-04): an already-exited session replays through the server's
+  // "fast_path", where stdout and stderr arrive MERGED on stream 1 and no
+  // stream-2 frame is sent. Matching `No such file` against stderr alone turned
+  // every absent path into `sprites_stat_unanswered`, which broke `pathExists`,
+  // `writeFile({overwrite:false})`, `movePath` and `inspectPath`.
+  it("answers absent when the stat's 'No such file' arrives merged on stdout", async () => {
+    const { backend, client } = createFakeSpritesBackend();
+    const runtime = await backend.acquire(SPEC);
+    client.mergeExecStreams = true;
+
+    expect(await backend.pathExists(runtime, "/workspace/definitely-absent")).toBe(false);
+    expect(await backend.inspectPath(runtime, "/workspace/definitely-absent")).toBeNull();
+  });
+
+  it("still answers absent when stderr arrives on its own stream", async () => {
+    // The pre-exit path, where stream 2 does carry stderr. Both must work.
+    const { backend } = createFakeSpritesBackend();
+    const runtime = await backend.acquire(SPEC);
+
+    expect(await backend.pathExists(runtime, "/workspace/definitely-absent")).toBe(false);
+  });
+
+  it("allows an overwrite:false write to an absent path under merged streams", async () => {
+    // The consequence of the bug above: a fail-closed probe that cannot answer
+    // refuses every first write.
+    const { backend, client } = createFakeSpritesBackend();
+    const runtime = await backend.acquire(SPEC);
+    client.mergeExecStreams = true;
+
+    await backend.writeFile(
+      runtime,
+      "/workspace/new.txt",
+      new TextEncoder().encode("fresh").buffer as ArrayBuffer,
+      { createParents: true, overwrite: false },
+    );
+
+    expect(client.readText(spriteNameOf(runtime), "/workspace/new.txt")).toBe("fresh");
+  });
+
+  it("reports a listed symlink as a symlink, not a file", async () => {
+    // The listing carries a `type` string; its `isDir` is `false` for a link, so
+    // reading that boolean reported every symlink as a regular file.
+    const { backend, client } = createFakeSpritesBackend();
+    const runtime = await backend.acquire(SPEC);
+    const spriteName = spriteNameOf(runtime);
+    client.seedFile(spriteName, "/workspace/real.txt", "x");
+    client.seedSymlink(spriteName, "/workspace/link", 11);
+
+    const entries = await backend.listDirectory(runtime, "/workspace");
+
+    expect(entries).toContainEqual({ name: "link", type: "symlink" });
+    expect(entries).toContainEqual({ name: "real.txt", type: "file" });
   });
 
   it("propagates a failed listing rather than reporting an empty directory", async () => {
