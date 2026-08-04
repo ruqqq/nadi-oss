@@ -1469,6 +1469,21 @@ export class ThreadComputeService {
       });
       return "discard";
     }
+    // Everything below this line is an INFERENCE about whether there is
+    // anything to lose, and the reason we act on an inference at all is
+    // billing: on providers whose idle runtime keeps burning compute, holding
+    // it is expensive. A provider that suspends itself has already stopped the
+    // meter, so inferring a discard buys only disk and risks work. The
+    // declared-clean case above still discards — that is stated intent, not a
+    // guess.
+    if (this.deps.backend.nativeIdleSuspend === true) {
+      log.info("compute.retention_decision", {
+        threadId: this.deps.threadId,
+        disposition: "recoverable",
+        reason: "provider_native_idle",
+      });
+      return "recoverable";
+    }
     const cleanliness = (await this.deps.probeWorkspaceCleanliness?.()) ?? {
       state: "probe_failed" as const,
       reason: "probe_unavailable",

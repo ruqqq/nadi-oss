@@ -1086,6 +1086,72 @@ describe("retention: preserve by default, discard only on proof", () => {
     infoSpy.mockRestore();
   });
 
+  /**
+   * The inferred discards (git-clean, empty workspace) exist to stop a runtime
+   * that would otherwise bill while idle — Daytona and Cloudflare deliberately
+   * disable native idle handling. A provider that suspends itself (Sprites)
+   * already stopped the meter, so inferring a discard buys only disk and pays
+   * for it in destroyed work. A real user lost a sandbox exactly this way.
+   */
+  describe("providers that suspend an idle runtime themselves", () => {
+    const nativeIdleBackend = () =>
+      Object.assign(new FakeComputeBackend(), { nativeIdleSuspend: true });
+
+    it("preserves an EMPTY workspace instead of discarding it on inference", async () => {
+      const backend = nativeIdleBackend();
+      const { service } = createService({
+        backend,
+        isSandboxDeclaredClean: async () => false,
+        probeWorkspaceCleanliness: async () => ({ state: "no_repo" as const, hasFiles: false }),
+      });
+      await makeIdle(service);
+      await service.releaseIfIdle();
+      expect(backend.releaseCalls[0]?.options.disposition).toBe("recoverable");
+    });
+
+    it("preserves a git-clean workspace too, and skips the probe round-trip", async () => {
+      const probe = vi.fn(async () => ({ state: "clean" as const }));
+      const backend = nativeIdleBackend();
+      const { service } = createService({
+        backend,
+        isSandboxDeclaredClean: async () => false,
+        probeWorkspaceCleanliness: probe,
+      });
+      await makeIdle(service);
+      await service.releaseIfIdle();
+      expect(backend.releaseCalls[0]?.options.disposition).toBe("recoverable");
+      // The verdict cannot change the outcome, and the probe is an exec
+      // round-trip on every idle timer.
+      expect(probe).not.toHaveBeenCalled();
+    });
+
+    it("still discards on an explicit declared-clean signal", async () => {
+      // Stated intent, not an inference: discarding then frees disk on purpose.
+      const backend = nativeIdleBackend();
+      const { service } = createService({ backend, isSandboxDeclaredClean: async () => true });
+      await makeIdle(service);
+      await service.releaseIfIdle();
+      expect(backend.releaseCalls[0]?.options.disposition).toBe("discard");
+    });
+
+    it("logs the decision with its own reason so it stays diagnosable", async () => {
+      const infoSpy = vi.spyOn(log, "info").mockImplementation(() => {});
+      const { service } = createService({
+        backend: nativeIdleBackend(),
+        isSandboxDeclaredClean: async () => false,
+        probeWorkspaceCleanliness: async () => ({ state: "clean" as const }),
+      });
+      await makeIdle(service);
+      await service.releaseIfIdle();
+      expect(infoSpy).toHaveBeenCalledWith("compute.retention_decision", {
+        threadId: "thread_test",
+        disposition: "recoverable",
+        reason: "provider_native_idle",
+      });
+      infoSpy.mockRestore();
+    });
+  });
+
   it("preserves when no probe dep is wired at all — the absent-probe safety default", async () => {
     // A review of Task 4 found this default (absent `probeWorkspaceCleanliness`
     // resolves to `probe_failed`, never `clean`) was only covered incidentally,

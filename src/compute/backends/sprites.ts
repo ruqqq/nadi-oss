@@ -130,6 +130,12 @@ const SIGNALS: Record<StopMode, SpritesSignal> = {
 
 export class SpritesComputeBackend implements ComputeBackend {
   readonly id = "sprites" as const;
+  /**
+   * A sprite hibernates on its own ~30s after activity stops and there is no
+   * way to turn that off, so compute billing has already stopped long before
+   * the service's idle timer fires. See `ComputeBackend.nativeIdleSuspend`.
+   */
+  readonly nativeIdleSuspend = true;
   private readonly client: SpritesClient;
   /**
    * The runtime's environment, carried on EVERY exec.
