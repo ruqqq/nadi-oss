@@ -29,16 +29,23 @@ describe("createAutomatonManagementTools", () => {
     expect(t.list_workbenches!.needsApproval ?? false).toBe(false);
   });
 
-  it("the schedule schema accepts every preset and a cron expression", () => {
+  it("the schedule schema accepts every preset, once, and a cron expression", () => {
     for (const schedule of [
       { kind: "hourly", minute: 0 },
       { kind: "daily", hour: 8, minute: 0 },
       { kind: "weekdays", hour: 8, minute: 30 },
       { kind: "weekly", weekday: 1, hour: 8, minute: 0 },
       { kind: "cron", expr: "0 8 * * 1-5" },
+      { kind: "once", runAt: Date.now() + 60_000 },
     ]) {
       expect(() => automatonScheduleSchema.parse(schedule)).not.toThrow();
     }
+  });
+
+  it("mutation tool descriptions mention once schedules", () => {
+    const t = tools() as Record<string, { description?: string }>;
+    expect(t.create_automaton!.description).toMatch(/once/i);
+    expect(t.update_automaton!.description).toMatch(/once/i);
   });
 
   it("the schedule schema rejects an out-of-range minute", () => {

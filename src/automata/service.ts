@@ -11,7 +11,33 @@ import {
   isUsableProviderForWorkspace,
   parseModelInputModalities,
 } from "../settings/model-selection";
-import { computeNextDueAt, isValidTimezone, parseSchedule } from "./schedule";
+import {
+  computeNextDueAt,
+  isValidTimezone,
+  parseSchedule,
+  type AutomatonSchedule,
+} from "./schedule";
+
+function scheduleValidationError(
+  error: unknown,
+  opts?: { reEnable?: boolean },
+): AutomatonValidationError {
+  const msg = String((error as Error).message);
+  if (msg.includes("runAt must be in the future")) {
+    return new AutomatonValidationError(
+      opts?.reEnable ? "Pick a new time before enabling." : "Pick a time in the future.",
+    );
+  }
+  return new AutomatonValidationError(msg);
+}
+
+function computeInitialNextDueAt(schedule: AutomatonSchedule, timezone: string): number {
+  try {
+    return computeNextDueAt(schedule, timezone, Date.now());
+  } catch (error) {
+    throw scheduleValidationError(error);
+  }
+}
 
 /** Bad input: maps to HTTP 400 in the route path. */
 export class AutomatonValidationError extends Error {}
@@ -249,9 +275,10 @@ export class AutomatonService {
     const scheduleJson = JSON.stringify(input.schedule ?? {});
     let nextDueAt: number;
     try {
-      nextDueAt = computeNextDueAt(parseSchedule(scheduleJson), timezone, Date.now());
+      nextDueAt = computeInitialNextDueAt(parseSchedule(scheduleJson), timezone);
     } catch (error) {
-      throw new AutomatonValidationError(String((error as Error).message));
+      if (error instanceof AutomatonValidationError) throw error;
+      throw scheduleValidationError(error);
     }
 
     const project = await resolveProjectId(this.db, this.ctx.workspaceId, input.projectId);
@@ -363,7 +390,7 @@ export class AutomatonService {
         patch.nextDueAt = computeNextDueAt(parseSchedule(scheduleJson), timezone, Date.now());
         patch.disabledReason = null;
       } catch (error) {
-        throw new AutomatonValidationError(String((error as Error).message));
+        throw scheduleValidationError(error, { reEnable: enabledFlipped });
       }
     }
 

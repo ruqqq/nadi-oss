@@ -252,7 +252,10 @@ export async function fireDueAutomata(
         });
         continue;
       }
-      nextDueAt = computeNextDueAt(schedule, automaton.timezone, dueAt);
+      const isOnce = schedule.kind === "once";
+      if (!isOnce) {
+        nextDueAt = computeNextDueAt(schedule, automaton.timezone, dueAt);
+      }
       const unfinished = await repo.findUnfinishedRun(automaton.id);
       const action = decideDueAction({ dueAt, now, hasUnfinishedRun: Boolean(unfinished) });
 
@@ -279,20 +282,37 @@ export async function fireDueAutomata(
           // abort the advance below.
           if (!isUniqueConstraintError(error)) throw error;
         }
-        await repo.advanceSchedule(automaton.id, nextDueAt, null);
+        if (isOnce) {
+          await repo.disableAfterOnceFire(automaton.id, null);
+        } else {
+          await repo.advanceSchedule(automaton.id, nextDueAt as number, null);
+        }
         skipped += 1;
         continue;
       }
 
       await startAutomatonRun(env, db, automaton, { trigger: "scheduled", dueAt });
-      await repo.advanceSchedule(automaton.id, nextDueAt, now);
+      if (isOnce) {
+        await repo.disableAfterOnceFire(automaton.id, now);
+      } else {
+        await repo.advanceSchedule(automaton.id, nextDueAt as number, now);
+      }
       fired += 1;
     } catch (error) {
       if (error instanceof AutomatonRunFailedAfterClaim) {
         // The claim landed and startAutomatonRun already persisted the real
         // cause onto the run row. The claim is consumed regardless, so the
         // schedule must still advance or this automaton wedges forever.
-        if (nextDueAt !== undefined) {
+        const schedule = (() => {
+          try {
+            return parseSchedule(automaton.scheduleJson);
+          } catch {
+            return null;
+          }
+        })();
+        if (schedule?.kind === "once") {
+          await repo.disableAfterOnceFire(automaton.id, null);
+        } else if (nextDueAt !== undefined) {
           await repo.advanceSchedule(automaton.id, nextDueAt, null);
         }
         skipped += 1;

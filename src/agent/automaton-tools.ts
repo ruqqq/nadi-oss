@@ -36,6 +36,15 @@ export const automatonScheduleSchema = z.discriminatedUnion("kind", [
     kind: z.literal("cron"),
     expr: z.string().describe("A 5-field cron expression, e.g. '0 8 * * 1-5'."),
   }),
+  z.object({
+    kind: z.literal("once"),
+    runAt: z
+      .number()
+      .int()
+      .describe(
+        "Absolute UTC epoch milliseconds for the single fire. Must be in the future when saved or re-enabled.",
+      ),
+  }),
 ]);
 
 const notifyModeSchema = z.enum(["all", "failures_only"]);
@@ -68,9 +77,9 @@ function toErrorResult(error: unknown): { ok: false; error: string } {
   throw error;
 }
 
-function scheduleSummary(scheduleJson: string): string {
+function scheduleSummary(scheduleJson: string, timezone: string): string {
   try {
-    return describeSchedule(parseSchedule(scheduleJson));
+    return describeSchedule(parseSchedule(scheduleJson), timezone);
   } catch {
     return "Custom";
   }
@@ -137,7 +146,7 @@ export function createAutomatonManagementTools(input: { env: Env; threadId: stri
             automata: rows.map((row) => ({
               id: row.id,
               name: row.name,
-              schedule: scheduleSummary(row.scheduleJson),
+              schedule: scheduleSummary(row.scheduleJson, row.timezone),
               timezone: row.timezone,
               enabled: row.enabled,
               nextDueAt: row.nextDueAt,
@@ -193,7 +202,7 @@ export function createAutomatonManagementTools(input: { env: Env; threadId: stri
               id: automaton.id,
               name: automaton.name,
               prompt: automaton.prompt,
-              schedule: scheduleSummary(automaton.scheduleJson),
+              schedule: scheduleSummary(automaton.scheduleJson, automaton.timezone),
               scheduleJson: automaton.scheduleJson,
               timezone: automaton.timezone,
               enabled: automaton.enabled,
@@ -222,7 +231,7 @@ export function createAutomatonManagementTools(input: { env: Env; threadId: stri
     create_automaton: {
       ...tool({
         description:
-          "Create a new automaton: a saved agent task that runs the given prompt on a schedule. Prefer the preset schedule kinds (hourly/daily/weekdays/weekly); use kind 'cron' only for schedules the presets can't express. timezone is an IANA name like 'Asia/Singapore'. This is a mutation and requires user approval.",
+          "Create a new automaton: a saved agent task that runs the given prompt on a schedule. Prefer preset kinds (hourly/daily/weekdays/weekly) for recurring tasks; use kind 'once' with a future UTC `runAt` (epoch ms) for a single fire that auto-disables afterward; use kind 'cron' only when presets cannot express the cadence. timezone is an IANA name like 'Asia/Singapore'. This is a mutation and requires user approval.",
         inputSchema: z.object({
           name: z.string().describe("Short human name for the automaton."),
           prompt: z.string().describe("The instruction to run each time it fires."),
@@ -255,7 +264,7 @@ export function createAutomatonManagementTools(input: { env: Env; threadId: stri
               automaton: {
                 id: automaton.id,
                 name: automaton.name,
-                schedule: scheduleSummary(automaton.scheduleJson),
+                schedule: scheduleSummary(automaton.scheduleJson, automaton.timezone),
                 nextDueAt: automaton.nextDueAt,
                 enabled: automaton.enabled,
               },
@@ -271,7 +280,7 @@ export function createAutomatonManagementTools(input: { env: Env; threadId: stri
     update_automaton: {
       ...tool({
         description:
-          "Update an existing automaton. Only the fields you pass are changed. Set enabled:false to disable it (it stops firing) or enabled:true to re-enable it (its next run is scheduled from now, never backfilled). Changing the schedule or timezone reschedules the next run. This is a mutation and requires user approval.",
+          "Update an existing automaton. Only the fields you pass are changed. Set enabled:false to disable it (it stops firing) or enabled:true to re-enable it (its next run is scheduled from now, never backfilled). For kind 'once', re-enabling requires a future `runAt` — patch the schedule first or together with enabled:true. After a scheduled Once fire the automaton is left disabled. Changing the schedule or timezone reschedules the next run. This is a mutation and requires user approval.",
         inputSchema: z.object({
           id: z.string().describe("The automaton id (auto_...)."),
           name: z.string().optional(),
@@ -301,7 +310,7 @@ export function createAutomatonManagementTools(input: { env: Env; threadId: stri
               automaton: {
                 id: automaton.id,
                 name: automaton.name,
-                schedule: scheduleSummary(automaton.scheduleJson),
+                schedule: scheduleSummary(automaton.scheduleJson, automaton.timezone),
                 nextDueAt: automaton.nextDueAt,
                 enabled: automaton.enabled,
               },

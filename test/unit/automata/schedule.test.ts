@@ -24,6 +24,19 @@ describe("scheduleToCron", () => {
 });
 
 describe("computeNextDueAt", () => {
+  it("returns runAt for a future once schedule", () => {
+    const runAt = at("2026-08-12T09:00:00Z");
+    expect(computeNextDueAt({ kind: "once", runAt }, "UTC", at("2026-08-01T00:00:00Z"))).toBe(
+      runAt,
+    );
+  });
+
+  it("rejects a past once schedule", () => {
+    expect(() =>
+      computeNextDueAt({ kind: "once", runAt: at("2026-08-01T00:00:00Z") }, "UTC", Date.now()),
+    ).toThrow(/runAt must be in the future/i);
+  });
+
   it("resolves a preset against its timezone, not UTC", () => {
     // 08:00 Asia/Singapore (UTC+8) is 00:00Z.
     const next = computeNextDueAt(
@@ -91,6 +104,13 @@ describe("computeNextDueAt", () => {
 });
 
 describe("parseSchedule", () => {
+  it("round-trips once", () => {
+    expect(parseSchedule('{"kind":"once","runAt":1785857552194}')).toEqual({
+      kind: "once",
+      runAt: 1785857552194,
+    });
+  });
+
   it("round-trips each preset", () => {
     expect(parseSchedule('{"kind":"weekly","weekday":1,"hour":8,"minute":0}')).toEqual({
       kind: "weekly",
@@ -127,13 +147,25 @@ describe("isValidTimezone", () => {
 });
 
 describe("describeSchedule", () => {
+  const tz = "UTC";
+
   it("renders a human summary for the list row", () => {
-    expect(describeSchedule({ kind: "weekdays", hour: 8, minute: 0 })).toBe("Weekdays at 08:00");
-    expect(describeSchedule({ kind: "daily", hour: 8, minute: 5 })).toBe("Daily at 08:05");
-    expect(describeSchedule({ kind: "hourly", minute: 0 })).toBe("Hourly at :00");
-    expect(describeSchedule({ kind: "weekly", weekday: 1, hour: 8, minute: 0 })).toBe(
+    expect(describeSchedule({ kind: "weekdays", hour: 8, minute: 0 }, tz)).toBe(
+      "Weekdays at 08:00",
+    );
+    expect(describeSchedule({ kind: "daily", hour: 8, minute: 5 }, tz)).toBe("Daily at 08:05");
+    expect(describeSchedule({ kind: "hourly", minute: 0 }, tz)).toBe("Hourly at :00");
+    expect(describeSchedule({ kind: "weekly", weekday: 1, hour: 8, minute: 0 }, tz)).toBe(
       "Mondays at 08:00",
     );
-    expect(describeSchedule({ kind: "cron", expr: "0 8 * * 1-5" })).toBe("Custom (0 8 * * 1-5)");
+    expect(describeSchedule({ kind: "cron", expr: "0 8 * * 1-5" }, tz)).toBe(
+      "Custom (0 8 * * 1-5)",
+    );
+  });
+
+  it("formats once in the automaton timezone", () => {
+    const summary = describeSchedule({ kind: "once", runAt: at("2026-08-12T09:00:00Z") }, "UTC");
+    expect(summary).toMatch(/^Once · /);
+    expect(summary).toContain("09:00");
   });
 });
