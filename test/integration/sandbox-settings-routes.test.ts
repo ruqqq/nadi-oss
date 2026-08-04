@@ -358,6 +358,111 @@ describe("sandbox settings routes", () => {
     }
   });
 
+  describe("sprites secret + provider config", () => {
+    function spritesProviderConfig(secretName = "sandbox:sprites") {
+      return { kind: "sprites", apiKeySecretName: secretName };
+    }
+
+    it("PUT sprites-secret stores the KV secret and reflects byok mode", async () => {
+      const { token } = await seedUserWorkspace();
+      const { store } = createWorkspaceSecretsServices(env);
+      await SELF.fetch("https://nadi.test/api/settings/sandbox", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...cookie(token) },
+        body: JSON.stringify({
+          enabled: true,
+          provider: "sprites",
+          providerConfig: spritesProviderConfig(),
+        }),
+      });
+
+      const res = await SELF.fetch("https://nadi.test/api/settings/sandbox/sprites-secret", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...cookie(token) },
+        body: JSON.stringify({ value: "sprites_test_secret" }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(await store.get(workspaceId, "sandbox:sprites")).toBe("sprites_test_secret");
+      expect(await res.json()).toMatchObject({
+        spritesMode: "byok",
+        spritesSecretPresent: true,
+      });
+    });
+
+    it("DELETE sprites-secret resets to system mode", async () => {
+      const { token } = await seedUserWorkspace();
+      const { store } = createWorkspaceSecretsServices(env);
+      await SELF.fetch("https://nadi.test/api/settings/sandbox", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...cookie(token) },
+        body: JSON.stringify({
+          enabled: true,
+          provider: "sprites",
+          providerConfig: spritesProviderConfig(),
+        }),
+      });
+      await SELF.fetch("https://nadi.test/api/settings/sandbox/sprites-secret", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...cookie(token) },
+        body: JSON.stringify({ value: "sprites_test_secret" }),
+      });
+
+      const res = await SELF.fetch("https://nadi.test/api/settings/sandbox/sprites-secret", {
+        method: "DELETE",
+        headers: cookie(token),
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({
+        spritesMode: "system",
+        spritesSecretPresent: false,
+      });
+      expect(await store.get(workspaceId, "sandbox:sprites")).toBeNull();
+    });
+
+    it("saves the sprites provider config and round-trips it through GET", async () => {
+      const { token } = await seedUserWorkspace();
+      const providerConfig = spritesProviderConfig("sandbox:sprites");
+
+      const put = await SELF.fetch("https://nadi.test/api/settings/sandbox", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...cookie(token) },
+        body: JSON.stringify({ enabled: true, provider: "sprites", providerConfig }),
+      });
+      expect(put.status).toBe(200);
+
+      const get = await SELF.fetch("https://nadi.test/api/settings/sandbox", {
+        headers: cookie(token),
+      });
+      expect(get.status).toBe(200);
+      const view = (await get.json()) as { workspace: { provider: string; providerConfig: unknown } };
+      expect(view.workspace).toMatchObject({ provider: "sprites", providerConfig });
+    });
+
+    it("rejects a sprites-secret write whose secretName does not match the configured one", async () => {
+      const { token } = await seedUserWorkspace();
+      const { store } = createWorkspaceSecretsServices(env);
+      await SELF.fetch("https://nadi.test/api/settings/sandbox", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...cookie(token) },
+        body: JSON.stringify({
+          enabled: true,
+          provider: "sprites",
+          providerConfig: spritesProviderConfig(),
+        }),
+      });
+
+      const res = await SELF.fetch("https://nadi.test/api/settings/sandbox/sprites-secret", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...cookie(token) },
+        body: JSON.stringify({ value: "orphaned-key", secretName: "sandbox:wrong-sprites" }),
+      });
+      expect(res.status).toBe(400);
+      expect(await store.get(workspaceId, "sandbox:wrong-sprites")).toBeNull();
+    });
+  });
+
   it("merges partial workspace settings updates instead of resetting omitted fields", async () => {
     const { token } = await seedUserWorkspace();
 
@@ -1049,6 +1154,38 @@ describe("sandbox settings routes", () => {
       expect(body.provider).toBe("cloudflare");
       expect(body.phase).toBe("connection");
       expect(body.missingConfig.length).toBeGreaterThan(0);
+    });
+
+    it("returns 400 missing_secret for sprites with no key configured", async () => {
+      const { token } = await seedUserWorkspace();
+      await SELF.fetch("https://nadi.test/api/settings/sandbox", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...cookie(token) },
+        body: JSON.stringify({
+          enabled: true,
+          provider: "sprites",
+          providerConfig: { kind: "sprites", apiKeySecretName: "sandbox:sprites" },
+        }),
+      });
+
+      // No workspace secret saved and no SPRITES_API_KEY system key set in
+      // this test env, so the resolved config has no key at all.
+      const res = await SELF.fetch("https://nadi.test/api/settings/sandbox/test", {
+        method: "POST",
+        headers: cookie(token),
+      });
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({
+        ok: false,
+        provider: "sprites",
+        phase: "connection",
+        error: "missing_secret",
+      });
+      // The ok-path (an authenticated listSprites(1) succeeding) needs a real
+      // or mocked sprites.dev endpoint; this suite has no fetch-injection seam
+      // for the sprites client (unlike Daytona's COMPUTE_TEST_BACKEND_FACTORY),
+      // so that path is left to the live smoke test per the brief.
     });
 
     it("reports a cleanup-phase failure when release fails after a successful acquire", async () => {
