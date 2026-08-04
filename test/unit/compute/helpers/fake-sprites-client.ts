@@ -1,3 +1,4 @@
+import { SpritesComputeBackend } from "../../../../src/compute/backends/sprites";
 import type {
   SpritesClient,
   SpritesExecOptions,
@@ -31,6 +32,8 @@ interface FakeSession {
 interface FakeSprite {
   files: Map<string, Uint8Array>;
   dirs: Set<string>;
+  /** Symlinks, by path → link size. `stat` reports the LINK, never its target. */
+  links: Map<string, number>;
   sessions: Map<string, FakeSession>;
   deleted: boolean;
   environment: Record<string, string>;
@@ -66,6 +69,17 @@ export class FakeSpritesClient implements SpritesClient {
   failNextFsList: Error | undefined;
   failNextExec: Error | undefined;
   failNextCreate: Error | undefined;
+  /**
+   * One-shot IN-BAND exec failure: the socket completes normally and reports a
+   * non-zero exit. Distinct from `failNextExec`, which throws — a backend that
+   * only handles the throwing shape silently accepts the other.
+   */
+  nextExecResult: SpritesExecResult | undefined;
+  /**
+   * One-shot: the NEXT `listSessions` answers normally and then clears every
+   * session — a process that exits between the list and the kill.
+   */
+  dropSessionsOnNextList = false;
 
   private readonly sprites = new Map<string, FakeSprite>();
   private sessionSeq = 0;
@@ -82,6 +96,7 @@ export class FakeSpritesClient implements SpritesClient {
       // `/workspace` is deliberately ABSENT: the backend's acquire is what
       // creates it, on both the fresh and the recovery path.
       dirs: new Set(["/", "/tmp"]),
+      links: new Map(),
       sessions: new Map(),
       deleted: false,
       environment: { ...input.environment },
@@ -133,10 +148,17 @@ export class FakeSpritesClient implements SpritesClient {
   async listSessions(name: string): Promise<SpritesSessionInfo[]> {
     this.calls.push(`listSessions:${name}`);
     const sprite = this.alive(name);
-    return [...sprite.sessions.entries()].map(([sessionId, session]) => ({
+    const sessions = [...sprite.sessions.entries()].map(([sessionId, session]) => ({
       sessionId,
       command: session.command,
     }));
+    // The kill/exit race: the caller gets a live-looking listing, and the
+    // sessions are gone by the time it acts on one.
+    if (this.dropSessionsOnNextList) {
+      this.dropSessionsOnNextList = false;
+      sprite.sessions.clear();
+    }
+    return sessions;
   }
 
   async killSession(name: string, sessionId: string, signal: SpritesSignal): Promise<void> {
@@ -207,16 +229,6 @@ export class FakeSpritesClient implements SpritesClient {
 
   // ---- test seams ---------------------------------------------------------
 
-  /** Whether the sprite was deleted (the leak check for a failed acquire). */
-  isDeleted(name: string): boolean {
-    return this.sprites.get(name)?.deleted ?? true;
-  }
-
-  /** Whether the sprite was ever created. */
-  has(name: string): boolean {
-    return this.sprites.has(name);
-  }
-
   /** Names of sprites that exist and are not deleted. */
   liveSprites(): string[] {
     return [...this.sprites.entries()].filter(([, s]) => !s.deleted).map(([name]) => name);
@@ -228,6 +240,7 @@ export class FakeSpritesClient implements SpritesClient {
       this.sprites.set(name, {
         files: new Map(),
         dirs: new Set(["/", "/tmp", "/workspace"]),
+        links: new Map(),
         sessions: new Map(),
         deleted: false,
         environment: {},
@@ -243,18 +256,16 @@ export class FakeSpritesClient implements SpritesClient {
     this.alive(name).sessions.set(sessionId, { command, killed: false });
   }
 
-  /**
-   * Drop every session WITHOUT writing an rc file — a process that vanished
-   * (signal, or a cold sprite restart) leaving no exit evidence behind.
-   */
-  dropSessions(name: string): void {
-    this.alive(name).sessions.clear();
-  }
-
   /** Read a file's text, for asserting what a wrapper actually wrote. */
   readText(name: string, path: string): string | null {
     const file = this.sprites.get(name)?.files.get(path);
     return file === undefined ? null : DECODER.decode(file);
+  }
+
+  /** Place a symlink; `stat` (no `-L`) reports it as a link of `size` bytes. */
+  seedSymlink(name: string, path: string, size: number): void {
+    this.seedSprite(name);
+    this.alive(name).links.set(path, size);
   }
 
   /** Place a file directly (bypassing the backend's write path). */
@@ -273,6 +284,11 @@ export class FakeSpritesClient implements SpritesClient {
       const error = this.failNextExec;
       this.failNextExec = undefined;
       throw error;
+    }
+    if (this.nextExecResult) {
+      const result = this.nextExecResult;
+      this.nextExecResult = undefined;
+      return result;
     }
     const [shell, flag, script] = options.argv;
     if (shell !== "bash" || flag !== "-c" || script === undefined) {
@@ -328,6 +344,11 @@ export class FakeSpritesClient implements SpritesClient {
     const [command] = tokens;
     if (command === "stat" && tokens[1] === "-c" && tokens[2] === "%F:%s" && tokens[3] === "--") {
       const path = tokens[4] ?? "";
+      // No `-L`, so a link reports as ITSELF — checked before files/dirs.
+      const linkSize = sprite.links.get(path);
+      if (linkSize !== undefined) {
+        return { exitCode: 0, stdout: `symbolic link:${linkSize}`, stderr: "" };
+      }
       if (sprite.dirs.has(path)) return { exitCode: 0, stdout: "directory:4096", stderr: "" };
       const file = sprite.files.get(path);
       if (file) {
@@ -363,7 +384,11 @@ export class FakeSpritesClient implements SpritesClient {
       sprite.files.set(to, file);
       return { exitCode: 0, stdout: "", stderr: "" };
     }
-    return notFound(script);
+    // Anything else is a plain foreground command (`runCommand` passes the
+    // caller's command straight through), so it runs on the same inner
+    // interpreter the wrapper uses — including its loud 127 for the unknown.
+    const result = runInner(sprite, script, "");
+    return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
   }
 
   private alive(name: string): FakeSprite {
@@ -373,6 +398,15 @@ export class FakeSpritesClient implements SpritesClient {
     }
     return sprite;
   }
+}
+
+/** A fresh backend wired to a fresh fake client, exposing both. */
+export function createFakeSpritesBackend(): {
+  backend: SpritesComputeBackend;
+  client: FakeSpritesClient;
+} {
+  const client = new FakeSpritesClient();
+  return { backend: new SpritesComputeBackend({ client }), client };
 }
 
 /**
