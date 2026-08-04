@@ -105,7 +105,13 @@ export const HERO_MOVES: HeroMove[] = [
       ...tool(
         "exec_download_file",
         { path: "/workspace/churn_by_segment.png" },
-        { attachmentId: "att_9f31", name: "churn_by_segment.png" },
+        {
+          attachmentId: "att_9f31",
+          filename: "churn_by_segment.png",
+          byteSize: 48_210,
+          mimeType: "image/png",
+          url: "/api/attachments/att_9f31",
+        },
       ),
     ],
     answers: {

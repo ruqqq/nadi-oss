@@ -41,7 +41,13 @@ export function presignDepsFromEnv(env: Env): PresignDeps {
 export async function presignGet(
   deps: PresignDeps,
   key: string,
-  opts: { anchorMs: number; expiresInSeconds: number },
+  opts: {
+    anchorMs: number;
+    expiresInSeconds: number;
+    /** When set, signed into the query as `response-content-disposition` so R2
+     *  overrides Content-Disposition on GET (e.g. force download). */
+    responseContentDisposition?: string;
+  },
 ): Promise<string> {
   const client = new AwsClient({
     accessKeyId: deps.accessKeyId,
@@ -53,6 +59,9 @@ export async function presignGet(
     `https://${deps.accountId}.r2.cloudflarestorage.com/${deps.bucketName}/${key}`,
   );
   url.searchParams.set("X-Amz-Expires", String(opts.expiresInSeconds));
+  if (opts.responseContentDisposition) {
+    url.searchParams.set("response-content-disposition", opts.responseContentDisposition);
+  }
   // Supply the (bucketed, deterministic) datetime via the signer option — NOT as
   // an X-Amz-Date request header. A header would be folded into SignedHeaders
   // (host;x-amz-date), and a plain GET of the URL omits that header, so R2 fails
@@ -61,4 +70,12 @@ export async function presignGet(
     aws: { signQuery: true, datetime: toAmzDate(opts.anchorMs) },
   });
   return signed.url;
+}
+
+/** Build a Content-Disposition value safe to embed in a signed query string. */
+export function attachmentContentDisposition(filename: string | null | undefined): string {
+  const raw = (filename ?? "attachment").trim() || "attachment";
+  // Strip characters that break or confuse disposition parsing / quotes.
+  const safe = raw.replace(/["\\\r\n]/g, "_");
+  return `attachment; filename="${safe}"`;
 }

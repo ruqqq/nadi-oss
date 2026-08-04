@@ -9,6 +9,7 @@ import { assertFeedbackReporter } from "../feedback/access";
 import {
   PRESIGN_EXPIRES_SECONDS,
   PRESIGN_WINDOW_MS,
+  attachmentContentDisposition,
   bucketedAnchorMs,
   presignDepsFromEnv,
   presignGet,
@@ -230,7 +231,12 @@ async function handleServe(req: Request, env: Env, id: string): Promise<Response
 
   const db = registryDb(env);
   const row = await db
-    .select({ r2Key: attachments.r2Key, threadId: attachments.threadId, kind: threadIndex.kind })
+    .select({
+      r2Key: attachments.r2Key,
+      filename: attachments.filename,
+      threadId: attachments.threadId,
+      kind: threadIndex.kind,
+    })
     .from(attachments)
     .innerJoin(threadIndex, eq(threadIndex.id, attachments.threadId))
     .where(eq(attachments.id, id))
@@ -244,9 +250,15 @@ async function handleServe(req: Request, env: Env, id: string): Promise<Response
     if (!workspaceId) return new Response("Not found", { status: 404 });
   }
 
+  const downloadParam = new URL(req.url).searchParams.get("download");
+  const forceDownload = downloadParam === "1" || downloadParam === "true";
+
   const signed = await presignGet(presignDepsFromEnv(env), row.r2Key, {
     anchorMs: bucketedAnchorMs(Date.now(), PRESIGN_WINDOW_MS),
     expiresInSeconds: PRESIGN_EXPIRES_SECONDS,
+    ...(forceDownload
+      ? { responseContentDisposition: attachmentContentDisposition(row.filename) }
+      : {}),
   });
   return new Response(null, { status: 302, headers: { location: signed } });
 }

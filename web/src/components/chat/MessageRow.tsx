@@ -10,6 +10,7 @@ import {
   MessageResponse,
 } from "@/components/ai-elements/message";
 import { MessageAttachmentView } from "./MessageAttachmentView";
+import { collectMessageFileParts } from "@/lib/message-file-parts";
 import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-elements/reasoning";
 import { buildToolTimeline } from "@/lib/group-tool-parts";
 import type { ToolNameServer } from "@/lib/resolve-tool-name";
@@ -66,10 +67,9 @@ export function MessageRow({
   });
 
   // File parts render as a grouped thumbnail/chip grid (skipped in the timeline
-  // switch below); images open a lightbox, other types open in a new tab.
-  const fileParts = message.parts.filter(
-    (p): p is Extract<Part, { type: "file" }> => p.type === "file",
-  );
+  // switch below); images open a lightbox, other types download. Include files
+  // the agent pulled in via exec_download_file (synthesized from tool output).
+  const fileParts = collectMessageFileParts(message.parts);
 
   return (
     <Message from={message.role}>
@@ -150,7 +150,9 @@ export function MessageRow({
           return null;
         })}
         {fileParts.length > 0 && (
-          <MessageAttachments>
+          <MessageAttachments
+            className={message.role === "assistant" ? "ml-0" : undefined}
+          >
             {fileParts.map((part, i) => (
               <MessageAttachmentView key={`attachment-${i}`} data={part} />
             ))}

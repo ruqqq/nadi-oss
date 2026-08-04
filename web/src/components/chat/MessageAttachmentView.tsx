@@ -1,8 +1,9 @@
 import type { FileUIPart } from "ai";
 import type { Icon } from "@phosphor-icons/react";
 import { MessageAttachment } from "@/components/ai-elements/message";
-import { File, FileCode, FilePdf, FileSvg, FileText } from "@/icons";
+import { DownloadSimple, File, FileCode, FilePdf, FileSvg, FileText } from "@/icons";
 import { Dialog, DialogContent, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { attachmentDownloadUrl } from "@/lib/message-file-parts";
 
 /** Extensions we treat as source/markup so they get the code glyph. */
 const CODE_EXTS = new Set([
@@ -71,12 +72,13 @@ function fileMeta(data: FileUIPart): { Glyph: Icon; tag: string } {
 
 /**
  * Renders one attachment in the chat timeline. Images show as a thumbnail that
- * opens a full-size lightbox on click; other file types show as a compact file
- * card — a type glyph plus the filename and a monospace extension tag — that
- * opens the file in a new tab.
+ * opens a full-size lightbox on click (with download); other file types show as
+ * a compact file card that downloads via the serve route's disposition flag.
  */
 export function MessageAttachmentView({ data }: { data: FileUIPart }) {
   const isImage = Boolean(data.mediaType?.startsWith("image/") && data.url);
+  const downloadHref = data.url ? attachmentDownloadUrl(data.url) : undefined;
+  const filename = data.filename || "Attachment";
 
   if (isImage) {
     return (
@@ -95,25 +97,35 @@ export function MessageAttachmentView({ data }: { data: FileUIPart }) {
           showCloseButton
         >
           <DialogTitle className="sr-only">{data.filename || "Image attachment"}</DialogTitle>
-          <img
-            alt={data.filename || "attachment"}
-            className="max-h-[85vh] w-full rounded-lg object-contain"
-            src={data.url}
-          />
+          <div className="flex flex-col gap-3">
+            <img
+              alt={data.filename || "attachment"}
+              className="max-h-[85vh] w-full rounded-lg object-contain"
+              src={data.url}
+            />
+            {downloadHref && (
+              <a
+                href={downloadHref}
+                download={data.filename || undefined}
+                className="mx-auto inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-1.5 text-sm font-medium text-foreground outline-none transition-colors hover:bg-accent/40 focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <DownloadSimple className="size-4" />
+                Download{data.filename ? ` ${data.filename}` : ""}
+              </a>
+            )}
+          </div>
         </DialogContent>
       </Dialog>
     );
   }
 
-  const filename = data.filename || "Attachment";
   const { Glyph, tag } = fileMeta(data);
 
   return (
     <a
-      aria-label={`Open ${filename}`}
-      href={data.url}
+      aria-label={`Download ${filename}`}
+      href={downloadHref ?? data.url}
       rel="noreferrer"
-      target="_blank"
       className="group flex w-56 max-w-full items-center gap-3 rounded-lg border border-border bg-card px-3 py-2.5 outline-none transition-colors hover:border-ring/50 hover:bg-accent/40 focus-visible:ring-2 focus-visible:ring-ring"
     >
       <span className="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground transition-colors group-hover:text-foreground">

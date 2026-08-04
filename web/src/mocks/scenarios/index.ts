@@ -25,6 +25,7 @@ import type { MockFaults, MockStore } from "../store";
 import { TOOL_RUN_THREAD_ID, TOOL_WRITE_THREAD_ID } from "../chat/tool-run-transcript";
 import { MID_TURN_THREAD_ID } from "../chat/mid-turn-transcript";
 import { HERO_THREAD_ID } from "../chat/hero-transcript";
+import { ASSISTANT_DOWNLOAD_THREAD_ID } from "../chat/assistant-download-transcript";
 
 /** Fixed clock so screenshots are byte-stable across runs. 2026-07-08T00:00:00Z. */
 const NOW = 1_752_000_000_000;
@@ -1414,9 +1415,27 @@ function toolRunStore(): MockStore {
   };
 }
 
+/** Assistant sent an image via exec_download_file — chip + lightbox in the timeline. */
+function assistantAttachmentsStore(): MockStore {
+  const base = defaultStore();
+  return {
+    ...base,
+    threads: [
+      makeThread({
+        threadId: ASSISTANT_DOWNLOAD_THREAD_ID,
+        title: "Churn chart for last week",
+        lastMessagePreview: "Chart attached — open it for a closer look or download.",
+        updatedAt: NOW - 2 * MINUTE,
+      }),
+      ...base.threads,
+    ],
+  };
+}
+
 export const SCENARIOS: Record<string, () => MockStore> = {
   default: defaultStore,
   "tool-run": toolRunStore,
+  "assistant-attachments": assistantAttachmentsStore,
   "empty-account": emptyStore,
   "fresh-account": freshAccountStore,
   "onboarding-empower": onboardingEmpowerStore,
