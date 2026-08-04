@@ -120,6 +120,41 @@ export function parseExecFrame(data: ArrayBuffer): { stream: 1 | 2 | 3; payload:
   return { stream, payload };
 }
 
+/**
+ * `{"type":"exit","exit_code":N}` -> N, anything else -> `undefined`.
+ *
+ * The server announces completion TWICE: this text notification and the binary
+ * stream-3 frame (the live probe saw both, text first). Either is authoritative
+ * and whichever lands first settles the run — the socket is FIFO, so all output
+ * frames precede both.
+ *
+ * An `exit` message whose `exit_code` is absent or not an integer returns
+ * `undefined` rather than `0`, for the same reason `parseExecFrame` rejects a
+ * truncated exit frame: the binary frame or the close handler then decides, and
+ * a killed run never reads as a success.
+ */
+export function parseTextExitCode(data: string): number | undefined {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(data);
+  } catch {
+    return undefined;
+  }
+  const row = payload as { type?: unknown; exit_code?: unknown } | null;
+  if (row?.type !== "exit") return undefined;
+  if (typeof row.exit_code !== "number" || !Number.isInteger(row.exit_code)) return undefined;
+  return row.exit_code;
+}
+
+/**
+ * The `env` query param REPLACES the sprite's default environment rather than
+ * extending it, so any exec that supplies env at all loses `PATH` unless we put
+ * one back — and a `bash` that cannot resolve `mkdir` fails in exactly the shape
+ * that is hardest to read from production: the socket opens, nothing useful
+ * arrives, it closes. Only used when the caller sends env and omits `PATH`.
+ */
+const DEFAULT_EXEC_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
 function toArrayBuffer(data: ArrayBuffer | ArrayBufferView): ArrayBuffer {
   if (ArrayBuffer.isView(data)) {
     return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
@@ -351,9 +386,17 @@ class SpritesHttpClient implements SpritesClient {
   private execUrl(name: string, options: SpritesExecOptions): string {
     const url = new URL(`${this.baseUrl}/sprites/${encodeURIComponent(name)}/exec`);
     for (const arg of options.argv) url.searchParams.append("cmd", arg);
+    // The vendor SDK always pairs the repeated `cmd` params with `path`, the
+    // executable to resolve — argv[0], verbatim, not an absolute path.
+    const executable = options.argv[0];
+    if (executable !== undefined) url.searchParams.set("path", executable);
     if (options.dir) url.searchParams.set("dir", options.dir);
-    for (const [key, value] of Object.entries(options.env ?? {})) {
-      url.searchParams.append("env", `${key}=${value}`);
+    const env = options.env;
+    if (env !== undefined && Object.keys(env).length > 0) {
+      const withPath = "PATH" in env ? env : { PATH: DEFAULT_EXEC_PATH, ...env };
+      for (const [key, value] of Object.entries(withPath)) {
+        url.searchParams.append("env", `${key}=${value}`);
+      }
     }
     if (options.detachable) url.searchParams.set("detachable", "true");
     if (options.maxRunAfterDisconnect) {
@@ -362,7 +405,19 @@ class SpritesHttpClient implements SpritesClient {
     return url.toString();
   }
 
-  /** Opens and accepts the exec socket, or throws the mapped upgrade failure. */
+  /**
+   * Opens the exec socket, or throws the mapped upgrade failure.
+   *
+   * It deliberately does NOT call `accept()`. On Workers, `accept()` starts
+   * delivering frames immediately and there is no buffering for listeners
+   * attached afterwards — a frame that arrives before its listener exists is
+   * DROPPED. The live server answers in ~25ms, well inside a single `await`, so
+   * accepting here and returning cost us every frame of every exec (the socket
+   * then closed with nothing parsed: `sprites_exec_no_exit`).
+   *
+   * Each caller therefore attaches its listeners first and calls `accept()`
+   * itself, with no `await` in between.
+   */
   private async openExecSocket(name: string, options: SpritesExecOptions): Promise<ExecSocket> {
     let response: Response;
     try {
@@ -377,7 +432,6 @@ class SpritesHttpClient implements SpritesClient {
     }
     const ws = (response as unknown as { webSocket?: ExecSocket | null }).webSocket;
     if (!ws) throw mapError(response.status, "sprites_exec_upgrade_failed");
-    ws.accept();
     return ws;
   }
 
@@ -427,10 +481,29 @@ class SpritesHttpClient implements SpritesClient {
       // server sends one) or a reassembly buffer in this closure that consumes
       // frames until the message is drained — a change confined to this handler
       // and `parseExecFrame`, not to anything above this file.
+      //
+      // LIVE PROBE (2026-08-04), framing confirmed, stream SEPARATION not:
+      // `echo hello-stdout; echo hello-stderr >&2; exit 7` came back as ONE
+      // stream-1 frame carrying "hello-stderr\nhello-stdout\n" — stderr merged
+      // into stdout, and not even in the emitted order. No stream-2 frame was
+      // sent at all. The session was a non-TTY replay (`fast_path` on an
+      // already-exited session), so this may be replay-specific rather than
+      // universal; either way, callers must treat `stderr` as possibly EMPTY
+      // with its content sitting in `stdout`, and must not read an empty
+      // `stderr` as "the command wrote nothing to stderr".
       ws.addEventListener("message", (event: never) => {
         const data = (event as { data: unknown }).data;
-        // Text frames are JSON control notifications (e.g. `port_opened`).
-        if (typeof data === "string") return;
+        // Text frames are JSON control notifications (`debug`, `session_info`,
+        // `port_opened`) — and `exit`, which is a completion signal in its own
+        // right; see `parseTextExitCode`.
+        if (typeof data === "string") {
+          const textExitCode = parseTextExitCode(data);
+          if (textExitCode === undefined) return;
+          stdout += stdoutDecoder.decode();
+          stderr += stderrDecoder.decode();
+          settle(() => resolve({ exitCode: textExitCode, stdout, stderr }));
+          return;
+        }
         if (!(data instanceof ArrayBuffer) && !ArrayBuffer.isView(data)) return;
         let frame: { stream: 1 | 2 | 3; payload: Uint8Array };
         try {
@@ -461,23 +534,60 @@ class SpritesHttpClient implements SpritesClient {
         settle(() => resolve({ exitCode, stdout, stderr }));
       });
 
-      ws.addEventListener("close", () => {
+      ws.addEventListener("close", (event: never) => {
         // No exit frame means the command's outcome is unknown — reporting a
         // fabricated exit code here would let a killed run read as success.
-        settle(() => reject(new ComputeError("provider_transient", "sprites_exec_no_exit")));
+        //
+        // The close code and reason ride in the message because this error was
+        // the only production symptom of the dropped-frame bug, and without
+        // them it named no cause at all.
+        const detail = event as { code?: unknown; reason?: unknown } | undefined;
+        const code = typeof detail?.code === "number" ? String(detail.code) : "unknown";
+        const reason =
+          typeof detail?.reason === "string" && detail.reason.length > 0
+            ? ` reason=${detail.reason}`
+            : "";
+        settle(() =>
+          reject(
+            new ComputeError("provider_transient", `sprites_exec_no_exit: code=${code}${reason}`),
+          ),
+        );
       });
 
       ws.addEventListener("error", () => {
         settle(() => reject(new ComputeError("provider_transient", "sprites_exec_socket_error")));
       });
+
+      // LAST, and synchronously after the three attachments above: `accept()`
+      // starts frame delivery, and anything delivered before a listener exists
+      // is lost. Never put an `await` between the listeners and this call.
+      try {
+        ws.accept();
+      } catch (error) {
+        settle(() =>
+          reject(
+            new ComputeError(
+              "provider_transient",
+              `sprites_exec_upgrade_failed: ${error instanceof Error ? error.message : String(error)}`,
+            ),
+          ),
+        );
+      }
     });
   }
 
   async execDetached(name: string, options: SpritesExecOptions): Promise<void> {
     const ws = await this.openExecSocket(name, { ...options, detachable: true });
+    // Nothing is read off this socket, so there is nothing to attach — but the
+    // ordering rule still holds: `accept()` is the last thing before the wait,
+    // and any future listener belongs above it, not after.
+    ws.accept();
     // The command is launched server-side on connection, so one macrotask after
-    // the socket is open is enough to confirm the launch. The process's survival
-    // does not depend on this socket — the detachable session does.
+    // the socket is accepted is enough to confirm the launch. The macrotask is
+    // sequenced strictly after the 101 upgrade resolved AND after `accept()`,
+    // so it cannot fire on a socket that is not yet open; it observes no frame,
+    // so no dropped frame can affect it. The process's survival does not depend
+    // on this socket — the detachable session does.
     await new Promise((resolve) => setTimeout(resolve, 0));
     ws.close();
   }

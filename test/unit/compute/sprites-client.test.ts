@@ -383,13 +383,30 @@ describe("parseExecFrame", () => {
   });
 });
 
+/**
+ * Models the Workers WebSocket contract that the live smoke exposed:
+ *
+ * - frames emitted BEFORE `accept()` are buffered by the runtime and delivered
+ *   at `accept()`;
+ * - once accepted, delivery is immediate and a frame with NO listener attached
+ *   is DROPPED — there is no replay for a listener attached later.
+ *
+ * The drop is recorded rather than thrown so a test can assert on it.
+ */
 class FakeWebSocket {
   accepted = false;
   closed = false;
+  /** Event types delivered while no listener was attached, i.e. lost. */
+  readonly dropped: string[] = [];
+  /** Runs synchronously inside `accept()`, like a server that answers in ~25ms. */
+  onAccept?: (socket: FakeWebSocket) => void;
   private readonly listeners = new Map<string, Array<(event: unknown) => void>>();
+  private readonly buffered: Array<{ type: string; event: unknown }> = [];
 
   accept(): void {
     this.accepted = true;
+    for (const item of this.buffered.splice(0)) this.deliver(item.type, item.event);
+    this.onAccept?.(this);
   }
 
   close(): void {
@@ -403,11 +420,24 @@ class FakeWebSocket {
   }
 
   emit(type: string, event: unknown): void {
-    for (const fn of this.listeners.get(type) ?? []) fn(event);
+    if (!this.accepted) {
+      this.buffered.push({ type, event });
+      return;
+    }
+    this.deliver(type, event);
   }
 
   emitFrame(stream: number, payload: string | Uint8Array): void {
     this.emit("message", { data: frame(stream, payload) });
+  }
+
+  private deliver(type: string, event: unknown): void {
+    const fns = this.listeners.get(type) ?? [];
+    if (fns.length === 0) {
+      this.dropped.push(type);
+      return;
+    }
+    for (const fn of fns) fn(event);
   }
 }
 
@@ -435,7 +465,14 @@ describe("execCollect", () => {
     expect(url.pathname).toBe("/v1/sprites/s1/exec");
     expect(url.searchParams.getAll("cmd")).toEqual(["bash", "-c", "echo hi"]);
     expect(url.searchParams.get("dir")).toBe("/work");
-    expect(url.searchParams.getAll("env")).toEqual(["A=1", "B=2"]);
+    expect(url.searchParams.get("path")).toBe("bash");
+    // `env` REPLACES the sprite environment, so a PATH is prepended for callers
+    // that did not supply one.
+    expect(url.searchParams.getAll("env")).toEqual([
+      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "A=1",
+      "B=2",
+    ]);
     expect(url.searchParams.get("detachable")).toBeNull();
     const headers = calls[0]!.init.headers as Record<string, string>;
     expect(headers.Upgrade).toBe("websocket");
@@ -508,9 +545,86 @@ describe("execCollect", () => {
     const pending = client.execCollect("s1", { argv: ["bash"] });
     await flush();
     ws.emitFrame(1, "partial");
+    ws.emit("close", { code: 1006, reason: "abnormal" });
+
+    // The close code and reason are the only diagnosis this failure ever gets.
+    await expect(messageOf(pending)).resolves.toBe(
+      "sprites_exec_no_exit: code=1006 reason=abnormal",
+    );
+  });
+
+  it("reports an unknown close code rather than omitting it", async () => {
+    const ws = new FakeWebSocket();
+    const { client } = harness({ webSocket: ws });
+
+    const pending = client.execCollect("s1", { argv: ["bash"] });
+    await flush();
     ws.emit("close", {});
 
-    await expect(messageOf(pending)).resolves.toBe("sprites_exec_no_exit");
+    await expect(messageOf(pending)).resolves.toBe("sprites_exec_no_exit: code=unknown");
+  });
+
+  it("settles on the text exit notification when it lands first", async () => {
+    const ws = new FakeWebSocket();
+    const { client } = harness({ webSocket: ws });
+
+    const pending = client.execCollect("s1", { argv: ["bash"] });
+    await flush();
+    ws.emitFrame(1, "out");
+    ws.emit("message", { data: JSON.stringify({ type: "exit", exit_code: 7 }) });
+
+    await expect(pending).resolves.toEqual({ exitCode: 7, stdout: "out", stderr: "" });
+    expect(ws.closed).toBe(true);
+  });
+
+  it("ignores an exit notification whose code is missing rather than reporting success", async () => {
+    const ws = new FakeWebSocket();
+    const { client } = harness({ webSocket: ws });
+
+    const pending = client.execCollect("s1", { argv: ["bash"] });
+    await flush();
+    ws.emit("message", { data: JSON.stringify({ type: "exit" }) });
+    // The authoritative binary frame still decides.
+    ws.emitFrame(3, new Uint8Array([3]));
+
+    await expect(pending).resolves.toMatchObject({ exitCode: 3 });
+  });
+
+  it("ignores non-exit text notifications", async () => {
+    const ws = new FakeWebSocket();
+    const { client } = harness({ webSocket: ws });
+
+    const pending = client.execCollect("s1", { argv: ["bash"] });
+    await flush();
+    ws.emit("message", { data: JSON.stringify({ type: "debug", msg: "session_created" }) });
+    ws.emit("message", { data: "not json at all" });
+    ws.emitFrame(3, new Uint8Array([0]));
+
+    await expect(pending).resolves.toMatchObject({ exitCode: 0 });
+  });
+
+  it("keeps a caller-supplied PATH instead of overriding it", async () => {
+    const ws = new FakeWebSocket();
+    const { calls, client } = harness({ webSocket: ws });
+
+    const pending = client.execCollect("s1", { argv: ["bash"], env: { PATH: "/opt/bin" } });
+    await flush();
+    ws.emitFrame(3, new Uint8Array([0]));
+    await pending;
+
+    expect(new URL(calls[0]!.url).searchParams.getAll("env")).toEqual(["PATH=/opt/bin"]);
+  });
+
+  it("sends no env param at all when the caller supplies none", async () => {
+    const ws = new FakeWebSocket();
+    const { calls, client } = harness({ webSocket: ws });
+
+    const pending = client.execCollect("s1", { argv: ["bash"] });
+    await flush();
+    ws.emitFrame(3, new Uint8Array([0]));
+    await pending;
+
+    expect(new URL(calls[0]!.url).searchParams.getAll("env")).toEqual([]);
   });
 
   it("rejects with sprites_exec_timeout and closes the socket when timeoutMs elapses", async () => {
@@ -521,6 +635,49 @@ describe("execCollect", () => {
 
     await expect(messageOf(pending)).resolves.toBe("sprites_exec_timeout");
     expect(ws.closed).toBe(true);
+  });
+
+  // REGRESSION (live smoke, 2026-08-04): the client accepted the socket inside
+  // `openExecSocket` and attached its listeners only after `await`-ing it. The
+  // server answered inside that gap, every frame was dropped, and the run died
+  // with `sprites_exec_no_exit` on the very first `mkdir -p -- /workspace`.
+  // Replays the captured frame sequence verbatim.
+  it("keeps frames that arrive the instant the socket is accepted", async () => {
+    const ws = new FakeWebSocket();
+    ws.onAccept = (socket) => {
+      socket.emit("message", {
+        data: JSON.stringify({ msg: "session_created cmd=bash", pid: 332, type: "debug" }),
+      });
+      socket.emit("message", {
+        data: JSON.stringify({ type: "session_info", session_id: "332", command: "bash" }),
+      });
+      socket.emitFrame(1, "hello-stderr\nhello-stdout\n");
+      socket.emit("message", { data: JSON.stringify({ type: "exit", exit_code: 7 }) });
+      socket.emitFrame(3, new Uint8Array([7]));
+      // The live socket closed ~5s after the frames; a macrotask stands in.
+      setTimeout(() => socket.emit("close", {}), 0);
+    };
+    const { client } = harness({ webSocket: ws });
+
+    await expect(client.execCollect("s1", { argv: ["bash", "-c", "x"] })).resolves.toEqual({
+      exitCode: 7,
+      stdout: "hello-stderr\nhello-stdout\n",
+      stderr: "",
+    });
+    expect(ws.dropped).toEqual([]);
+  });
+
+  it("receives frames buffered before accept", async () => {
+    const ws = new FakeWebSocket();
+    const { client } = harness({ webSocket: ws });
+    ws.emitFrame(1, "early");
+    ws.emitFrame(3, new Uint8Array([0]));
+
+    await expect(client.execCollect("s1", { argv: ["bash"] })).resolves.toMatchObject({
+      exitCode: 0,
+      stdout: "early",
+    });
+    expect(ws.dropped).toEqual([]);
   });
 
   it("maps a failed upgrade to the status-appropriate ComputeError", async () => {
