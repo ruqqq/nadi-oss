@@ -447,4 +447,40 @@ describe("AutomatonService", () => {
       .get();
     expect(thread!.workbenchId).toBe(wbA);
   });
+
+  it("creates a once automaton with nextDueAt equal to runAt", async () => {
+    const seeded = await seedWorkspace("once-create");
+    const runAt = now + 86_400_000;
+    const row = await service(seeded).create({
+      name: "once",
+      prompt: "p",
+      timezone: "UTC",
+      schedule: { kind: "once", runAt },
+    });
+    expect(row.nextDueAt).toBe(runAt);
+    expect(JSON.parse(row.scheduleJson)).toEqual({ kind: "once", runAt });
+  });
+
+  it("rejects re-enabling a once automaton whose runAt is past", async () => {
+    const seeded = await seedWorkspace("once-reenable");
+    const runAt = Date.now() - 60_000;
+    const created = await service(seeded).create({
+      name: "once",
+      prompt: "p",
+      timezone: "UTC",
+      schedule: { kind: "once", runAt: Date.now() + 86_400_000 },
+    });
+    await db()
+      .update(schema.automata)
+      .set({
+        scheduleJson: JSON.stringify({ kind: "once", runAt }),
+        enabled: false,
+        nextDueAt: null,
+      })
+      .where(eq(schema.automata.id, created.id));
+
+    await expect(service(seeded).update(created.id, { enabled: true })).rejects.toThrow(
+      "Pick a new time before enabling.",
+    );
+  });
 });

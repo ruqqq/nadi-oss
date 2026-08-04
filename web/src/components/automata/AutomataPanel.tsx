@@ -19,6 +19,9 @@ import { cn } from "../../lib/utils";
 import {
   archiveAutomaton,
   createAutomaton,
+  defaultOnceDate,
+  utcMsToZonedDateParts,
+  zonedDateTimeToUtcMs,
   describeSchedule,
   getAutomaton,
   parseAutomatonSchedule,
@@ -129,7 +132,7 @@ function RunStatusChip({ status }: { status: AutomatonRunStatus }) {
   );
 }
 
-type RepeatKind = "hourly" | "daily" | "weekdays" | "weekly";
+type RepeatKind = "hourly" | "daily" | "weekdays" | "weekly" | "once";
 
 type AutomatonFormState = {
   name: string;
@@ -138,6 +141,7 @@ type AutomatonFormState = {
   hour: number;
   minute: number;
   weekday: number;
+  onceDate: string;
   timezone: string;
   cronExpr: string;
   projectId: string; // "none" or a ProjectSummary id
@@ -176,6 +180,7 @@ const EMPTY_FORM: AutomatonFormState = {
   hour: 8,
   minute: 0,
   weekday: 1,
+  onceDate: defaultOnceDate(defaultTimezone()),
   timezone: defaultTimezone(),
   cronExpr: "",
   projectId: "none",
@@ -233,6 +238,7 @@ function formFromAutomaton(automaton: AutomatonSummary): AutomatonFormState {
         hour: 8,
         minute: 0,
         weekday: 1,
+        onceDate: defaultOnceDate(automaton.timezone),
         cronExpr: schedule.expr,
       };
     case "hourly":
@@ -242,8 +248,21 @@ function formFromAutomaton(automaton: AutomatonSummary): AutomatonFormState {
         hour: 8,
         minute: schedule.minute,
         weekday: 1,
+        onceDate: defaultOnceDate(automaton.timezone),
         cronExpr: "",
       };
+    case "once": {
+      const parts = utcMsToZonedDateParts(schedule.runAt, automaton.timezone);
+      return {
+        ...base,
+        repeat: "once",
+        hour: parts.hour,
+        minute: parts.minute,
+        weekday: 1,
+        onceDate: parts.date,
+        cronExpr: "",
+      };
+    }
     case "weekly":
       return {
         ...base,
@@ -251,6 +270,7 @@ function formFromAutomaton(automaton: AutomatonSummary): AutomatonFormState {
         hour: schedule.hour,
         minute: schedule.minute,
         weekday: schedule.weekday,
+        onceDate: defaultOnceDate(automaton.timezone),
         cronExpr: "",
       };
     default:
@@ -260,6 +280,7 @@ function formFromAutomaton(automaton: AutomatonSummary): AutomatonFormState {
         hour: schedule.hour,
         minute: schedule.minute,
         weekday: 1,
+        onceDate: defaultOnceDate(automaton.timezone),
         cronExpr: "",
       };
   }
@@ -267,6 +288,12 @@ function formFromAutomaton(automaton: AutomatonSummary): AutomatonFormState {
 
 function scheduleFromForm(form: AutomatonFormState): AutomatonSchedule {
   if (form.cronExpr.trim()) return { kind: "cron", expr: form.cronExpr.trim() };
+  if (form.repeat === "once") {
+    return {
+      kind: "once",
+      runAt: zonedDateTimeToUtcMs(form.onceDate, form.hour, form.minute, form.timezone),
+    };
+  }
   switch (form.repeat) {
     case "hourly":
       return { kind: "hourly", minute: form.minute };
@@ -302,7 +329,7 @@ function formatDateTime(ts: number): string {
 // but a list row must never crash the whole panel over one bad row.
 function scheduleSummary(automaton: AutomatonSummary): string {
   try {
-    return describeSchedule(parseAutomatonSchedule(automaton.scheduleJson));
+    return describeSchedule(parseAutomatonSchedule(automaton.scheduleJson), automaton.timezone);
   } catch {
     return "Unknown schedule";
   }
@@ -888,7 +915,17 @@ export function AutomataPanel({
                         <Field label="Repeat" htmlFor="automaton-repeat">
                           <Select
                             value={form.repeat}
-                            onValueChange={(value) => handleField("repeat", value as RepeatKind)}
+                            onValueChange={(value) => {
+                              const repeat = value as RepeatKind;
+                              setForm((current) => ({
+                                ...current,
+                                repeat,
+                                ...(repeat === "once" && !current.onceDate
+                                  ? { onceDate: defaultOnceDate(current.timezone) }
+                                  : {}),
+                                ...(repeat === "once" ? { cronExpr: "" } : {}),
+                              }));
+                            }}
                           >
                             <SelectTrigger id="automaton-repeat" className="w-full">
                               <SelectValue />
@@ -898,6 +935,7 @@ export function AutomataPanel({
                               <SelectItem value="daily">Daily</SelectItem>
                               <SelectItem value="weekdays">Weekdays</SelectItem>
                               <SelectItem value="weekly">Weekly</SelectItem>
+                              <SelectItem value="once">Once</SelectItem>
                             </SelectContent>
                           </Select>
                         </Field>
@@ -937,6 +975,35 @@ export function AutomataPanel({
                               {...monoFieldProps}
                             />
                           </Field>
+                        ) : form.repeat === "once" ? (
+                          <>
+                            <Field label="Date" htmlFor="automaton-once-date">
+                              <Input
+                                id="automaton-once-date"
+                                type="date"
+                                value={form.onceDate}
+                                onChange={(event) => handleField("onceDate", event.target.value)}
+                                {...monoFieldProps}
+                              />
+                            </Field>
+                            <Field label="At" htmlFor="automaton-time">
+                              <Input
+                                id="automaton-time"
+                                type="time"
+                                value={timeValue}
+                                onChange={(event) => {
+                                  const parsed = parseTimeInput(event.target.value);
+                                  if (!parsed) return;
+                                  setForm((current) => ({
+                                    ...current,
+                                    hour: parsed.hour,
+                                    minute: parsed.minute,
+                                  }));
+                                }}
+                                {...monoFieldProps}
+                              />
+                            </Field>
+                          </>
                         ) : (
                           <Field label="At" htmlFor="automaton-time">
                             <Input
@@ -971,30 +1038,32 @@ export function AutomataPanel({
                       />
                     </Field>
 
-                    <details
-                      className="rounded-md border border-border"
-                      open={advancedOpen}
-                      onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}
-                    >
-                      <summary className="cursor-pointer px-3 py-2 text-muted-foreground text-xs">
-                        Advanced
-                      </summary>
-                      <div className="border-border border-t p-3">
-                        <Field
-                          label="Cron expression"
-                          htmlFor="automaton-cron"
-                          hint="Overrides the repeat and time above."
-                        >
-                          <Input
-                            id="automaton-cron"
-                            placeholder="0 8 * * 1-5"
-                            value={form.cronExpr}
-                            onChange={(event) => handleField("cronExpr", event.target.value)}
-                            {...monoFieldProps}
-                          />
-                        </Field>
-                      </div>
-                    </details>
+                    {form.repeat !== "once" && (
+                      <details
+                        className="rounded-md border border-border"
+                        open={advancedOpen}
+                        onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}
+                      >
+                        <summary className="cursor-pointer px-3 py-2 text-muted-foreground text-xs">
+                          Advanced
+                        </summary>
+                        <div className="border-border border-t p-3">
+                          <Field
+                            label="Cron expression"
+                            htmlFor="automaton-cron"
+                            hint="Overrides the repeat and time above."
+                          >
+                            <Input
+                              id="automaton-cron"
+                              placeholder="0 8 * * 1-5"
+                              value={form.cronExpr}
+                              onChange={(event) => handleField("cronExpr", event.target.value)}
+                              {...monoFieldProps}
+                            />
+                          </Field>
+                        </div>
+                      </details>
+                    )}
                   </FormCard>
 
                   <FormCard

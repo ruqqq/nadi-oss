@@ -10,7 +10,8 @@ export type AutomatonSchedule =
   | { kind: "daily"; hour: number; minute: number }
   | { kind: "weekdays"; hour: number; minute: number }
   | { kind: "weekly"; weekday: number; hour: number; minute: number }
-  | { kind: "cron"; expr: string };
+  | { kind: "cron"; expr: string }
+  | { kind: "once"; runAt: number };
 
 const WEEKDAY_NAMES = [
   "Sundays",
@@ -34,6 +35,8 @@ export function scheduleToCron(schedule: AutomatonSchedule): string {
       return `${schedule.minute} ${schedule.hour} * * ${schedule.weekday}`;
     case "cron":
       return schedule.expr;
+    case "once":
+      invalid("once schedules do not have a cron expression");
   }
 }
 
@@ -55,6 +58,12 @@ export function computeNextDueAt(
   timezone: string,
   after: number,
 ): number {
+  if (schedule.kind === "once") {
+    if (schedule.runAt <= after) {
+      invalid("runAt must be in the future");
+    }
+    return schedule.runAt;
+  }
   const iterator = CronExpressionParser.parse(scheduleToCron(schedule), {
     currentDate: new Date(after),
     tz: timezone,
@@ -114,6 +123,13 @@ export function parseSchedule(json: string): AutomatonSchedule {
       }
       return { kind: "cron", expr: value.expr };
     }
+    case "once": {
+      if (typeof value.runAt !== "number" || !Number.isFinite(value.runAt)) {
+        invalid("runAt must be a finite number");
+      }
+      if (!Number.isInteger(value.runAt)) invalid("runAt must be an integer");
+      return { kind: "once", runAt: value.runAt };
+    }
     default:
       invalid(`unknown kind: ${String(value.kind)}`);
   }
@@ -121,7 +137,7 @@ export function parseSchedule(json: string): AutomatonSchedule {
 
 const pad = (n: number) => String(n).padStart(2, "0");
 
-export function describeSchedule(schedule: AutomatonSchedule): string {
+export function describeSchedule(schedule: AutomatonSchedule, timezone: string): string {
   switch (schedule.kind) {
     case "hourly":
       return `Hourly at :${pad(schedule.minute)}`;
@@ -133,5 +149,17 @@ export function describeSchedule(schedule: AutomatonSchedule): string {
       return `${WEEKDAY_NAMES[schedule.weekday]} at ${pad(schedule.hour)}:${pad(schedule.minute)}`;
     case "cron":
       return `Custom (${schedule.expr})`;
+    case "once": {
+      const when = new Intl.DateTimeFormat("en-GB", {
+        timeZone: timezone,
+        weekday: "short",
+        day: "numeric",
+        month: "short",
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23",
+      }).format(new Date(schedule.runAt));
+      return `Once · ${when}`;
+    }
   }
 }

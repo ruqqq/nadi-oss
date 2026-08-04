@@ -22,6 +22,14 @@ type AutomatonInput = {
   model?: string | null;
 };
 
+function mockNextDueAt(schedule: AutomatonSchedule): number | null {
+  const now = Date.now();
+  if (schedule.kind === "once") {
+    return schedule.runAt > now ? schedule.runAt : null;
+  }
+  return now + 3_600_000;
+}
+
 /** The run history `getAutomaton` returns. Derived from `lastRun` so the detail
  *  view can't disagree with the list row's chip. */
 function runsFor(automaton: AutomatonSummary): AutomatonRun[] {
@@ -58,6 +66,7 @@ export const automataHandlers = [
     const name = (input.name ?? "").trim();
     if (!name) return HttpResponse.json({ error: "An automaton needs a name." }, { status: 400 });
     const now = Date.now();
+    const schedule = input.schedule ?? { kind: "daily", hour: 9, minute: 0 };
     const automaton: AutomatonSummary = {
       id: mockId("atm"),
       workspaceId: store.settings?.workspace.id ?? "ws_mock",
@@ -71,11 +80,11 @@ export const automataHandlers = [
       modelProvider: input.modelProvider ?? null,
       model: input.model ?? null,
       modelInputModalities: null,
-      scheduleJson: JSON.stringify(input.schedule ?? { kind: "daily", hour: 9, minute: 0 }),
+      scheduleJson: JSON.stringify(schedule),
       timezone: input.timezone ?? "UTC",
       enabled: input.enabled ?? true,
       disabledReason: null,
-      nextDueAt: now + 3_600_000,
+      nextDueAt: mockNextDueAt(schedule),
       lastFiredAt: null,
       archivedAt: null,
       createdAt: now,
@@ -99,13 +108,26 @@ export const automataHandlers = [
     const patch = (await request.json().catch(() => ({}))) as AutomatonInput;
     if (typeof patch.name === "string") automaton.name = patch.name;
     if (typeof patch.prompt === "string") automaton.prompt = patch.prompt;
-    if (patch.schedule) automaton.scheduleJson = JSON.stringify(patch.schedule);
+    if (patch.schedule) {
+      automaton.scheduleJson = JSON.stringify(patch.schedule);
+      automaton.nextDueAt = mockNextDueAt(patch.schedule);
+    }
     if (typeof patch.timezone === "string") automaton.timezone = patch.timezone;
     if (patch.projectId !== undefined) automaton.projectId = patch.projectId;
     if (patch.workbenchId !== undefined) automaton.workbenchId = patch.workbenchId;
     if (typeof patch.enabled === "boolean") {
-      automaton.enabled = patch.enabled;
-      automaton.disabledReason = patch.enabled ? null : "Paused by owner";
+      if (patch.enabled) {
+        const schedule = JSON.parse(automaton.scheduleJson) as AutomatonSchedule;
+        if (schedule.kind === "once" && schedule.runAt <= Date.now()) {
+          return HttpResponse.json({ error: "Pick a new time before enabling." }, { status: 400 });
+        }
+        automaton.enabled = true;
+        automaton.disabledReason = null;
+        if (schedule.kind === "once") automaton.nextDueAt = schedule.runAt;
+      } else {
+        automaton.enabled = false;
+        automaton.disabledReason = "Paused by owner";
+      }
     }
     if (patch.notifyMode) automaton.notifyMode = patch.notifyMode;
     if (patch.modelProvider !== undefined) automaton.modelProvider = patch.modelProvider;

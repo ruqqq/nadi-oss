@@ -171,4 +171,19 @@ export class AutomatonRepository {
       .set({ enabled: false, disabledReason: reason, updatedAt: now })
       .where(eq(automata.id, automatonId));
   }
+
+  /** After a one-shot schedule fires or its due is consumed by a skip. */
+  async disableAfterOnceFire(automatonId: string, lastFiredAt: number | null) {
+    const now = Date.now();
+    await this.db
+      .update(automata)
+      .set({
+        enabled: false,
+        nextDueAt: null,
+        disabledReason: null,
+        ...(lastFiredAt === null ? {} : { lastFiredAt }),
+        updatedAt: now,
+      })
+      .where(eq(automata.id, automatonId));
+  }
 }

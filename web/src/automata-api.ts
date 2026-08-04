@@ -22,7 +22,8 @@ export type AutomatonSchedule =
   | { kind: "daily"; hour: number; minute: number }
   | { kind: "weekdays"; hour: number; minute: number }
   | { kind: "weekly"; weekday: number; hour: number; minute: number }
-  | { kind: "cron"; expr: string };
+  | { kind: "cron"; expr: string }
+  | { kind: "once"; runAt: number };
 
 export interface AutomatonSummary {
   id: string;
@@ -200,7 +201,86 @@ const WEEKDAY_NAMES = [
 
 const pad = (n: number) => String(n).padStart(2, "0");
 
-export function describeSchedule(schedule: AutomatonSchedule): string {
+/** Wall-clock date + time in an IANA zone → UTC epoch ms. */
+export function zonedDateTimeToUtcMs(
+  date: string,
+  hour: number,
+  minute: number,
+  timeZone: string,
+): number {
+  const segments = date.split("-").map(Number);
+  if (segments.length !== 3 || segments.some((n) => !Number.isFinite(n))) {
+    throw new Error("invalid date");
+  }
+  const [year, month, day] = segments as [number, number, number];
+  const target = { year, month, day, hour, minute };
+  let utc = Date.UTC(year, month - 1, day, hour, minute, 0);
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
+  for (let i = 0; i < 6; i++) {
+    const parts = Object.fromEntries(
+      formatter
+        .formatToParts(new Date(utc))
+        .filter((part) => part.type !== "literal")
+        .map((part) => [part.type, Number(part.value)]),
+    ) as Record<string, number>;
+    const py = parts.year ?? 0;
+    const pm = parts.month ?? 0;
+    const pd = parts.day ?? 0;
+    const ph = parts.hour ?? 0;
+    const pmin = parts.minute ?? 0;
+    if (
+      py === target.year &&
+      pm === target.month &&
+      pd === target.day &&
+      ph === target.hour &&
+      pmin === target.minute
+    ) {
+      return utc;
+    }
+    const diffMs =
+      Date.UTC(target.year, target.month - 1, target.day, target.hour, target.minute) -
+      Date.UTC(py, pm - 1, pd, ph, pmin);
+    utc += diffMs;
+  }
+  return utc;
+}
+
+export function utcMsToZonedDateParts(
+  ms: number,
+  timeZone: string,
+): { date: string; hour: number; minute: number } {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
+  const parts = Object.fromEntries(
+    formatter.formatToParts(new Date(ms)).map((part) => [part.type, part.value]),
+  );
+  return {
+    date: `${parts.year}-${parts.month}-${parts.day}`,
+    hour: Number(parts.hour),
+    minute: Number(parts.minute),
+  };
+}
+
+export function defaultOnceDate(timeZone: string): string {
+  return utcMsToZonedDateParts(Date.now() + 86_400_000, timeZone).date;
+}
+
+export function describeSchedule(schedule: AutomatonSchedule, timezone: string): string {
   switch (schedule.kind) {
     case "hourly":
       return `Hourly at :${pad(schedule.minute)}`;
@@ -212,5 +292,17 @@ export function describeSchedule(schedule: AutomatonSchedule): string {
       return `${WEEKDAY_NAMES[schedule.weekday]} at ${pad(schedule.hour)}:${pad(schedule.minute)}`;
     case "cron":
       return `Custom (${schedule.expr})`;
+    case "once": {
+      const when = new Intl.DateTimeFormat("en-GB", {
+        timeZone: timezone,
+        weekday: "short",
+        day: "numeric",
+        month: "short",
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23",
+      }).format(new Date(schedule.runAt));
+      return `Once · ${when}`;
+    }
   }
 }

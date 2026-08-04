@@ -720,4 +720,32 @@ describe("AutomatonRepository.listLatestRunsFor", () => {
     expect(byAutomaton.get("auto_latest_a")?.id).toBe("arun_a2");
     expect(byAutomaton.get("auto_latest_b")?.id).toBe("arun_b1");
   });
+
+  it("disables a once automaton after a successful scheduled fire", async () => {
+    const dueAt = Date.now() - 1000;
+    const onceJson = JSON.stringify({ kind: "once", runAt: dueAt });
+    await insertAutomaton({ id: "auto_once", nextDueAt: dueAt, scheduleJson: onceJson });
+
+    const result = await fireDueAutomata(env, Date.now());
+    expect(result).toEqual({ fired: 1, skipped: 0 });
+
+    const automaton = await getAutomaton("auto_once");
+    expect(automaton?.enabled).toBe(false);
+    expect(automaton?.nextDueAt).toBeNull();
+    expect(automaton?.disabledReason).toBeNull();
+  });
+
+  it("disables a once automaton after a stale skip", async () => {
+    const now = Date.UTC(2026, 0, 15, 12, 0, 0);
+    const dueAt = now - AUTOMATON_GRACE_MS - 60_000;
+    const onceJson = JSON.stringify({ kind: "once", runAt: dueAt });
+    await insertAutomaton({ id: "auto_once_stale", nextDueAt: dueAt, scheduleJson: onceJson });
+
+    const result = await fireDueAutomata(env, now);
+    expect(result).toEqual({ fired: 0, skipped: 1 });
+
+    const automaton = await getAutomaton("auto_once_stale");
+    expect(automaton?.enabled).toBe(false);
+    expect(automaton?.nextDueAt).toBeNull();
+  });
 });

@@ -182,13 +182,17 @@ describe("runAutomatonNow", () => {
 });
 
 describe("describeSchedule", () => {
+  const tz = "UTC";
+
   it("renders a human summary for the list row", () => {
-    expect(describeSchedule({ kind: "weekdays", hour: 8, minute: 0 })).toBe("Weekdays at 08:00");
-    expect(describeSchedule({ kind: "daily", hour: 8, minute: 5 })).toBe("Daily at 08:05");
-    expect(describeSchedule({ kind: "hourly", minute: 0 })).toBe("Hourly at :00");
-    expect(describeSchedule({ kind: "weekly", weekday: 1, hour: 8, minute: 0 })).toBe(
+    expect(describeSchedule({ kind: "weekdays", hour: 8, minute: 0 }, tz)).toBe("Weekdays at 08:00");
+    expect(describeSchedule({ kind: "daily", hour: 8, minute: 5 }, tz)).toBe("Daily at 08:05");
+    expect(describeSchedule({ kind: "hourly", minute: 0 }, tz)).toBe("Hourly at :00");
+    expect(describeSchedule({ kind: "weekly", weekday: 1, hour: 8, minute: 0 }, tz)).toBe(
       "Mondays at 08:00",
     );
-    expect(describeSchedule({ kind: "cron", expr: "0 8 * * 1-5" })).toBe("Custom (0 8 * * 1-5)");
+    expect(describeSchedule({ kind: "cron", expr: "0 8 * * 1-5" }, tz)).toBe(
+      "Custom (0 8 * * 1-5)",
+    );
   });
 });
