@@ -404,9 +404,9 @@ describe("buildComputeBackend Sprites dispatch", () => {
     await writer.ensureWorkspaceDek("ws-x");
     await writer.set("ws-x", "sandbox:sprites", "workspace-key");
 
-    const calls: Array<{ apiKey: string }> = [];
+    const calls: Array<{ apiKey: string; env: Record<string, string> }> = [];
     const fakeBackend = { id: "sprites" } as ComputeBackend;
-    const spritesFactory = (config: { apiKey: string }): ComputeBackend => {
+    const spritesFactory = (config: { apiKey: string; env: Record<string, string> }): ComputeBackend => {
       calls.push(config);
       return fakeBackend;
     };
@@ -416,7 +416,7 @@ describe("buildComputeBackend Sprites dispatch", () => {
     });
 
     expect(backend).toBe(fakeBackend);
-    expect(calls).toEqual([{ apiKey: "workspace-key" }]);
+    expect(calls).toEqual([{ apiKey: "workspace-key", env: {} }]);
   });
 
   it("fails closed when no sprites key is resolvable", async () => {
