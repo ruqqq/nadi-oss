@@ -11,7 +11,13 @@ export type WorkspaceCleanliness =
 export type DirtyRepo = { path: string; changes: string[]; unpushed: number };
 
 /**
- * One line per repo: `<path>\t<porcelain status, unit-separator-joined>\t<unpushed|NOUPSTREAM>`.
+ * One line per repo: `<path>\t<porcelain status, unit-separator-joined>\t<unpushed>`.
+ * With an upstream, `unpushed` is the count ahead of it. With NO upstream it is
+ * the repo's OWN commit count: commits that exist only inside the sandbox are
+ * work that dies with it, so a repo with commits and no remote must read as
+ * dirty. (It used to emit a `NOUPSTREAM` sentinel that parsed to 0 — i.e.
+ * "nothing to lose" — and such a sandbox was discarded 15 minutes after going
+ * idle.) A freshly `git init`-ed repo has 0 commits and stays clean.
  * The status lines are joined with ASCII unit separator (0x1F), not a
  * printable character, since porcelain status lines carry arbitrary path
  * bytes — a delimiter drawn from that alphabet (e.g. `|`) would mis-split a
@@ -33,7 +39,7 @@ while IFS= read -r gitdir; do
   if git -C "$repo" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' >/dev/null 2>&1; then
     unpushed=$(git -C "$repo" rev-list --count '@{upstream}..HEAD' 2>/dev/null || echo 0)
   else
-    unpushed=NOUPSTREAM
+    unpushed=$(git -C "$repo" rev-list --count HEAD 2>/dev/null || echo 0)
   fi
   printf '%s\\t%s\\t%s\\n' "$repo" "$status" "$unpushed"
 done <<EOF
@@ -65,16 +71,14 @@ function parseRepoLine(line: string): DirtyRepo | null {
   const changes =
     statusRaw.length > 0 ? statusRaw.split("\x1f").filter((entry) => entry.length > 0) : [];
 
-  let unpushed: number;
-  if (unpushedRaw === "NOUPSTREAM") {
-    unpushed = 0;
-  } else {
-    unpushed = Number.parseInt(unpushedRaw, 10);
-    if (!Number.isFinite(unpushed) || unpushed < 0 || String(unpushed) !== unpushedRaw) {
-      throw new UnparseableProbeLineError(
-        `unparseable unpushed count: ${JSON.stringify(unpushedRaw)}`,
-      );
-    }
+  // Always a count now — no sentinel. An unrecognized third field (including
+  // the retired `NOUPSTREAM`) is unparseable, which resolves to `probe_failed`
+  // and therefore preserves.
+  const unpushed = Number.parseInt(unpushedRaw, 10);
+  if (!Number.isFinite(unpushed) || unpushed < 0 || String(unpushed) !== unpushedRaw) {
+    throw new UnparseableProbeLineError(
+      `unparseable unpushed count: ${JSON.stringify(unpushedRaw)}`,
+    );
   }
 
   if (changes.length === 0 && unpushed === 0) {

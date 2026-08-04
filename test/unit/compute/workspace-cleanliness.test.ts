@@ -97,13 +97,46 @@ describe("probeWorkspaceCleanliness", () => {
     expect(result.state === "dirty" && result.repos[0]?.path).toBe("/workspace/wt/feature-branch");
   });
 
-  it("does not count unpushed when no upstream is configured", async () => {
-    // A repo with no remote has nowhere to push; refusing forever would make
-    // the declaration unreachable for local-only work.
+  /**
+   * DATA LOSS GUARD. With no upstream the script now reports the repo's OWN
+   * commit count, so commits that exist only inside the sandbox read as work
+   * to preserve. The four rows below are the whole matrix the fix turns on;
+   * only the first one changed verdict (it used to arrive as the `NOUPSTREAM`
+   * sentinel, parse to 0, and get the sandbox destroyed).
+   */
+  const upstreamCases: Array<[string, string, "clean" | "dirty"]> = [
+    ["no upstream, local-only commits", "/workspace/app\t\t2\n", "dirty"],
+    ["no upstream, freshly initialised repo with no commits", "/workspace/app\t\t0\n", "clean"],
+    ["upstream with unpushed commits", "/workspace/app\t\t1\n", "dirty"],
+    ["upstream, fully pushed", "/workspace/app\t\t0\n", "clean"],
+  ];
+  for (const [name, stdout, expected] of upstreamCases) {
+    it(`reports ${expected} for ${name}`, async () => {
+      const result = await probeWorkspaceCleanliness(fakeExec({ PROBE: { stdout } }));
+      expect(result.state).toBe(expected);
+    });
+  }
+
+  it("asks git for the repo's own commit count when there is no upstream", async () => {
+    // The clean/dirty split above cannot see WHICH number the sandbox sends —
+    // that is decided in the shell. This pins the script itself: no upstream
+    // must produce a count, never the retired `NOUPSTREAM` sentinel.
+    let command = "";
+    await probeWorkspaceCleanliness(async (script) => {
+      command = script;
+      return { exitCode: 0, stdout: "/workspace/app\t\t0\n", stderr: "" };
+    });
+    expect(command).toContain("rev-list --count HEAD");
+    expect(command).not.toContain("NOUPSTREAM");
+  });
+
+  it("reports probe_failed on the retired NOUPSTREAM sentinel rather than clean", async () => {
+    // A sandbox running an older probe (or any third field that is not a
+    // count) must preserve, not be read as "nothing to lose".
     const result = await probeWorkspaceCleanliness(
       fakeExec({ PROBE: { stdout: "/workspace/app\t\tNOUPSTREAM\n" } }),
     );
-    expect(result.state).toBe("clean");
+    expect(result.state).toBe("probe_failed");
   });
 
   /**
