@@ -1,6 +1,6 @@
 import type { Env } from "../../env";
 import type { BackendProcessReference, BackendReference, ComputeSpec } from "../backend";
-import { SpritesComputeBackend } from "./sprites";
+import { SPRITES_PROFILE_MEMORY_MB, SpritesComputeBackend } from "./sprites";
 import { createSpritesClient } from "./sprites-client";
 
 /**
@@ -32,6 +32,18 @@ export interface SpritesSmokeReport {
 const SMOKE_ENV_VALUE = "1";
 const ROUNDTRIP_SRC = "/workspace/.nadi-sprites-smoke-roundtrip.bin";
 const ROUNDTRIP_DEST = "/workspace/.nadi-sprites-smoke-roundtrip-dest.bin";
+const SMOKE_SUBDIR = "/workspace/.nadi-sprites-smoke-dir";
+/** Written just before the recoverable release; must survive hibernate/wake. */
+const SURVIVOR = "/workspace/.nadi-sprites-smoke-survivor.bin";
+/** The byte pattern both the round-trip and the survivor file carry. */
+const ROUNDTRIP_BYTES = [0, 1, 2, 255, 254, 10, 13, 65, 66, 67, 200];
+/**
+ * Long enough to pass the provider's ~30s idle hibernation threshold. Without
+ * it the recovery step reacquires a sprite that never went to sleep, so
+ * "wakes on the first API call" would be asserted by a test that never
+ * hibernated anything.
+ */
+const HIBERNATE_IDLE_MS = 45_000;
 /** ~256KB of stdout, to catch WS message coalescing/splitting (see step 6f). */
 const LARGE_PAYLOAD_BYTES = 262_144;
 
@@ -76,6 +88,20 @@ export async function runSpritesSmoke(env: Env): Promise<SpritesSmokeReport> {
 
   let runtime: BackendReference | null = null;
 
+  // 0. The connection-test probe, verified nowhere else: Settings → "Test
+  // connection" for sprites calls exactly this (`listSprites(1)` on a fresh
+  // client) and creates NOTHING. Run it BEFORE any sprite exists, so a wrapper
+  // that mis-parses the list body cannot be rescued by this run's own sprite.
+  await timed("0. listSprites(1) — the connection-test probe (creates nothing)", async () => {
+    const listed = await createSpritesClient({ apiKey }).listSprites(1);
+    if (!Array.isArray(listed.names)) {
+      throw new Error(
+        `listSprites did not parse into {names: string[]}: ${JSON.stringify(listed)}`,
+      );
+    }
+    return `parsed; names.length=${listed.names.length} (maxResults=1)`;
+  });
+
   try {
     // 1. acquire: create + memory policy + network policy + mkdir /workspace.
     // `prepare()` awaits setMemoryPolicy then setNetworkPolicy then the mkdir,
@@ -102,12 +128,29 @@ export async function runSpritesSmoke(env: Env): Promise<SpritesSmokeReport> {
         cwd: "/workspace",
         timeoutMs: 30_000,
       });
-      if (r.exitCode !== 0 || !r.stdout.includes(SMOKE_ENV_VALUE) || !r.stdout.includes("/workspace")) {
+      if (
+        r.exitCode !== 0 ||
+        !r.stdout.includes(SMOKE_ENV_VALUE) ||
+        !r.stdout.includes("/workspace")
+      ) {
         throw new Error(
           `exitCode=${r.exitCode} stdout=${JSON.stringify(r.stdout)} stderr=${JSON.stringify(r.stderr)}`,
         );
       }
       return `exitCode=0 stdout=${JSON.stringify(r.stdout)}`;
+    });
+
+    // 2b. `setMemoryPolicy` for the OTHER profile, against a live sprite. The
+    // acquire above only proved the `small` limit is accepted; `medium` is a
+    // different number on the same route, and a 4xx here (an unsupported limit,
+    // a plan cap) would otherwise only ever be discovered by a user picking the
+    // medium profile in production.
+    await timed(`2b. setMemoryPolicy(medium = ${SPRITES_PROFILE_MEMORY_MB.medium}MB)`, async () => {
+      if (!runtime) throw new Error("no runtime acquired");
+      await client.setMemoryPolicy(spriteNameOf(runtime), SPRITES_PROFILE_MEMORY_MB.medium);
+      // Restore the profile the rest of the run was acquired with.
+      await client.setMemoryPolicy(spriteNameOf(runtime), SPRITES_PROFILE_MEMORY_MB.small);
+      return `medium limit accepted; restored to small (${SPRITES_PROFILE_MEMORY_MB.small}MB)`;
     });
 
     // 3a. Allow-listed egress passes.
@@ -119,27 +162,32 @@ export async function runSpritesSmoke(env: Env): Promise<SpritesSmokeReport> {
       });
       const code = r.stdout.trim();
       if (r.exitCode !== 0 || !["200", "301"].includes(code)) {
-        throw new Error(`exitCode=${r.exitCode} http_code=${JSON.stringify(code)} stderr=${JSON.stringify(r.stderr)}`);
+        throw new Error(
+          `exitCode=${r.exitCode} http_code=${JSON.stringify(code)} stderr=${JSON.stringify(r.stderr)}`,
+        );
       }
       return `http_code=${code}`;
     });
 
     // 3b. Everything else is denied — proves the allow+deny-* policy actually
     // fences egress, not just that the allow rule works.
-    await timed("3b. egress denied (curl --max-time 10 https://example.com must fail)", async () => {
-      if (!runtime) throw new Error("no runtime acquired");
-      const r = await backend.runCommand(runtime, {
-        command: "curl --max-time 10 https://example.com",
-        timeoutMs: 30_000,
-      });
-      if (r.exitCode === 0) {
-        throw new Error(
-          `curl to a non-allow-listed host SUCCEEDED (exit 0) — egress is NOT fenced; ` +
-            `stdout=${JSON.stringify(r.stdout.slice(0, 200))}`,
-        );
-      }
-      return `curl failed as required: exitCode=${r.exitCode} stderr=${JSON.stringify(r.stderr.slice(0, 200))}`;
-    });
+    await timed(
+      "3b. egress denied (curl --max-time 10 https://example.com must fail)",
+      async () => {
+        if (!runtime) throw new Error("no runtime acquired");
+        const r = await backend.runCommand(runtime, {
+          command: "curl --max-time 10 https://example.com",
+          timeoutMs: 30_000,
+        });
+        if (r.exitCode === 0) {
+          throw new Error(
+            `curl to a non-allow-listed host SUCCEEDED (exit 0) — egress is NOT fenced; ` +
+              `stdout=${JSON.stringify(r.stdout.slice(0, 200))}`,
+          );
+        }
+        return `curl failed as required: exitCode=${r.exitCode} stderr=${JSON.stringify(r.stderr.slice(0, 200))}`;
+      },
+    );
 
     // 4a. Detachable session survives disconnect; sid-in-command matching in
     // listSessions is what getProcessStatus's "running" answer depends on.
@@ -186,7 +234,10 @@ export async function runSpritesSmoke(env: Env): Promise<SpritesSmokeReport> {
     let killProcess: BackendProcessReference | null = null;
     await timed("5a. startProcess (sleep 300)", async () => {
       if (!runtime) throw new Error("no runtime acquired");
-      const started = await backend.startProcess(runtime, { command: "sleep 300", timeoutMs: 600_000 });
+      const started = await backend.startProcess(runtime, {
+        command: "sleep 300",
+        timeoutMs: 600_000,
+      });
       killProcess = started.process;
       if (started.status !== "running") {
         throw new Error(`expected running right after starting sleep 300, got ${started.status}`);
@@ -207,7 +258,9 @@ export async function runSpritesSmoke(env: Env): Promise<SpritesSmokeReport> {
         await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
         const status = await backend.getProcessStatus(runtime, killProcess);
         if (status.status === "running") {
-          throw new Error(`still running after kill: stopProcess resolved ${JSON.stringify(stopResult)}`);
+          throw new Error(
+            `still running after kill: stopProcess resolved ${JSON.stringify(stopResult)}`,
+          );
         }
         const shape =
           status.status === "failed"
@@ -217,10 +270,63 @@ export async function runSpritesSmoke(env: Env): Promise<SpritesSmokeReport> {
       },
     );
 
+    // 5c. The OTHER signal path. `stopProcess` maps kill/terminate/interrupt to
+    // SIGKILL/SIGTERM/SIGINT, and only SIGKILL was exercised above — a provider
+    // that rejects or ignores a non-KILL signal name would go unnoticed.
+    await timed("5c. stopProcess(terminate) sends SIGTERM and the process stops", async () => {
+      if (!runtime) throw new Error("no runtime acquired");
+      const started = await backend.startProcess(runtime, {
+        command: "sleep 300",
+        timeoutMs: 600_000,
+      });
+      if (started.status !== "running") {
+        throw new Error(`expected running right after starting sleep 300, got ${started.status}`);
+      }
+      const stopResult = await backend.stopProcess(runtime, started.process, "terminate");
+      await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
+      const status = await backend.getProcessStatus(runtime, started.process);
+      if (status.status === "running") {
+        throw new Error(
+          `still running after SIGTERM: stopProcess resolved ${JSON.stringify(stopResult)}`,
+        );
+      }
+      return `stopProcess(terminate) resolved ${JSON.stringify(stopResult)}; status after = ${JSON.stringify(status)}`;
+    });
+
+    // 5d. stdin: `startProcess` writes it to a sentinel file and redirects the
+    // wrapper's stdin from there. Nothing else in this run proves that file is
+    // written before the wrapper launches, or that the redirect lands.
+    await timed(
+      "5d. startProcess with stdin (cat echoes it back through the out sentinel)",
+      async () => {
+        if (!runtime) throw new Error("no runtime acquired");
+        const live: BackendReference = runtime;
+        const payload = "nadi-sprites-smoke-stdin";
+        const started = await backend.startProcess(live, {
+          command: "cat",
+          stdin: `${payload}\n`,
+          timeoutMs: 60_000,
+        });
+        const output =
+          started.status === "exited"
+            ? { stdout: started.stdout, stderr: started.stderr }
+            : await (async () => {
+                await new Promise<void>((resolve) => setTimeout(resolve, 2_000));
+                return backend.readProcessOutput(live, started.process);
+              })();
+        if (!(output.stdout ?? "").includes(payload)) {
+          throw new Error(
+            `stdin did not reach the process: status=${started.status} stdout=${JSON.stringify(output.stdout)}`,
+          );
+        }
+        return `stdin round-tripped (status=${started.status}, stdout=${JSON.stringify(output.stdout)})`;
+      },
+    );
+
     // 6. File round-trip: the /fs [assumed] shapes.
     await timed("6a. writeFile -> readFile bytes identical", async () => {
       if (!runtime) throw new Error("no runtime acquired");
-      const src = new Uint8Array([0, 1, 2, 255, 254, 10, 13, 65, 66, 67, 200]);
+      const src = new Uint8Array(ROUNDTRIP_BYTES);
       await backend.writeFile(runtime, ROUNDTRIP_SRC, toArrayBuffer(src), {
         createParents: true,
         overwrite: true,
@@ -242,14 +348,57 @@ export async function runSpritesSmoke(env: Env): Promise<SpritesSmokeReport> {
       return `type=file size=${info.size}`;
     });
 
-    await timed("6c. listDirectory shows the file", async () => {
+    // 6c also probes the is-dir KEY NAME: `listDirectory` maps `entry.isDir` to
+    // `type`, and a provider that spells that field differently (`is_dir`)
+    // would report every subdirectory as a file — silently, with no error, in
+    // every directory listing the model ever sees. A real subdirectory is the
+    // only thing that can catch it.
+    await timed(
+      "6c. listDirectory shows the file, and a subdirectory as type=directory",
+      async () => {
+        if (!runtime) throw new Error("no runtime acquired");
+        await backend.createDirectory(runtime, SMOKE_SUBDIR);
+        const entries = await backend.listDirectory(runtime, "/workspace");
+        const name = ROUNDTRIP_SRC.split("/").pop() as string;
+        if (!entries.some((entry) => entry.name === name)) {
+          throw new Error(`entry not found; listing=${JSON.stringify(entries.map((e) => e.name))}`);
+        }
+        const dirName = SMOKE_SUBDIR.split("/").pop() as string;
+        const dirEntry = entries.find((entry) => entry.name === dirName);
+        if (dirEntry?.type !== "directory") {
+          throw new Error(
+            `subdirectory ${dirName} reported type=${dirEntry?.type ?? "missing"} — the is-dir field ` +
+              `is not being read; listing=${JSON.stringify(entries)}`,
+          );
+        }
+        return `listing includes ${name} and ${dirName} (type=directory); ${entries.length} entries total`;
+      },
+    );
+
+    // 6c2. The no-overwrite contract, asserted as an expected FAILURE: writing
+    // over an existing path without `overwrite` must reject. This is the guard
+    // `ComputeFileService` leans on to avoid clobbering a file it did not read.
+    await timed("6c2. writeFile({overwrite:false}) onto an existing path must reject", async () => {
       if (!runtime) throw new Error("no runtime acquired");
-      const entries = await backend.listDirectory(runtime, "/workspace");
-      const name = ROUNDTRIP_SRC.split("/").pop() as string;
-      if (!entries.some((entry) => entry.name === name)) {
-        throw new Error(`entry not found; listing=${JSON.stringify(entries.map((e) => e.name))}`);
+      let detail: string | null = null;
+      try {
+        await backend.writeFile(runtime, ROUNDTRIP_SRC, textBuffer("CLOBBER"), {
+          createParents: false,
+          overwrite: false,
+        });
+      } catch (error) {
+        detail = message(error);
       }
-      return `listing includes ${name} (${entries.length} entries total)`;
+      if (detail === null) {
+        throw new Error(
+          "write SUCCEEDED over an existing path with overwrite:false — clobber risk",
+        );
+      }
+      const read = await backend.readFile(runtime, ROUNDTRIP_SRC, 1_000);
+      if (read.bytes.byteLength !== 11) {
+        throw new Error(`existing file was modified: ${read.bytes.byteLength} bytes`);
+      }
+      return `rejected as required (${detail}); existing file untouched (11 bytes)`;
     });
 
     await timed("6d. movePath(overwrite) onto an existing destination", async () => {
@@ -262,10 +411,45 @@ export async function runSpritesSmoke(env: Env): Promise<SpritesSmokeReport> {
       const destInfo = await backend.inspectPath(runtime, ROUNDTRIP_DEST);
       const srcInfo = await backend.inspectPath(runtime, ROUNDTRIP_SRC);
       if (destInfo?.type !== "file" || destInfo.size !== 11 || srcInfo !== null) {
-        throw new Error(`dest=${JSON.stringify(destInfo)} src(should be gone)=${JSON.stringify(srcInfo)}`);
+        throw new Error(
+          `dest=${JSON.stringify(destInfo)} src(should be gone)=${JSON.stringify(srcInfo)}`,
+        );
       }
       return `destination replaced (size=${destInfo.size}); source path now absent`;
     });
+
+    // 6d2. The move side of the same contract: `movePath` must refuse an
+    // existing destination unless told to overwrite. Asserted after 6d, so the
+    // destination is known to exist.
+    await timed(
+      "6d2. movePath(overwrite:false) onto an existing destination must reject",
+      async () => {
+        if (!runtime) throw new Error("no runtime acquired");
+        const scratch = `${SMOKE_SUBDIR}/move-source.bin`;
+        await backend.writeFile(runtime, scratch, textBuffer("NEW"), {
+          createParents: true,
+          overwrite: true,
+        });
+        let detail: string | null = null;
+        try {
+          await backend.movePath(runtime, scratch, ROUNDTRIP_DEST, false);
+        } catch (error) {
+          detail = message(error);
+        }
+        if (detail === null) {
+          throw new Error("move SUCCEEDED onto an existing destination with overwrite:false");
+        }
+        const destInfo = await backend.inspectPath(runtime, ROUNDTRIP_DEST);
+        const srcInfo = await backend.inspectPath(runtime, scratch);
+        if (destInfo?.size !== 11 || srcInfo === null) {
+          throw new Error(
+            `refused move was not a no-op: dest=${JSON.stringify(destInfo)} src=${JSON.stringify(srcInfo)}`,
+          );
+        }
+        await backend.deletePath(runtime, scratch);
+        return `rejected as required (${detail}); destination and source both intact`;
+      },
+    );
 
     await timed("6e. deletePath removes the file", async () => {
       if (!runtime) throw new Error("no runtime acquired");
@@ -281,53 +465,87 @@ export async function runSpritesSmoke(env: Env): Promise<SpritesSmokeReport> {
     // truncate stdout mid-stream. Base64 of all-zero bytes is deterministic
     // (every triple → "AAA A", with a fixed tail), so both length AND content
     // are checked — a corruption that preserved length would still be caught.
-    await timed("6f. WS exec framing under >=256KB payload (byte-count + content integrity)", async () => {
-      if (!runtime) throw new Error("no runtime acquired");
-      const r = await backend.runCommand(runtime, {
-        command: `head -c ${LARGE_PAYLOAD_BYTES} /dev/zero | base64 -w0`,
-        timeoutMs: 30_000,
-      });
-      if (r.exitCode !== 0) {
-        throw new Error(`exitCode=${r.exitCode} stderr=${JSON.stringify(r.stderr.slice(0, 200))}`);
-      }
-      const stdout = r.stdout.trim();
-      const expectedLength = Math.ceil(LARGE_PAYLOAD_BYTES / 3) * 4;
-      if (stdout.length !== expectedLength) {
-        throw new Error(
-          `byte count mismatch: got ${stdout.length} expected ${expectedLength} — frame coalescing/splitting likely corrupted or truncated the stream`,
-        );
-      }
-      if (!/^A+==$/.test(stdout)) {
-        throw new Error(
-          `payload content corrupted (expected all-'A' base64 of zero bytes with a trailing '=='); ` +
-            `head=${JSON.stringify(stdout.slice(0, 40))} tail=${JSON.stringify(stdout.slice(-40))}`,
-        );
-      }
-      return `stdout length=${stdout.length} matches expected ${expectedLength}; content verified all-'A' with trailing '==' (no coalescing/splitting detected)`;
-    });
+    await timed(
+      "6f. WS exec framing under >=256KB payload (byte-count + content integrity)",
+      async () => {
+        if (!runtime) throw new Error("no runtime acquired");
+        const r = await backend.runCommand(runtime, {
+          command: `head -c ${LARGE_PAYLOAD_BYTES} /dev/zero | base64 -w0`,
+          timeoutMs: 30_000,
+        });
+        if (r.exitCode !== 0) {
+          throw new Error(
+            `exitCode=${r.exitCode} stderr=${JSON.stringify(r.stderr.slice(0, 200))}`,
+          );
+        }
+        const stdout = r.stdout.trim();
+        const expectedLength = Math.ceil(LARGE_PAYLOAD_BYTES / 3) * 4;
+        if (stdout.length !== expectedLength) {
+          throw new Error(
+            `byte count mismatch: got ${stdout.length} expected ${expectedLength} — frame coalescing/splitting likely corrupted or truncated the stream`,
+          );
+        }
+        if (!/^A+==$/.test(stdout)) {
+          throw new Error(
+            `payload content corrupted (expected all-'A' base64 of zero bytes with a trailing '=='); ` +
+              `head=${JSON.stringify(stdout.slice(0, 40))} tail=${JSON.stringify(stdout.slice(-40))}`,
+          );
+        }
+        return `stdout length=${stdout.length} matches expected ${expectedLength}; content verified all-'A' with trailing '==' (no coalescing/splitting detected)`;
+      },
+    );
 
     // 7. Hibernate/wake reuse: recoverable release is a no-op provider call
     // (hibernation is automatic); acquiring with the recovery reference must
     // reuse the same sprite, and its filesystem must still hold what step 6d
     // wrote.
-    await timed("7. release(recoverable) -> acquire(recovery) -> file survives", async () => {
-      if (!runtime) throw new Error("no runtime acquired");
-      const recovery = await backend.release(runtime, {
-        disposition: "recoverable",
-        recoveryTtlMs: 60 * 60 * 1000,
-      });
-      if (!recovery) throw new Error("recoverable release returned null");
-      // Hold the recovery reference in `runtime` IMMEDIATELY, before
-      // attempting the reacquire below — `destroy` accepts a recovery
-      // reference too, so if `acquire(spec, recovery)` throws (a real
-      // transient-failure surface: it re-applies policies + mkdir over the
-      // network), the `finally` can still delete the sprite instead of
-      // discarding its only reference here and leaking it forever.
-      runtime = recovery;
-      runtime = await backend.acquire(spec, recovery);
-      const read = await backend.readFile(runtime, ROUNDTRIP_DEST, 1_000);
+    let recoveryReference: BackendReference | null = null;
+    await timed(
+      "7a. release(recoverable) returns a recovery reference (no provider call)",
+      async () => {
+        if (!runtime) throw new Error("no runtime acquired");
+        // Step 6e deleted the round-trip file, so the survivor is written here —
+        // reading a path a previous step removed would have made 7c fail for a
+        // reason that has nothing to do with hibernation.
+        await backend.writeFile(runtime, SURVIVOR, toArrayBuffer(new Uint8Array(ROUNDTRIP_BYTES)), {
+          createParents: true,
+          overwrite: true,
+        });
+        const recovery = await backend.release(runtime, {
+          disposition: "recoverable",
+          recoveryTtlMs: 60 * 60 * 1000,
+        });
+        if (!recovery) throw new Error("recoverable release returned null");
+        // Hold the recovery reference in `runtime` IMMEDIATELY, before
+        // attempting the reacquire below — `destroy` accepts a recovery
+        // reference too, so if `acquire(spec, recovery)` throws (a real
+        // transient-failure surface: it re-applies policies + mkdir over the
+        // network), the `finally` can still delete the sprite instead of
+        // discarding its only reference here and leaking it forever.
+        runtime = recovery;
+        recoveryReference = recovery;
+        return "recovery reference held; no provider call was made";
+      },
+    );
+
+    // 7b. Idle long enough to actually hibernate. Its own step so a slow run is
+    // attributable to the deliberate wait rather than to a sluggish provider —
+    // and without it, 7c would reacquire a sprite that never slept, which
+    // proves nothing about waking one that did.
+    await timed(
+      `7b. idle ${HIBERNATE_IDLE_MS / 1000}s so the sprite hibernates (~30s idle)`,
+      async () => {
+        await new Promise<void>((resolve) => setTimeout(resolve, HIBERNATE_IDLE_MS));
+        return `waited ${HIBERNATE_IDLE_MS}ms with no API call in flight`;
+      },
+    );
+
+    await timed("7c. acquire(recovery) wakes the hibernated sprite; file survives", async () => {
+      if (!recoveryReference) throw new Error("no recovery reference held");
+      runtime = await backend.acquire(spec, recoveryReference);
+      const read = await backend.readFile(runtime, SURVIVOR, 1_000);
       const back = new Uint8Array(read.bytes);
-      const expected = new Uint8Array([0, 1, 2, 255, 254, 10, 13, 65, 66, 67, 200]);
+      const expected = new Uint8Array(ROUNDTRIP_BYTES);
       if (!bytesEqual(back, expected)) {
         throw new Error(`file did not survive hibernate/wake: bytes=${JSON.stringify([...back])}`);
       }
@@ -341,7 +559,12 @@ export async function runSpritesSmoke(env: Env): Promise<SpritesSmokeReport> {
         await backend.destroy(runtime);
         push("8. destroy (finally)", true, "sprite deleted", Date.now() - started);
       } catch (error) {
-        push("8. destroy (finally)", false, `POSSIBLE LEAKED SPRITE — ${message(error)}`, Date.now() - started);
+        push(
+          "8. destroy (finally)",
+          false,
+          `POSSIBLE LEAKED SPRITE — ${message(error)}`,
+          Date.now() - started,
+        );
       }
     } else {
       push(

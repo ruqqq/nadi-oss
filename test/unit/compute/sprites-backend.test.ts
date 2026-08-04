@@ -403,6 +403,32 @@ describe("SpritesComputeBackend.runCommand", () => {
   });
 });
 
+describe("SpritesComputeBackend internal exec budget", () => {
+  it("passes a timeout on every exec it issues itself, and the caller's on runCommand", async () => {
+    // `execCollect` only arms its abort when a `timeoutMs` is passed, so an
+    // internal op that omits one waits on the socket forever — and `statPath`
+    // backs `pathExists`, which gates every fail-closed write. This reads the
+    // captured options rather than the `calls` log, which cannot show a timeout.
+    const { backend, client } = createFakeSpritesBackend();
+    const runtime = await backend.acquire(SPEC); // prepare(): mkdir /workspace
+    const spriteName = spriteNameOf(runtime);
+    client.seedFile(spriteName, "/workspace/from.txt", "x");
+
+    await backend.createDirectory(runtime, "/workspace/dir");
+    await backend.pathExists(runtime, "/workspace/from.txt"); // statPath
+    await backend.movePath(runtime, "/workspace/from.txt", "/workspace/to.txt", false);
+    await backend.deletePath(runtime, "/workspace/to.txt");
+
+    const internal = client.execCollectOptions;
+    expect(internal.length).toBeGreaterThan(0);
+    expect(internal.map((options) => options.timeoutMs)).toEqual(internal.map(() => 60_000));
+
+    // The caller's budget stays authoritative for a user command.
+    await backend.runCommand(runtime, { command: "true", timeoutMs: 1_234 });
+    expect(client.execCollectOptions.at(-1)?.timeoutMs).toBe(1_234);
+  });
+});
+
 describe("SpritesComputeBackend file operations", () => {
   it("reads a file whose size is exactly maxBytes", async () => {
     // The boundary the contract's oversize case cannot pin: `>` vs `>=` both

@@ -73,6 +73,13 @@ export class FakeSpritesClient implements SpritesClient {
    * "recoverable release touches no provider" assertion both read this.
    */
   readonly calls: string[] = [];
+  /**
+   * The full options object of every `execCollect`, in order. `calls` above
+   * flattens an exec to its argv + dir, which cannot show whether a timeout was
+   * passed — and the backend's own execs must always carry one, or an
+   * unanswered socket hangs them forever.
+   */
+  readonly execCollectOptions: SpritesExecOptions[] = [];
   readonly networkPolicies: RecordedNetworkPolicy[] = [];
   readonly memoryPolicies: Array<{ name: string; limitMb: number }> = [];
   readonly killCalls: RecordedKill[] = [];
@@ -148,6 +155,7 @@ export class FakeSpritesClient implements SpritesClient {
 
   async execCollect(name: string, options: SpritesExecOptions): Promise<SpritesExecResult> {
     this.calls.push(`execCollect:${describeExec(options)}`);
+    this.execCollectOptions.push({ ...options });
     return this.runExec(name, options);
   }
 

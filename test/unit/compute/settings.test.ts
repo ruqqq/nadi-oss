@@ -411,13 +411,9 @@ describe("buildComputeBackend Sprites dispatch", () => {
       return fakeBackend;
     };
 
-    const backend = await buildComputeBackend(
-      env,
-      "ws-x",
-      "thread-y",
-      spritesEffectiveConfig(),
-      { spritesFactory },
-    );
+    const backend = await buildComputeBackend(env, "ws-x", "thread-y", spritesEffectiveConfig(), {
+      spritesFactory,
+    });
 
     expect(backend).toBe(fakeBackend);
     expect(calls).toEqual([{ apiKey: "workspace-key" }]);

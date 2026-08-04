@@ -171,16 +171,28 @@ describe("mock Sprites settings mutations", () => {
     ).resolves.toMatchObject({
       spritesMode: "byok",
       spritesSecretPresent: true,
+      // The server derives availability from `apiKey !== null`; a saved BYOK
+      // key makes it true with no further configuration.
+      spritesAvailable: true,
     });
   });
 
-  it("resets Sprites to system mode on clearSpritesOverride", async () => {
+  it("resets Sprites to system mode and the default idle timeout on clearSpritesOverride", async () => {
     seedStore("default");
+    const workspace = getStore().sandbox.workspace;
+    if (!workspace) throw new Error("expected workspace fixture");
+    workspace.provider = "sprites";
+    workspace.providerConfig = { kind: "sprites", apiKeySecretName: "sandbox:sprites" };
+    workspace.idleTimeoutMs = 60_000;
     await saveSpritesSecret({ value: "sprites-key" }, mswFetch);
 
     await expect(clearSpritesOverride(mswFetch)).resolves.toMatchObject({
       spritesMode: "system",
       spritesSecretPresent: false,
+      spritesAvailable: false,
+      // `clearSpritesOverride` resets the provider config and the idle timeout
+      // in one D1 write.
+      workspace: { idleTimeoutMs: 900_000 },
     });
   });
 

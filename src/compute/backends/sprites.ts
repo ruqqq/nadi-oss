@@ -52,6 +52,17 @@ const WORKSPACE_ROOT = "/workspace";
 const SETTLE_POLL_ATTEMPTS = 10;
 const SETTLE_POLL_INTERVAL_MS = 200;
 
+/**
+ * Budget for the backend's OWN exec calls — the `stat`/`mkdir`/`rm`/`mv` this
+ * file issues, none of which take a caller-supplied timeout. `execCollect` only
+ * arms its abort when a `timeoutMs` is passed, so without this an unanswered
+ * WebSocket would hang these forever (and `statPath` backs `pathExists`, which
+ * gates every fail-closed write). Passed explicitly at each call site rather
+ * than defaulted in the client, so `runCommand`'s caller-supplied budget stays
+ * the only thing that decides a user command's deadline.
+ */
+const INTERNAL_EXEC_TIMEOUT_MS = 60_000;
+
 const runtimePayloadSchema = z.object({
   kind: z.literal("runtime"),
   spriteName: z.string().min(1),
@@ -98,6 +109,12 @@ export class SpritesComputeBackend implements ComputeBackend {
       // A hibernated sprite still exists and wakes on the first API call, so
       // there is nothing to create or start — just re-apply the policies and
       // make sure the workspace root is there.
+      //
+      // Note what recovery does NOT re-apply: `spec.env`. The environment is
+      // fixed at `createSprite` and there is no route to amend it afterwards,
+      // so a spec whose env changed between release and recovery keeps the
+      // original values — same behaviour as Daytona, whose env is likewise
+      // baked in at sandbox creation.
       const spriteName = parsed.data.payload.spriteName;
       await this.prepare(spriteName, spec);
       return this.runtimeReference(spriteName);
@@ -344,6 +361,7 @@ export class SpritesComputeBackend implements ComputeBackend {
     const spriteName = this.runtimeName(runtime);
     const result = await this.client.execCollect(spriteName, {
       argv: ["bash", "-c", `mkdir -p -- ${shellQuote(path)}`],
+      timeoutMs: INTERNAL_EXEC_TIMEOUT_MS,
     });
     if (result.exitCode !== 0) {
       throw new ComputeError(
@@ -359,6 +377,7 @@ export class SpritesComputeBackend implements ComputeBackend {
     // contract, and the route's recursion semantics are unverified.
     const result = await this.client.execCollect(spriteName, {
       argv: ["bash", "-c", `rm -rf -- ${shellQuote(path)}`],
+      timeoutMs: INTERNAL_EXEC_TIMEOUT_MS,
     });
     if (result.exitCode !== 0) {
       throw new ComputeError(
@@ -384,6 +403,7 @@ export class SpritesComputeBackend implements ComputeBackend {
     const spriteName = this.runtimeName(runtime);
     const result = await this.client.execCollect(spriteName, {
       argv: ["bash", "-c", `mv -- ${shellQuote(from)} ${shellQuote(to)}`],
+      timeoutMs: INTERNAL_EXEC_TIMEOUT_MS,
     });
     if (result.exitCode !== 0) {
       throw new ComputeError(
@@ -413,6 +433,7 @@ export class SpritesComputeBackend implements ComputeBackend {
     }
     const result = await this.client.execCollect(spriteName, {
       argv: ["bash", "-c", `mkdir -p -- ${WORKSPACE_ROOT}`],
+      timeoutMs: INTERNAL_EXEC_TIMEOUT_MS,
     });
     if (result.exitCode !== 0) {
       throw new ComputeError(
@@ -433,6 +454,7 @@ export class SpritesComputeBackend implements ComputeBackend {
   ): Promise<{ type: PathInfo["type"]; size: number } | null> {
     const result = await this.client.execCollect(spriteName, {
       argv: ["bash", "-c", `stat -c %F:%s -- ${shellQuote(path)}`],
+      timeoutMs: INTERNAL_EXEC_TIMEOUT_MS,
     });
     if (result.exitCode === 0) {
       const parsed = parseStat(result.stdout);

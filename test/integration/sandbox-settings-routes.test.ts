@@ -436,7 +436,9 @@ describe("sandbox settings routes", () => {
         headers: cookie(token),
       });
       expect(get.status).toBe(200);
-      const view = (await get.json()) as { workspace: { provider: string; providerConfig: unknown } };
+      const view = (await get.json()) as {
+        workspace: { provider: string; providerConfig: unknown };
+      };
       expect(view.workspace).toMatchObject({ provider: "sprites", providerConfig });
     });
 

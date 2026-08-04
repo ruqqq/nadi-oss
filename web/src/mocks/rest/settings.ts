@@ -332,6 +332,9 @@ export const settingsHandlers = [
     const input = (await request.json().catch(() => ({}))) as { value?: string };
     store.sandbox.spritesSecretPresent = (input.value ?? "").length > 0;
     store.sandbox.spritesMode = "byok";
+    // The server derives `spritesAvailable` from `apiKey !== null`, and a stored
+    // BYOK key IS that key — unlike Daytona there are no profiles to complete.
+    store.sandbox.spritesAvailable = store.sandbox.spritesSecretPresent;
     return HttpResponse.json(store.sandbox);
   }),
 
@@ -339,11 +342,17 @@ export const settingsHandlers = [
     const store = getStore();
     store.sandbox.spritesMode = "system";
     store.sandbox.spritesSecretPresent = false;
+    // Back to system mode: availability is whatever the operator's own key
+    // gives, and no mock scenario ships a system SPRITES_API_KEY.
+    store.sandbox.spritesAvailable = false;
     if (store.sandbox.workspace?.providerConfig.kind === "sprites") {
       store.sandbox.workspace.providerConfig = {
         kind: "sprites",
         apiKeySecretName: "sandbox:sprites",
       };
+      // `clearSpritesOverride` resets the idle timeout alongside the provider
+      // config in the same D1 write.
+      store.sandbox.workspace.idleTimeoutMs = 900_000;
     }
     return HttpResponse.json(store.sandbox);
   }),
