@@ -2,8 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import type { ComputeSettingsView } from "../../../src/compute/settings";
 import {
   clearDaytonaOverride,
+  clearSpritesOverride,
   getSandboxSettings,
   saveDaytonaSecret,
+  saveSpritesSecret,
   saveWorkspaceSandboxSettings,
   type SandboxSettingsResponse,
 } from "../../../web/src/sandbox-settings-api";
@@ -71,6 +73,9 @@ describe("sandbox settings api", () => {
       daytonaMode: "byok",
       daytonaAvailable: true,
       daytonaSecretPresent: true,
+      spritesMode: "byok",
+      spritesAvailable: true,
+      spritesSecretPresent: true,
       workspaceSecretEnvVars: [],
       agentSecretEnvVars: [],
       readiness: {
@@ -81,6 +86,7 @@ describe("sandbox settings api", () => {
           missingConfig: ["NADI_SANDBOX_SMALL", "BACKUP_BUCKET"],
           unsupported: ["network_restrictions"],
         },
+        sprites: { provider: "sprites", ready: true, missingConfig: [], unsupported: [] },
       },
       effective: {
         enabled: true,
@@ -179,6 +185,55 @@ describe("sandbox settings api", () => {
 
     await expect(clearDaytonaOverride(fetchImpl)).rejects.toThrow(
       "Something went wrong while trying to reset Daytona configuration. Please try again.",
+    );
+  });
+
+  it("saves Sprites secret without exposing it in URLs", async () => {
+    const fetchImpl = vi.fn(async () =>
+      Response.json({
+        workspace: null,
+        agent: null,
+        spritesSecretPresent: true,
+        workspaceSecretEnvVars: [],
+        agentSecretEnvVars: [],
+        effective: { enabled: false },
+      }),
+    ) as never;
+    await saveSpritesSecret({ value: "sprites_test", secretName: "sandbox:sprites" }, fetchImpl);
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "/api/settings/sandbox/sprites-secret",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({ value: "sprites_test", secretName: "sandbox:sprites" }),
+      }),
+    );
+  });
+
+  it("clears the Sprites override with a credentialed DELETE", async () => {
+    const body = {
+      workspace: null,
+      agent: null,
+      spritesMode: "system" as const,
+      spritesAvailable: true,
+      spritesSecretPresent: false,
+      workspaceSecretEnvVars: [],
+      agentSecretEnvVars: [],
+      effective: { enabled: false },
+    };
+    const fetchImpl = vi.fn(async () => Response.json(body)) as never;
+
+    expect(await clearSpritesOverride(fetchImpl)).toEqual(body);
+    expect(fetchImpl).toHaveBeenCalledWith("/api/settings/sandbox/sprites-secret", {
+      method: "DELETE",
+      credentials: "include",
+    });
+  });
+
+  it("uses an action-specific error when resetting Sprites configuration fails", async () => {
+    const fetchImpl = vi.fn(async () => new Response("", { status: 500 })) as never;
+
+    await expect(clearSpritesOverride(fetchImpl)).rejects.toThrow(
+      "Something went wrong while trying to reset Sprites configuration. Please try again.",
     );
   });
 });

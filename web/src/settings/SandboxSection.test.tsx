@@ -28,6 +28,8 @@ const api = vi.hoisted(() => ({
   saveWorkspaceSandboxSettings: vi.fn(),
   saveDaytonaSecret: vi.fn(),
   clearDaytonaOverride: vi.fn(),
+  saveSpritesSecret: vi.fn(),
+  clearSpritesOverride: vi.fn(),
   testConnection: vi.fn(),
 }));
 
@@ -98,6 +100,23 @@ function cloudflareWorkspace(
   };
 }
 
+function spritesWorkspace(
+  overrides: Partial<SandboxSettingsResponse["workspace"] & object> = {},
+): SandboxSettingsResponse["workspace"] {
+  return {
+    enabled: true,
+    provider: "sprites",
+    providerConfig: { kind: "sprites", apiKeySecretName: "sandbox:sprites" },
+    idleTimeoutMs: 900_000,
+    recoveryTtlMs: 86_400_000,
+    maxProcessRuntimeMs: 600_000,
+    networkRestrictionEnabled: false,
+    networkDomainAllowlist: "",
+    envVars: {},
+    ...overrides,
+  };
+}
+
 function response(overrides: Partial<SandboxSettingsResponse> = {}): SandboxSettingsResponse {
   return {
     workspace: daytonaWorkspace(),
@@ -105,11 +124,15 @@ function response(overrides: Partial<SandboxSettingsResponse> = {}): SandboxSett
     daytonaMode: "byok",
     daytonaAvailable: true,
     daytonaSecretPresent: true,
+    spritesMode: "system",
+    spritesAvailable: true,
+    spritesSecretPresent: false,
     workspaceSecretEnvVars: [],
     agentSecretEnvVars: [],
     readiness: {
       daytona: { provider: "daytona", ready: true, missingConfig: [], unsupported: [] },
       cloudflare: { provider: "cloudflare", ready: true, missingConfig: [], unsupported: [] },
+      sprites: { provider: "sprites", ready: true, missingConfig: [], unsupported: [] },
     },
     effective: { enabled: true, value: { resourceProfile: "small", allowedHosts: null } },
     ...overrides,
@@ -185,6 +208,7 @@ describe("SandboxSection provider selection", () => {
             missingConfig: ["BACKUP_BUCKET", "R2_ACCESS_KEY_ID"],
             unsupported: [],
           },
+          sprites: { provider: "sprites", ready: true, missingConfig: [], unsupported: [] },
         },
       }),
     );
@@ -425,6 +449,7 @@ describe("SandboxSection network-restrictions gate", () => {
             missingConfig: [],
             unsupported: ["network_restrictions"],
           },
+          sprites: { provider: "sprites", ready: true, missingConfig: [], unsupported: [] },
         },
       }),
     );
@@ -540,6 +565,7 @@ describe("SandboxSection network-restrictions gate", () => {
             missingConfig: [],
             unsupported: ["network_restrictions"],
           },
+          sprites: { provider: "sprites", ready: true, missingConfig: [], unsupported: [] },
         },
       }),
     );
@@ -564,6 +590,7 @@ describe("SandboxSection network-restrictions gate", () => {
             missingConfig: [],
             unsupported: ["network_restrictions"],
           },
+          sprites: { provider: "sprites", ready: true, missingConfig: [], unsupported: [] },
         },
       }),
     );
@@ -596,6 +623,7 @@ describe("SandboxSection network-restrictions gate", () => {
             missingConfig: [],
             unsupported: ["network_restrictions"],
           },
+          sprites: { provider: "sprites", ready: true, missingConfig: [], unsupported: [] },
         },
       }),
     );
@@ -627,6 +655,7 @@ describe("SandboxSection network-restrictions gate", () => {
             missingConfig: ["BACKUP_BUCKET"],
             unsupported: ["network_restrictions"],
           },
+          sprites: { provider: "sprites", ready: true, missingConfig: [], unsupported: [] },
         },
       }),
     );
@@ -636,5 +665,96 @@ describe("SandboxSection network-restrictions gate", () => {
       screen.getByText(/Cloudflare's sandbox has no way to enforce a host allowlist/i),
     ).toBeInTheDocument();
     expect(screen.getByText(/isn.t fully provisioned yet/i)).toBeInTheDocument();
+  });
+});
+
+describe("SandboxSection Sprites provider", () => {
+  it("shows the System/BYOK mode toggle when Sprites is selected", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await renderLoaded(response({ workspace: spritesWorkspace() }));
+    await selectProvider(user, /sprites/i);
+
+    expect(screen.getByRole("button", { name: /^System managed$/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^BYOK$/i })).toBeInTheDocument();
+    expect(screen.queryByLabelText(/daytona api key/i)).not.toBeInTheDocument();
+  });
+
+  it("shows the Sprites token field in BYOK mode", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await renderLoaded(
+      response({ workspace: spritesWorkspace(), spritesMode: "byok", spritesSecretPresent: true }),
+    );
+    await selectProvider(user, /sprites/i);
+
+    expect(screen.getByLabelText(/sprites api token/i)).toBeInTheDocument();
+  });
+
+  it("submits a Sprites payload on save", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await renderLoaded(response({ workspace: spritesWorkspace() }));
+    await selectProvider(user, /sprites/i);
+    await user.click(screen.getByRole("button", { name: /save workspace settings/i }));
+
+    await waitFor(() => expect(api.saveWorkspaceSandboxSettings).toHaveBeenCalled());
+    const body = api.saveWorkspaceSandboxSettings.mock.calls[0]![0] as Record<string, unknown>;
+    expect(body.provider).toBe("sprites");
+    expect(body.providerConfig).toEqual({ kind: "sprites", apiKeySecretName: "sandbox:sprites" });
+  });
+
+  it("entering a token in BYOK mode calls the sprites-secret endpoint on save", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const system = response({
+      workspace: spritesWorkspace(),
+      spritesMode: "system",
+      spritesSecretPresent: false,
+    });
+    const settingsSaved = response({
+      workspace: spritesWorkspace(),
+      spritesMode: "system",
+      spritesSecretPresent: false,
+    });
+    const byokSaved = response({
+      workspace: spritesWorkspace(),
+      spritesMode: "byok",
+      spritesSecretPresent: true,
+    });
+    api.saveWorkspaceSandboxSettings.mockResolvedValue(settingsSaved);
+    api.saveSpritesSecret.mockResolvedValue(byokSaved);
+    await renderLoaded(system);
+    await selectProvider(user, /sprites/i);
+
+    await user.click(screen.getByRole("button", { name: /^BYOK$/i }));
+    await user.type(screen.getByLabelText(/sprites api token/i), "sprites_secret");
+    await user.click(screen.getByRole("button", { name: /save workspace settings/i }));
+
+    await waitFor(() => expect(api.saveSpritesSecret).toHaveBeenCalled());
+    expect(api.saveSpritesSecret).toHaveBeenCalledWith({
+      value: "sprites_secret",
+      secretName: "sandbox:sprites",
+    });
+    expect(api.saveWorkspaceSandboxSettings.mock.invocationCallOrder[0]).toBeLessThan(
+      api.saveSpritesSecret.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("resets Sprites BYOK to system-managed mode", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const system = response({
+      workspace: spritesWorkspace(),
+      spritesMode: "system",
+      spritesSecretPresent: false,
+    });
+    api.clearSpritesOverride.mockResolvedValue(system);
+    await renderLoaded(
+      response({ workspace: spritesWorkspace(), spritesMode: "byok", spritesSecretPresent: true }),
+    );
+    await selectProvider(user, /sprites/i);
+
+    await user.click(screen.getByRole("button", { name: /^System managed$/i }));
+
+    await waitFor(() => expect(api.clearSpritesOverride).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(screen.queryByLabelText(/sprites api token/i)).not.toBeInTheDocument(),
+    );
   });
 });

@@ -2,8 +2,10 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { toast } from "sonner";
 import {
   clearDaytonaOverride,
+  clearSpritesOverride,
   getSandboxSettings,
   saveDaytonaSecret,
+  saveSpritesSecret,
   saveWorkspaceSandboxSettings,
   testConnection,
   type ComputeProviderReadiness,
@@ -15,6 +17,7 @@ import {
   type SandboxResourceProfile,
   type SandboxSettingsResponse,
   type SandboxWorkspaceSettings,
+  type SpritesProviderConfig,
 } from "../sandbox-settings-api";
 import {
   SANDBOX_CLOUDFLARE_NETWORK_UNSUPPORTED_CONSEQUENCE_HINT,
@@ -24,6 +27,7 @@ import {
   SANDBOX_PROVIDER_OPTIONS,
   SANDBOX_SETTINGS_HINT,
   SANDBOX_SNAPSHOT_HINT,
+  SANDBOX_SPRITES_HINT,
   sandboxCloudflareNetworkUnsupportedNote,
   type SandboxProviderId,
 } from "../settings-ui-config";
@@ -61,6 +65,11 @@ const DEFAULT_DAYTONA_CONFIG: DaytonaProviderConfig = {
   apiUrl: null,
   target: null,
   profiles: { small: null, medium: null },
+};
+
+const DEFAULT_SPRITES_CONFIG: SpritesProviderConfig = {
+  kind: "sprites",
+  apiKeySecretName: "sandbox:sprites",
 };
 
 const DEFAULT_WORKSPACE_SANDBOX: SandboxWorkspaceSettings = {
@@ -180,6 +189,9 @@ function SandboxSettingsForm({
         readiness={settings.readiness}
         daytonaMode={settings.daytonaMode}
         daytonaAvailable={settings.daytonaAvailable}
+        spritesSecretPresent={settings.spritesSecretPresent}
+        spritesMode={settings.spritesMode}
+        spritesAvailable={settings.spritesAvailable}
         operatorManagedCompute={settings.operatorManagedCompute ?? false}
         onSaved={onSaved}
       />
@@ -193,6 +205,9 @@ function WorkspaceSandboxCard({
   readiness,
   daytonaMode: confirmedDaytonaMode,
   daytonaAvailable,
+  spritesSecretPresent,
+  spritesMode: confirmedSpritesMode,
+  spritesAvailable,
   operatorManagedCompute,
   onSaved,
 }: {
@@ -201,6 +216,9 @@ function WorkspaceSandboxCard({
   readiness: SandboxReadiness;
   daytonaMode: SandboxSettingsResponse["daytonaMode"];
   daytonaAvailable: boolean;
+  spritesSecretPresent: boolean;
+  spritesMode: SandboxSettingsResponse["spritesMode"];
+  spritesAvailable: boolean;
   /** Hides the read-only deployment panel — an operator set this compute up. */
   operatorManagedCompute: boolean;
   onSaved: (settings: SandboxSettingsResponse) => void;
@@ -211,14 +229,21 @@ function WorkspaceSandboxCard({
   // hook order stays stable, and gate what actually renders on `provider` below.
   const daytona = base.providerConfig.kind === "daytona" ? base.providerConfig : null;
   const config = daytona ?? DEFAULT_DAYTONA_CONFIG;
+  // Sprites has only a BYOK secret name, no other config fields; same
+  // hook-order-stability rationale as Daytona above.
+  const sprites = base.providerConfig.kind === "sprites" ? base.providerConfig : null;
+  const spritesConfig = sprites ?? DEFAULT_SPRITES_CONFIG;
   const initialProvider: SandboxProviderId =
     base.providerConfig.kind === "cloudflare"
       ? "cloudflare"
-      : base.providerConfig.kind === "mock"
-        ? "mock"
-        : "daytona";
+      : base.providerConfig.kind === "sprites"
+        ? "sprites"
+        : base.providerConfig.kind === "mock"
+          ? "mock"
+          : "daytona";
   const [provider, setProvider] = useState<SandboxProviderId>(initialProvider);
   const [daytonaMode, setDaytonaMode] = useState(confirmedDaytonaMode);
+  const [spritesMode, setSpritesMode] = useState(confirmedSpritesMode);
   // `@cloudflare/sandbox` has no network-policy API, so a restricted workspace
   // cannot run on Cloudflare. The server is the sole authority for this verdict
   // (derived from the effective allowlist); the UI only consumes it.
@@ -242,6 +267,7 @@ function WorkspaceSandboxCard({
   useEffect(() => {
     setProvider(initialProvider);
     setDaytonaMode(confirmedDaytonaMode);
+    setSpritesMode(confirmedSpritesMode);
     setEnabled(base.enabled);
     setSmallKind(config.profiles.small?.kind ?? "snapshot");
     setSmallValue(config.profiles.small?.value ?? "");
@@ -261,6 +287,7 @@ function WorkspaceSandboxCard({
     base.idleTimeoutMs,
     initialProvider,
     confirmedDaytonaMode,
+    confirmedSpritesMode,
   ]);
 
   const submit = useCallback(
@@ -292,20 +319,29 @@ function WorkspaceSandboxCard({
           ? { ...shared, provider: "cloudflare", providerConfig: { kind: "cloudflare" } }
           : provider === "mock"
             ? { ...shared, provider: "mock", providerConfig: { kind: "mock" } }
-            : {
-                ...shared,
-                provider: "daytona",
-              providerConfig: {
-                kind: "daytona",
-                apiKeySecretName: config.apiKeySecretName,
-                apiUrl: apiUrl.trim() || null,
-                target: target.trim() || null,
-                profiles: {
-                  small: toEnvironmentSource(smallKind, smallValue),
-                  medium: toEnvironmentSource(mediumKind, mediumValue),
-                },
-              },
-            };
+            : provider === "sprites"
+              ? {
+                  ...shared,
+                  provider: "sprites",
+                  providerConfig: {
+                    kind: "sprites",
+                    apiKeySecretName: spritesConfig.apiKeySecretName,
+                  },
+                }
+              : {
+                  ...shared,
+                  provider: "daytona",
+                  providerConfig: {
+                    kind: "daytona",
+                    apiKeySecretName: config.apiKeySecretName,
+                    apiUrl: apiUrl.trim() || null,
+                    target: target.trim() || null,
+                    profiles: {
+                      small: toEnvironmentSource(smallKind, smallValue),
+                      medium: toEnvironmentSource(mediumKind, mediumValue),
+                    },
+                  },
+                };
       let workspaceView: SandboxSettingsResponse | null = null;
       try {
         workspaceView = await saveWorkspaceSandboxSettings(payload);
@@ -315,7 +351,12 @@ function WorkspaceSandboxCard({
                 value: secretValue.trim(),
                 secretName: config.apiKeySecretName,
               })
-            : workspaceView;
+            : provider === "sprites" && spritesMode === "byok" && secretValue.trim()
+              ? await saveSpritesSecret({
+                  value: secretValue.trim(),
+                  secretName: spritesConfig.apiKeySecretName,
+                })
+              : workspaceView;
         onSaved(next);
         setSecretValue("");
         toast.success("Saved workspace sandbox settings");
@@ -328,8 +369,15 @@ function WorkspaceSandboxCard({
               ? savedBase.providerConfig
               : DEFAULT_DAYTONA_CONFIG;
           onSaved(workspaceView);
-          setProvider(savedBase.providerConfig.kind === "cloudflare" ? "cloudflare" : "daytona");
+          setProvider(
+            savedBase.providerConfig.kind === "cloudflare"
+              ? "cloudflare"
+              : savedBase.providerConfig.kind === "sprites"
+                ? "sprites"
+                : "daytona",
+          );
           setDaytonaMode(workspaceView.daytonaMode);
+          setSpritesMode(workspaceView.spritesMode);
           setEnabled(savedBase.enabled);
           setSmallKind(savedConfig.profiles.small?.kind ?? "snapshot");
           setSmallValue(savedConfig.profiles.small?.value ?? "");
@@ -340,13 +388,16 @@ function WorkspaceSandboxCard({
           setIdleTimeoutMinutes(msToMinutes(savedBase.idleTimeoutMs));
         } else {
           setDaytonaMode(confirmedDaytonaMode);
+          setSpritesMode(confirmedSpritesMode);
         }
         setError(
           provider === "daytona" && daytonaMode === "byok"
             ? "Couldn’t save the BYOK Daytona configuration. Your previous mode is unchanged."
-            : status === "400"
-              ? "Check the sandbox image and settings."
-              : "Couldn’t save sandbox settings.",
+            : provider === "sprites" && spritesMode === "byok"
+              ? "Couldn’t save the BYOK Sprites configuration. Your previous mode is unchanged."
+              : status === "400"
+                ? "Check the sandbox image and settings."
+                : "Couldn’t save sandbox settings.",
         );
         toast.error("Couldn’t save workspace sandbox settings.");
       } finally {
@@ -358,6 +409,9 @@ function WorkspaceSandboxCard({
       provider,
       daytonaMode,
       confirmedDaytonaMode,
+      spritesMode,
+      confirmedSpritesMode,
+      spritesConfig.apiKeySecretName,
       enabled,
       config.apiKeySecretName,
       smallKind,
@@ -389,6 +443,24 @@ function WorkspaceSandboxCard({
       setSaving(false);
     }
   }, [saving, confirmedDaytonaMode, onSaved]);
+
+  const selectSpritesSystemManaged = useCallback(async () => {
+    if (saving || confirmedSpritesMode === "system") return;
+    setSaving(true);
+    setError(null);
+    try {
+      const next = await clearSpritesOverride();
+      onSaved(next);
+      setSecretValue("");
+      toast.success("Switched to system-managed Sprites");
+    } catch {
+      setSpritesMode(confirmedSpritesMode);
+      setError("Couldn’t switch to system-managed Sprites. Your BYOK configuration is unchanged.");
+      toast.error("Couldn’t reset the Sprites configuration.");
+    } finally {
+      setSaving(false);
+    }
+  }, [saving, confirmedSpritesMode, onSaved]);
 
   // Radix already blocks selecting a disabled item; this second guard keeps the
   // gate enforced even if the option is ever rendered enabled by mistake.
@@ -577,6 +649,78 @@ function WorkspaceSandboxCard({
                 </div>
               </FormCard>
             </>
+          )}
+        </>
+      ) : provider === "sprites" ? (
+        <>
+          <FormCard title="Sprites configuration">
+            <div className="space-y-2">
+              <p className="text-muted-foreground text-sm">{SANDBOX_SPRITES_HINT}</p>
+              <ButtonGroup aria-label="Sprites configuration mode">
+                <Button
+                  type="button"
+                  variant="outline"
+                  aria-pressed={spritesMode === "system"}
+                  className={cn(spritesMode === "system" && "bg-accent text-accent-foreground")}
+                  onClick={selectSpritesSystemManaged}
+                  disabled={saving}
+                >
+                  System managed
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  aria-pressed={spritesMode === "byok"}
+                  className={cn(spritesMode === "byok" && "bg-accent text-accent-foreground")}
+                  onClick={() => {
+                    setError(null);
+                    setSpritesMode("byok");
+                  }}
+                  disabled={saving}
+                >
+                  BYOK
+                </Button>
+              </ButtonGroup>
+              {spritesMode === "system" && (
+                <p className="text-muted-foreground text-sm" role="status">
+                  {spritesAvailable
+                    ? "Provisioned by the operator."
+                    : "No system Sprites token is configured for this deployment."}
+                </p>
+              )}
+            </div>
+          </FormCard>
+          {spritesMode === "byok" && (
+            <FormCard title="Sprites connection">
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between gap-3">
+                  <Label htmlFor="sandbox-sprites-key">Sprites API token</Label>
+                  <span className="flex items-center gap-1.5 text-muted-foreground text-xs">
+                    <span
+                      className={cn(
+                        "size-2 shrink-0 rounded-full",
+                        spritesSecretPresent ? "bg-approve" : "bg-muted-foreground/40",
+                      )}
+                      aria-hidden="true"
+                    />
+                    {spritesSecretPresent ? "Configured" : "Not configured"}
+                  </span>
+                </div>
+                <Input
+                  id="sandbox-sprites-key"
+                  type="password"
+                  autoComplete="new-password"
+                  placeholder={spritesSecretPresent ? "••••••••••••" : "fo1_…"}
+                  value={secretValue}
+                  onChange={(event) => setSecretValue(event.target.value)}
+                  className="font-mono"
+                  disabled={saving}
+                />
+                <p className="text-muted-foreground text-xs">
+                  The stored token is never displayed. Saving a new value replaces it.
+                </p>
+              </div>
+            </FormCard>
           )}
         </>
       ) : operatorManagedCompute ? null : (
