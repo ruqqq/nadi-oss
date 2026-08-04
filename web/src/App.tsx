@@ -254,6 +254,7 @@ import { useSocketConnected } from "./lib/use-socket-connected";
 import { computeThreadReadiness } from "./lib/thread-readiness";
 import { debounce } from "./lib/debounce";
 import { useWideLayout } from "./lib/use-wide-layout";
+import { useFinePointer } from "./lib/use-fine-pointer";
 import { LONG_PRESS_MS, useLongPress } from "./lib/use-long-press";
 import { isCompactCommand } from "./lib/composer-submit";
 import {
@@ -791,7 +792,7 @@ function ThreadRow({
   thread,
   active,
   disabled,
-  isMobile,
+  narrowLayout,
   projects,
   onSelect,
   onMoveThread,
@@ -802,8 +803,8 @@ function ThreadRow({
   thread: ThreadSummary;
   active: boolean;
   disabled: boolean;
-  /** Drives the row's action surface: long-press sheet vs hover-reveal ⋮. */
-  isMobile: boolean;
+  /** Drawer rail vs pinned sidebar — not the same as touch vs pointer. */
+  narrowLayout: boolean;
   projects: ProjectSummary[];
   onSelect: (threadId: string) => void;
   onMoveThread: (threadId: string, projectId: string | null) => void;
@@ -812,10 +813,12 @@ function ThreadRow({
   onDismissThread: (thread: ThreadSummary) => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
-  // Mobile has no hover to reveal the ⋮, so the row itself is the trigger.
+  const finePointer = useFinePointer();
+  const touchPrimary = !finePointer;
+  // Touch has no hover to reveal the ⋮, so the row itself is the trigger.
   const { pressing, handlers } = useLongPress({
     onLongPress: () => setMenuOpen(true),
-    enabled: isMobile && !disabled,
+    enabled: touchPrimary && !disabled,
   });
 
   return (
@@ -832,21 +835,30 @@ function ThreadRow({
       // Tied to the timer's own constant: a press-in that outran the menu (or
       // finished early and sat still) would be a worse signal than none.
       // Releasing snaps back — only the wait should feel slow.
-      style={isMobile ? { transitionDuration: pressing ? `${LONG_PRESS_MS}ms` : "150ms" } : undefined}
+      style={touchPrimary ? { transitionDuration: pressing ? `${LONG_PRESS_MS}ms` : "150ms" } : undefined}
       role="listitem"
       // Long-pressing a row must open its menu, not select the text under the
-      // finger or raise the browser's own menu.
-      {...(isMobile ? handlers : {})}
+      // finger or raise the browser's own menu. Pointer users get right-click
+      // instead — including on a narrow desktop window or PWA.
+      {...(touchPrimary
+        ? handlers
+        : {
+            onContextMenu: (event) => {
+              if (disabled) return;
+              event.preventDefault();
+              setMenuOpen(true);
+            },
+          })}
     >
       <button
         className={cn(
           // The active row keeps a left spine so it reads as "you are here"
           // even where the accent fill is subtle.
           "relative flex w-full min-w-0 max-w-full items-center gap-1 rounded-md py-2 pl-3 text-left transition-colors",
-          // The ⋮ lives in a reserved right gutter in the two-column layout, so
-          // revealing it on hover never reflows the title. Phones reach the menu
-          // by long press and spend the space on the title instead.
-          "pr-3 wide:pr-10",
+          // The ⋮ lives in a reserved right gutter when there is room for it.
+          // Touch-primary narrow layouts reach the menu by long press instead.
+          "pr-3",
+          (!narrowLayout || finePointer) && "pr-10",
           active
             ? "bg-accent before:absolute before:top-2 before:bottom-2 before:left-0.5 before:w-0.5 before:rounded-full before:bg-primary"
             : "hover:bg-accent/60",
@@ -888,14 +900,14 @@ function ThreadRow({
         </span>
       </button>
 
-      {/* Sits in the gutter the row reserves at md+. On mobile the same menu
-          is opened by long press and this only anchors it, so the box must not
-          swallow taps meant for the row underneath. */}
-      <div className={cn("absolute top-1.5 right-2", isMobile && "pointer-events-none")}>
+      {/* On touch-primary layouts the menu is opened by long press and this
+          only anchors it, so the box must not swallow taps meant for the row. */}
+      <div className={cn("absolute top-1.5 right-2", touchPrimary && "pointer-events-none")}>
         <ThreadRowMenu
           thread={thread}
           disabled={disabled}
-          isMobile={isMobile}
+          touchPrimary={touchPrimary}
+          narrowLayout={narrowLayout}
           projects={projects}
           open={menuOpen}
           onOpenChange={setMenuOpen}
@@ -964,8 +976,7 @@ function ThreadList({
   onDismissThread: (thread: ThreadSummary) => void;
 }) {
   const [query, setQuery] = useState("");
-  // Matches the wide: variant the ⋮ gutter uses.
-  const isMobile = !useWideLayout();
+  const narrowLayout = !useWideLayout();
 
   const searching = query.trim().length > 0;
   // The rendered list is ALWAYS a local filter over the shared array — never
@@ -1109,7 +1120,7 @@ function ThreadList({
               thread={thread}
               active={thread.threadId === activeThreadId}
               disabled={disabled}
-              isMobile={isMobile}
+              narrowLayout={narrowLayout}
               projects={projects}
               onSelect={onSelectThread}
               onMoveThread={onMoveThread}

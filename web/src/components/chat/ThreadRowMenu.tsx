@@ -16,8 +16,9 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from "../ui/sheet";
 
 /**
  * Row actions for a rail thread. The surface follows the house rule: an
- * anchored dropdown off the ⋮ on desktop, a bottom sheet on mobile — where the
- * row's long press opens it, since there is no hover to reveal a trigger.
+ * anchored dropdown off the ⋮ for pointer users, a bottom sheet on touch —
+ * where the row's long press opens it, since there is no hover to reveal a
+ * trigger.
  *
  * `open` is controlled by the row so the long press (which lands on the row,
  * not on this trigger) can raise the same menu the ⋮ does.
@@ -33,7 +34,8 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from "../ui/sheet";
 export function ThreadRowMenu({
   thread,
   disabled,
-  isMobile,
+  touchPrimary,
+  narrowLayout,
   projects,
   open,
   onOpenChange,
@@ -44,7 +46,10 @@ export function ThreadRowMenu({
 }: {
   thread: ThreadSummary;
   disabled: boolean;
-  isMobile: boolean;
+  /** Touch-first input — long press opens the menu; no visible ⋮ trigger. */
+  touchPrimary: boolean;
+  /** Drawer rail vs pinned sidebar — drives move-sheet placement. */
+  narrowLayout: boolean;
   projects: ProjectSummary[];
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -77,7 +82,7 @@ export function ThreadRowMenu({
       }}
     >
       <SheetContent
-        side={isMobile ? "bottom" : "right"}
+        side={narrowLayout ? "bottom" : "right"}
         className="flex flex-col gap-0 p-0 pb-[env(safe-area-inset-bottom)] sm:max-w-sm"
       >
         <SheetHeader className="shrink-0 border-b py-4 pr-12 pl-5 text-left">
@@ -102,8 +107,8 @@ export function ThreadRowMenu({
     <>
       <DropdownMenu open={open && !moving} onOpenChange={onOpenChange}>
         <DropdownMenuTrigger asChild>
-          {isMobile ? (
-            // Mobile reaches this menu by long press, so the trigger is only an
+          {touchPrimary ? (
+            // Touch reaches this menu by long press, so the trigger is only an
             // anchor: it must not be tappable (it would sit over the row's own
             // tap target) and must not be announced as an action that a touch
             // user cannot perform.
@@ -115,9 +120,11 @@ export function ThreadRowMenu({
               // The trigger rests invisible but keeps its space in the row's
               // gutter, so revealing it never reflows the title. It stays
               // reachable by keyboard, and stays visible while its menu is open.
+              // On a narrow pointer layout there is no hover row to discover it
+              // from, so it stays visible.
               className={cn(
-                "size-7 text-muted-foreground transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100",
-                open ? "opacity-100" : "opacity-0",
+                "size-7 text-muted-foreground transition-opacity hover:text-foreground focus-visible:opacity-100",
+                narrowLayout || open ? "opacity-100" : "opacity-0 group-hover:opacity-100",
               )}
               disabled={disabled}
               aria-label={`Actions for ${thread.title}`}
