@@ -316,8 +316,14 @@ export async function runSpritesSmoke(env: Env): Promise<SpritesSmokeReport> {
         disposition: "recoverable",
         recoveryTtlMs: 60 * 60 * 1000,
       });
-      runtime = null;
       if (!recovery) throw new Error("recoverable release returned null");
+      // Hold the recovery reference in `runtime` IMMEDIATELY, before
+      // attempting the reacquire below — `destroy` accepts a recovery
+      // reference too, so if `acquire(spec, recovery)` throws (a real
+      // transient-failure surface: it re-applies policies + mkdir over the
+      // network), the `finally` can still delete the sprite instead of
+      // discarding its only reference here and leaking it forever.
+      runtime = recovery;
       runtime = await backend.acquire(spec, recovery);
       const read = await backend.readFile(runtime, ROUNDTRIP_DEST, 1_000);
       const back = new Uint8Array(read.bytes);
