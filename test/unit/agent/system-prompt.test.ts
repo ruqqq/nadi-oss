@@ -135,6 +135,7 @@ describe("composeSystemPrompt", () => {
     expect(out).toContain("write_file");
     // Discovery affordances are retained, not replaced.
     expect(out).toContain("rg, fd, git");
+    expect(out).toContain("exec_download_file");
   });
 
   it("omits workspace file-tools guidance when the sandbox is unavailable", () => {

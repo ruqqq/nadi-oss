@@ -19,6 +19,10 @@ import {
 } from "../chat/tool-run-transcript";
 import { MID_TURN_THREAD_ID, midTurnTranscript } from "../chat/mid-turn-transcript";
 import { HERO_THREAD_ID, heroTranscript } from "../chat/hero-transcript";
+import {
+  ASSISTANT_DOWNLOAD_THREAD_ID,
+  assistantDownloadTranscript,
+} from "../chat/assistant-download-transcript";
 import { historyUnreachable, mockId, notFound, pathParam } from "./util";
 
 const authHandlers = [
@@ -277,10 +281,13 @@ const attachmentHandlers = [
       mimeType,
     });
   }),
-  http.get("*/api/attachments/:attachmentId", () => mockPngResponse()),
+  http.get("*/api/attachments/:attachmentId", ({ request }) => {
+    const download = new URL(request.url).searchParams.get("download");
+    return mockPngResponse(download === "1" || download === "true");
+  }),
 ];
 
-function mockPngResponse(): Response {
+function mockPngResponse(asDownload = false): Response {
   const binary = atob(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
   );
@@ -288,7 +295,11 @@ function mockPngResponse(): Response {
   for (let index = 0; index < binary.length; index += 1) {
     bytes[index] = binary.charCodeAt(index);
   }
-  return new Response(bytes, { headers: { "content-type": "image/png" } });
+  const headers: Record<string, string> = { "content-type": "image/png" };
+  if (asDownload) {
+    headers["content-disposition"] = 'attachment; filename="attachment.png"';
+  }
+  return new Response(bytes, { headers });
 }
 
 function feedbackHistory(threadId: string): unknown[] | null {
@@ -372,6 +383,7 @@ function seededHistory(threadId: string): unknown[] | null {
   if (threadId === HERO_THREAD_ID) return heroTranscript();
   if (threadId === TOOL_RUN_THREAD_ID) return toolRunTranscript();
   if (threadId === TOOL_WRITE_THREAD_ID) return singleMcpWriteTranscript();
+  if (threadId === ASSISTANT_DOWNLOAD_THREAD_ID) return assistantDownloadTranscript();
   return feedbackHistory(threadId);
 }
 

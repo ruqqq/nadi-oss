@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   PRESIGN_EXPIRES_SECONDS,
   PRESIGN_WINDOW_MS,
+  attachmentContentDisposition,
   bucketedAnchorMs,
   presignGet,
 } from "../../src/storage/r2-presign";
@@ -66,5 +67,25 @@ describe("presignGet", () => {
     // expiry must fully cover the stability window (with margin) so a URL minted
     // at the window start is still valid at the window's end.
     expect(PRESIGN_EXPIRES_SECONDS).toBeGreaterThanOrEqual(PRESIGN_WINDOW_MS / 1000);
+  });
+
+  it("signs response-content-disposition when requested for downloads", async () => {
+    const disposition = attachmentContentDisposition('chart "v2".png');
+    const u = await presignGet(DEPS, "ws1/th1/abc.png", {
+      anchorMs: bucketedAnchorMs(1_700_000_000_000, WINDOW),
+      expiresInSeconds: 600,
+      responseContentDisposition: disposition,
+    });
+    const params = new URL(u).searchParams;
+    expect(params.get("response-content-disposition")).toBe(disposition);
+    expect(params.get("X-Amz-SignedHeaders")).toBe("host");
+    expect(disposition).toBe('attachment; filename="chart _v2_.png"');
+  });
+});
+
+describe("attachmentContentDisposition", () => {
+  it("falls back to attachment when filename is empty", () => {
+    expect(attachmentContentDisposition(null)).toBe('attachment; filename="attachment"');
+    expect(attachmentContentDisposition("  ")).toBe('attachment; filename="attachment"');
   });
 });

@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
 // Capture what the download tool writes as the attachment mime. The mime must
-// survive backend.readFile -> execDownloadFile -> the tool, falling back to
-// application/octet-stream only when the provider supplied none (legacy semantics).
+// survive backend.readFile -> execDownloadFile -> the tool, falling back to a
+// filename guess and finally application/octet-stream.
 const { insertMock } = vi.hoisted(() => ({ insertMock: vi.fn() }));
 
 vi.mock("../../../src/db/attachment-repository", () => ({
@@ -34,13 +34,35 @@ describe("exec_download_file attachment mime", () => {
       mimeType: "image/png",
     });
 
-    await execute({ path: "/workspace/logo.png" });
+    const result = (await execute({ path: "/workspace/logo.png" })) as {
+      mimeType: string;
+      url: string;
+      attachmentId: string;
+    };
 
     expect(insertMock).toHaveBeenCalledTimes(1);
     expect(insertMock.mock.calls[0]?.[0]).toMatchObject({ mimeType: "image/png" });
+    expect(result.mimeType).toBe("image/png");
+    expect(result.url).toBe(`/api/attachments/${result.attachmentId}`);
   });
 
-  it("falls back to application/octet-stream when no mime is supplied", async () => {
+  it("guesses image mime from filename when the provider supplies none", async () => {
+    insertMock.mockClear();
+    const execute = makeDownloadTool({
+      bytes: new Uint8Array([9]).buffer,
+      filename: "chart.PNG",
+    });
+
+    const result = (await execute({
+      path: "/workspace/chart.PNG",
+      artifactName: "chart.PNG",
+    })) as { mimeType: string };
+
+    expect(insertMock.mock.calls[0]?.[0]).toMatchObject({ mimeType: "image/png" });
+    expect(result.mimeType).toBe("image/png");
+  });
+
+  it("falls back to application/octet-stream when no mime is supplied or guessable", async () => {
     insertMock.mockClear();
     const execute = makeDownloadTool({
       bytes: new Uint8Array([9]).buffer,

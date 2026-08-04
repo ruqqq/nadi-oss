@@ -47,6 +47,36 @@ import {
 } from "../compute/workspace-cleanliness";
 import { confirmWorkSaved, type WorkSavedToolDeps } from "./work-saved-tool";
 
+/** Guess a mime from a filename when the sandbox provider did not supply one.
+ *  Only covers types we care about for chat chips (images + a few documents);
+ *  everything else returns null so the caller can fall back to octet-stream. */
+export function guessMimeFromFilename(filename: string): string | null {
+  const dot = filename.lastIndexOf(".");
+  if (dot < 0) return null;
+  const ext = filename.slice(dot + 1).toLowerCase();
+  switch (ext) {
+    case "png":
+      return "image/png";
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "gif":
+      return "image/gif";
+    case "webp":
+      return "image/webp";
+    case "svg":
+      return "image/svg+xml";
+    case "pdf":
+      return "application/pdf";
+    case "txt":
+    case "md":
+    case "csv":
+      return "text/plain";
+    default:
+      return null;
+  }
+}
+
 /**
  * Everything a thread Durable Object must supply so the native compute exec tools
  * (and the idle-eviction alarm callback) can construct a fully wired
@@ -895,7 +925,8 @@ export function buildComputeToolDefs(
       },
     }),
     exec_download_file: tool({
-      description: "Download a sandbox file into Nadi-managed storage.",
+      description:
+        "Download a sandbox file into Nadi-managed storage and attach it for the user. The chat UI shows the file as an attachment chip (images open in a lightbox).",
       inputSchema: z.object({
         path: z.string(),
         artifactName: z.string().optional(),
@@ -913,20 +944,28 @@ export function buildComputeToolDefs(
           const attachmentId = `att_${crypto.randomUUID()}`;
           const filename =
             input.artifactName ?? download.filename ?? input.path.split("/").pop() ?? attachmentId;
+          const mimeType =
+            download.mimeType ?? guessMimeFromFilename(filename) ?? "application/octet-stream";
           const r2Key = `${workspaceId}/${threadId}/${attachmentId}`;
           await env.ATTACHMENTS_BUCKET.put(r2Key, download.bytes);
           await new AttachmentRepository(env.REGISTRY_DB).insert({
             id: attachmentId,
             workspaceId,
             threadId,
-            mimeType: download.mimeType ?? "application/octet-stream",
+            mimeType,
             filename,
             byteSize: download.bytes.byteLength,
             r2Key,
             status: "committed",
             createdAt: Date.now(),
           });
-          return { attachmentId, filename, byteSize: download.bytes.byteLength };
+          return {
+            attachmentId,
+            filename,
+            byteSize: download.bytes.byteLength,
+            mimeType,
+            url: `/api/attachments/${attachmentId}`,
+          };
         } catch (error) {
           return toErrorResult(error);
         }

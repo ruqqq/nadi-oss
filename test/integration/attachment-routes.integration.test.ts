@@ -317,6 +317,29 @@ describe("attachment routes", () => {
     expect(serveRes.headers.get("location")).toContain("r2.cloudflarestorage.com");
   });
 
+  it("serves ?download=1 with a disposition override on the signed URL", async () => {
+    const seeded = await seedThread();
+    const fd = new FormData();
+    fd.set("file", new File([new Uint8Array([9])], "report.png", { type: "image/png" }));
+    const up = await SELF.fetch(uploadUrl(), {
+      method: "POST",
+      body: fd,
+      headers: { cookie: `better-auth.session_token=${seeded.token}` },
+    });
+    const { id } = (await up.json()) as { id: string };
+
+    const serveRes = await SELF.fetch(`https://nadi.test/api/attachments/${id}?download=1`, {
+      headers: { cookie: `better-auth.session_token=${seeded.token}` },
+      redirect: "manual",
+    });
+    expect(serveRes.status).toBe(302);
+    const location = serveRes.headers.get("location") ?? "";
+    expect(location).toContain("r2.cloudflarestorage.com");
+    expect(new URL(location).searchParams.get("response-content-disposition")).toBe(
+      'attachment; filename="report.png"',
+    );
+  });
+
   it("returns 404 serving an unknown attachment id", async () => {
     const seeded = await seedThread();
     const res = await SELF.fetch("https://nadi.test/api/attachments/does-not-exist", {
