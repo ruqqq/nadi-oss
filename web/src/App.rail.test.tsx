@@ -4,6 +4,8 @@ import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/re
 import { ChatApp, RailContent } from "./App";
 import type { ThreadChatApi, ThreadAgentSocket } from "./thread-chat-seam";
 import type { ThreadSummary } from "./threads-api";
+import { FINE_POINTER_QUERY } from "./lib/use-fine-pointer";
+import { WIDE_LAYOUT_QUERY } from "./lib/use-wide-layout";
 
 const live = vi.hoisted(() => {
   let onMessage: ((raw: string) => void) | null = null;
@@ -841,12 +843,12 @@ describe("RailContent dismissal", () => {
 });
 
 describe("RailContent row menu", () => {
-  // The ⋮ trigger only renders on the wide layout; mobile reaches the same menu
-  // by long press, where the trigger is an aria-hidden anchor with no label.
-  function wideLayout() {
+  function mockLayout({ wide, finePointer }: { wide: boolean; finePointer: boolean }) {
     window.matchMedia = ((query: string) =>
       ({
-        matches: query === "(min-width: 768px) and (min-height: 600px)",
+        matches:
+          (wide && query === WIDE_LAYOUT_QUERY) ||
+          (finePointer && query === FINE_POINTER_QUERY),
         media: query,
         onchange: null,
         addEventListener: () => {},
@@ -856,6 +858,17 @@ describe("RailContent row menu", () => {
         dispatchEvent: () => false,
       }) as unknown as MediaQueryList) as typeof window.matchMedia;
   }
+
+  function wideLayout() {
+    mockLayout({ wide: true, finePointer: true });
+  }
+
+  function narrowDesktop() {
+    mockLayout({ wide: false, finePointer: true });
+  }
+
+  // The ⋮ trigger renders for pointer users; touch-primary layouts reach the
+  // same menu by long press, where the trigger is an aria-hidden anchor.
 
   async function openMenu(title: string) {
     const trigger = screen.getByLabelText(`Actions for ${title}`);
@@ -908,5 +921,14 @@ describe("RailContent row menu", () => {
 
     fireEvent.contextMenu(screen.getByText("Right click me"));
     await waitFor(() => expect(screen.getByRole("menuitem", { name: "Dismiss" })).toBeTruthy());
+  });
+
+  it("shows the ⋮ trigger on a narrow desktop window", async () => {
+    narrowDesktop();
+    const target = thread({ threadId: "t1", title: "Narrow desktop" });
+    render(<RailContent {...baseProps({ threads: [target] })} />);
+
+    expect(screen.getByLabelText("Actions for Narrow desktop")).toBeTruthy();
+    await openMenu("Narrow desktop");
   });
 });
