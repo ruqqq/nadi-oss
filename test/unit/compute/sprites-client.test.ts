@@ -358,8 +358,20 @@ describe("parseExecFrame", () => {
     expect(parsed.payload[0]).toBe(7);
   });
 
-  it("accepts an empty payload", () => {
+  it("accepts an empty payload on stdout", () => {
     expect(parseExecFrame(frame(1, "")).payload.length).toBe(0);
+  });
+
+  it("accepts an empty payload on stderr", () => {
+    expect(parseExecFrame(frame(2, "")).payload.length).toBe(0);
+  });
+
+  it("rejects an exit frame with no exit-code byte rather than defaulting to 0", () => {
+    expect(() => parseExecFrame(frame(3, ""))).toThrow("sprites_exec_bad_exit");
+  });
+
+  it("rejects an exit frame carrying more than one byte", () => {
+    expect(() => parseExecFrame(frame(3, new Uint8Array([0, 1])))).toThrow("sprites_exec_bad_exit");
   });
 
   it("throws on an empty frame with no stream byte", () => {
@@ -463,6 +475,30 @@ describe("execCollect", () => {
     ws.emitFrame(3, new Uint8Array([0]));
 
     await expect(pending).resolves.toMatchObject({ stdout: "€" });
+  });
+
+  it("rejects a truncated exit frame instead of reporting success", async () => {
+    const ws = new FakeWebSocket();
+    const { client } = harness({ webSocket: ws });
+
+    const pending = client.execCollect("s1", { argv: ["bash"] });
+    await flush();
+    ws.emitFrame(1, "output");
+    ws.emitFrame(3, "");
+
+    await expect(messageOf(pending)).resolves.toBe("sprites_exec_bad_exit");
+    expect(ws.closed).toBe(true);
+  });
+
+  it("rejects an exit frame with a multi-byte payload", async () => {
+    const ws = new FakeWebSocket();
+    const { client } = harness({ webSocket: ws });
+
+    const pending = client.execCollect("s1", { argv: ["bash"] });
+    await flush();
+    ws.emitFrame(3, new Uint8Array([0, 0]));
+
+    await expect(messageOf(pending)).resolves.toBe("sprites_exec_bad_exit");
   });
 
   it("rejects with sprites_exec_no_exit when the socket closes without an exit frame", async () => {

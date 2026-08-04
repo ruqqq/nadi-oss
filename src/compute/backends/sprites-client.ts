@@ -91,12 +91,18 @@ function mapError(status: number, context: string): ComputeError {
 
 /**
  * One exec frame: byte 0 is the stream id, the rest is payload. Exit frames
- * (stream 3) carry a single byte, the exit code.
+ * (stream 3) carry exactly one byte, the exit code.
  *
  * Exported for direct unit testing — the framing is the one piece of this file
  * with no HTTP status to key on, so an unrecognized stream id must THROW rather
  * than be dropped: a silently ignored frame would let `execCollect` return a
  * short stdout, or hang waiting for an exit that already arrived mislabeled.
+ *
+ * The exit payload's LENGTH is validated for the same reason: a truncated
+ * stream-3 frame read as "no byte, so 0" would report a killed or crashed run
+ * as a success, which is precisely the outcome `execCollect`'s no-exit
+ * rejection exists to prevent. An empty payload is fine on stdout/stderr (a
+ * zero-length write), and only there.
  */
 export function parseExecFrame(data: ArrayBuffer): { stream: 1 | 2 | 3; payload: Uint8Array } {
   const view = new Uint8Array(data);
@@ -107,7 +113,11 @@ export function parseExecFrame(data: ArrayBuffer): { stream: 1 | 2 | 3; payload:
   if (stream !== 1 && stream !== 2 && stream !== 3) {
     throw new ComputeError("provider_transient", "sprites_exec_unexpected_frame");
   }
-  return { stream, payload: view.subarray(1) };
+  const payload = view.subarray(1);
+  if (stream === 3 && payload.length !== 1) {
+    throw new ComputeError("provider_transient", "sprites_exec_bad_exit");
+  }
+  return { stream, payload };
 }
 
 function toArrayBuffer(data: ArrayBuffer | ArrayBufferView): ArrayBuffer {
@@ -399,6 +409,24 @@ class SpritesHttpClient implements SpritesClient {
         }, options.timeoutMs);
       }
 
+      // ASSUMPTION [unverified against a live server]: exactly ONE frame per
+      // WebSocket message. WebSocket preserves message boundaries, so a
+      // frame-per-message contract is the natural design and is what the vendor
+      // SDK appears to rely on — but nothing in the payload states it. If the
+      // server ever coalesced two frames into one message, the second frame's
+      // stream-id byte would be appended to the first stream as CONTENT: silent
+      // output corruption, and an exit code swallowed into stdout.
+      //
+      // The only self-evidencing part is the exit frame, which `parseExecFrame`
+      // rejects unless its payload is exactly one byte — so a coalesced message
+      // ENDING in an exit frame throws `sprites_exec_bad_exit` rather than
+      // returning a wrong code. A coalesced stdout+stderr pair is undetectable
+      // here by construction.
+      //
+      // If the live smoke shows coalescing, the fix is a length prefix (if the
+      // server sends one) or a reassembly buffer in this closure that consumes
+      // frames until the message is drained — a change confined to this handler
+      // and `parseExecFrame`, not to anything above this file.
       ws.addEventListener("message", (event: never) => {
         const data = (event as { data: unknown }).data;
         // Text frames are JSON control notifications (e.g. `port_opened`).
@@ -419,7 +447,14 @@ class SpritesHttpClient implements SpritesClient {
           stderr += stderrDecoder.decode(frame.payload, { stream: true });
           return;
         }
-        const exitCode = frame.payload[0] ?? 0;
+        const exitCode = frame.payload[0];
+        if (exitCode === undefined) {
+          // Unreachable while `parseExecFrame` enforces a one-byte exit payload;
+          // kept so no future edit to the parser can turn a missing exit code
+          // into a silent `0`.
+          settle(() => reject(new ComputeError("provider_transient", "sprites_exec_bad_exit")));
+          return;
+        }
         // Flush any trailing partial multi-byte sequence.
         stdout += stdoutDecoder.decode();
         stderr += stderrDecoder.decode();
