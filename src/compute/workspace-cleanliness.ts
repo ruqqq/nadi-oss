@@ -8,16 +8,31 @@ export type WorkspaceCleanliness =
   | { state: "no_repo"; hasFiles: boolean } // no git repo found
   | { state: "probe_failed"; reason: string };
 
+/**
+ * `unpushed` counts commits that exist only inside the sandbox: ahead of the
+ * upstream when there is one, otherwise reachable from HEAD but from no
+ * remote-tracking ref. A cloned repo on a fresh local branch that has pushed
+ * nothing of its own therefore reports 0, not its whole history.
+ */
 export type DirtyRepo = { path: string; changes: string[]; unpushed: number };
 
 /**
  * One line per repo: `<path>\t<porcelain status, unit-separator-joined>\t<unpushed>`.
  * With an upstream, `unpushed` is the count ahead of it. With NO upstream it is
- * the repo's OWN commit count: commits that exist only inside the sandbox are
- * work that dies with it, so a repo with commits and no remote must read as
- * dirty. (It used to emit a `NOUPSTREAM` sentinel that parsed to 0 — i.e.
- * "nothing to lose" — and such a sandbox was discarded 15 minutes after going
- * idle.) A freshly `git init`-ed repo has 0 commits and stays clean.
+ * `HEAD --not --remotes` — commits reachable from HEAD that no remote-tracking
+ * ref already has, i.e. commits that exist ONLY inside the sandbox and die with
+ * it. (It used to emit a `NOUPSTREAM` sentinel that parsed to 0 — "nothing to
+ * lose" — and such a sandbox was discarded 15 minutes after going idle.)
+ *
+ * `--not --remotes` rather than a bare `rev-list --count HEAD`, which counts the
+ * WHOLE history: the normal shape of a coding thread is a clone that
+ * `checkout -b`-ed a feature branch, and between the branch and its first
+ * `push -u` there is no upstream. A bare count reports every commit ever cloned
+ * as unpushed, which makes `confirm_work_saved` refuse forever ("working tree
+ * clean; 3 unpushed commit(s)" — commits already on origin) and, on a
+ * self-suspending provider where the declaration is the only discard path,
+ * means no sandbox is ever discarded. A freshly `git init`-ed repo has an
+ * unborn HEAD, `rev-list` errors, and `|| echo 0` keeps it clean.
  * The status lines are joined with ASCII unit separator (0x1F), not a
  * printable character, since porcelain status lines carry arbitrary path
  * bytes — a delimiter drawn from that alphabet (e.g. `|`) would mis-split a
@@ -27,7 +42,7 @@ export type DirtyRepo = { path: string; changes: string[]; unpushed: number };
  * literal word PROBE appears only as a marker comment so callers/tests can
  * identify this exec's command string.
  */
-const PROBE_SCRIPT = `# PROBE workspace cleanliness (marker word load-bearing: unit tests stub exec by matching "PROBE" in the command string — don't remove)
+export const PROBE_SCRIPT = `# PROBE workspace cleanliness (marker word load-bearing: unit tests stub exec by matching "PROBE" in the command string — don't remove)
 set -u
 root="${WORKSPACE_ROOT}"
 found=0
@@ -39,7 +54,7 @@ while IFS= read -r gitdir; do
   if git -C "$repo" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' >/dev/null 2>&1; then
     unpushed=$(git -C "$repo" rev-list --count '@{upstream}..HEAD' 2>/dev/null || echo 0)
   else
-    unpushed=$(git -C "$repo" rev-list --count HEAD 2>/dev/null || echo 0)
+    unpushed=$(git -C "$repo" rev-list --count HEAD --not --remotes 2>/dev/null || echo 0)
   fi
   printf '%s\\t%s\\t%s\\n' "$repo" "$status" "$unpushed"
 done <<EOF

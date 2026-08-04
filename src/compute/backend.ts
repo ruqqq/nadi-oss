@@ -136,6 +136,11 @@ export interface ComputeBackend {
    * no way to disable it, so by the time our 15-minute timer fires compute
    * billing has long since stopped and an INFERRED discard buys only disk —
    * paid for by destroying work.
+   *
+   * A NEW BACKEND MUST DECIDE THIS. Omitting it is not a neutral default: it
+   * opts the provider into the inferred discards, so a backend that does
+   * suspend itself and forgets to declare it will have idle sandboxes deleted
+   * on a guess, which is how a real user lost work.
    */
   readonly nativeIdleSuspend?: boolean;
   acquire(spec: ComputeSpec, recovery?: BackendReference): Promise<BackendReference>;

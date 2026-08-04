@@ -109,6 +109,39 @@ Which provider a workspace uses is a **stored column**, written once at
 provisioning from `DEFAULT_SANDBOX_PROVIDER`. Changing that variable affects new
 workspaces only.
 
+### Idle retention: what happens to a sandbox nobody is using
+
+After `idleTimeoutMs` (default 15 min) `ThreadComputeService.resolveIdleDisposition`
+releases the runtime either as `discard` (gone) or `recoverable` (kept for
+`recoveryTtlMs`, default 24h, clamped to 7 days). It **preserves by default and
+discards only on proof**, and there are exactly three proofs:
+
+1. an explicit `confirm_work_saved` declaration (`reason: declared_clean`);
+2. the git probe (`compute/workspace-cleanliness.ts`) proving every repo clean;
+3. that probe reporting an empty workspace — no repo, no files.
+
+Two things narrow (2) and (3), and both apply to **every** provider unless noted:
+
+- **A repo with commits that exist only in the sandbox is not clean.** The probe
+  counts commits ahead of the upstream, or — when the branch has no upstream, the
+  normal state of a coding thread between `checkout -b` and its first `push -u` —
+  commits reachable from HEAD but from no remote-tracking ref
+  (`rev-list --count HEAD --not --remotes`). Such a thread now releases as
+  `recoverable` where it used to be destroyed, so **Daytona and Cloudflare
+  operators should expect more recovery snapshots** (a Daytona stop+archive, an
+  R2 backup object under `backups/`) living out the recovery TTL. The exposure is
+  disk, not compute: those providers archive rather than keep the runtime warm.
+- **Providers that suspend an idle runtime themselves skip (2) and (3) entirely**
+  (`ComputeBackend.nativeIdleSuspend`, `reason: provider_native_idle`). Only
+  Sprites declares it. Daytona (`autoStopInterval: 0`) and Cloudflare
+  (`keepAlive: true`) deliberately disable native idle handling, so an idle
+  runtime there bills continuously and the inferred discards are what stop the
+  meter — they stay on. See `docs/operations/sprites.md` §3.
+
+Every decision is logged as `compute.retention_decision` with the thread id, the
+disposition, and the reason. That log line is how this class of issue gets
+diagnosed; a sandbox that vanished has one.
+
 A workspace's concurrently-live sandboxes are capped by
 `MAX_ACTIVE_CONTAINERS_PER_WORKSPACE`, enforced through the D1 ledger in
 `compute/container-ledger.ts`. At the cap, the least-recently-used idle sandbox
