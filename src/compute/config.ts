@@ -32,6 +32,7 @@ export const providerConfigSchema = z.discriminatedUnion("kind", [
     profiles: z.record(z.enum(["small", "medium"]), environmentSourceSchema.nullable()),
   }),
   z.object({ kind: z.literal("cloudflare") }),
+  z.object({ kind: z.literal("sprites"), apiKeySecretName: z.string() }),
   z.object({ kind: z.literal("mock") }),
 ]);
 
@@ -124,6 +125,7 @@ export function resolveEffectiveComputeConfig(input: {
   agent: AgentComputeSettings | null;
   daytonaCredentialPresent: boolean;
   daytonaProfiles: Record<ComputeResourceProfile, EnvironmentSource | null>;
+  spritesCredentialPresent?: boolean;
   mcpHosts?: string[];
   workspaceSecretEnvNames?: string[];
   agentSecretEnvNames?: string[];
@@ -137,6 +139,9 @@ export function resolveEffectiveComputeConfig(input: {
     return { enabled: false, reason: "unsupported_provider" };
   }
   if (workspace.providerConfig.kind === "daytona" && !input.daytonaCredentialPresent) {
+    return { enabled: false, reason: "missing_secret" };
+  }
+  if (workspace.providerConfig.kind === "sprites" && !input.spritesCredentialPresent) {
     return { enabled: false, reason: "missing_secret" };
   }
 
@@ -203,15 +208,16 @@ export function resolveEffectiveComputeConfig(input: {
  */
 export function resolveDefaultSandboxProvider(env: {
   DEFAULT_SANDBOX_PROVIDER?: string | undefined;
-}): "cloudflare" | "daytona" | "mock" {
+}): "cloudflare" | "daytona" | "sprites" | "mock" {
   const raw = env.DEFAULT_SANDBOX_PROVIDER?.trim().toLowerCase();
-  if (raw === "mock" || raw === "daytona" || raw === "cloudflare") return raw;
+  if (raw === "mock" || raw === "daytona" || raw === "sprites" || raw === "cloudflare") return raw;
   return "cloudflare";
 }
 
 export function defaultProviderConfig(provider: string): ProviderConfig {
   if (provider === "cloudflare") return { kind: "cloudflare" };
   if (provider === "mock") return { kind: "mock" };
+  if (provider === "sprites") return { kind: "sprites", apiKeySecretName: "sandbox:sprites" };
   return {
     kind: "daytona",
     apiKeySecretName: "sandbox:daytona",

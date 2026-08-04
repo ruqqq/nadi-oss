@@ -4,10 +4,13 @@ import { CloudflareComputeBackend } from "./backends/cloudflare";
 import type { CloudflareSandboxFactory } from "./backends/cloudflare-client";
 import { DaytonaComputeBackend } from "./backends/daytona";
 import { MockComputeBackend } from "./backends/mock";
+import { SpritesComputeBackend } from "./backends/sprites";
+import { createSpritesClient } from "./backends/sprites-client";
 import { resolveDaytonaConfiguration } from "./daytona-config";
+import { resolveSpritesConfiguration } from "./sprites-config";
 import { ComputeError } from "./errors";
 import { CLOUDFLARE_REQUIRED_CONFIG, isComputeConfigPresent } from "./settings";
-import type { DaytonaProviderConfig, EffectiveComputeConfig } from "./types";
+import type { DaytonaProviderConfig, EffectiveComputeConfig, SpritesProviderConfig } from "./types";
 
 /** Test seams for substituting the Cloudflare SDK or Daytona client factory.
  * The Cloudflare override also prevents unit tests from loading
@@ -21,6 +24,7 @@ export interface BuildComputeBackendOverrides {
     target: string | null;
     source: { image?: string; snapshot?: string };
   }) => ComputeBackend;
+  spritesFactory?: (config: { apiKey: string; env: Record<string, string> }) => ComputeBackend;
 }
 
 /**
@@ -40,6 +44,17 @@ export async function buildComputeBackend(
   threadId: string,
   config: EffectiveComputeConfig,
   overrides?: BuildComputeBackendOverrides,
+  /**
+   * The runtime environment the caller will run commands with — the same
+   * `ComputeSpec.env` the thread service holds, resolved before this call.
+   *
+   * Only sprites uses it: Daytona and Cloudflare bake env into the sandbox at
+   * creation, while sprites has to carry it on every exec (its create-time
+   * `environment` never reaches a command). It is passed at CONSTRUCTION rather
+   * than through the backend reference because the reference is persisted and
+   * these values are secrets.
+   */
+  execEnv?: Record<string, string>,
 ): Promise<ComputeBackend> {
   switch (config.providerConfig.kind) {
     case "daytona":
@@ -57,6 +72,14 @@ export async function buildComputeBackend(
       // so it is imported eagerly (unlike the Cloudflare SDK) and never fails to
       // build. See `src/compute/backends/mock.ts`.
       return new MockComputeBackend();
+    case "sprites":
+      return buildSpritesBackend(
+        env,
+        workspaceId,
+        config.providerConfig,
+        overrides?.spritesFactory,
+        execEnv ?? {},
+      );
   }
 }
 
@@ -137,4 +160,33 @@ async function buildDaytonaBackend(
     target: resolved.target,
     source: { [source.kind]: source.value },
   });
+}
+
+/**
+ * Builds the sprites.dev backend from the effective system-managed or
+ * workspace configuration. `SpritesComputeBackend`/`createSpritesClient` are
+ * pure fetch/TS (no `cloudflare:workers` import), so — unlike the Cloudflare
+ * SDK — they are imported eagerly at the top of this file and never need a
+ * lazy `import()`.
+ */
+async function buildSpritesBackend(
+  env: Env,
+  workspaceId: string,
+  providerConfig: SpritesProviderConfig,
+  factoryOverride: BuildComputeBackendOverrides["spritesFactory"],
+  execEnv: Record<string, string>,
+): Promise<ComputeBackend> {
+  const resolved = await resolveSpritesConfiguration({ env, workspaceId, providerConfig });
+  if (!resolved.apiKey)
+    throw new ComputeError("compute_unavailable", "compute_sprites_secret_missing");
+  const create =
+    factoryOverride ??
+    ((c: { apiKey: string; env: Record<string, string> }) =>
+      new SpritesComputeBackend({
+        client: createSpritesClient({ apiKey: c.apiKey }),
+        // Carried on every exec — sprites has no create-time environment that
+        // reaches a command. Instance-only; never written to a reference.
+        env: c.env,
+      }));
+  return create({ apiKey: resolved.apiKey, env: execEnv });
 }

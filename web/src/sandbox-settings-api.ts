@@ -28,9 +28,15 @@ export interface MockProviderConfig {
   kind: "mock";
 }
 
+export interface SpritesProviderConfig {
+  kind: "sprites";
+  apiKeySecretName: string;
+}
+
 export type SandboxProviderConfig =
   | DaytonaProviderConfig
   | CloudflareProviderConfig
+  | SpritesProviderConfig
   | MockProviderConfig;
 
 export interface SandboxWorkspaceSettings {
@@ -84,6 +90,7 @@ export interface ComputeProviderReadiness {
 export interface SandboxReadiness {
   daytona: ComputeProviderReadiness;
   cloudflare: ComputeProviderReadiness;
+  sprites: ComputeProviderReadiness;
 }
 
 export interface SandboxSettingsResponse {
@@ -99,6 +106,9 @@ export interface SandboxSettingsResponse {
   daytonaMode: "system" | "byok";
   daytonaAvailable: boolean;
   daytonaSecretPresent: boolean;
+  spritesMode: "system" | "byok";
+  spritesAvailable: boolean;
+  spritesSecretPresent: boolean;
   workspaceSecretEnvVars: Array<{ name: string; updatedAt: string }>;
   agentSecretEnvVars: Array<{ name: string; updatedAt: string }>;
   effective: {
@@ -166,6 +176,31 @@ export async function clearDaytonaOverride(
     credentials: "include",
   });
   if (!res.ok) throw await errorFromResponse(res, "reset Daytona configuration");
+  return (await res.json()) as SandboxSettingsResponse;
+}
+
+export async function saveSpritesSecret(
+  input: { value: string; secretName?: string },
+  fetchImpl: FetchLike = appFetch,
+): Promise<SandboxSettingsResponse> {
+  const res = await fetchImpl("/api/settings/sandbox/sprites-secret", {
+    method: "PUT",
+    credentials: "include",
+    headers: JSON_HEADERS,
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) throw await errorFromResponse(res, "save Sprites API token");
+  return (await res.json()) as SandboxSettingsResponse;
+}
+
+export async function clearSpritesOverride(
+  fetchImpl: FetchLike = appFetch,
+): Promise<SandboxSettingsResponse> {
+  const res = await fetchImpl("/api/settings/sandbox/sprites-secret", {
+    method: "DELETE",
+    credentials: "include",
+  });
+  if (!res.ok) throw await errorFromResponse(res, "reset Sprites configuration");
   return (await res.json()) as SandboxSettingsResponse;
 }
 

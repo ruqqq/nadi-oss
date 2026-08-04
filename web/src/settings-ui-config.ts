@@ -67,6 +67,9 @@ export const MEMORY_SETTINGS_HINT =
 export const SANDBOX_SETTINGS_HINT =
   "Let the agent run shell commands in an isolated compute environment. An agent can override whether execution is enabled and add allowed domains — leave it on “Inherit” to follow the workspace default. Sandbox size is set by the thread’s workbench, not here.";
 
+export const SANDBOX_SPRITES_HINT =
+  "Sprites (Fly.io) machines persist between turns and hibernate when idle. System mode uses this deployment's Sprites account; bring your own token to use your own.";
+
 export const SANDBOX_SNAPSHOT_HINT =
   "Snapshot (a prebuilt Daytona template with preconfigured image + CPU/RAM/disk). Takes precedence over Image.";
 
@@ -78,6 +81,7 @@ export const SANDBOX_NETWORK_RESTRICTION_HINT =
 export const SANDBOX_PROVIDER_OPTIONS = [
   { value: "daytona", label: "Daytona" },
   { value: "cloudflare", label: "Cloudflare" },
+  { value: "sprites", label: "Sprites (Fly.io)" },
   { value: "mock", label: "Mock (local dev)" },
 ] as const;
 

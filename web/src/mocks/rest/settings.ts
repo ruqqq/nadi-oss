@@ -9,7 +9,7 @@
  */
 
 import { http, HttpResponse } from "msw";
-import type { DaytonaProviderConfig } from "../../sandbox-settings-api";
+import type { DaytonaProviderConfig, SpritesProviderConfig } from "../../sandbox-settings-api";
 import type { ProviderModelSearchResult, SettingsProvider } from "../../settings-api";
 import { getStore } from "../store";
 import { notFound, pathParam } from "./util";
@@ -259,6 +259,8 @@ export const settingsHandlers = [
           mergedProviderConfig = providerConfig as DaytonaProviderConfig;
         } else if (providerConfig.kind === "cloudflare") {
           mergedProviderConfig = { kind: "cloudflare" };
+        } else if (providerConfig.kind === "sprites") {
+          mergedProviderConfig = providerConfig as SpritesProviderConfig;
         } else if (providerConfig.kind === "mock") {
           mergedProviderConfig = { kind: "mock" };
         }
@@ -320,6 +322,36 @@ export const settingsHandlers = [
         target: null,
         profiles: { small: null, medium: null },
       };
+      store.sandbox.workspace.idleTimeoutMs = 900_000;
+    }
+    return HttpResponse.json(store.sandbox);
+  }),
+
+  http.put("*/api/settings/sandbox/sprites-secret", async ({ request }) => {
+    const store = getStore();
+    const input = (await request.json().catch(() => ({}))) as { value?: string };
+    store.sandbox.spritesSecretPresent = (input.value ?? "").length > 0;
+    store.sandbox.spritesMode = "byok";
+    // The server derives `spritesAvailable` from `apiKey !== null`, and a stored
+    // BYOK key IS that key — unlike Daytona there are no profiles to complete.
+    store.sandbox.spritesAvailable = store.sandbox.spritesSecretPresent;
+    return HttpResponse.json(store.sandbox);
+  }),
+
+  http.delete("*/api/settings/sandbox/sprites-secret", () => {
+    const store = getStore();
+    store.sandbox.spritesMode = "system";
+    store.sandbox.spritesSecretPresent = false;
+    // Back to system mode: availability is whatever the operator's own key
+    // gives, and no mock scenario ships a system SPRITES_API_KEY.
+    store.sandbox.spritesAvailable = false;
+    if (store.sandbox.workspace?.providerConfig.kind === "sprites") {
+      store.sandbox.workspace.providerConfig = {
+        kind: "sprites",
+        apiKeySecretName: "sandbox:sprites",
+      };
+      // `clearSpritesOverride` resets the idle timeout alongside the provider
+      // config in the same D1 write.
       store.sandbox.workspace.idleTimeoutMs = 900_000;
     }
     return HttpResponse.json(store.sandbox);

@@ -18,6 +18,11 @@ import {
   type DaytonaConfigurationMode,
   type ResolvedDaytonaConfiguration,
 } from "./daytona-config";
+import {
+  resolveSpritesConfiguration,
+  type SpritesConfigurationMode,
+  type ResolvedSpritesConfiguration,
+} from "./sprites-config";
 import type {
   AgentComputeSettings,
   ComputeOutputLimits,
@@ -83,8 +88,9 @@ export function computeProviderReadiness(input: {
   networkRestricted: boolean;
 }): ComputeProviderReadiness {
   const { env, provider, networkRestricted } = input;
-  // Non-Cloudflare providers (Daytona) validate their own credentials elsewhere
-  // and DO support network restrictions, so nothing here blocks deployability.
+  // Non-Cloudflare providers (Daytona, Sprites) validate their own credentials
+  // elsewhere and DO support network restrictions, so nothing here blocks
+  // deployability.
   if (provider !== "cloudflare") {
     return { provider, ready: true, missingConfig: [], unsupported: [] };
   }
@@ -277,11 +283,25 @@ async function resolveWorkspaceDaytonaConfiguration(
   });
 }
 
+async function resolveWorkspaceSpritesConfiguration(
+  env: Env,
+  workspaceId: string,
+  workspace: WorkspaceComputeSettings | null,
+): Promise<ResolvedSpritesConfiguration | null> {
+  if (!workspace || workspace.providerConfig.kind !== "sprites") return null;
+  return resolveSpritesConfiguration({
+    env,
+    workspaceId,
+    providerConfig: workspace.providerConfig,
+  });
+}
+
 /** The D1-backed inputs {@link resolveEffectiveComputeConfig} needs, independent of the workbench profile. */
 export interface ComputeConfigInputs {
   workspace: WorkspaceComputeSettings | null;
   agent: AgentComputeSettings | null;
   daytonaConfiguration: ResolvedDaytonaConfiguration | null;
+  spritesConfiguration: ResolvedSpritesConfiguration | null;
   mcpHosts: string[];
   secretNames: Awaited<ReturnType<typeof loadSecretEnvNames>>;
 }
@@ -308,12 +328,11 @@ export async function loadComputeConfigInputs(input: {
     loadMcpHosts(input.env, input.workspaceId),
     loadSecretEnvNames(input.env, input.workspaceId, input.agentId),
   ]);
-  const daytonaConfiguration = await resolveWorkspaceDaytonaConfiguration(
-    input.env,
-    input.workspaceId,
-    workspace,
-  );
-  return { workspace, agent, daytonaConfiguration, mcpHosts, secretNames };
+  const [daytonaConfiguration, spritesConfiguration] = await Promise.all([
+    resolveWorkspaceDaytonaConfiguration(input.env, input.workspaceId, workspace),
+    resolveWorkspaceSpritesConfiguration(input.env, input.workspaceId, workspace),
+  ]);
+  return { workspace, agent, daytonaConfiguration, spritesConfiguration, mcpHosts, secretNames };
 }
 
 /**
@@ -332,6 +351,7 @@ export function computeConfigFromInputs(
     agent: inputs.agent,
     daytonaCredentialPresent: inputs.daytonaConfiguration?.apiKey != null,
     daytonaProfiles: inputs.daytonaConfiguration?.profiles ?? { small: null, medium: null },
+    spritesCredentialPresent: inputs.spritesConfiguration?.apiKey != null,
     mcpHosts: inputs.mcpHosts,
     workspaceSecretEnvNames: inputs.secretNames.workspace.map((secret) => secret.name),
     agentSecretEnvNames: inputs.secretNames.agent.map((secret) => secret.name),
@@ -360,6 +380,7 @@ export async function resolveComputeConfigForAgent(input: {
 export interface ComputeReadiness {
   daytona: ComputeProviderReadiness;
   cloudflare: ComputeProviderReadiness;
+  sprites: ComputeProviderReadiness;
 }
 
 export interface ComputeSettingsView {
@@ -377,6 +398,9 @@ export interface ComputeSettingsView {
   daytonaMode: DaytonaConfigurationMode;
   daytonaAvailable: boolean;
   daytonaSecretPresent: boolean;
+  spritesMode: SpritesConfigurationMode;
+  spritesAvailable: boolean;
+  spritesSecretPresent: boolean;
   workspaceSecretEnvVars: Array<{ name: string; updatedAt: string }>;
   agentSecretEnvVars: Array<{ name: string; updatedAt: string }>;
 }
@@ -405,11 +429,20 @@ export async function getComputeSettingsView(input: {
     workspace?.providerConfig.kind === "daytona"
       ? workspace.providerConfig
       : (defaultProviderConfig("daytona") as Extract<ProviderConfig, { kind: "daytona" }>);
-  const [daytonaConfiguration, mcpHosts, secretNames] = await Promise.all([
+  const spritesProviderConfig =
+    workspace?.providerConfig.kind === "sprites"
+      ? workspace.providerConfig
+      : (defaultProviderConfig("sprites") as Extract<ProviderConfig, { kind: "sprites" }>);
+  const [daytonaConfiguration, spritesConfiguration, mcpHosts, secretNames] = await Promise.all([
     resolveDaytonaConfiguration({
       env: input.env,
       workspaceId: input.workspaceId,
       providerConfig: daytonaProviderConfig,
+    }),
+    resolveSpritesConfiguration({
+      env: input.env,
+      workspaceId: input.workspaceId,
+      providerConfig: spritesProviderConfig,
     }),
     loadMcpHosts(input.env, input.workspaceId),
     loadSecretEnvNames(input.env, input.workspaceId, input.agentId),
@@ -425,6 +458,7 @@ export async function getComputeSettingsView(input: {
     agent,
     daytonaCredentialPresent: daytonaConfiguration?.apiKey != null,
     daytonaProfiles: daytonaConfiguration?.profiles ?? { small: null, medium: null },
+    spritesCredentialPresent: spritesConfiguration?.apiKey != null,
     mcpHosts,
     workspaceSecretEnvNames: secretNames.workspace.map((secret) => secret.name),
     agentSecretEnvNames: secretNames.agent.map((secret) => secret.name),
@@ -441,6 +475,7 @@ export async function getComputeSettingsView(input: {
         provider: "cloudflare",
         networkRestricted,
       }),
+      sprites: computeProviderReadiness({ env: input.env, provider: "sprites", networkRestricted }),
     },
     operatorManagedCompute: editionCapabilities(input.env).operatorManagedCompute,
     daytonaMode: daytonaConfiguration.mode,
@@ -449,6 +484,9 @@ export async function getComputeSettingsView(input: {
       daytonaConfiguration.profiles.small !== null &&
       daytonaConfiguration.profiles.medium !== null,
     daytonaSecretPresent: daytonaConfiguration.mode === "byok",
+    spritesMode: spritesConfiguration.mode,
+    spritesAvailable: spritesConfiguration.apiKey !== null,
+    spritesSecretPresent: spritesConfiguration.mode === "byok",
     workspaceSecretEnvVars: secretNames.workspace,
     agentSecretEnvVars: secretNames.agent,
   };

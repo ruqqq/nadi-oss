@@ -9,6 +9,7 @@ import {
 } from "../../../src/compute/backends/daytona";
 import { FakeComputeBackend } from "../../../src/compute/backends/fake";
 import { createFakeCloudflareBackend } from "./helpers/fake-cloudflare-client";
+import { createFakeSpritesBackend } from "./helpers/fake-sprites-client";
 
 const TEST_SPEC: ComputeSpec = {
   environmentId: "contract-test",
@@ -215,6 +216,10 @@ computeBackendContract("FakeComputeBackend", () => new FakeComputeBackend());
 computeBackendContract("CloudflareComputeBackend", () => createFakeCloudflareBackend().backend, {
   reportsMissingRuntimeAfterDiscard: false,
 });
+
+// Sprites hibernates instead of archiving; recoverable release is a no-op and
+// restore reuses the same sprite, so the full contract applies.
+computeBackendContract("SpritesComputeBackend", () => createFakeSpritesBackend().backend);
 
 describe("FakeComputeBackend failure seams", () => {
   it("fails the next release without losing the runtime", async () => {

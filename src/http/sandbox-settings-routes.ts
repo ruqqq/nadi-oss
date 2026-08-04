@@ -24,6 +24,8 @@ import type {
 } from "../compute/backend";
 import { DaytonaComputeBackend } from "../compute/backends/daytona";
 import { resolveDaytonaConfiguration } from "../compute/daytona-config";
+import { createSpritesClient } from "../compute/backends/sprites-client";
+import { resolveSpritesConfiguration } from "../compute/sprites-config";
 import { buildComputeBackend } from "../compute/registry";
 import { ComputeError } from "../compute/errors";
 import {
@@ -66,6 +68,14 @@ export async function routeSandboxSettings(req: Request, env: Env): Promise<Resp
       return updateDaytonaSecret(req, env, target.workspaceId, target.agentId);
     if (req.method === "DELETE")
       return clearDaytonaOverride(env, target.workspaceId, target.agentId);
+    return new Response("Method not allowed", { status: 405 });
+  }
+
+  if (url.pathname === "/api/settings/sandbox/sprites-secret") {
+    if (req.method === "PUT")
+      return updateSpritesSecret(req, env, target.workspaceId, target.agentId);
+    if (req.method === "DELETE")
+      return clearSpritesOverride(env, target.workspaceId, target.agentId);
     return new Response("Method not allowed", { status: 405 });
   }
 
@@ -368,6 +378,40 @@ async function resolveTestBackend(
     return { backend, environmentId: "mock:small" };
   }
 
+  // Sprites: no acquire/probe backend exists yet, so the connection test is a
+  // list-based probe run inline here and returned directly. Returning a
+  // `response` short-circuits `runConnectionProbe` below — the sprites test
+  // never creates a sprite.
+  if (providerConfig.kind === "sprites") {
+    const resolved = await resolveSpritesConfiguration({ env, workspaceId, providerConfig });
+    if (!resolved.apiKey) {
+      return {
+        response: Response.json(
+          { ok: false, provider: "sprites", phase: "connection", error: "missing_secret" },
+          { status: 400 },
+        ),
+      };
+    }
+    // List-based probe (per the approved spec): no sandbox is created. An
+    // authenticated GET /v1/sprites proves the key + reachability.
+    try {
+      await createSpritesClient({ apiKey: resolved.apiKey }).listSprites(1);
+      return { response: Response.json({ ok: true, provider: "sprites" }) };
+    } catch (error) {
+      return {
+        response: Response.json(
+          {
+            ok: false,
+            provider: "sprites",
+            phase: "connection",
+            error: error instanceof Error ? error.message : String(error),
+          },
+          { status: 502 },
+        ),
+      };
+    }
+  }
+
   // Cloudflare: fail closed early when the deployment is not ready (the same
   // signal the settings UI keys off), so we never build a backend that can't run.
   const readiness = computeProviderReadiness({
@@ -589,6 +633,97 @@ async function clearDaytonaOverride(
             secretName,
           });
           return new Response("Unable to reset Daytona override", { status: 500 });
+        }
+      }
+      throw resetError;
+    }
+  }
+
+  return Response.json(await getComputeSettingsView({ env, workspaceId, agentId }));
+}
+
+async function updateSpritesSecret(
+  req: Request,
+  env: Env,
+  workspaceId: string,
+  agentId: string,
+): Promise<Response> {
+  const body = (await req.json().catch(() => null)) as {
+    value?: unknown;
+    secretName?: unknown;
+  } | null;
+  if (typeof body?.value !== "string" || !body.value.trim()) {
+    return new Response("value must be a non-empty string", { status: 400 });
+  }
+  const workspace = await getWorkspaceComputeSettings(env, workspaceId);
+  if (workspace?.providerConfig.kind === "cloudflare") {
+    return new Response("Sprites credentials require the Sprites provider", { status: 400 });
+  }
+  const defaultSpritesConfig = defaultProviderConfig("sprites");
+  if (defaultSpritesConfig.kind !== "sprites") throw new Error("invalid_sprites_default");
+  const configuredSecretName =
+    workspace?.providerConfig.kind === "sprites"
+      ? workspace.providerConfig.apiKeySecretName
+      : defaultSpritesConfig.apiKeySecretName;
+  const suppliedSecretName =
+    typeof body.secretName === "string" && body.secretName.trim()
+      ? body.secretName.trim()
+      : configuredSecretName;
+  if (suppliedSecretName !== configuredSecretName) {
+    return new Response("secretName must match the configured Sprites secret", { status: 400 });
+  }
+  try {
+    await saveDaytonaApiKey({
+      env,
+      workspaceId,
+      secretName: configuredSecretName,
+      value: body.value,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message === "invalid_secret_name") {
+      return new Response("invalid secretName", { status: 400 });
+    }
+    throw err;
+  }
+  return Response.json(await getComputeSettingsView({ env, workspaceId, agentId }));
+}
+
+async function clearSpritesOverride(
+  env: Env,
+  workspaceId: string,
+  agentId: string,
+): Promise<Response> {
+  const workspace = await getWorkspaceComputeSettings(env, workspaceId);
+  const defaultSpritesConfig = defaultProviderConfig("sprites");
+  if (defaultSpritesConfig.kind !== "sprites") throw new Error("invalid_sprites_default");
+  const secretName =
+    workspace?.providerConfig.kind === "sprites"
+      ? workspace.providerConfig.apiKeySecretName
+      : defaultSpritesConfig.apiKeySecretName;
+  const { store, writer } = createWorkspaceSecretsServices(env);
+  const existingKey = await store.get(workspaceId, secretName);
+  await writer.delete(workspaceId, secretName);
+
+  if (workspace?.providerConfig.kind === "sprites") {
+    try {
+      await registryDb(env)
+        .update(workspaceSandboxSettings)
+        .set({
+          providerConfigJson: JSON.stringify(defaultSpritesConfig),
+          idleTimeoutMs: 900_000,
+          updatedAt: Date.now(),
+        })
+        .where(eq(workspaceSandboxSettings.workspaceId, workspaceId));
+    } catch (resetError) {
+      if (existingKey !== null) {
+        try {
+          await writer.set(workspaceId, secretName, existingKey);
+        } catch {
+          log.error("sandbox_settings.sprites_reset_compensation_failed", {
+            workspaceId,
+            secretName,
+          });
+          return new Response("Unable to reset Sprites override", { status: 500 });
         }
       }
       throw resetError;

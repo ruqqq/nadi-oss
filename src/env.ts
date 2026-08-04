@@ -43,6 +43,9 @@ export interface Env extends Cloudflare.Env {
   /** Operator-managed Daytona credential. Workspace keys take precedence. */
   DAYTONA_API_KEY?: string;
 
+  /** Operator-managed sprites.dev credential. Workspace keys take precedence. */
+  SPRITES_API_KEY?: string;
+
   /**
    * Compute provider a NEW workspace's default sandbox is provisioned with.
    * Unset/blank → `cloudflare` (the production default). Set to `mock` in local

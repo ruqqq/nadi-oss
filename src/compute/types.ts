@@ -16,6 +16,11 @@ export interface CloudflareProviderConfig {
   kind: "cloudflare";
 }
 
+export interface SpritesProviderConfig {
+  kind: "sprites";
+  apiKeySecretName: string;
+}
+
 /**
  * In-memory local-dev compute. Needs no credentials or deployment config, so it
  * carries none. See `src/compute/backends/mock.ts`.
@@ -24,7 +29,11 @@ export interface MockProviderConfig {
   kind: "mock";
 }
 
-export type ProviderConfig = DaytonaProviderConfig | CloudflareProviderConfig | MockProviderConfig;
+export type ProviderConfig =
+  | DaytonaProviderConfig
+  | CloudflareProviderConfig
+  | SpritesProviderConfig
+  | MockProviderConfig;
 
 export interface ComputeOutputLimits {
   tailMaxLines: number;

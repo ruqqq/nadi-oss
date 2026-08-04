@@ -2,11 +2,17 @@ import { describe, expect, it } from "vitest";
 import { computeProviderReadiness, extractMcpHosts } from "../../../src/compute/settings";
 import { buildComputeBackend } from "../../../src/compute/registry";
 import { deriveSandboxId } from "../../../src/compute/backends/cloudflare";
-import { DEFAULT_COMPUTE_LIMITS } from "../../../src/compute/config";
+import {
+  DEFAULT_COMPUTE_LIMITS,
+  defaultProviderConfig,
+  parseProviderConfigJson,
+  resolveDefaultSandboxProvider,
+  resolveEffectiveComputeConfig,
+} from "../../../src/compute/config";
 import { FakeCloudflareSandboxFactory } from "./helpers/fake-cloudflare-client";
 import type { Env } from "../../../src/env";
 import type { ComputeBackend, ComputeSpec } from "../../../src/compute/backend";
-import type { EffectiveComputeConfig } from "../../../src/compute/types";
+import type { EffectiveComputeConfig, WorkspaceComputeSettings } from "../../../src/compute/types";
 import { createWorkspaceSecretsServices, packB64 } from "../../../src/secrets";
 
 function fakeKv(): KVNamespace {
@@ -25,6 +31,22 @@ function daytonaEnv(daytonaApiKey?: string): Env {
     SECRETS_KV: fakeKv(),
     SECRETS_STORE_KEK_RAW_B64: packB64(new Uint8Array(32)),
   } as unknown as Env;
+}
+
+function spritesEnv(spritesApiKey?: string): Env {
+  return {
+    SPRITES_API_KEY: spritesApiKey,
+    SECRETS_KV: fakeKv(),
+    SECRETS_STORE_KEK_RAW_B64: packB64(new Uint8Array(32)),
+  } as unknown as Env;
+}
+
+function spritesEffectiveConfig(): EffectiveComputeConfig {
+  return {
+    ...cloudflareEffectiveConfig(),
+    provider: "sprites",
+    providerConfig: { kind: "sprites", apiKeySecretName: "sandbox:sprites" },
+  };
 }
 
 function daytonaEffectiveConfig(profile: "small" | "medium" = "small"): EffectiveComputeConfig {
@@ -165,6 +187,84 @@ describe("computeProviderReadiness", () => {
     expect(readiness.missingConfig).toEqual([]);
     expect(readiness.unsupported).toEqual([]);
   });
+
+  it("treats Sprites as deployable and network-capable", () => {
+    const readiness = computeProviderReadiness({
+      env: cloudflareEnv(),
+      provider: "sprites",
+      networkRestricted: true,
+    });
+    expect(readiness.ready).toBe(true);
+    expect(readiness.missingConfig).toEqual([]);
+    expect(readiness.unsupported).toEqual([]);
+  });
+});
+
+describe("sprites provider config plumbing", () => {
+  it("round-trips a valid sprites provider config through JSON", () => {
+    const json = JSON.stringify({ kind: "sprites", apiKeySecretName: "sandbox:sprites" });
+    expect(parseProviderConfigJson(json)).toEqual({
+      kind: "sprites",
+      apiKeySecretName: "sandbox:sprites",
+    });
+  });
+
+  it("rejects a sprites provider config missing apiKeySecretName", () => {
+    const json = JSON.stringify({ kind: "sprites" });
+    expect(() => parseProviderConfigJson(json)).toThrow("invalid_provider_config_json");
+  });
+
+  it("defaultProviderConfig('sprites') returns the sandbox:sprites default", () => {
+    expect(defaultProviderConfig("sprites")).toEqual({
+      kind: "sprites",
+      apiKeySecretName: "sandbox:sprites",
+    });
+  });
+
+  it("resolveDefaultSandboxProvider recognizes 'sprites'", () => {
+    expect(resolveDefaultSandboxProvider({ DEFAULT_SANDBOX_PROVIDER: "sprites" })).toBe("sprites");
+  });
+
+  function spritesWorkspace(): WorkspaceComputeSettings {
+    return {
+      enabled: true,
+      provider: "sprites",
+      providerConfig: { kind: "sprites", apiKeySecretName: "sandbox:sprites" },
+      idleTimeoutMs: 900_000,
+      recoveryTtlMs: 86_400_000,
+      maxProcessRuntimeMs: 600_000,
+      limits: DEFAULT_COMPUTE_LIMITS,
+      networkRestrictionEnabled: false,
+      networkDomainAllowlist: "",
+      envVars: {},
+    };
+  }
+
+  it("bails missing_secret for a sprites workspace without a credential", () => {
+    const result = resolveEffectiveComputeConfig({
+      workspace: spritesWorkspace(),
+      agent: null,
+      daytonaCredentialPresent: false,
+      daytonaProfiles: { small: null, medium: null },
+      spritesCredentialPresent: false,
+    });
+    expect(result).toEqual({ enabled: false, reason: "missing_secret" });
+  });
+
+  it("enables a sprites workspace once a credential is present, without computing environmentId", () => {
+    const result = resolveEffectiveComputeConfig({
+      workspace: spritesWorkspace(),
+      agent: null,
+      daytonaCredentialPresent: false,
+      daytonaProfiles: { small: null, medium: null },
+      spritesCredentialPresent: true,
+    });
+    expect(result.enabled).toBe(true);
+    if (result.enabled) {
+      expect(result.value.provider).toBe("sprites");
+      expect(result.value).not.toHaveProperty("environmentId");
+    }
+  });
 });
 
 describe("buildComputeBackend cloudflare dispatch", () => {
@@ -293,6 +393,41 @@ describe("buildComputeBackend Daytona dispatch", () => {
     await expect(buildComputeBackend(env, "ws-x", "thread-y", config)).rejects.toMatchObject({
       code: "compute_unavailable",
       message: "compute_daytona_source_missing",
+    });
+  });
+});
+
+describe("buildComputeBackend Sprites dispatch", () => {
+  it("returns the spritesFactory override's backend, passing the resolved BYOK key", async () => {
+    const env = spritesEnv("system-key");
+    const { writer } = createWorkspaceSecretsServices(env);
+    await writer.ensureWorkspaceDek("ws-x");
+    await writer.set("ws-x", "sandbox:sprites", "workspace-key");
+
+    const calls: Array<{ apiKey: string; env: Record<string, string> }> = [];
+    const fakeBackend = { id: "sprites" } as ComputeBackend;
+    const spritesFactory = (config: {
+      apiKey: string;
+      env: Record<string, string>;
+    }): ComputeBackend => {
+      calls.push(config);
+      return fakeBackend;
+    };
+
+    const backend = await buildComputeBackend(env, "ws-x", "thread-y", spritesEffectiveConfig(), {
+      spritesFactory,
+    });
+
+    expect(backend).toBe(fakeBackend);
+    expect(calls).toEqual([{ apiKey: "workspace-key", env: {} }]);
+  });
+
+  it("fails closed when no sprites key is resolvable", async () => {
+    await expect(
+      buildComputeBackend(spritesEnv(), "ws-x", "thread-y", spritesEffectiveConfig()),
+    ).rejects.toMatchObject({
+      code: "compute_unavailable",
+      message: "compute_sprites_secret_missing",
     });
   });
 });

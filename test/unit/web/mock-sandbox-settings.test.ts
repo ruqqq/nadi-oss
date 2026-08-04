@@ -2,7 +2,9 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { setupServer } from "../../../web/node_modules/msw/node";
 import {
   clearDaytonaOverride,
+  clearSpritesOverride,
   saveDaytonaSecret,
+  saveSpritesSecret,
   saveWorkspaceSandboxSettings,
   testConnection,
 } from "../../../web/src/sandbox-settings-api";
@@ -146,5 +148,72 @@ describe("mock Daytona settings mutations", () => {
 
     getStore().sandbox.daytonaAvailable = true;
     await expect(testConnection(mswFetch)).resolves.toEqual({ ok: true });
+  });
+});
+
+describe("mock Sprites settings mutations", () => {
+  it("seeds spritesMode/spritesAvailable/spritesSecretPresent and readiness.sprites", () => {
+    expect(seedStore("default").sandbox).toMatchObject({
+      spritesMode: "system",
+      spritesAvailable: false,
+      spritesSecretPresent: false,
+      readiness: {
+        sprites: { provider: "sprites", ready: true, missingConfig: [], unsupported: [] },
+      },
+    });
+  });
+
+  it("enters BYOK mode on saveSpritesSecret and persists the secret name", async () => {
+    seedStore("default");
+
+    await expect(
+      saveSpritesSecret({ value: "sprites-key", secretName: "sandbox:sprites" }, mswFetch),
+    ).resolves.toMatchObject({
+      spritesMode: "byok",
+      spritesSecretPresent: true,
+      // The server derives availability from `apiKey !== null`; a saved BYOK
+      // key makes it true with no further configuration.
+      spritesAvailable: true,
+    });
+  });
+
+  it("resets Sprites to system mode and the default idle timeout on clearSpritesOverride", async () => {
+    seedStore("default");
+    const workspace = getStore().sandbox.workspace;
+    if (!workspace) throw new Error("expected workspace fixture");
+    workspace.provider = "sprites";
+    workspace.providerConfig = { kind: "sprites", apiKeySecretName: "sandbox:sprites" };
+    workspace.idleTimeoutMs = 60_000;
+    await saveSpritesSecret({ value: "sprites-key" }, mswFetch);
+
+    await expect(clearSpritesOverride(mswFetch)).resolves.toMatchObject({
+      spritesMode: "system",
+      spritesSecretPresent: false,
+      spritesAvailable: false,
+      // `clearSpritesOverride` resets the provider config and the idle timeout
+      // in one D1 write.
+      workspace: { idleTimeoutMs: 900_000 },
+    });
+  });
+
+  it("accepts and persists a sprites providerConfig on the workspace PUT", async () => {
+    seedStore("default");
+
+    const result = await saveWorkspaceSandboxSettings(
+      {
+        provider: "sprites",
+        providerConfig: { kind: "sprites", apiKeySecretName: "sandbox:sprites" },
+      },
+      mswFetch,
+    );
+
+    expect(result.workspace).toMatchObject({
+      provider: "sprites",
+      providerConfig: { kind: "sprites", apiKeySecretName: "sandbox:sprites" },
+    });
+    expect(getStore().sandbox.workspace).toMatchObject({
+      provider: "sprites",
+      providerConfig: { kind: "sprites", apiKeySecretName: "sandbox:sprites" },
+    });
   });
 });

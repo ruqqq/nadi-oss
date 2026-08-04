@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildComputeToolDefs } from "../../../src/agent/compute-tools";
+import { buildComputeToolDefs, isQuotaGatedProvider } from "../../../src/agent/compute-tools";
 
 describe("buildComputeToolDefs env hint", () => {
   it("lists preset env var names (editable + secret) in exec description", () => {
@@ -20,5 +20,28 @@ describe("buildComputeToolDefs env hint", () => {
       async () => ({}) as any,
     );
     expect((tools.exec as any).description).not.toMatch(/preset environment variables/i);
+  });
+});
+
+describe("isQuotaGatedProvider", () => {
+  it("gates cloudflare unconditionally", () => {
+    expect(isQuotaGatedProvider("cloudflare", null, null)).toBe(true);
+    expect(isQuotaGatedProvider("cloudflare", "byok", "byok")).toBe(true);
+  });
+
+  it("gates daytona only when system-managed", () => {
+    expect(isQuotaGatedProvider("daytona", "system", null)).toBe(true);
+    expect(isQuotaGatedProvider("daytona", "byok", null)).toBe(false);
+    expect(isQuotaGatedProvider("daytona", null, null)).toBe(false);
+  });
+
+  it("gates sprites only when system-managed", () => {
+    expect(isQuotaGatedProvider("sprites", null, "system")).toBe(true);
+    expect(isQuotaGatedProvider("sprites", null, "byok")).toBe(false);
+    expect(isQuotaGatedProvider("sprites", null, null)).toBe(false);
+  });
+
+  it("never gates mock", () => {
+    expect(isQuotaGatedProvider("mock", "system", "system")).toBe(false);
   });
 });

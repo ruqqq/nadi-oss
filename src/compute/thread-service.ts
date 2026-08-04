@@ -542,7 +542,9 @@ export class ThreadComputeService {
       stderrBytes: 0,
       stdoutLines: 0,
       stderrLines: 0,
-      outputTruncated: false,
+      // Carries the backend's own verdict, so the stored row (and the UI that
+      // reads it) shows the cut too, not just the value returned here.
+      outputTruncated: result.stdoutTruncated === true,
       label: input.label ?? null,
     });
     if (result.stdout) this.appendOutput(processId, "stdout", result.stdout);
@@ -556,9 +558,12 @@ export class ThreadComputeService {
       exitCode: result.exitCode,
       stdout: result.stdout,
       stderr: result.stderr,
-      // `runCommand` returns the command's complete stdout; the tail limits
-      // apply to what gets STORED for the UI, not to what is returned here.
-      stdoutTruncated: false,
+      // `runCommand` returns the command's complete stdout, and the tail limits
+      // apply to what gets STORED for the UI rather than to what is returned
+      // here — UNLESS the backend positively reports a cut it can see. The
+      // sprites provider does, from the server's 64KiB fast-path replay cap;
+      // every other backend leaves this absent and reads as complete.
+      stdoutTruncated: result.stdoutTruncated === true,
     };
   }
 
