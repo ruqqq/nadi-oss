@@ -12,6 +12,7 @@ import { buildComputeBackend } from "../compute/registry";
 import { ComputeError } from "../compute/errors";
 import { ContainerLedger } from "../compute/container-ledger";
 import type { DaytonaConfigurationMode } from "../compute/daytona-config";
+import type { SpritesConfigurationMode } from "../compute/sprites-config";
 import {
   createComputeQuotaGate,
   parseMaxActiveContainers,
@@ -434,6 +435,7 @@ export async function resolveComputeService(deps: ComputeToolHostDeps): Promise<
     env: deps.env,
     effectiveConfig,
     daytonaMode: inputs.daytonaConfiguration?.mode ?? null,
+    spritesMode: inputs.spritesConfiguration?.mode ?? null,
     workspaceId,
     threadId: deps.threadId,
     now,
@@ -490,6 +492,10 @@ export async function resolveComputeService(deps: ComputeToolHostDeps): Promise<
  * - **Daytona, BYOK** — no. The workspace supplies its own key and pays its own
  *   provider directly; capping that would be us rationing someone else's
  *   account. This is the case the original exemption is still right about.
+ * - **Sprites, system-managed** — yes, same reasoning as system-managed
+ *   Daytona: it spends the operator's Fly plan concurrency.
+ * - **Sprites, BYOK** — no. Same BYOK exemption rationale as Daytona applies
+ *   verbatim: the workspace supplies its own key and pays its own provider.
  *
  * Kept pure and exported so the rule is directly assertable, rather than only
  * observable by driving the whole resolution pipeline (DB-backed settings,
@@ -498,9 +504,11 @@ export async function resolveComputeService(deps: ComputeToolHostDeps): Promise<
 export function isQuotaGatedProvider(
   provider: EffectiveComputeConfig["provider"],
   daytonaMode: DaytonaConfigurationMode | null,
+  spritesMode: SpritesConfigurationMode | null,
 ): boolean {
   if (provider === "cloudflare") return true;
   if (provider === "daytona") return daytonaMode === "system";
+  if (provider === "sprites") return spritesMode === "system";
   return false;
 }
 
@@ -514,11 +522,14 @@ export function buildComputeQuotaGate(input: {
   effectiveConfig: EffectiveComputeConfig;
   /** The workspace's resolved Daytona mode; null when it is not a Daytona workspace. */
   daytonaMode: DaytonaConfigurationMode | null;
+  /** The workspace's resolved Sprites mode; null when it is not a Sprites workspace. */
+  spritesMode: SpritesConfigurationMode | null;
   workspaceId: string;
   threadId: string;
   now: () => number;
 }): ComputeQuotaGate | undefined {
-  if (!isQuotaGatedProvider(input.effectiveConfig.provider, input.daytonaMode)) return undefined;
+  if (!isQuotaGatedProvider(input.effectiveConfig.provider, input.daytonaMode, input.spritesMode))
+    return undefined;
   return createComputeQuotaGate({
     ledger: new ContainerLedger(input.env.REGISTRY_DB),
     workspaceId: input.workspaceId,

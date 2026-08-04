@@ -33,6 +33,22 @@ function daytonaEnv(daytonaApiKey?: string): Env {
   } as unknown as Env;
 }
 
+function spritesEnv(spritesApiKey?: string): Env {
+  return {
+    SPRITES_API_KEY: spritesApiKey,
+    SECRETS_KV: fakeKv(),
+    SECRETS_STORE_KEK_RAW_B64: packB64(new Uint8Array(32)),
+  } as unknown as Env;
+}
+
+function spritesEffectiveConfig(): EffectiveComputeConfig {
+  return {
+    ...cloudflareEffectiveConfig(),
+    provider: "sprites",
+    providerConfig: { kind: "sprites", apiKeySecretName: "sandbox:sprites" },
+  };
+}
+
 function daytonaEffectiveConfig(profile: "small" | "medium" = "small"): EffectiveComputeConfig {
   return {
     ...cloudflareEffectiveConfig(),
@@ -377,6 +393,42 @@ describe("buildComputeBackend Daytona dispatch", () => {
     await expect(buildComputeBackend(env, "ws-x", "thread-y", config)).rejects.toMatchObject({
       code: "compute_unavailable",
       message: "compute_daytona_source_missing",
+    });
+  });
+});
+
+describe("buildComputeBackend Sprites dispatch", () => {
+  it("returns the spritesFactory override's backend, passing the resolved BYOK key", async () => {
+    const env = spritesEnv("system-key");
+    const { writer } = createWorkspaceSecretsServices(env);
+    await writer.ensureWorkspaceDek("ws-x");
+    await writer.set("ws-x", "sandbox:sprites", "workspace-key");
+
+    const calls: Array<{ apiKey: string }> = [];
+    const fakeBackend = { id: "sprites" } as ComputeBackend;
+    const spritesFactory = (config: { apiKey: string }): ComputeBackend => {
+      calls.push(config);
+      return fakeBackend;
+    };
+
+    const backend = await buildComputeBackend(
+      env,
+      "ws-x",
+      "thread-y",
+      spritesEffectiveConfig(),
+      { spritesFactory },
+    );
+
+    expect(backend).toBe(fakeBackend);
+    expect(calls).toEqual([{ apiKey: "workspace-key" }]);
+  });
+
+  it("fails closed when no sprites key is resolvable", async () => {
+    await expect(
+      buildComputeBackend(spritesEnv(), "ws-x", "thread-y", spritesEffectiveConfig()),
+    ).rejects.toMatchObject({
+      code: "compute_unavailable",
+      message: "compute_sprites_secret_missing",
     });
   });
 });
