@@ -34,6 +34,7 @@ import {
   TO_MARKDOWN,
 } from "./debug-vision";
 import type { VisionProbeConfig } from "./debug-vision";
+import { runSpritesSmoke } from "../compute/backends/sprites-smoke";
 
 /** RPC surface of ThinkThreadAgent's DEBUG-only methods (token-gated routes). */
 interface DebugThreadStub {
@@ -1128,6 +1129,21 @@ export async function routeDebug(req: Request, env: Env): Promise<Response | nul
       }
       return { payload, sent: results.length, results };
     });
+  }
+
+  // POST /api/debug/sprites-smoke — drive the LIVE sprites.dev compute
+  // backend through create/exec/kill/file/hibernate-wake end to end.
+  // Constructs SpritesComputeBackend DIRECTLY (bypasses the registry/workspace
+  // config), the same pattern as /cloudflare-compute. Every step is
+  // try/caught into the report; the sprite is ALWAYS deleted in a `finally` —
+  // there is no auto-destroy on sprites.dev, so a leaked one bills storage
+  // forever. This is the ship gate for the provider: see
+  // src/compute/backends/sprites-smoke.ts.
+  if (url.pathname === "/api/debug/sprites-smoke" && req.method === "POST") {
+    if (!env.SPRITES_API_KEY) {
+      return Response.json({ error: "SPRITES_API_KEY not set" }, { status: 400 });
+    }
+    return tryJson(async () => runSpritesSmoke(env));
   }
 
   return new Response("debug route not found", { status: 404 });
