@@ -143,8 +143,67 @@ The smoke test covers:
 4. **Process tracking**: `startProcess` spawns a long-running command; `getProcessStatus` reports it running; a socket disconnect doesn't crash the monitoring.
 5. **Sentinel files and signals**: process stdout/stderr/exit-code are written to `/tmp` sentinel files (proven pattern from Daytona); `stopProcess(kill)` (SIGKILL) and `stopProcess(terminate)` (SIGTERM) both stop the process; a `stdin` payload reaches the process and comes back through the out sentinel.
 6. **File ops**: write, read, move (with overwrite), delete, and list round-trip correctly; a subdirectory lists as `type: "directory"` (the is-dir field is really being read); and both no-overwrite refusals — `writeFile({overwrite:false})` over an existing path, `movePath(overwrite:false)` onto an existing destination — reject and leave the target untouched.
-7. **Large payload framing**: WebSocket message coalescing/splitting under ≥256KB stdout is detected and fails the test if it corrupted the output.
+7. **Large payload framing** (step 6f): a ≥256KB stdout, produced after a deliberate `sleep 2` so the run is STREAMED, arrives byte-exact — coalescing or splitting of WebSocket messages would fail the test. Step 6g is the companion **known-limitation probe** for the 64KiB replay cap below.
 8. **Hibernate/wake**: recoverable release, then a **45 s idle wait** past the provider's ~30 s hibernation threshold (step 7b — its own step so the cost is attributable), then re-acquire with the same sprite; a file written before the release survives the round-trip. Without the wait, nothing would actually have hibernated.
+
+## 5. Provider limitations you will meet in production
+
+### `runCommand` output above 64KiB can be silently truncated
+
+The exec WebSocket serves a session down one of two paths, and the server names
+which in its `debug` text frames:
+
+| Debug frame | When | Output |
+| --- | --- | --- |
+| `normal_path history_len=0` | we attached BEFORE the command finished | streamed live, complete at any size (349528 bytes over 13 frames, live 2026-08-04) |
+| `fast_path … history_len=65536` | the command had ALREADY EXITED when the socket opened | a RECORDED history, capped at exactly **65536 bytes** |
+
+On the `fast_path` the truncated output comes back with `exitCode: 0` and no
+error of any kind — there is no flag to raise the cap and no marker in the
+result, so nothing in `sprites-client.ts` can detect or work around it.
+
+Which path a given call takes is a race between the command's runtime and the
+upgrade round-trip (~25 ms), so it is **not a stable property of a command**: a
+command that produces a lot of output quickly is the exposed case. `sleep 2`
+before the output is what the smoke uses to force the streaming path.
+
+**Consequence:** `runCommand` is not safe for large output. The
+sentinel-file route — `startProcess` then `readProcessOutput`, which reads the
+recorded stdout back out of the sandbox filesystem — has no such cap. In nadi
+the exposed caller is `ThreadComputeService`'s foreground `exec`
+(`src/compute/thread-service.ts`, the `backend.runCommand(...)` call); its
+background path already uses `startProcess`.
+
+### The sprite's create-time `environment` never reaches a command
+
+`POST /sprites` accepts an `environment` map, and a command run in that sprite
+sees **none** of it (live probe, 2026-08-04: `PROBE_ENV` set at create,
+`echo "[$PROBE_ENV]"` printed `[]`). `SpritesComputeBackend` therefore carries
+the runtime environment on the `env` query param of **every exec**, and creates
+sprites with no `environment` at all — so no workbench secret or minted
+`GH_TOKEN` is written into a provider-side record that nothing reads.
+
+Two consequences worth knowing:
+
+- The `env` param **replaces** the environment rather than extending it, so the
+  client re-sends the sprite's own default `PATH`
+  (`DEFAULT_EXEC_PATH` in `sprites-client.ts`, read back live — it includes
+  `/home/sprite/.local/bin`, where a sandbox's user-installed tools land).
+  `HOME` survives a replacement on its own; `PATH` does not.
+- Env values ride in the exec URL's query string. That is TLS-protected in
+  transit but would appear in any provider-side request log. Moving them into
+  `export` lines inside the `startProcess` wrapper would not help — the wrapper
+  is sent as `cmd` params on the same URL.
+
+### An rc sentinel can land after the session disappears
+
+`getProcessStatus` reads the `/tmp` rc sentinel first and the session listing
+second, and the two are not simultaneous: live, a finished `sleep 8; echo done`
+was seen with its stdout sentinel written, its session still listed, and no rc
+file — with rc `0` readable ~200 ms later. A single read landing in that window
+used to report a successful run as `failed`. The backend now re-reads the
+sentinel a few times before answering, and treats a read that *threw* as "not
+known yet" (`running`) rather than as proof of absence.
 
 ### Three recorded unknowns
 
@@ -153,7 +212,7 @@ built before live verification:
 
 - **Step 4a (session command echo):** Does the raw session list include the full command string, or is it truncated? The backend's `getProcessStatus` matches sessions by substring on `command` (the process id is embedded in the command). A truncated echo would cause every long-running process to wrongly report `"failed"`.
 - **Step 5b (post-SIGKILL state shape):** After `killSession` with SIGKILL, does `getProcessStatus` return `{status: "failed"}` (the wrapper was killed before it could write an exit code to the rc file) or `{status: "exited", exitCode: N}` (the shell survived the kill and wrote a code)? The backend handles both arms; the test records which one sprites.dev actually returns.
-- **Step 6f (WebSocket frame boundaries):** Under a ≥256KB stdout, is the output byte-exact, or does WebSocket message coalescing/splitting corrupt or truncate it? The test sends deterministic base64 and checks byte count and content.
+- **Step 6f (WebSocket frame boundaries):** Under a ≥256KB stdout, is the output byte-exact, or does WebSocket message coalescing/splitting corrupt or truncate it? The test sends deterministic base64 and checks byte count and content. **Answered:** framing is correct on the streaming path; the truncation this step originally caught was the server's `fast_path` replay cap, documented in §5.
 
 If a later debugging session uncovers a different answer for any of these, the
 test can be read as a record of what the provider was observed to do at this

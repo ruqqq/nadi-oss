@@ -24,7 +24,7 @@ export interface BuildComputeBackendOverrides {
     target: string | null;
     source: { image?: string; snapshot?: string };
   }) => ComputeBackend;
-  spritesFactory?: (config: { apiKey: string }) => ComputeBackend;
+  spritesFactory?: (config: { apiKey: string; env: Record<string, string> }) => ComputeBackend;
 }
 
 /**
@@ -44,6 +44,17 @@ export async function buildComputeBackend(
   threadId: string,
   config: EffectiveComputeConfig,
   overrides?: BuildComputeBackendOverrides,
+  /**
+   * The runtime environment the caller will run commands with — the same
+   * `ComputeSpec.env` the thread service holds, resolved before this call.
+   *
+   * Only sprites uses it: Daytona and Cloudflare bake env into the sandbox at
+   * creation, while sprites has to carry it on every exec (its create-time
+   * `environment` never reaches a command). It is passed at CONSTRUCTION rather
+   * than through the backend reference because the reference is persisted and
+   * these values are secrets.
+   */
+  execEnv?: Record<string, string>,
 ): Promise<ComputeBackend> {
   switch (config.providerConfig.kind) {
     case "daytona":
@@ -67,6 +78,7 @@ export async function buildComputeBackend(
         workspaceId,
         config.providerConfig,
         overrides?.spritesFactory,
+        execEnv ?? {},
       );
   }
 }
@@ -162,13 +174,19 @@ async function buildSpritesBackend(
   workspaceId: string,
   providerConfig: SpritesProviderConfig,
   factoryOverride: BuildComputeBackendOverrides["spritesFactory"],
+  execEnv: Record<string, string>,
 ): Promise<ComputeBackend> {
   const resolved = await resolveSpritesConfiguration({ env, workspaceId, providerConfig });
   if (!resolved.apiKey)
     throw new ComputeError("compute_unavailable", "compute_sprites_secret_missing");
   const create =
     factoryOverride ??
-    ((c: { apiKey: string }) =>
-      new SpritesComputeBackend({ client: createSpritesClient({ apiKey: c.apiKey }) }));
-  return create({ apiKey: resolved.apiKey });
+    ((c: { apiKey: string; env: Record<string, string> }) =>
+      new SpritesComputeBackend({
+        client: createSpritesClient({ apiKey: c.apiKey }),
+        // Carried on every exec — sprites has no create-time environment that
+        // reaches a command. Instance-only; never written to a reference.
+        env: c.env,
+      }));
+  return create({ apiKey: resolved.apiKey, env: execEnv });
 }

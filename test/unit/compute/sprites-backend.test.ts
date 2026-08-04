@@ -272,6 +272,45 @@ describe("SpritesComputeBackend process lifecycle", () => {
     ).toEqual({ status: "running" });
   });
 
+  // REGRESSION (live smoke, 2026-08-04): the rc file and the session listing are
+  // read at different moments, and live the rc landed ~200ms AFTER the process
+  // was otherwise finished (stdout written, session about to disappear). A
+  // single read that fell in that window reported a run that exited 0 as
+  // `failed` — a terminal verdict, on a successful process.
+  it("re-reads a late rc file instead of calling a finished process failed", async () => {
+    const { backend, client } = createFakeSpritesBackend();
+    const runtime = await backend.acquire(SPEC);
+    const spriteName = spriteNameOf(runtime);
+    // No session and no rc on the first read; the sentinel lands before the next.
+    const readFile = client.fsRead.bind(client);
+    let reads = 0;
+    client.fsRead = async (name, path) => {
+      reads += 1;
+      if (reads === 2) client.seedFile(spriteName, "/tmp/.nadi-rc-pid-late", "0");
+      return readFile(name, path);
+    };
+
+    expect(
+      await backend.getProcessStatus(runtime, processReference(spriteName, "pid-late", "sess-x")),
+    ).toEqual({ status: "exited", exitCode: 0 });
+  });
+
+  it("stays running — never failed — while the rc file cannot be READ at all", async () => {
+    // A read that THREW is not evidence the file is absent. `failed` is terminal
+    // and stops callers polling, so a transient read failure must not produce it;
+    // the sprite answered `listSessions`, so it is alive and this will settle.
+    const { backend, client } = createFakeSpritesBackend();
+    const runtime = await backend.acquire(SPEC);
+    const spriteName = spriteNameOf(runtime);
+    client.fsRead = async () => {
+      throw new ComputeError("provider_transient", "sprites_request_timeout: /fs/read");
+    };
+
+    expect(
+      await backend.getProcessStatus(runtime, processReference(spriteName, "pid-unread", "sess-x")),
+    ).toEqual({ status: "running" });
+  });
+
   it("rejects a process reference minted for a different sprite", async () => {
     const { backend } = createFakeSpritesBackend();
     const runtime = await backend.acquire(SPEC);
@@ -451,6 +490,89 @@ describe("SpritesComputeBackend.runCommand", () => {
     await expect(
       backend.runCommand(runtime, { command: "echo hi", timeoutMs: 1_000 }),
     ).rejects.toMatchObject({ code: "provider_transient" });
+  });
+});
+
+/**
+ * LIVE (2026-08-04): a sprite created with `environment:{PROBE_ENV:"…"}` ran
+ * `echo "[$PROBE_ENV]"` and printed `[]` — the create-time environment reaches
+ * no command. Everything below exists because that made workbench env vars and
+ * the GitHub App's minted `GH_TOKEN` invisible to every command the agent ran.
+ */
+describe("SpritesComputeBackend runtime environment", () => {
+  it("carries the runtime env on runCommand, with the caller's values on top", async () => {
+    const { backend, client } = createFakeSpritesBackend({ GH_TOKEN: "ghs_x", SHARED: "runtime" });
+    const runtime = await backend.acquire(SPEC);
+
+    await backend.runCommand(runtime, {
+      command: "true",
+      env: { SHARED: "per-call" },
+      timeoutMs: 1_000,
+    });
+
+    expect(client.execCollectOptions.at(-1)?.env).toEqual({
+      GH_TOKEN: "ghs_x",
+      // Folded in by `acquire` from the spec, for callers that construct the
+      // backend directly rather than through the registry.
+      SPRITES_TEST: "true",
+      SHARED: "per-call",
+    });
+  });
+
+  it("carries the runtime env on the DETACHED startProcess launch too", async () => {
+    // The background path is the one that runs `git clone`, so a `GH_TOKEN` that
+    // reached only `runCommand` would still fail every private-repo clone.
+    const { backend, client } = createFakeSpritesBackend({ GH_TOKEN: "ghs_x" });
+    const runtime = await backend.acquire(SPEC);
+
+    await backend.startProcess(runtime, { command: "echo hi", timeoutMs: 1_000 });
+
+    expect(client.execDetachedOptions.at(-1)?.env).toEqual({
+      GH_TOKEN: "ghs_x",
+      SPRITES_TEST: "true",
+    });
+  });
+
+  it("sends NO env on its own housekeeping execs, keeping the sprite's defaults", async () => {
+    // `env` REPLACES the environment, so sending a partial one to `mkdir`/`stat`
+    // would swap the sprite's PATH for ours with nothing gained.
+    const { backend, client } = createFakeSpritesBackend({ GH_TOKEN: "ghs_x" });
+    const runtime = await backend.acquire(SPEC);
+    await backend.pathExists(runtime, "/workspace");
+
+    for (const options of client.execCollectOptions) {
+      expect(options.env).toBeUndefined();
+    }
+  });
+
+  it("keeps env VALUES out of the persisted reference", async () => {
+    // The reference is written to durable storage; these are secrets.
+    const { backend } = createFakeSpritesBackend({ GH_TOKEN: "ghs_secret" });
+    const runtime = await backend.acquire(SPEC);
+    const recovery = await backend.release(runtime, {
+      disposition: "recoverable",
+      recoveryTtlMs: 1_000,
+    });
+
+    expect(JSON.stringify([runtime, recovery])).not.toContain("ghs_secret");
+    expect(JSON.stringify([runtime, recovery])).not.toContain("GH_TOKEN");
+  });
+
+  it("sends no env at all when there is none to send", async () => {
+    const { backend, client } = createFakeSpritesBackend();
+    const runtime = await backend.acquire({ ...SPEC, env: {} });
+
+    await backend.runCommand(runtime, { command: "true", timeoutMs: 1_000 });
+
+    expect(client.execCollectOptions.at(-1)?.env).toBeUndefined();
+  });
+
+  it("does not send the environment at create time — nothing there reaches a command", async () => {
+    const { backend, client } = createFakeSpritesBackend({ GH_TOKEN: "ghs_secret" });
+
+    await backend.acquire(SPEC);
+
+    expect(client.createdEnvironments).toEqual([{}]);
   });
 });
 

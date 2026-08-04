@@ -46,6 +46,23 @@ const ROUNDTRIP_BYTES = [0, 1, 2, 255, 254, 10, 13, 65, 66, 67, 200];
 const HIBERNATE_IDLE_MS = 45_000;
 /** ~256KB of stdout, to catch WS message coalescing/splitting (see step 6f). */
 const LARGE_PAYLOAD_BYTES = 262_144;
+/** Base64 of `LARGE_PAYLOAD_BYTES` zero bytes: 349528 chars, all `A` bar `==`. */
+const LARGE_PAYLOAD_BASE64_LENGTH = Math.ceil(LARGE_PAYLOAD_BYTES / 3) * 4;
+/**
+ * The server's replay cap: a session that had ALREADY EXITED when we attached
+ * is served from a recorded history truncated to exactly this many bytes
+ * (`fast_path … history_len=65536` in its debug frames). See step 6g.
+ */
+const FAST_PATH_REPLAY_CAP_BYTES = 65_536;
+/**
+ * How long step 6f's command stalls before producing output, so the socket is
+ * attached before the command finishes and the server streams it live
+ * (`normal_path`) instead of replaying a truncated history.
+ */
+const STREAMING_DELAY_SECS = 2;
+/** Step 4b's budget for an 8-second background command to be observed finished. */
+const PROCESS_SETTLE_TIMEOUT_MS = 40_000;
+const PROCESS_SETTLE_POLL_MS = 2_000;
 
 export async function runSpritesSmoke(env: Env): Promise<SpritesSmokeReport> {
   const apiKey = env.SPRITES_API_KEY;
@@ -214,20 +231,39 @@ export async function runSpritesSmoke(env: Env): Promise<SpritesSmokeReport> {
       return `status=running; raw listSessions=${JSON.stringify(rawSessions)}`;
     });
 
-    // 4b. Disconnect-survival + the sentinel-file design: wait past the sleep,
-    // then read state fresh (no socket was held open across the wait).
+    // 4b. Disconnect-survival + the sentinel-file design: the socket is long
+    // gone, so everything below is read fresh from the sprite.
+    //
+    // POLLED, not a single read after a fixed sleep. `sleep 8` does not reliably
+    // finish within 8 s of wall-clock on the caller's side: a sprite nobody is
+    // talking to slows down (it hibernates on idle, and waking is implicit on
+    // the next API call), so the same process observed at +12 s by a poller that
+    // kept it awake was still `running` at +15 s after a silent wait. The
+    // ASSERTION is unchanged — it must reach `exited 0` with `done` on stdout —
+    // but the deadline is generous and the settle time is reported, because that
+    // latency is the observation worth keeping. Production polls too
+    // (`ThreadComputeService.refreshProcessStatus`); a one-shot read after a
+    // fixed sleep was asserting a latency guarantee the provider never gave.
     await timed("4b. sleep 8 settles: exited 0, stdout has 'done'", async () => {
       if (!runtime || !sleepProcess) throw new Error("no runtime/process");
-      await new Promise<void>((resolve) => setTimeout(resolve, 10_000));
-      const status = await backend.getProcessStatus(runtime, sleepProcess);
-      if (status.status !== "exited" || status.exitCode !== 0) {
-        throw new Error(`status=${status.status} exitCode=${status.exitCode}`);
+      const live: BackendReference = runtime;
+      const proc: BackendProcessReference = sleepProcess;
+      const startedAt = Date.now();
+      let status = await backend.getProcessStatus(live, proc);
+      while (status.status === "running" && Date.now() - startedAt < PROCESS_SETTLE_TIMEOUT_MS) {
+        await new Promise<void>((resolve) => setTimeout(resolve, PROCESS_SETTLE_POLL_MS));
+        status = await backend.getProcessStatus(live, proc);
       }
-      const out = await backend.readProcessOutput(runtime, sleepProcess);
+      if (status.status !== "exited" || status.exitCode !== 0) {
+        throw new Error(
+          `status=${status.status} exitCode=${status.exitCode} after ${Date.now() - startedAt}ms`,
+        );
+      }
+      const out = await backend.readProcessOutput(live, proc);
       if (!(out.stdout ?? "").includes("done")) {
         throw new Error(`stdout missing 'done': ${JSON.stringify(out.stdout)}`);
       }
-      return `status=exited exitCode=0 stdout=${JSON.stringify(out.stdout)}`;
+      return `status=exited exitCode=0 after ${Date.now() - startedAt}ms of polling; stdout=${JSON.stringify(out.stdout)}`;
     });
 
     // 5a. Start a long process to kill.
@@ -465,8 +501,58 @@ export async function runSpritesSmoke(env: Env): Promise<SpritesSmokeReport> {
     // truncate stdout mid-stream. Base64 of all-zero bytes is deterministic
     // (every triple → "AAA A", with a fixed tail), so both length AND content
     // are checked — a corruption that preserved length would still be caught.
+    //
+    // The leading `sleep` is load-bearing, and is what this step exists for:
+    // it guarantees the socket is attached BEFORE any output exists, so the
+    // server streams the run live (`normal_path`) across many frames. Without
+    // it the command can finish inside the ~25ms upgrade round-trip, and the
+    // server then REPLAYS a history capped at 64KiB — an integrity assertion
+    // over that path can never pass, and says nothing about framing. Step 6g
+    // covers the replay cap deliberately.
     await timed(
-      "6f. WS exec framing under >=256KB payload (byte-count + content integrity)",
+      "6f. WS exec framing under >=256KB payload, streamed (byte-count + content integrity)",
+      async () => {
+        if (!runtime) throw new Error("no runtime acquired");
+        const r = await backend.runCommand(runtime, {
+          command: `sleep ${STREAMING_DELAY_SECS}; head -c ${LARGE_PAYLOAD_BYTES} /dev/zero | base64 -w0`,
+          timeoutMs: 30_000,
+        });
+        if (r.exitCode !== 0) {
+          throw new Error(
+            `exitCode=${r.exitCode} stderr=${JSON.stringify(r.stderr.slice(0, 200))}`,
+          );
+        }
+        const stdout = r.stdout.trim();
+        if (stdout.length !== LARGE_PAYLOAD_BASE64_LENGTH) {
+          throw new Error(
+            `byte count mismatch: got ${stdout.length} expected ${LARGE_PAYLOAD_BASE64_LENGTH} — ` +
+              (stdout.length === FAST_PATH_REPLAY_CAP_BYTES
+                ? `this is the ${FAST_PATH_REPLAY_CAP_BYTES}-byte fast_path replay cap, so the sleep ` +
+                  `did not keep us on the streaming path`
+                : `frame coalescing/splitting likely corrupted or truncated the stream`),
+          );
+        }
+        if (!/^A+==$/.test(stdout)) {
+          throw new Error(
+            `payload content corrupted (expected all-'A' base64 of zero bytes with a trailing '=='); ` +
+              `head=${JSON.stringify(stdout.slice(0, 40))} tail=${JSON.stringify(stdout.slice(-40))}`,
+          );
+        }
+        return `streamed (normal_path): stdout length=${stdout.length} matches expected ${LARGE_PAYLOAD_BASE64_LENGTH}; content verified all-'A' with trailing '==' (no coalescing/splitting detected)`;
+      },
+    );
+
+    // 6g. KNOWN LIMITATION PROBE, not a feature test. The same command with no
+    // leading sleep races the upgrade: if it exits first, the server serves a
+    // RECORDED history capped at exactly 65536 bytes (`fast_path …
+    // history_len=65536` in its debug frames) and reports exit 0 — `runCommand`
+    // silently truncates. If we win the race it streams (`normal_path`) and
+    // everything arrives. Both are known-good today, so BOTH are accepted and
+    // the observed one is reported; anything else is a change in provider
+    // behaviour and fails. Documented at `execCollect` and in
+    // docs/operations/sprites.md.
+    await timed(
+      `6g. KNOWN LIMITATION: fast-path replay caps runCommand output at ${FAST_PATH_REPLAY_CAP_BYTES} bytes`,
       async () => {
         if (!runtime) throw new Error("no runtime acquired");
         const r = await backend.runCommand(runtime, {
@@ -478,20 +564,24 @@ export async function runSpritesSmoke(env: Env): Promise<SpritesSmokeReport> {
             `exitCode=${r.exitCode} stderr=${JSON.stringify(r.stderr.slice(0, 200))}`,
           );
         }
-        const stdout = r.stdout.trim();
-        const expectedLength = Math.ceil(LARGE_PAYLOAD_BYTES / 3) * 4;
-        if (stdout.length !== expectedLength) {
-          throw new Error(
-            `byte count mismatch: got ${stdout.length} expected ${expectedLength} — frame coalescing/splitting likely corrupted or truncated the stream`,
+        const length = r.stdout.trim().length;
+        if (length === FAST_PATH_REPLAY_CAP_BYTES) {
+          return (
+            `fast_path replay: got ${length} of ${LARGE_PAYLOAD_BASE64_LENGTH} bytes with exitCode=0 and no error — ` +
+            `the documented 64KiB truncation. Large output must go through startProcess + readProcessOutput.`
           );
         }
-        if (!/^A+==$/.test(stdout)) {
-          throw new Error(
-            `payload content corrupted (expected all-'A' base64 of zero bytes with a trailing '=='); ` +
-              `head=${JSON.stringify(stdout.slice(0, 40))} tail=${JSON.stringify(stdout.slice(-40))}`,
+        if (length === LARGE_PAYLOAD_BASE64_LENGTH) {
+          return (
+            `normal_path this run: the command did not finish inside the upgrade round-trip, so all ` +
+            `${length} bytes streamed. The cap is still real (see 6f's comment); which path a fast ` +
+            `command takes is a race, which is why this step accepts both.`
           );
         }
-        return `stdout length=${stdout.length} matches expected ${expectedLength}; content verified all-'A' with trailing '==' (no coalescing/splitting detected)`;
+        throw new Error(
+          `unrecognised length ${length}: neither the full ${LARGE_PAYLOAD_BASE64_LENGTH} bytes nor the ` +
+            `known ${FAST_PATH_REPLAY_CAP_BYTES}-byte replay cap — provider behaviour has CHANGED here`,
+        );
       },
     );
 

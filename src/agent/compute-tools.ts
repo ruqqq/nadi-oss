@@ -123,7 +123,10 @@ export interface ComputeToolHostDeps {
    * Test seam: substitute the backend (e.g. the in-memory fake) instead of
    * constructing a real Daytona client from the decrypted workspace secret.
    */
-  buildBackend?: (config: EffectiveComputeConfig) => Promise<ComputeBackend>;
+  buildBackend?: (
+    config: EffectiveComputeConfig,
+    execEnv: Record<string, string>,
+  ) => Promise<ComputeBackend>;
   /**
    * Whether this runtime can drive a PROACTIVE system-reminder turn (see
    * {@link deliverSystemReminder}). Manual watcher registration is only ever
@@ -403,9 +406,10 @@ export async function resolveComputeService(deps: ComputeToolHostDeps): Promise<
     : `${effectiveConfig.provider}:${effectiveProfile}`;
 
   const now = deps.now ?? (() => Date.now());
-  const backend = deps.buildBackend
-    ? await deps.buildBackend(effectiveConfig)
-    : await buildComputeBackend(deps.env, workspaceId, deps.threadId, effectiveConfig);
+  // The environment is resolved BEFORE the backend is constructed, because the
+  // sprites backend has to carry it on every exec (its create-time
+  // `environment` never reaches a command) and so needs it at construction.
+  // Nothing in this resolution depends on the backend.
   const computeEnv = await resolveComputeEnvVars({
     env: deps.env,
     workspaceId,
@@ -431,6 +435,16 @@ export async function resolveComputeService(deps: ComputeToolHostDeps): Promise<
       log: (message) => console.log(message),
     });
   }
+  const backend = deps.buildBackend
+    ? await deps.buildBackend(effectiveConfig, effectiveEnv)
+    : await buildComputeBackend(
+        deps.env,
+        workspaceId,
+        deps.threadId,
+        effectiveConfig,
+        undefined,
+        effectiveEnv,
+      );
   const quota = buildComputeQuotaGate({
     env: deps.env,
     effectiveConfig,

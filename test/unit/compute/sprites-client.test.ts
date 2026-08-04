@@ -552,12 +552,26 @@ describe("parseExecFrame", () => {
  *   at `accept()`;
  * - once accepted, delivery is immediate and a frame with NO listener attached
  *   is DROPPED — there is no replay for a listener attached later.
+ * - **binary messages arrive as a `Blob`** unless `binaryType` was set to
+ *   `"arraybuffer"` BEFORE `accept()`. This is workerd's real default, and the
+ *   reason it is modelled here: the previous fake handed out `ArrayBuffer`s
+ *   unconditionally, so 187 green tests coexisted with a production client that
+ *   silently dropped every stdout, stderr and exit frame it was ever sent.
  *
  * The drop is recorded rather than thrown so a test can assert on it.
  */
 class FakeWebSocket {
   accepted = false;
   closed = false;
+  /** Set by the code under test; only a pre-`accept()` value counts. */
+  binaryType = "blob";
+  /** What `binaryType` read at `accept()` — what delivery actually honours. */
+  binaryTypeAtAccept = "blob";
+  /**
+   * Deliver `Blob`s even when `binaryType` says otherwise, modelling a runtime
+   * that ignores the setting. The client must complain, not drop the frame.
+   */
+  forceBlob = false;
   /** Event types delivered while no listener was attached, i.e. lost. */
   readonly dropped: string[] = [];
   /** Runs synchronously inside `accept()`, like a server that answers in ~25ms. */
@@ -567,6 +581,9 @@ class FakeWebSocket {
 
   accept(): void {
     this.accepted = true;
+    // Latched here, like the real socket: `accept()` starts delivery, so a
+    // `binaryType` assigned afterwards cannot change how frames arrive.
+    this.binaryTypeAtAccept = this.binaryType;
     for (const item of this.buffered.splice(0)) this.deliver(item.type, item.event);
     this.onAccept?.(this);
   }
@@ -589,19 +606,36 @@ class FakeWebSocket {
     this.deliver(type, event);
   }
 
+  /**
+   * Queued as raw bytes; the Blob-vs-ArrayBuffer decision is made at DELIVERY,
+   * because that is when the runtime consults the latched `binaryType`.
+   */
   emitFrame(stream: number, payload: string | Uint8Array): void {
-    this.emit("message", { data: frame(stream, payload) });
+    this.emit(BINARY, frame(stream, payload));
   }
 
   private deliver(type: string, event: unknown): void {
-    const fns = this.listeners.get(type) ?? [];
+    const isBinary = type === BINARY;
+    const deliveredType = isBinary ? "message" : type;
+    const deliveredEvent = isBinary
+      ? {
+          data:
+            this.binaryTypeAtAccept === "arraybuffer" && !this.forceBlob
+              ? (event as ArrayBuffer)
+              : new Blob([event as ArrayBuffer]),
+        }
+      : event;
+    const fns = this.listeners.get(deliveredType) ?? [];
     if (fns.length === 0) {
-      this.dropped.push(type);
+      this.dropped.push(deliveredType);
       return;
     }
-    for (const fn of fns) fn(event);
+    for (const fn of fns) fn(deliveredEvent);
   }
 }
+
+/** Internal queue tag for a binary frame awaiting its delivery-time shape. */
+const BINARY = "__binary";
 
 /** Let the client reach its `addEventListener` calls before frames are emitted. */
 async function flush(): Promise<void> {
@@ -629,9 +663,12 @@ describe("execCollect", () => {
     expect(url.searchParams.get("dir")).toBe("/work");
     expect(url.searchParams.get("path")).toBe("bash");
     // `env` REPLACES the sprite environment, so a PATH is prepended for callers
-    // that did not supply one.
+    // that did not supply one — and it is the sprite's OWN default, read back
+    // live. The two leading entries are load-bearing: `/home/sprite/.local/bin`
+    // is where a sandbox's user-installed tools live, so a "sane default" that
+    // omitted it would un-install them the moment env is sent on every exec.
     expect(url.searchParams.getAll("env")).toEqual([
-      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "PATH=/home/sprite/.local/bin:/.sprite/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
       "A=1",
       "B=2",
     ]);
@@ -879,6 +916,48 @@ describe("execCollect", () => {
     await expect(codeOf(client.execCollect("s1", { argv: ["bash"] }))).resolves.toBe(
       "runtime_missing",
     );
+  });
+
+  // REGRESSION (live smoke, 2026-08-04): workerd delivers binary WebSocket
+  // messages as a `Blob`, and the handler's `instanceof ArrayBuffer` guard
+  // dropped every one of them in silence — no stdout, no exit code, just
+  // `sprites_exec_no_exit`. The fake now defaults to `Blob` like the real
+  // runtime, so this test captures NOTHING unless the client asks for
+  // ArrayBuffers before `accept()`.
+  //
+  // MUTATION CHECK: delete `ws.binaryType = "arraybuffer"` from `execCollect`
+  // and this fails — the frames arrive as Blobs and the run rejects with
+  // `sprites_exec_unreadable_frame` instead of resolving with stdout.
+  it("captures stdout only because it asks for ArrayBuffer frames before accept", async () => {
+    const ws = new FakeWebSocket();
+    const { client } = harness({ webSocket: ws });
+
+    const pending = client.execCollect("s1", { argv: ["bash", "-c", "echo AA"] });
+    await flush();
+    ws.emitFrame(1, "AA");
+    ws.emitFrame(3, new Uint8Array([0]));
+
+    await expect(pending).resolves.toEqual({ exitCode: 0, stdout: "AA", stderr: "" });
+    // The ordering half of the same requirement: a `binaryType` assigned after
+    // `accept()` is too late for frames already in flight.
+    expect(ws.binaryTypeAtAccept).toBe("arraybuffer");
+  });
+
+  it("rejects, naming the type, if a Blob arrives despite binaryType", async () => {
+    const ws = new FakeWebSocket();
+    // A runtime that ignores the setting. The frame must never be dropped in
+    // silence again — that is the whole failure mode this class of bug has.
+    ws.forceBlob = true;
+    const { client } = harness({ webSocket: ws });
+
+    const pending = client.execCollect("s1", { argv: ["bash", "-c", "echo AA"] });
+    await flush();
+    ws.emitFrame(1, "AA");
+
+    const message = await messageOf(pending);
+    expect(message).toContain("sprites_exec_unreadable_frame");
+    expect(message).toContain("Blob");
+    expect(ws.closed).toBe(true);
   });
 });
 

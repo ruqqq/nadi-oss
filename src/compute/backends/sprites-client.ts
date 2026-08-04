@@ -59,7 +59,29 @@ export interface SpritesClient {
     rules: Array<{ domain: string; action: "allow" | "deny" }>,
   ): Promise<void>;
   setMemoryPolicy(name: string, limitMb: number): Promise<void>;
-  /** WS exec, buffered to completion. */
+  /**
+   * WS exec, buffered to completion.
+   *
+   * **PROVIDER LIMITATION — output above 64KiB can be silently truncated.**
+   * The server serves an exec session down one of two paths, and names which in
+   * its `debug` text frames:
+   *
+   *  - `normal_path history_len=0` — we attached BEFORE the command finished, so
+   *    output is streamed live. Complete, at any size (349528 bytes over 13
+   *    frames, live 2026-08-04).
+   *  - `fast_path ... history_len=65536` — the command had ALREADY EXITED when
+   *    the socket opened, so the server replays its recorded history, and that
+   *    history is capped at exactly 65536 bytes. The same 349528-byte command
+   *    came back as 65536 bytes with a zero exit code and no error of any kind.
+   *
+   * Which path a given call takes is a race between the command's runtime and
+   * the upgrade round-trip (~25ms), so it is not a stable property of the
+   * command: a fast command that produces a lot of output is the exposed case.
+   * There is no flag to raise the cap and no marker in the result, so this
+   * cannot be detected or worked around here — the sentinel-file route
+   * (`startProcess` + `readProcessOutput`, which reads the output from the
+   * sandbox filesystem) is the only way to get large output back intact.
+   */
   execCollect(name: string, options: SpritesExecOptions): Promise<SpritesExecResult>;
   /**
    * WS exec with detachable=true; connects, waits for the server's
@@ -262,8 +284,21 @@ export function parseTextExitCode(data: string): number | undefined {
  * one back — and a `bash` that cannot resolve `mkdir` fails in exactly the shape
  * that is hardest to read from production: the socket opens, nothing useful
  * arrives, it closes. Only used when the caller sends env and omits `PATH`.
+ *
+ * LIVE (2026-08-04): this is the sprite's OWN default `PATH`, read back verbatim
+ * from `echo $PATH` in an exec that sent no env. The two leading entries matter —
+ * `/home/sprite/.local/bin` is where a sandbox's user-installed tools land, and
+ * `/.sprite/bin` is the provider's own — so a hand-written "sane default" that
+ * omitted them would silently un-install every tool the agent had installed the
+ * moment we started sending env on every exec (which `SpritesComputeBackend`
+ * now does, to carry the runtime env; see `sprites.ts`).
+ *
+ * Note that `env` does not replace EVERYTHING: `HOME` survived a replacement
+ * that never mentioned it (same probe), so the server seeds a small base itself.
+ * `PATH` is not part of that base, which is why this constant exists.
  */
-const DEFAULT_EXEC_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const DEFAULT_EXEC_PATH =
+  "/home/sprite/.local/bin:/.sprite/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 function toArrayBuffer(data: ArrayBuffer | ArrayBufferView): ArrayBuffer {
   if (ArrayBuffer.isView(data)) {
@@ -274,6 +309,20 @@ function toArrayBuffer(data: ArrayBuffer | ArrayBufferView): ArrayBuffer {
 
 /** The subset of the socket this client uses, so tests can script one. */
 interface ExecSocket {
+  /**
+   * MUST be set to `"arraybuffer"` before `accept()`.
+   *
+   * REGRESSION (live smoke, 2026-08-04): workerd delivers binary WebSocket
+   * messages as a **`Blob`** by default, not an `ArrayBuffer`. Every stdout,
+   * stderr and exit frame therefore failed the handler's
+   * `instanceof ArrayBuffer` guard and was DROPPED — silently, so every exec
+   * ended as `sprites_exec_no_exit` with no clue why. Instrumenting the live
+   * Worker showed frames arriving with `ctor=Blob`, and `ctor=ArrayBuffer`
+   * (`[1,65,65,...]`, `[3,0]`) once this was set. 187 unit tests stayed green
+   * throughout, because the fake socket fed ArrayBuffers the real one never
+   * sends — which is why the fake now defaults to `Blob` too.
+   */
+  binaryType?: string;
   accept(): void;
   close(code?: number, reason?: string): void;
   addEventListener(type: string, listener: (event: never) => void): void;
@@ -675,7 +724,25 @@ class SpritesHttpClient implements SpritesClient {
           }
           return;
         }
-        if (!(data instanceof ArrayBuffer) && !ArrayBuffer.isView(data)) return;
+        // Anything non-string that is not already bytes means `binaryType` did
+        // not take: workerd's default delivers a `Blob` here, which this handler
+        // cannot read synchronously. NEVER return silently — dropping a frame
+        // loses stdout or an exit code with no error to read, which is exactly
+        // how the Blob bug survived a live deploy and 187 green unit tests.
+        if (!(data instanceof ArrayBuffer) && !ArrayBuffer.isView(data)) {
+          const kind =
+            (data as { constructor?: { name?: string } } | null)?.constructor?.name ?? typeof data;
+          settle(() =>
+            reject(
+              new ComputeError(
+                "provider_transient",
+                `sprites_exec_unreadable_frame: expected ArrayBuffer, got ${kind} ` +
+                  `(binaryType was not honoured before accept())`,
+              ),
+            ),
+          );
+          return;
+        }
         let frame: { stream: 1 | 2 | 3; payload: Uint8Array };
         try {
           frame = parseExecFrame(toArrayBuffer(data as ArrayBuffer | ArrayBufferView));
@@ -742,6 +809,7 @@ class SpritesHttpClient implements SpritesClient {
       // starts frame delivery, and anything delivered before a listener exists
       // is lost. Never put an `await` between the listeners and this call.
       try {
+        ws.binaryType = "arraybuffer";
         ws.accept();
       } catch (error) {
         settle(() =>
@@ -811,6 +879,7 @@ class SpritesHttpClient implements SpritesClient {
       });
 
       try {
+        ws.binaryType = "arraybuffer";
         ws.accept();
       } catch (error) {
         settle(() =>

@@ -90,6 +90,17 @@ export class FakeSpritesClient implements SpritesClient {
    * unanswered socket hangs them forever.
    */
   readonly execCollectOptions: SpritesExecOptions[] = [];
+  /**
+   * The full options of every `execDetached`, in order. The runtime env has to
+   * ride on the DETACHED launch too — a create-time `environment` reaches no
+   * command on sprites — and `calls` cannot show it.
+   */
+  readonly execDetachedOptions: SpritesExecOptions[] = [];
+  /**
+   * The `environment` of every `createSprite`. It reaches no command on the
+   * live provider, so what matters is that no secret is written into it.
+   */
+  readonly createdEnvironments: Array<Record<string, string>> = [];
   readonly networkPolicies: RecordedNetworkPolicy[] = [];
   readonly memoryPolicies: Array<{ name: string; limitMb: number }> = [];
   readonly killCalls: RecordedKill[] = [];
@@ -121,6 +132,7 @@ export class FakeSpritesClient implements SpritesClient {
 
   async createSprite(name: string, input: { environment?: Record<string, string> }): Promise<void> {
     this.calls.push(`createSprite:${name}`);
+    this.createdEnvironments.push({ ...input.environment });
     if (this.failNextCreate) {
       const error = this.failNextCreate;
       this.failNextCreate = undefined;
@@ -192,6 +204,7 @@ export class FakeSpritesClient implements SpritesClient {
    */
   async execDetached(name: string, options: SpritesExecOptions): Promise<string> {
     this.calls.push(`execDetached:${describeExec(options)}`);
+    this.execDetachedOptions.push({ ...options });
     this.sessionSeq += 1;
     const sessionId = String(this.sessionSeq);
     this.pendingSessionId = sessionId;
@@ -390,6 +403,12 @@ export class FakeSpritesClient implements SpritesClient {
     const errPath = groups.err ?? "";
     const rcPath = groups.rc ?? "";
     const stdinPath = groups.stdin ?? "/dev/null";
+    // The wrapper writes rc to a temp path and RENAMES it, so a poll can never
+    // read a half-written file. Modelled literally: a wrapper that stopped
+    // renaming to the path the backend reads would leave rc absent here.
+    if (groups.rctmp !== groups.rcmoved) {
+      throw new Error(`wrapper renames ${groups.rcmoved}, but wrote ${groups.rctmp}`);
+    }
 
     if (cwd && !sprite.dirs.has(cwd)) {
       // `cd` failed, so the redirections never happened; only the rc file is
@@ -479,13 +498,21 @@ export class FakeSpritesClient implements SpritesClient {
   }
 }
 
-/** A fresh backend wired to a fresh fake client, exposing both. */
-export function createFakeSpritesBackend(): {
+/**
+ * A fresh backend wired to a fresh fake client, exposing both.
+ *
+ * `env` is the runtime environment the registry passes at construction — the
+ * production path for workbench vars and the minted `GH_TOKEN`.
+ */
+export function createFakeSpritesBackend(env?: Record<string, string>): {
   backend: SpritesComputeBackend;
   client: FakeSpritesClient;
 } {
   const client = new FakeSpritesClient();
-  return { backend: new SpritesComputeBackend({ client }), client };
+  return {
+    backend: new SpritesComputeBackend({ client, ...(env === undefined ? {} : { env }) }),
+    client,
+  };
 }
 
 /**
@@ -494,7 +521,7 @@ export function createFakeSpritesBackend(): {
  * therefore still parses.
  */
 const WRAPPER_RE =
-  /^cd (?<cwd>.+?) && timeout (?<secs>\d+) bash -c (?<cmd>.+) < (?<stdin>\S+) > (?<out>\S+) 2> (?<err>\S+); printf %s "\$\?" > (?<rc>\S+)$/;
+  /^cd (?<cwd>.+?) && timeout (?<secs>\d+) bash -c (?<cmd>.+) < (?<stdin>\S+) > (?<out>\S+) 2> (?<err>\S+); printf %s "\$\?" > (?<rctmp>\S+) && mv -f (?<rcmoved>\S+) (?<rc>\S+)$/;
 
 interface InnerResult {
   stdout: string;

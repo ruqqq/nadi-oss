@@ -63,6 +63,34 @@ const SETTLE_POLL_INTERVAL_MS = 200;
  */
 const INTERNAL_EXEC_TIMEOUT_MS = 60_000;
 
+/**
+ * How many extra times `getProcessStatus` re-reads the rc sentinel once the
+ * session has LEFT the listing without one, and how long it waits between
+ * reads.
+ *
+ * LIVE (2026-08-04): the two observations are not simultaneous. A `sleep 8;
+ * echo done` was seen with its stdout sentinel already written, its session
+ * still listed, and NO rc file — and then, ~200ms later, rc `0`. A single read
+ * that lands in that window sees "no exit recorded, session gone" and, without
+ * this grace, reports a perfectly successful process as `failed` — which is
+ * exactly what the smoke's step 4b did.
+ */
+const RC_SETTLE_ATTEMPTS = 3;
+const RC_SETTLE_INTERVAL_MS = 300;
+
+/**
+ * What one read of the rc sentinel established.
+ *
+ * The distinction that matters is `absent` vs `unknown`: a 404 whose body says
+ * the FILE is missing is evidence, a read that threw or a file whose content
+ * does not parse (a `printf` caught mid-write) is not. Collapsing both to
+ * "no answer" is what let a transient read failure become a `failed` verdict.
+ */
+type RcRead =
+  | { kind: "code"; code: number }
+  | { kind: "absent" }
+  | { kind: "unknown"; detail: string };
+
 const runtimePayloadSchema = z.object({
   kind: z.literal("runtime"),
   spriteName: z.string().min(1),
@@ -103,12 +131,38 @@ const SIGNALS: Record<StopMode, SpritesSignal> = {
 export class SpritesComputeBackend implements ComputeBackend {
   readonly id = "sprites" as const;
   private readonly client: SpritesClient;
+  /**
+   * The runtime's environment, carried on EVERY exec.
+   *
+   * LIVE (2026-08-04): `createSprite`'s `environment` does not reach a command.
+   * A sprite created with `{PROBE_ENV:"reached-the-command"}` ran
+   * `echo "[$PROBE_ENV]"` and printed `[]`. Sending the same pair as the exec
+   * `env` query param printed the value. So the create-time environment is,
+   * for our purposes, write-only — and passing `spec.env` to `createSprite`
+   * (the only place it went before) meant workbench env vars and the GitHub
+   * App's minted `GH_TOKEN` reached NO command at all. A private-repo clone
+   * would have failed as an auth error with nothing pointing at the cause.
+   *
+   * Held in the INSTANCE, never in the persisted `BackendReference`: the
+   * reference is written to durable storage and these values are secrets. The
+   * registry constructs a backend per operation and passes the same resolved
+   * env the service holds, and `acquire` folds in `spec.env` for callers that
+   * construct the backend directly (the live smoke, tests).
+   */
+  private runtimeEnv: Record<string, string>;
 
-  constructor(input: { client: SpritesClient }) {
+  constructor(input: { client: SpritesClient; env?: Record<string, string> }) {
     this.client = input.client;
+    this.runtimeEnv = { ...(input.env ?? {}) };
   }
 
   async acquire(spec: ComputeSpec, recovery?: BackendReference): Promise<BackendReference> {
+    // Fold the spec's env into what every later exec carries. The registry
+    // normally supplies the same values at construction; this covers the
+    // direct-construction callers (the live smoke, tests) and keeps a
+    // recovered runtime carrying the CURRENT spec rather than whatever was
+    // baked in at create time — which, per `runtimeEnv`, was nothing.
+    this.runtimeEnv = { ...this.runtimeEnv, ...spec.env };
     if (recovery) {
       const parsed = spritesReferenceSchema.safeParse(recovery);
       if (!parsed.success || parsed.data.payload.kind !== "recovery") {
@@ -118,18 +172,21 @@ export class SpritesComputeBackend implements ComputeBackend {
       // there is nothing to create or start — just re-apply the policies and
       // make sure the workspace root is there.
       //
-      // Note what recovery does NOT re-apply: `spec.env`. The environment is
-      // fixed at `createSprite` and there is no route to amend it afterwards,
-      // so a spec whose env changed between release and recovery keeps the
-      // original values — same behaviour as Daytona, whose env is likewise
-      // baked in at sandbox creation.
+      // Recovery DOES pick up a changed `spec.env`, unlike Daytona (whose env
+      // is baked into the sandbox at creation): nothing here is baked in, the
+      // env rides on each exec, and the fold above already took the current
+      // spec's values.
       const spriteName = parsed.data.payload.spriteName;
       await this.prepare(spriteName, spec);
       return this.runtimeReference(spriteName);
     }
 
     const spriteName = `nadi-${crypto.randomUUID()}`;
-    await this.client.createSprite(spriteName, { environment: spec.env });
+    // Deliberately created with NO `environment`. It does not reach commands
+    // (see `runtimeEnv`), so sending it would write every workbench secret and
+    // the minted `GH_TOKEN` into a provider-side record that nothing ever
+    // reads. The env is carried per-exec instead.
+    await this.client.createSprite(spriteName, {});
     try {
       await this.prepare(spriteName, spec);
     } catch (error) {
@@ -180,10 +237,11 @@ export class SpritesComputeBackend implements ComputeBackend {
    */
   async runCommand(runtime: BackendReference, input: RunCommandInput): Promise<RunCommandResult> {
     const spriteName = this.runtimeName(runtime);
+    const env = this.execEnv(input.env);
     const result = await this.client.execCollect(spriteName, {
       argv: ["bash", "-c", input.command],
       dir: input.cwd ?? WORKSPACE_ROOT,
-      ...(input.env === undefined ? {} : { env: input.env }),
+      ...(env === undefined ? {} : { env }),
       timeoutMs: input.timeoutMs,
     });
     return {
@@ -213,18 +271,31 @@ export class SpritesComputeBackend implements ComputeBackend {
     const timeoutSecs = Math.max(1, Math.ceil(input.timeoutMs / 1000));
     // argv form sidesteps every quoting concern except the two values
     // interpolated into the script itself.
+    //
+    // The rc write is a write-then-RENAME, not a plain redirect: `> rc` creates
+    // the file before `printf` fills it, so a status poll landing in that window
+    // reads an empty file. `readRcOnce` treats unparsable content as "no
+    // answer", so the empty read is not mistaken for an exit code — but the
+    // rename removes the window entirely, and it is one extra word.
     const wrapper =
       `cd ${shellQuote(input.cwd ?? WORKSPACE_ROOT)} && ` +
       `timeout ${timeoutSecs} bash -c ${shellQuote(input.command)} ` +
       `< ${stdinPath} > ${outPath} 2> ${errPath}; ` +
-      `printf %s "$?" > ${rcPath}`;
+      `printf %s "$?" > ${rcPath}.tmp && mv -f ${rcPath}.tmp ${rcPath}`;
+    // The env rides in the `env` query param, NOT as `export` lines inside the
+    // wrapper. Neither is secret-safe against a server that logs its request
+    // line — the wrapper itself is sent as repeated `cmd` params on the same
+    // URL, so `export GH_TOKEN=…` would sit in exactly the same place, just
+    // harder to read and one shell-quoting bug away from a broken script. One
+    // mechanism for both exec paths is the cheaper thing to keep correct.
+    const env = this.execEnv(input.env);
     const sessionId = await this.client.execDetached(spriteName, {
       argv: ["bash", "-c", wrapper],
       detachable: true,
       // Outlive the command's own timeout, so the wrapper always gets to write
       // its rc file rather than being reaped mid-exit.
       maxRunAfterDisconnect: `${timeoutSecs + 60}s`,
-      ...(input.env === undefined ? {} : { env: input.env }),
+      ...(env === undefined ? {} : { env }),
     });
 
     const process = this.processReference(spriteName, processId, sessionId);
@@ -255,8 +326,8 @@ export class SpritesComputeBackend implements ComputeBackend {
     const spriteName = this.runtimeName(runtime);
     const payload = this.processPayload(process);
     this.requireProcessRuntime(spriteName, payload.spriteName);
-    const exitCode = await this.readRc(spriteName, payload.processId);
-    if (exitCode !== undefined) return { status: "exited", exitCode };
+    const rc = await this.readRcOnce(spriteName, payload.processId);
+    if (rc.kind === "code") return { status: "exited", exitCode: rc.code };
     const sessions = await this.client.listSessions(spriteName);
     // Presence of the session id is the ONLY liveness signal. Not the row's
     // `is_active` (live, that read `false` for a running `sleep 120` — it means
@@ -265,9 +336,27 @@ export class SpritesComputeBackend implements ComputeBackend {
     if (sessions.some((session) => session.sessionId === payload.sessionId)) {
       return { status: "running" };
     }
-    // No session and no rc file: the process went away without recording an
-    // exit — killed by a signal the wrapper never saw, or a cold sprite
-    // restart. `failed` is the honest answer; inventing an exit code is not.
+    // No session and no exit code — but the two reads happened at different
+    // moments, and live the rc file has been seen landing ~200ms AFTER the
+    // process was otherwise finished. Re-read before answering, or a successful
+    // run that merely settled between the two calls is reported `failed`.
+    let last: RcRead = rc;
+    for (let attempt = 0; attempt < RC_SETTLE_ATTEMPTS; attempt += 1) {
+      await delay(RC_SETTLE_INTERVAL_MS);
+      last = await this.readRcOnce(spriteName, payload.processId);
+      if (last.kind === "code") return { status: "exited", exitCode: last.code };
+    }
+    if (last.kind === "unknown") {
+      // The rc file could not be READ (the sprite answered `listSessions`, so it
+      // is alive and this is transient). That is not evidence the process died,
+      // and `failed` is a terminal verdict callers stop polling on — so report
+      // the non-terminal answer and let the next poll decide.
+      return { status: "running" };
+    }
+    // Positively absent, three times, with the session gone: the process went
+    // away without recording an exit — killed by a signal the wrapper never
+    // saw, or a cold sprite restart. `failed` is the honest answer; inventing
+    // an exit code is not.
     return { status: "failed" };
   }
 
@@ -500,17 +589,48 @@ export class SpritesComputeBackend implements ComputeBackend {
    * The sentinel may only ever bring an exit FORWARD; it must never invent one.
    */
   private async readRc(spriteName: string, processId: string): Promise<number | undefined> {
+    const rc = await this.readRcOnce(spriteName, processId);
+    return rc.kind === "code" ? rc.code : undefined;
+  }
+
+  /**
+   * One read of the rc sentinel, keeping "proven absent" separate from "could
+   * not tell". See `RcRead` — `getProcessStatus` is the only caller that needs
+   * the distinction, and it is the caller that can turn a wrong guess into a
+   * terminal `failed` verdict.
+   */
+  private async readRcOnce(spriteName: string, processId: string): Promise<RcRead> {
     let raw: string;
     try {
       const result = await this.client.fsRead(spriteName, sentinelPath("rc", processId));
-      if (!result) return undefined;
+      if (!result) return { kind: "absent" };
       raw = new TextDecoder().decode(result.bytes).trim();
-    } catch {
-      return undefined;
+    } catch (error) {
+      return { kind: "unknown", detail: error instanceof Error ? error.message : String(error) };
     }
-    if (!/^-?\d+$/.test(raw)) return undefined;
+    if (!/^-?\d+$/.test(raw)) {
+      // Content that does not parse means the write is still in flight (or the
+      // file is corrupt) — NOT that no exit happened.
+      return { kind: "unknown", detail: `unparsable rc ${JSON.stringify(raw.slice(0, 40))}` };
+    }
     const code = Number.parseInt(raw, 10);
-    return Number.isSafeInteger(code) ? code : undefined;
+    if (!Number.isSafeInteger(code)) {
+      return { kind: "unknown", detail: `rc out of range ${JSON.stringify(raw.slice(0, 40))}` };
+    }
+    return { kind: "code", code };
+  }
+
+  /**
+   * The environment for one exec: the runtime's env, with any per-call env
+   * layered on top. `undefined` when there is nothing to send, so an exec with
+   * no env keeps the sprite's own default environment rather than replacing it
+   * with a one-entry one (the `env` param REPLACES; see `DEFAULT_EXEC_PATH` in
+   * the client, which is where the PATH-preservation lives — it is not
+   * duplicated here).
+   */
+  private execEnv(callerEnv?: Record<string, string>): Record<string, string> | undefined {
+    const merged = { ...this.runtimeEnv, ...(callerEnv ?? {}) };
+    return Object.keys(merged).length > 0 ? merged : undefined;
   }
 
   /**
