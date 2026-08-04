@@ -11,9 +11,17 @@ import {
   isUsableProviderForWorkspace,
   parseModelInputModalities,
 } from "../settings/model-selection";
-import { computeNextDueAt, isValidTimezone, parseSchedule, type AutomatonSchedule } from "./schedule";
+import {
+  computeNextDueAt,
+  isValidTimezone,
+  parseSchedule,
+  type AutomatonSchedule,
+} from "./schedule";
 
-function scheduleValidationError(error: unknown, opts?: { reEnable?: boolean }): AutomatonValidationError {
+function scheduleValidationError(
+  error: unknown,
+  opts?: { reEnable?: boolean },
+): AutomatonValidationError {
   const msg = String((error as Error).message);
   if (msg.includes("runAt must be in the future")) {
     return new AutomatonValidationError(

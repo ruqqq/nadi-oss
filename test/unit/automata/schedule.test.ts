@@ -150,7 +150,9 @@ describe("describeSchedule", () => {
   const tz = "UTC";
 
   it("renders a human summary for the list row", () => {
-    expect(describeSchedule({ kind: "weekdays", hour: 8, minute: 0 }, tz)).toBe("Weekdays at 08:00");
+    expect(describeSchedule({ kind: "weekdays", hour: 8, minute: 0 }, tz)).toBe(
+      "Weekdays at 08:00",
+    );
     expect(describeSchedule({ kind: "daily", hour: 8, minute: 5 }, tz)).toBe("Daily at 08:05");
     expect(describeSchedule({ kind: "hourly", minute: 0 }, tz)).toBe("Hourly at :00");
     expect(describeSchedule({ kind: "weekly", weekday: 1, hour: 8, minute: 0 }, tz)).toBe(
@@ -162,10 +164,7 @@ describe("describeSchedule", () => {
   });
 
   it("formats once in the automaton timezone", () => {
-    const summary = describeSchedule(
-      { kind: "once", runAt: at("2026-08-12T09:00:00Z") },
-      "UTC",
-    );
+    const summary = describeSchedule({ kind: "once", runAt: at("2026-08-12T09:00:00Z") }, "UTC");
     expect(summary).toMatch(/^Once · /);
     expect(summary).toContain("09:00");
   });
