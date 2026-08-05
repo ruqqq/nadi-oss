@@ -82,7 +82,7 @@ export function ToolGroup({
 
   const header = (
     <>
-      <span className="font-display text-base leading-snug">{ariaLabel}</span>
+      <span className="font-display line-clamp-2 text-base leading-snug">{ariaLabel}</span>
       <span className="mt-1.5 flex flex-wrap items-center gap-2">
         {errorCount > 0 ? (
           <span className="inline-flex rounded-full border border-reject/40 bg-reject/10 px-2 py-px text-[11px] font-semibold text-reject">
@@ -116,7 +116,7 @@ export function ToolGroup({
         <SheetTrigger asChild>{strip}</SheetTrigger>
         <SheetContent
           side="bottom"
-          className="flex max-h-[85vh] flex-col gap-0 p-0 pb-[env(safe-area-inset-bottom)]"
+          className="flex max-h-[85vh] flex-col gap-0 overflow-hidden p-0 pb-[env(safe-area-inset-bottom)]"
         >
           <SheetHeader className="shrink-0 border-b py-4 pl-5 pr-12">
             <SheetTitle className="flex flex-col items-start">{header}</SheetTitle>

@@ -264,7 +264,7 @@ function Row({
       <span className="min-w-0">
         <span
           className={cn(
-            "break-words font-mono text-[12.5px] font-semibold",
+            "line-clamp-2 break-words font-mono text-[12.5px] font-semibold",
             !entry.objectMono && "font-sans",
             entry.state === "error" && "text-reject",
             entry.state === "running" && "activity-shimmer",
@@ -350,7 +350,7 @@ export function ToolRunLog({
   );
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto py-1">
+    <div className="flex min-h-0 flex-auto flex-col overflow-y-auto py-1">
       {entries.map(({ key, entry, duration }) => (
         <Row key={key} entry={entry} duration={duration} gutterWidth={gutterWidth} />
       ))}

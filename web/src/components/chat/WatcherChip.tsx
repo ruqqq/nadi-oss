@@ -47,7 +47,7 @@ export function WatcherChip({ watcher, nowMs }: { watcher: ActiveWatcher; nowMs:
   );
 
   const detail = (
-    <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-4 text-sm">
+    <div className="min-h-0 flex-auto space-y-2 overflow-y-auto p-4 text-sm">
       <div>
         <div className="text-muted-foreground text-xs">Command</div>
         <div className="break-all font-mono text-xs">{model.subtitle}</div>
@@ -85,7 +85,7 @@ export function WatcherChip({ watcher, nowMs }: { watcher: ActiveWatcher; nowMs:
     return (
       <Sheet open={open} onOpenChange={setOpen}>
         <SheetTrigger asChild>{chip}</SheetTrigger>
-        <SheetContent side="bottom" className="flex max-h-[85vh] flex-col gap-0 p-0">
+        <SheetContent side="bottom" className="flex max-h-[85vh] flex-col gap-0 overflow-hidden p-0">
           <SheetHeader className="shrink-0 border-b py-4 pr-12 pl-5">
             <SheetTitle className="text-base">{header}</SheetTitle>
           </SheetHeader>

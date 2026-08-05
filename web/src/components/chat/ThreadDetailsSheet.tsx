@@ -114,7 +114,7 @@ export function ThreadDetailsSheet({
   };
 
   const body = (
-    <ScrollArea className="min-h-0 flex-1">
+    <ScrollArea className="min-h-0 flex-auto">
       <div className="flex flex-col gap-5 px-5 py-4">
         <section className="space-y-2">
           <Label htmlFor="thread-title">Title</Label>
@@ -304,7 +304,7 @@ export function ThreadDetailsSheet({
           onOpenAutoFocus={(event) => event.preventDefault()}
           className={
             isMobile
-              ? "flex max-h-[85vh] flex-col gap-0 p-0 pb-[env(safe-area-inset-bottom)]"
+              ? "flex max-h-[85vh] flex-col gap-0 overflow-hidden p-0 pb-[env(safe-area-inset-bottom)]"
               : "flex w-full flex-col gap-0 p-0 sm:max-w-md"
           }
         >
