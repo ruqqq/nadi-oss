@@ -30,6 +30,7 @@ function ensureDevVars() {
   text = setVar(text, "DEFAULT_MODEL", "mock");
   text = setVar(text, "DEFAULT_SANDBOX_PROVIDER", "mock");
   text = setVar(text, "APP_BASE_URL", "http://localhost:8787");
+  text = setVar(text, "ARTIFACTS_HOST", "artifacts.localhost");
   // Better Auth + HITL + KV encryption need real random values to function.
   text = setVar(text, "BETTER_AUTH_SECRET", rand());
   text = setVar(text, "TOOL_APPROVAL_SECRET", rand());

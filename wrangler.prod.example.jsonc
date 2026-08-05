@@ -5,7 +5,11 @@
   "main": "src/index.ts",
   "workers_dev": true,
   "preview_urls": true,
-  "routes": [{ "pattern": "<your-domain.example>", "custom_domain": true }],
+  "routes": [
+    { "pattern": "<your-domain.example>", "custom_domain": true },
+    // HTML artifacts are served on a separate origin (src/http/artifact-routes.ts).
+    { "pattern": "artifacts.<your-domain.example>", "custom_domain": true },
+  ],
   "compatibility_date": "2026-05-01",
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
@@ -138,6 +142,8 @@
     // rebrand here; unset/blank falls back to "Nadi" in resolveAppName.
     "APP_NAME": "Nadi",
     "APP_BASE_URL": "https://<your-domain.example>",
+    // Isolated origin for published HTML artifacts (must match the second route).
+    "ARTIFACTS_HOST": "artifacts.<your-domain.example>",
     "DEFAULT_MODEL_PROVIDER": "openai-oauth",
     "DEFAULT_MODEL": "gpt-5.4-mini",
     "DEFAULT_WORKSPACE_ID": "default",
