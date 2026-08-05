@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import type { FeaturedConnection } from "../../lib/featured-connections";
 import type { McpServer } from "../../mcp-api";
 
@@ -63,7 +63,9 @@ describe("FeaturedConnectionCard onResolved", () => {
     );
 
     await screen.findByText(/Connected · 0 tools/);
-    expect(onResolved).toHaveBeenLastCalledWith("composio", []);
+    await waitFor(() => {
+      expect(onResolved).toHaveBeenLastCalledWith("composio", []);
+    });
     // Not null, not undefined, and not merely falsy — exactly an empty array.
     expect(onResolved.mock.calls.at(-1)?.[1]).not.toBeNull();
     expect(Array.isArray(onResolved.mock.calls.at(-1)?.[1])).toBe(true);
