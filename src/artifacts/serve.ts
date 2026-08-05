@@ -6,7 +6,8 @@ import { deriveArtifactViewSecret, verifyArtifactViewToken } from "./view-token"
 
 const ARTIFACT_PATH = /^\/v\/([^/]+)\/(art_[^/]+)(?:\/(.*))?$/;
 
-async function deleteR2PrefixBestEffort(bucket: R2Bucket, prefix: string): Promise<void> {
+/** Best-effort delete of every object under `prefix`. Used by serve expiry and publish rollback. */
+export async function deleteR2PrefixBestEffort(bucket: R2Bucket, prefix: string): Promise<void> {
   try {
     let cursor: string | undefined;
     for (;;) {

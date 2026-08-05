@@ -1756,13 +1756,22 @@ export class ThreadComputeService {
           if (files.length >= maxFiles) throw new Error("artifact_too_many_files");
           const remaining = maxTotal - total;
           if (remaining <= 0) throw new Error("artifact_too_large");
-          const { bytes, mimeType } = await this.deps.backend.readFile(runtime, abs, remaining);
+          const { bytes, mimeType: providerMime } = await this.deps.backend.readFile(
+            runtime,
+            abs,
+            remaining,
+          );
           total += bytes.byteLength;
           if (total > maxTotal) throw new Error("artifact_too_large");
+          // Prefer the extension map for known web types so HTML/CSS/JS always
+          // render on the artifact host even when the sandbox reports text/plain.
+          const fromExt = mimeFromFilename(rel);
+          const mimeType =
+            fromExt === "application/octet-stream" ? (providerMime ?? fromExt) : fromExt;
           files.push({
             relativePath: rel,
             bytes,
-            mimeType: mimeType ?? mimeFromFilename(rel),
+            mimeType,
           });
         }
       }

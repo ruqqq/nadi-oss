@@ -2,6 +2,7 @@ import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import type { Env } from "../env";
 import { AttachmentRepository } from "../db/attachment-repository";
+import { deleteR2PrefixBestEffort } from "../artifacts/serve";
 import { ArtifactRepository } from "../db/artifact-repository";
 import { AgentSkillRepository } from "../db/repositories/agent-skills";
 import { registryDb } from "../db/client";
@@ -1018,38 +1019,44 @@ export function buildComputeToolDefs(
           });
           const artifactId = `art_${crypto.randomUUID()}`;
           const r2Prefix = `artifacts/${artifactId}/`;
-          for (const f of published.files) {
-            await env.ATTACHMENTS_BUCKET.put(r2Prefix + f.relativePath, f.bytes, {
-              httpMetadata: { contentType: f.mimeType },
+          try {
+            for (const f of published.files) {
+              await env.ATTACHMENTS_BUCKET.put(r2Prefix + f.relativePath, f.bytes, {
+                httpMetadata: { contentType: f.mimeType },
+              });
+            }
+            const createdAt = Date.now();
+            const expiresAt = createdAt + 24 * 60 * 60 * 1000;
+            const entryPath = input.entryPath ?? "index.html";
+            const title =
+              input.title ?? input.path.split("/").filter(Boolean).pop() ?? artifactId;
+            await new ArtifactRepository(env.REGISTRY_DB).insert({
+              id: artifactId,
+              workspaceId,
+              threadId,
+              title,
+              entryPath,
+              fileCount: published.files.length,
+              byteSize: published.totalBytes,
+              r2Prefix,
+              status: "active",
+              expiresAt,
+              createdAt,
             });
+            return {
+              artifactId,
+              title,
+              entryPath,
+              fileCount: published.files.length,
+              byteSize: published.totalBytes,
+              expiresAt,
+              url: `/api/artifacts/${artifactId}`,
+            };
+          } catch (error) {
+            // Puts-then-insert can leave unreachable R2 objects; reclaim the prefix.
+            await deleteR2PrefixBestEffort(env.ATTACHMENTS_BUCKET, r2Prefix);
+            throw error;
           }
-          const createdAt = Date.now();
-          const expiresAt = createdAt + 24 * 60 * 60 * 1000;
-          const entryPath = input.entryPath ?? "index.html";
-          const title =
-            input.title ?? input.path.split("/").filter(Boolean).pop() ?? artifactId;
-          await new ArtifactRepository(env.REGISTRY_DB).insert({
-            id: artifactId,
-            workspaceId,
-            threadId,
-            title,
-            entryPath,
-            fileCount: published.files.length,
-            byteSize: published.totalBytes,
-            r2Prefix,
-            status: "active",
-            expiresAt,
-            createdAt,
-          });
-          return {
-            artifactId,
-            title,
-            entryPath,
-            fileCount: published.files.length,
-            byteSize: published.totalBytes,
-            expiresAt,
-            url: `/api/artifacts/${artifactId}`,
-          };
         } catch (error) {
           return toErrorResult(error);
         }

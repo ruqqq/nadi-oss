@@ -15,6 +15,7 @@ const registryTables = [
   "feedback_reports",
   "feedback_threads",
   "attachments",
+  "artifacts",
   "thread_repository_snapshots",
   "thread_workbench_snapshots",
   "thread_token_usage",

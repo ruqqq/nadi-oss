@@ -130,6 +130,36 @@ describe("ThreadComputeService.execPublishArtifact", () => {
       service.execPublishArtifact({ path: "/workspace/dist", maxBytes: 100 }),
     ).rejects.toThrow("artifact_too_large");
   });
+
+  it("prefers the extension MIME map over a provider text/plain for HTML", async () => {
+    const { service, backend, store } = createService();
+    await seedDir(service, backend, store, "/workspace/dist", {
+      "index.html": "<html></html>",
+      "style.css": "body {}",
+    });
+    const runtime = store.getComputeState()?.runtimeRef;
+    if (!runtime) throw new Error("runtime missing");
+    // Re-seed with a wrong provider mime — mirrors Cloudflare sandbox reporting text/plain.
+    backend.seedFile(
+      runtime,
+      "/workspace/dist/index.html",
+      new TextEncoder().encode("<html></html>"),
+      "text/plain",
+    );
+    backend.seedFile(
+      runtime,
+      "/workspace/dist/style.css",
+      new TextEncoder().encode("body {}"),
+      "text/plain",
+    );
+
+    const published = await service.execPublishArtifact({ path: "/workspace/dist" });
+
+    expect(published.files.find((f) => f.relativePath === "index.html")?.mimeType).toBe(
+      "text/html",
+    );
+    expect(published.files.find((f) => f.relativePath === "style.css")?.mimeType).toBe("text/css");
+  });
 });
 
 describe("exec_publish_artifact tool", () => {
@@ -198,5 +228,48 @@ describe("exec_publish_artifact tool", () => {
     expect(result.fileCount).toBe(2);
     expect(result.url).toBe(`/api/artifacts/${result.artifactId}`);
     expect(result.expiresAt).toBeGreaterThan(Date.now());
+  });
+
+  it("deletes the R2 prefix when a mid-publish put fails", async () => {
+    insertMock.mockClear();
+    const html = new TextEncoder().encode("<html></html>").buffer;
+    const css = new TextEncoder().encode("body {}").buffer;
+    const listMock = vi.fn(async () => ({
+      objects: [{ key: "artifacts/art_x/index.html" }],
+      truncated: false,
+    }));
+    const deleteMock = vi.fn(async () => {});
+    let putCount = 0;
+    const putMock = vi.fn(async () => {
+      putCount += 1;
+      if (putCount === 2) throw new Error("r2_put_failed");
+    });
+    const env = {
+      ATTACHMENTS_BUCKET: { put: putMock, list: listMock, delete: deleteMock },
+      REGISTRY_DB: {},
+    };
+    const tools = buildComputeToolDefs(
+      async () =>
+        ({
+          execPublishArtifact: async () => ({
+            files: [
+              { relativePath: "index.html", bytes: html, mimeType: "text/html" },
+              { relativePath: "style.css", bytes: css, mimeType: "text/css" },
+            ],
+            totalBytes: html.byteLength + css.byteLength,
+          }),
+        }) as never,
+      async () => ({ env, threadId: "thr_1", workspaceId: "ws_1" }) as never,
+    );
+    const execute = (
+      tools.exec_publish_artifact as { execute: (input: unknown) => Promise<unknown> }
+    ).execute;
+
+    const result = (await execute({ path: "/workspace/dist" })) as { ok?: boolean };
+
+    expect(result).toMatchObject({ ok: false });
+    expect(insertMock).not.toHaveBeenCalled();
+    expect(listMock).toHaveBeenCalled();
+    expect(deleteMock).toHaveBeenCalledWith("artifacts/art_x/index.html");
   });
 });
