@@ -75,7 +75,9 @@ describe("ThreadComputeService.execPublishArtifact", () => {
 
     expect(published.files).toHaveLength(2);
     expect(published.files.map((f) => f.relativePath).sort()).toEqual(["index.html", "style.css"]);
-    expect(published.files.find((f) => f.relativePath === "index.html")?.mimeType).toBe("text/html");
+    expect(published.files.find((f) => f.relativePath === "index.html")?.mimeType).toBe(
+      "text/html",
+    );
     expect(published.files.find((f) => f.relativePath === "style.css")?.mimeType).toBe("text/css");
     expect(published.totalBytes).toBeGreaterThan(0);
   });
@@ -135,7 +137,13 @@ describe("exec_publish_artifact tool", () => {
     files: Array<{ relativePath: string; bytes: ArrayBuffer; mimeType: string }>;
     totalBytes: number;
   }) {
-    const putMock = vi.fn(async () => {});
+    const putMock = vi.fn(
+      async (
+        _key: string,
+        _body: ArrayBuffer,
+        _opts?: { httpMetadata?: { contentType: string } },
+      ) => {},
+    );
     const env = {
       ATTACHMENTS_BUCKET: { put: putMock },
       REGISTRY_DB: {},
