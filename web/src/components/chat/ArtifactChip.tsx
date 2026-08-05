@@ -103,7 +103,7 @@ export function ArtifactChip({ artifact, nowMs }: { artifact: MessageArtifactPar
         <iframe
           title={artifact.title}
           src={viewUrl}
-          className="min-h-[50vh] w-full flex-1 border-0 bg-background"
+          className="min-h-0 w-full flex-1 border-0 bg-background"
         />
       )}
     </div>
@@ -169,10 +169,10 @@ export function ArtifactChip({ artifact, nowMs }: { artifact: MessageArtifactPar
         <Sheet open={previewOpen} onOpenChange={setPreviewOpen}>
           <SheetContent
             side="bottom"
-            className="flex max-h-[85vh] flex-col gap-0 p-0 pb-[env(safe-area-inset-bottom)]"
+            className="flex h-dvh max-h-dvh flex-col gap-0 rounded-none p-0 pb-[env(safe-area-inset-bottom)]"
             style={
               viewport
-                ? { maxHeight: `${viewport.height}px`, paddingBottom: viewport.keyboard }
+                ? { height: `${viewport.height}px`, maxHeight: `${viewport.height}px`, paddingBottom: viewport.keyboard }
                 : undefined
             }
           >
@@ -184,7 +184,7 @@ export function ArtifactChip({ artifact, nowMs }: { artifact: MessageArtifactPar
         </Sheet>
       ) : (
         <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
-          <DialogContent className="flex max-h-[82vh] flex-col gap-0 p-0 sm:max-w-3xl">
+          <DialogContent className="fixed inset-0 flex h-dvh max-h-dvh w-screen max-w-none translate-x-0 translate-y-0 flex-col gap-0 rounded-none border-0 p-0 sm:max-w-none">
             <DialogHeader className="shrink-0 border-b py-4 pr-12 pl-5">
               <DialogTitle className="text-base">{previewHeader}</DialogTitle>
             </DialogHeader>
