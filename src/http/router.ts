@@ -2,6 +2,7 @@ import type { Env } from "../env";
 import { routeAuth } from "./auth-routes";
 import { routeBootstrap } from "./bootstrap-routes";
 import { routeAttachments } from "./attachment-routes";
+import { routeArtifacts } from "./artifact-routes";
 import { routeFeedback } from "./feedback-routes";
 import { routeThreads } from "./thread-routes";
 import { routeMcp } from "./mcp-routes";
@@ -34,6 +35,8 @@ export async function route(req: Request, env: Env, ctx: ExecutionContext): Prom
   if (feedback) return feedback;
   const attachments = await routeAttachments(req, env);
   if (attachments) return attachments;
+  const artifacts = await routeArtifacts(req, env);
+  if (artifacts) return artifacts;
   const threads = await routeThreads(req, env, ctx);
   if (threads) return threads;
   const automata = await routeAutomata(req, env, ctx);

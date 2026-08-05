@@ -21,11 +21,11 @@ async function deleteR2PrefixBestEffort(bucket: R2Bucket, prefix: string): Promi
   }
 }
 
-function artifactExpired(row: { status: string; expiresAt: number }, nowMs: number): boolean {
+export function artifactExpired(row: { status: string; expiresAt: number }, nowMs: number): boolean {
   return row.status === "expired" || row.expiresAt < nowMs;
 }
 
-async function respondExpired(
+export async function respondExpired(
   env: Env,
   repo: ArtifactRepository,
   artifactId: string,
