@@ -107,7 +107,7 @@ export function SubagentChip({
   );
 
   const detail = (
-    <div className="min-h-0 flex-1 overflow-y-auto p-4">
+    <div className="min-h-0 flex-auto overflow-y-auto p-4">
       {model.isRunning && (
         <div className="mb-4 flex items-center justify-between gap-3">
           {model.progressLine && (
@@ -134,7 +134,7 @@ export function SubagentChip({
     return (
       <Sheet open={open} onOpenChange={setOpen}>
         <SheetTrigger asChild>{chip}</SheetTrigger>
-        <SheetContent side="bottom" className="flex max-h-[85vh] flex-col gap-0 p-0">
+        <SheetContent side="bottom" className="flex max-h-[85vh] flex-col gap-0 overflow-hidden p-0">
           <SheetHeader className="shrink-0 border-b py-4 pr-12 pl-5">
             <SheetTitle className="text-base">{header}</SheetTitle>
           </SheetHeader>

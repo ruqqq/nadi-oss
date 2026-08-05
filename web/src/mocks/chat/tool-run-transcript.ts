@@ -49,6 +49,24 @@ const TYPECHECK_STDERR = [
   "  ELIFECYCLE  Command failed with exit code 2.",
 ].join("\n");
 
+/** Multi-line heredoc-style exec — reproduces the mobile command-wall bug. */
+const WA_SKILL_COMMAND = [
+  "mkdir -p /tmp/wa-skill && cat > /tmp/wa-skill/poll.sh <<'SKILL_SCRIPT_FINAL'",
+  "#!/usr/bin/env bash",
+  "set -euo pipefail",
+  "WA_POLL_DIR=\"${WA_POLL_DIR:-/tmp/wa-skill}\"",
+  "WHATSAPP_SESSION_KEY=\"${WHATSAPP_SESSION_KEY:?set WHATSAPP_SESSION_KEY}\"",
+  "case \"${1:-}\" in",
+  "  setup) npm install @whiskeysockets/baileys qrcode @hapi/boom ;;",
+  "  pair) node poll.js pair ;;",
+  "  poll) node poll.js poll ;;",
+  "  status) node poll.js status ;;",
+  "  *) echo \"usage: whatsapp-poll {setup|pair|poll|status}\" >&2; exit 2 ;;",
+  "esac",
+  "SKILL_SCRIPT_FINAL",
+  "chmod +x /tmp/wa-skill/poll.sh",
+].join("\n");
+
 function execOutput(overrides: Record<string, unknown>): Record<string, unknown> {
   return {
     ok: true,
@@ -167,6 +185,18 @@ export function toolRunTranscript(): unknown[] {
           "output-available",
           { patch: PATCH, expectedHashes: { "src/db/schema.ts": "sha256:9f2c" } },
           { ok: true, operations: 1, written: 1, deleted: 0 },
+        ),
+        call(
+          "exec",
+          "call_wa_skill",
+          "output-available",
+          { command: WA_SKILL_COMMAND },
+          execOutput({
+            status: "exited",
+            exitCode: 0,
+            command: WA_SKILL_COMMAND,
+            stdoutPreview: "",
+          }),
         ),
         call(
           "exec",

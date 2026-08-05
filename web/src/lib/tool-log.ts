@@ -59,6 +59,13 @@ export interface ToolLogEntry {
 /** How many rows of a list result are shown before the count takes over. */
 export const LIST_PREVIEW_LIMIT = 3;
 
+/** Collapse a multi-line shell command to a single readable row title. */
+function oneLineCommand(command: string, max = 72): string {
+  const first = command.split(/\r?\n/)[0]?.replace(/\s+/g, " ").trim() ?? command.trim();
+  if (first.length <= max) return first;
+  return `${first.slice(0, max - 1)}…`;
+}
+
 // The gutter verb per built-in tool. Absent → the row leads with its friendly
 // name and no gutter, which is what unmapped built-ins should look like.
 const GUTTERS: Record<string, string> = {
@@ -380,9 +387,12 @@ export function buildToolLogEntry(
     case "exec": {
       const label = str(input, "label") ?? str(output, "label");
       const command = str(input, "command") ?? str(output, "command");
-      object = label ?? command ?? "a command";
+      if (command) {
+        blocks.push({ kind: "text", label: "Command", text: command });
+      }
+      object = label ?? (command ? oneLineCommand(command) : undefined) ?? "a command";
       objectMono = label === undefined;
-      if (label && command) subtitle = command;
+      if (label && command) subtitle = oneLineCommand(command);
       if (output && state !== "denied") {
         if (output["ok"] === false) {
           const failure = builtInError(output);

@@ -69,6 +69,21 @@ describe("exec", () => {
     expect(entry.subtitle).toBe("pnpm run typecheck");
   });
 
+  it("puts a multi-line command in a Command block and shortens the row title", () => {
+    const command = ["mkdir -p /tmp/wa-skill", "#!/usr/bin/env bash", "set -euo pipefail"].join("\n");
+    const entry = buildToolLogEntry(
+      "exec",
+      part({
+        type: "tool-exec",
+        input: { command },
+        output: { ...base, status: "exited", exitCode: 0, command },
+      }),
+      noServers,
+    );
+    expect(entry.object).toBe("mkdir -p /tmp/wa-skill");
+    expect(text(entry.blocks, "Command")).toBe(command);
+  });
+
   it("reads a non-zero exit as an error and labels it with the code", () => {
     const entry = buildToolLogEntry(
       "exec",

@@ -82,7 +82,7 @@ export function CompletionGroup({
 
   // Scrollable list inside a height-capped flex column (header pinned), matching ToolGroup.
   const body = (
-    <div className="min-h-0 flex-1 overflow-y-auto p-4">
+    <div className="min-h-0 flex-auto overflow-y-auto p-4">
       {run.map((message) => renderCard(message, runsById))}
     </div>
   );
@@ -91,7 +91,7 @@ export function CompletionGroup({
     return (
       <Sheet open={open} onOpenChange={setOpen}>
         <SheetTrigger asChild>{strip}</SheetTrigger>
-        <SheetContent side="bottom" className="flex max-h-[85vh] flex-col gap-0 p-0">
+        <SheetContent side="bottom" className="flex max-h-[85vh] flex-col gap-0 overflow-hidden p-0">
           <SheetHeader className="shrink-0 border-b px-5 py-4">
             <SheetTitle className="font-display text-base">{title}</SheetTitle>
           </SheetHeader>

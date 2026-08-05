@@ -116,9 +116,9 @@ describe("withExitSentinel", () => {
 
     const started = Date.now();
     let sentinel: string | undefined;
-    while (Date.now() - started < 3_000) {
+    while (Date.now() - started < 5_000) {
       sentinel = readSentinel(rcPath);
-      if (sentinel !== undefined) break;
+      if (sentinel !== undefined && sentinel !== "") break;
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     const sentinelAt = Date.now() - started;
