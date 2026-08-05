@@ -91,6 +91,52 @@ describe("ThreadComputeService.execPublishArtifact", () => {
     );
   });
 
+  // The tool description invites `path` + `entryPath` for a single .html file,
+  // so a model passing the FILE as `path` is the expected fumble. It has to fail
+  // by saying so.
+  //
+  // On sprites the listing does not stop it: listing a file answers 200 with a
+  // one-entry listing OF THAT FILE (live 2026-08-05), so `walk` built
+  // `/workspace/report.html/report.html` and died on the read with
+  // `sprites_read_missing` — a message about a missing file, for a file that is
+  // there. That is why the check runs BEFORE the walk instead of leaning on the
+  // listing to fail. This fake throws on the listing, so it cannot reproduce the
+  // sprites path; it pins the guard, not the provider.
+  it("rejects a file path with a message that names the fix", async () => {
+    const { service, backend, store } = createService();
+    await seedDir(service, backend, store, "/workspace", { "report.html": "<html></html>" });
+
+    await expect(service.execPublishArtifact({ path: "/workspace/report.html" })).rejects.toThrow(
+      "artifact_path_not_directory: /workspace/report.html is a file — pass its parent directory as path and its filename as entryPath",
+    );
+  });
+
+  it("still publishes when the path is a directory", async () => {
+    // The guard must not cost the normal case a listing it already does.
+    const { service, backend, store } = createService();
+    await seedDir(service, backend, store, "/workspace/dist", { "index.html": "<html></html>" });
+
+    await expect(service.execPublishArtifact({ path: "/workspace/dist" })).resolves.toMatchObject({
+      files: [{ relativePath: "index.html" }],
+    });
+  });
+
+  it("does not reject a path inspectPath cannot see", async () => {
+    // `inspectPath` returns null for BOTH "nothing there" and "the provider
+    // answered something that reads like not-found" (Cloudflare's fail-open).
+    // Turning that into a not-a-directory verdict would refuse to publish a
+    // directory that is really there, so only a positive `file` verdict blocks.
+    const { service, backend, store } = createService();
+    await seedDir(service, backend, store, "/workspace/dist", { "index.html": "<html></html>" });
+    const runtime = store.getComputeState()?.runtimeRef;
+    if (!runtime) throw new Error("runtime missing");
+    backend.seedBlindInspect(runtime, "/workspace/dist");
+
+    await expect(service.execPublishArtifact({ path: "/workspace/dist" })).resolves.toMatchObject({
+      files: [{ relativePath: "index.html" }],
+    });
+  });
+
   it("rejects path traversal in the sandbox path", async () => {
     const { service } = createService();
 
