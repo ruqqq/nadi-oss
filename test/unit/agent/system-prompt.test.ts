@@ -137,6 +137,8 @@ describe("composeSystemPrompt", () => {
     expect(out).toContain("rg, fd, git");
     expect(out).toContain("exec_download_file");
     expect(out).toContain("exec_publish_artifact");
+    expect(out).toContain("Prefer exec_publish_artifact");
+    expect(out).toContain("do not use exec_download_file for HTML");
   });
 
   it("omits workspace file-tools guidance when the sandbox is unavailable", () => {

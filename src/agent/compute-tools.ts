@@ -953,7 +953,7 @@ export function buildComputeToolDefs(
     }),
     exec_download_file: tool({
       description:
-        "Download a sandbox file into Nadi-managed storage and attach it for the user. The chat UI shows the file as an attachment chip (images open in a lightbox).",
+        "Download a sandbox file into Nadi-managed storage and attach it for the user (images open in a lightbox). Use for non-HTML deliverables — charts, screenshots, PDFs, data exports — or when the user explicitly wants a downloadable file. Do NOT use this for HTML the user should view in a browser; use exec_publish_artifact instead (downloaded HTML is plain text and will not render).",
       inputSchema: z.object({
         path: z.string(),
         artifactName: z.string().optional(),
@@ -1000,7 +1000,7 @@ export function buildComputeToolDefs(
     }),
     exec_publish_artifact: tool({
       description:
-        "Publish a sandbox directory (HTML entry + assets) as an ephemeral preview artifact. The chat UI offers Preview / Open. Prefer this over exec_download_file when the user should view a built page in the browser.",
+        "Publish a sandbox directory as an ephemeral HTML preview artifact. The chat UI offers Preview / Open so the user can view a real page with working relative assets. Prefer this over exec_download_file for any HTML the user should open in a browser — including a single .html file (pass its parent directory as path and the filename as entryPath). Default entryPath is index.html.",
       inputSchema: z.object({
         path: z.string(),
         entryPath: z.string().optional(),
