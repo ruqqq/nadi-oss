@@ -1741,6 +1741,25 @@ export class ThreadComputeService {
     const maxTotal = Math.min(input.maxBytes ?? 20_000_000, 20_000_000);
     const maxFiles = 100;
     const runtime = await this.ensureRuntime();
+    // The tool tells the model to publish a single .html file by passing its
+    // PARENT plus `entryPath`, so handing us the file itself is the expected
+    // mistake — and nothing downstream catches it usefully. On sprites, listing
+    // a file answers 200 with a one-entry listing OF THAT FILE (live
+    // 2026-08-05), so `walk` composed `<file>/<file>` and failed on the read
+    // with `sprites_read_missing`: a missing-file error naming a file that
+    // exists, pointing at a path the model never wrote.
+    //
+    // Only a positive `file` verdict refuses. `inspectPath` returns null for
+    // both "nothing there" and "the provider said something that reads like
+    // not-found" (Cloudflare answers `{success:false}` in band), so treating
+    // null as not-a-directory would refuse real directories. Anything we cannot
+    // positively call a file still goes to the walk, which throws on its own.
+    const rootInfo = await this.deps.backend.inspectPath(runtime, root);
+    if (rootInfo?.type === "file") {
+      throw new Error(
+        `artifact_path_not_directory: ${root} is a file — pass its parent directory as path and its filename as entryPath`,
+      );
+    }
     const files: Array<{ relativePath: string; bytes: ArrayBuffer; mimeType: string }> = [];
     let total = 0;
     const walk = async (absDir: string, relBase: string) => {
