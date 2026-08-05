@@ -19,7 +19,10 @@ interface FetchScript {
   throws?: Error;
 }
 
-function harness(script: FetchScript | FetchScript[] = {}) {
+function harness(
+  script: FetchScript | FetchScript[] = {},
+  options: { execUpgradeTimeoutMs?: number } = {},
+) {
   const calls: RecordedCall[] = [];
   const queue = Array.isArray(script) ? [...script] : [script];
   const fetchImpl = (async (input: RequestInfo | URL, init: RequestInit = {}) => {
@@ -38,7 +41,7 @@ function harness(script: FetchScript | FetchScript[] = {}) {
     });
   }) as unknown as typeof fetch;
 
-  const client: SpritesClient = createSpritesClient({ apiKey: "k-123", fetchImpl });
+  const client: SpritesClient = createSpritesClient({ apiKey: "k-123", fetchImpl, ...options });
   return { calls, client };
 }
 
@@ -772,9 +775,51 @@ describe("execCollect", () => {
     ws.emitFrame(1, "partial");
     ws.emit("close", { code: 1006, reason: "abnormal" });
 
-    // The close code and reason are the only diagnosis this failure ever gets.
-    await expect(messageOf(pending)).resolves.toBe(
-      "sprites_exec_no_exit: code=1006 reason=abnormal",
+    // The close code, reason and elapsed time are the only diagnosis this
+    // failure ever gets. `after=` is what names the side that hung up: workerd
+    // reports an abort of ours and a server-side drop identically, so a cluster
+    // at one constant is our timer and a spread is the far end.
+    await expect(messageOf(pending)).resolves.toMatch(
+      /^sprites_exec_no_exit: code=1006 reason=abnormal after=\d+ms$/,
+    );
+  });
+
+  // REGRESSION (live, 2026-08-05): the upgrade's abort signal stayed armed
+  // after the upgrade succeeded, and workerd's fetch keeps the signal wired to
+  // the connection it produced — so the signal firing KILLED the established
+  // exec socket. Reproduced verbatim in workerd against a silent WebSocket
+  // server: the socket died at exactly the timeout with
+  // `code=1006 reason="WebSocket disconnected without sending Close frame."`,
+  // which is `sprites_exec_no_exit`, and stayed open when the signal was not
+  // passed. Every exec outliving the timeout failed, which is most real work.
+  it("disarms the upgrade timeout once the exec socket is open", async () => {
+    const ws = new FakeWebSocket();
+    const { calls, client } = harness({ webSocket: ws }, { execUpgradeTimeoutMs: 20 });
+
+    const pending = client.execCollect("s1", { argv: ["bash"] });
+    await flush();
+    const signal = calls[0]?.init.signal as AbortSignal | undefined;
+    expect(signal).toBeDefined();
+
+    // Past the upgrade budget with the socket already established.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(signal?.aborted).toBe(false);
+
+    ws.emitFrame(3, new Uint8Array([0]));
+    await expect(pending).resolves.toMatchObject({ exitCode: 0 });
+  });
+
+  // The other half of the same invariant: disarming after the upgrade must not
+  // stop an upgrade that never answers from being bounded. Without this, a
+  // stalled upgrade pins the Durable Object turn it runs inside.
+  it("still bounds an upgrade that never answers", async () => {
+    const { client } = harness(
+      { throws: Object.assign(new Error("aborted"), { name: "AbortError" }) },
+      { execUpgradeTimeoutMs: 20 },
+    );
+
+    await expect(messageOf(client.execCollect("s1", { argv: ["bash"] }))).resolves.toBe(
+      "sprites_exec_upgrade_timeout",
     );
   });
 
@@ -786,7 +831,9 @@ describe("execCollect", () => {
     await flush();
     ws.emit("close", {});
 
-    await expect(messageOf(pending)).resolves.toBe("sprites_exec_no_exit: code=unknown");
+    await expect(messageOf(pending)).resolves.toMatch(
+      /^sprites_exec_no_exit: code=unknown after=\d+ms$/,
+    );
   });
 
   // The text notification can PRECEDE trailing output, so settling on it
