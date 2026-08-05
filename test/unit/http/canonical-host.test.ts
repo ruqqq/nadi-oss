@@ -23,6 +23,12 @@ describe("canonicalRedirectUrl", () => {
     expect(canonicalRedirectUrl(new URL("https://other.example.com/"), CONFIGURED)).toBeNull();
   });
 
+  it("does not redirect the artifact preview host when it is not listed as legacy", () => {
+    expect(
+      canonicalRedirectUrl(new URL("https://artifacts.example.com/v/t/art_1/"), CONFIGURED),
+    ).toBeNull();
+  });
+
   // The self-hosted default: no custom domain, so nothing to redirect to.
   it("is disabled when the canonical host is unset", () => {
     expect(canonicalRedirectUrl(new URL("https://legacy.example.com/"), {})).toBeNull();
