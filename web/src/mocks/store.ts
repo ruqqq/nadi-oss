@@ -36,6 +36,17 @@ import { SCENARIOS } from "./scenarios";
  * that infers "this is the error scenario" from a thread title silently stops
  * failing the day someone reworders the fixture.
  */
+/** Ephemeral HTML artifact row backing GET /api/artifacts/:id. */
+export interface MockArtifact {
+  id: string;
+  title: string;
+  entryPath: string;
+  fileCount: number;
+  byteSize: number;
+  expiresAt: number;
+  status: "active" | "expired";
+}
+
 export interface MockFaults {
   /**
    * Thread ids whose history load fails at the TRANSPORT level, i.e. the fetch
@@ -95,6 +106,8 @@ export interface MockStore {
     messages: unknown[];
     transcriptsByReportId: Record<string, unknown[]>;
   };
+  /** Keyed by artifact id. Seeded by scenarios that exercise artifact chips. */
+  artifacts: Record<string, MockArtifact>;
   faults: MockFaults;
 }
 

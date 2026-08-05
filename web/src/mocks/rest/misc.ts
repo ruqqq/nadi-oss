@@ -20,6 +20,10 @@ import {
 import { MID_TURN_THREAD_ID, midTurnTranscript } from "../chat/mid-turn-transcript";
 import { HERO_THREAD_ID, heroTranscript } from "../chat/hero-transcript";
 import {
+  ASSISTANT_ARTIFACTS_THREAD_ID,
+  assistantArtifactTranscript,
+} from "../chat/assistant-artifact-transcript";
+import {
   ASSISTANT_DOWNLOAD_THREAD_ID,
   assistantDownloadTranscript,
 } from "../chat/assistant-download-transcript";
@@ -384,6 +388,7 @@ function seededHistory(threadId: string): unknown[] | null {
   if (threadId === TOOL_RUN_THREAD_ID) return toolRunTranscript();
   if (threadId === TOOL_WRITE_THREAD_ID) return singleMcpWriteTranscript();
   if (threadId === ASSISTANT_DOWNLOAD_THREAD_ID) return assistantDownloadTranscript();
+  if (threadId === ASSISTANT_ARTIFACTS_THREAD_ID) return assistantArtifactTranscript();
   return feedbackHistory(threadId);
 }
 
