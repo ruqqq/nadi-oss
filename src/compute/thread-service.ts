@@ -30,6 +30,7 @@ import {
   type WorkOutcome,
   type WorkRow,
 } from "../agent/work-ledger";
+import { mimeFromFilename } from "../artifacts/mime";
 
 // The root every runtime is provisioned with; a relative-path exec must resolve
 // here (same root the file tools guard), not the sandbox's boot dir (/root).
@@ -1724,6 +1725,53 @@ export class ThreadComputeService {
     await this.refreshRelease(this.deps.config.idleTimeoutMs);
     const filename = path.split("/").pop();
     return { bytes, ...(filename ? { filename } : {}), ...(mimeType ? { mimeType } : {}) };
+  }
+
+  async execPublishArtifact(input: {
+    path: string;
+    entryPath?: string;
+    maxBytes?: number;
+  }): Promise<{
+    files: Array<{ relativePath: string; bytes: ArrayBuffer; mimeType: string }>;
+    totalBytes: number;
+  }> {
+    const root = validateComputePath(input.path);
+    const entryPath = input.entryPath ?? "index.html";
+    if (entryPath.split("/").includes("..")) throw new Error("compute_invalid_path");
+    const maxTotal = Math.min(input.maxBytes ?? 20_000_000, 20_000_000);
+    const maxFiles = 100;
+    const runtime = await this.ensureRuntime();
+    const files: Array<{ relativePath: string; bytes: ArrayBuffer; mimeType: string }> = [];
+    let total = 0;
+    const walk = async (absDir: string, relBase: string) => {
+      const entries = await this.deps.backend.listDirectory(runtime, absDir);
+      for (const ent of entries) {
+        if (ent.name === "." || ent.name === "..") continue;
+        if (ent.type === "symlink" || ent.type === "other") continue;
+        const rel = relBase ? `${relBase}/${ent.name}` : ent.name;
+        const abs = `${absDir.replace(/\/$/, "")}/${ent.name}`;
+        if (ent.type === "directory") {
+          await walk(abs, rel);
+        } else if (ent.type === "file") {
+          if (files.length >= maxFiles) throw new Error("artifact_too_many_files");
+          const remaining = maxTotal - total;
+          if (remaining <= 0) throw new Error("artifact_too_large");
+          const { bytes, mimeType } = await this.deps.backend.readFile(runtime, abs, remaining);
+          total += bytes.byteLength;
+          if (total > maxTotal) throw new Error("artifact_too_large");
+          files.push({
+            relativePath: rel,
+            bytes,
+            mimeType: mimeType ?? mimeFromFilename(rel),
+          });
+        }
+      }
+    };
+    await walk(root, "");
+    if (!files.some((f) => f.relativePath === entryPath)) throw new Error("artifact_entry_missing");
+    this.deps.store.touchLastUsed(this.deps.now());
+    await this.refreshRelease(this.deps.config.idleTimeoutMs);
+    return { files, totalBytes: total };
   }
 
   /**

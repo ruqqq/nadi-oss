@@ -2,6 +2,7 @@ import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import type { Env } from "../env";
 import { AttachmentRepository } from "../db/attachment-repository";
+import { ArtifactRepository } from "../db/artifact-repository";
 import { AgentSkillRepository } from "../db/repositories/agent-skills";
 import { registryDb } from "../db/client";
 import { computeConfigFromInputs, loadComputeConfigInputs } from "../compute/settings";
@@ -990,6 +991,64 @@ export function buildComputeToolDefs(
             byteSize: download.bytes.byteLength,
             mimeType,
             url: `/api/attachments/${attachmentId}`,
+          };
+        } catch (error) {
+          return toErrorResult(error);
+        }
+      },
+    }),
+    exec_publish_artifact: tool({
+      description:
+        "Publish a sandbox directory (HTML entry + assets) as an ephemeral preview artifact. The chat UI offers Preview / Open. Prefer this over exec_download_file when the user should view a built page in the browser.",
+      inputSchema: z.object({
+        path: z.string(),
+        entryPath: z.string().optional(),
+        title: z.string().optional(),
+        maxBytes: z.number().int().positive().optional(),
+      }),
+      execute: async (input) => {
+        try {
+          const { env, threadId, workspaceId } = await getFileContext();
+          const published = await (
+            await getService()
+          ).execPublishArtifact({
+            path: input.path,
+            ...(input.entryPath === undefined ? {} : { entryPath: input.entryPath }),
+            ...(input.maxBytes === undefined ? {} : { maxBytes: input.maxBytes }),
+          });
+          const artifactId = `art_${crypto.randomUUID()}`;
+          const r2Prefix = `artifacts/${artifactId}/`;
+          for (const f of published.files) {
+            await env.ATTACHMENTS_BUCKET.put(r2Prefix + f.relativePath, f.bytes, {
+              httpMetadata: { contentType: f.mimeType },
+            });
+          }
+          const createdAt = Date.now();
+          const expiresAt = createdAt + 24 * 60 * 60 * 1000;
+          const entryPath = input.entryPath ?? "index.html";
+          const title =
+            input.title ?? input.path.split("/").filter(Boolean).pop() ?? artifactId;
+          await new ArtifactRepository(env.REGISTRY_DB).insert({
+            id: artifactId,
+            workspaceId,
+            threadId,
+            title,
+            entryPath,
+            fileCount: published.files.length,
+            byteSize: published.totalBytes,
+            r2Prefix,
+            status: "active",
+            expiresAt,
+            createdAt,
+          });
+          return {
+            artifactId,
+            title,
+            entryPath,
+            fileCount: published.files.length,
+            byteSize: published.totalBytes,
+            expiresAt,
+            url: `/api/artifacts/${artifactId}`,
           };
         } catch (error) {
           return toErrorResult(error);

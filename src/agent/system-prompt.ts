@@ -13,7 +13,7 @@ const MEMORY_POLICY =
 // which appends its own extra sentence about Nadi knowledge-base/skill-registry
 // edits. One source of truth so the two guidance copies can't drift apart.
 export const FILE_TOOLS_GUIDANCE =
-  "Use read_file for focused repository text reads and apply_patch for targeted edits. Use write_file for new or complete replacement files. Continue using exec with rg, fd, git, build tools, and test runners for discovery and repository workflows. Use exec_download_file when the user should receive a sandbox file (charts, screenshots, exports); the chat UI shows it as an attachment.";
+  "Use read_file for focused repository text reads and apply_patch for targeted edits. Use write_file for new or complete replacement files. Continue using exec with rg, fd, git, build tools, and test runners for discovery and repository workflows. Use exec_download_file when the user should receive a sandbox file (charts, screenshots, exports); the chat UI shows it as an attachment. Use exec_publish_artifact when the user should view a built HTML directory (entry page + assets) in the browser; use exec_download_file when they should receive a single file.";
 
 // Only appended when the sandbox is enabled: the native file tools only exist
 // then. Keeps the always-on prompt nudging the model toward them even before the
