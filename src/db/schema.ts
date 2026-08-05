@@ -1067,6 +1067,27 @@ export const attachments = sqliteTable(
   }),
 );
 
+export const artifacts = sqliteTable(
+  "artifacts",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id").notNull(),
+    threadId: text("thread_id").notNull(),
+    title: text("title").notNull(),
+    entryPath: text("entry_path").notNull(),
+    fileCount: integer("file_count").notNull(),
+    byteSize: integer("byte_size").notNull(),
+    r2Prefix: text("r2_prefix").notNull(),
+    status: text("status").notNull().default("active"), // active | expired
+    expiresAt: integer("expires_at").notNull(),
+    createdAt: integer("created_at").notNull(),
+  },
+  (table) => ({
+    byThread: index("idx_artifacts_thread").on(table.threadId),
+  }),
+);
+export type ArtifactRow = typeof artifacts.$inferSelect;
+
 export type User = typeof users.$inferSelect;
 export type Session = typeof sessions.$inferSelect;
 export type Account = typeof accounts.$inferSelect;
