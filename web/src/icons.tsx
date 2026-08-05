@@ -18,6 +18,7 @@ export {
   Plus,
   ArrowLeft,
   ArrowSquareOut,
+  Browser,
   ArrowBendDownRight,
   Key,
   List,

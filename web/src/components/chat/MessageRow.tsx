@@ -10,6 +10,8 @@ import {
   MessageResponse,
 } from "@/components/ai-elements/message";
 import { MessageAttachmentView } from "./MessageAttachmentView";
+import { ArtifactChip } from "./ArtifactChip";
+import { collectMessageArtifactParts } from "@/lib/message-artifact-parts";
 import { collectMessageFileParts } from "@/lib/message-file-parts";
 import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-elements/reasoning";
 import { buildToolTimeline } from "@/lib/group-tool-parts";
@@ -70,6 +72,15 @@ export function MessageRow({
   // switch below); images open a lightbox, other types download. Include files
   // the agent pulled in via exec_download_file (synthesized from tool output).
   const fileParts = collectMessageFileParts(message.parts);
+  const artifactParts =
+    message.role === "assistant" ? collectMessageArtifactParts(message.parts) : [];
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (artifactParts.length === 0) return;
+    const id = window.setInterval(() => setNowMs(Date.now()), 60_000);
+    return () => window.clearInterval(id);
+  }, [artifactParts.length]);
 
   return (
     <Message from={message.role}>
@@ -150,12 +161,15 @@ export function MessageRow({
           }
           return null;
         })}
-        {fileParts.length > 0 && (
+        {(fileParts.length > 0 || artifactParts.length > 0) && (
           <MessageAttachments
             className={message.role === "assistant" ? "ml-0" : undefined}
           >
             {fileParts.map((part, i) => (
               <MessageAttachmentView key={`attachment-${i}`} data={part} />
+            ))}
+            {artifactParts.map((artifact) => (
+              <ArtifactChip key={artifact.artifactId} artifact={artifact} nowMs={nowMs} />
             ))}
           </MessageAttachments>
         )}
