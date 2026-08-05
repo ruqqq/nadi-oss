@@ -502,14 +502,24 @@ describe("filesystem", () => {
     );
   });
 
-  it("distinguishes a null entries list from an empty one", async () => {
-    // A Go server marshals a nil slice as `null`, so this is the shape an empty
-    // directory could arrive in. It still throws — `null` is not evidence of
-    // emptiness — but the message has to say `null`, not just "unexpected".
+  // LIVE (2026-08-05), verbatim, listing a directory created empty:
+  // `{"path":"/tmp/probe/empty","entries":null,"count":0}`. Go marshals a nil
+  // slice as `null` and this handler builds one. Rejecting it made every empty
+  // directory a hard failure — which is what broke `exec_publish_artifact`,
+  // whose recursive walk descends into whatever it finds. `sessions` is `[]` on
+  // the same server, so this is one handler's encoding, not a house style.
+  it("reads a null entries list as an empty directory", async () => {
     const { client } = harness(json({ path: "/work", entries: null, count: 0 }));
 
+    await expect(client.fsList("s1", "/work")).resolves.toEqual([]);
+  });
+
+  it("still throws when a null entries list contradicts a non-zero count", async () => {
+    // `null` is evidence of emptiness only while the server's own count agrees.
+    const { client } = harness(json({ path: "/work", entries: null, count: 3 }));
+
     await expect(messageOf(client.fsList("s1", "/work"))).resolves.toBe(
-      'sprites_list_unexpected_shape: /work entries=null body={"path":"/work","entries":null,"count":0}',
+      'sprites_list_unexpected_shape: /work entries=null body={"path":"/work","entries":null,"count":3}',
     );
   });
 

@@ -709,11 +709,22 @@ class SpritesHttpClient implements SpritesClient {
     // empty") that higher layers act on destructively; a missing or non-array
     // `entries` is not evidence for it.
     //
+    // `null` is the ONE exception, and it is not a guess. LIVE (2026-08-05), a
+    // directory created empty answered `{"path":...,"entries":null,"count":0}` —
+    // Go marshals a nil slice as `null`. So `null` IS this server's empty
+    // listing, and reading it as a fault made every empty directory throw:
+    // `exec_publish_artifact`'s recursive walk hits one and the publish dies.
+    // The `count` cross-check keeps the claim honest — a `null` list the server
+    // itself says has members is a contradiction, not an empty directory.
+    //
     // Every arm below names the value that failed its check. The four arms used
-    // to throw the same bare string, so a production report could not tell a
-    // `null` entries list (what a Go server marshals a nil slice as) from an
-    // entry missing its `type` — and the operator had nothing to act on.
+    // to throw the same bare string, so a production report could not tell this
+    // `null` from an entry missing its `type` — and the operator, staring at
+    // `provider_transient — sprites_list_unexpected_shape`, had nothing to act
+    // on. That is how this bug survived: the message never named the cause.
+    const payloadCount = (payload as { count?: unknown } | null)?.count;
     const entries = (payload as { entries?: unknown } | null)?.entries;
+    if (entries === null && !(typeof payloadCount === "number" && payloadCount > 0)) return [];
     if (!Array.isArray(entries)) {
       throw new ComputeError(
         "provider_transient",
