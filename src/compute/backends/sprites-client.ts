@@ -201,6 +201,25 @@ function mapError(status: number, context: string): ComputeError {
 }
 
 /**
+ * A one-line, bounded rendering of a value for an error message. `undefined`
+ * survives as the word (`JSON.stringify` drops it), and anything long is cut
+ * short — these messages reach the model as a tool result.
+ */
+function preview(value: unknown, maxLength = 200): string {
+  // `JSON.stringify` is typed as returning a string but answers `undefined` for
+  // a function or a symbol, and throws on a circular or BigInt-bearing value —
+  // both would otherwise masquerade as an absent field.
+  let rendered: string | undefined;
+  try {
+    rendered = value === undefined ? "undefined" : JSON.stringify(value);
+  } catch {
+    rendered = undefined;
+  }
+  const text = rendered ?? String(value);
+  return text.length > maxLength ? `${text.slice(0, maxLength)}…` : text;
+}
+
+/**
  * The listing's `type` string -> our vocabulary. Anything outside the three the
  * SDK names (`file`, `directory`, `symlink`) becomes `other` rather than a
  * throw: a socket or device node in a directory is a listable entry, not a
@@ -678,7 +697,10 @@ class SpritesHttpClient implements SpritesClient {
       workingDir: FS_WORKING_DIR,
     });
     if (!response.ok) throw mapError(response.status, "sprites_fs_list_failed");
-    const payload = await this.json(response, "sprites_list_unexpected_shape");
+    const payload = await this.json(
+      response,
+      "sprites_list_unexpected_shape: response body was not JSON",
+    );
     // LIVE (2026-08-04): `{"path":"/workspace","entries":[...],"count":2}` — a
     // WRAPPER, not a bare array.
     //
@@ -686,18 +708,32 @@ class SpritesHttpClient implements SpritesClient {
     // never map to `[]`. An empty list is a positive claim ("this directory is
     // empty") that higher layers act on destructively; a missing or non-array
     // `entries` is not evidence for it.
+    //
+    // Every arm below names the value that failed its check. The four arms used
+    // to throw the same bare string, so a production report could not tell a
+    // `null` entries list (what a Go server marshals a nil slice as) from an
+    // entry missing its `type` — and the operator had nothing to act on.
     const entries = (payload as { entries?: unknown } | null)?.entries;
     if (!Array.isArray(entries)) {
-      throw new ComputeError("provider_transient", "sprites_list_unexpected_shape");
+      throw new ComputeError(
+        "provider_transient",
+        `sprites_list_unexpected_shape: ${path} entries=${preview(entries)} body=${preview(payload)}`,
+      );
     }
-    return entries.map((entry) => {
+    return entries.map((entry, index) => {
       const row = entry as { name?: unknown; type?: unknown; size?: unknown } | null;
       const entryName = row?.name;
       if (typeof entryName !== "string" || entryName.length === 0 || entryName.includes("/")) {
-        throw new ComputeError("provider_transient", "sprites_list_unexpected_shape");
+        throw new ComputeError(
+          "provider_transient",
+          `sprites_list_unexpected_shape: ${path} entry[${index}].name=${preview(entryName)} entry=${preview(entry)}`,
+        );
       }
       if (typeof row?.type !== "string" || row.type.length === 0) {
-        throw new ComputeError("provider_transient", "sprites_list_unexpected_shape");
+        throw new ComputeError(
+          "provider_transient",
+          `sprites_list_unexpected_shape: ${path} entry[${index}].type=${preview(row?.type)} entry=${preview(entry)}`,
+        );
       }
       return {
         name: entryName,

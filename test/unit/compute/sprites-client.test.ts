@@ -479,13 +479,18 @@ describe("filesystem", () => {
     ]);
   });
 
+  // Every arm below used to throw the bare string `sprites_list_unexpected_shape`,
+  // so a production report named the check that fired but never WHICH value
+  // failed it — leaving no way to tell a null `entries` from a nameless entry
+  // from a body that was not JSON at all. The message now carries the offending
+  // value; these tests pin that it does.
   it("throws sprites_list_unexpected_shape when the body carries no entries key", async () => {
     // A shape mismatch is not evidence that the directory is empty — callers act
     // on `[]` destructively.
     const { client } = harness(json({ path: "/work", count: 0 }));
 
     await expect(messageOf(client.fsList("s1", "/work"))).resolves.toBe(
-      "sprites_list_unexpected_shape",
+      'sprites_list_unexpected_shape: /work entries=undefined body={"path":"/work","count":0}',
     );
   });
 
@@ -493,7 +498,18 @@ describe("filesystem", () => {
     const { client } = harness(json({ entries: "nope" }));
 
     await expect(messageOf(client.fsList("s1", "/work"))).resolves.toBe(
-      "sprites_list_unexpected_shape",
+      'sprites_list_unexpected_shape: /work entries="nope" body={"entries":"nope"}',
+    );
+  });
+
+  it("distinguishes a null entries list from an empty one", async () => {
+    // A Go server marshals a nil slice as `null`, so this is the shape an empty
+    // directory could arrive in. It still throws — `null` is not evidence of
+    // emptiness — but the message has to say `null`, not just "unexpected".
+    const { client } = harness(json({ path: "/work", entries: null, count: 0 }));
+
+    await expect(messageOf(client.fsList("s1", "/work"))).resolves.toBe(
+      'sprites_list_unexpected_shape: /work entries=null body={"path":"/work","entries":null,"count":0}',
     );
   });
 
@@ -501,7 +517,7 @@ describe("filesystem", () => {
     const { client } = harness(json({ entries: [{ name: "a.txt", isDir: false, size: 1 }] }));
 
     await expect(messageOf(client.fsList("s1", "/work"))).resolves.toBe(
-      "sprites_list_unexpected_shape",
+      'sprites_list_unexpected_shape: /work entry[0].type=undefined entry={"name":"a.txt","isDir":false,"size":1}',
     );
   });
 
@@ -509,7 +525,7 @@ describe("filesystem", () => {
     const { client } = harness(json({ entries: [{ name: "/work/a.txt", type: "file", size: 1 }] }));
 
     await expect(messageOf(client.fsList("s1", "/work"))).resolves.toBe(
-      "sprites_list_unexpected_shape",
+      'sprites_list_unexpected_shape: /work entry[0].name="/work/a.txt" entry={"name":"/work/a.txt","type":"file","size":1}',
     );
   });
 
@@ -517,7 +533,32 @@ describe("filesystem", () => {
     const { client } = harness(json({ entries: [{ name: "", type: "file", size: 1 }] }));
 
     await expect(messageOf(client.fsList("s1", "/work"))).resolves.toBe(
-      "sprites_list_unexpected_shape",
+      'sprites_list_unexpected_shape: /work entry[0].name="" entry={"name":"","type":"file","size":1}',
+    );
+  });
+
+  it("names the offending entry by index when an earlier entry parsed cleanly", async () => {
+    const { client } = harness(
+      json({
+        entries: [
+          { name: "ok.txt", type: "file", size: 1 },
+          { name: "bad", type: 7, size: 1 },
+        ],
+      }),
+    );
+
+    await expect(messageOf(client.fsList("s1", "/work"))).resolves.toBe(
+      'sprites_list_unexpected_shape: /work entry[1].type=7 entry={"name":"bad","type":7,"size":1}',
+    );
+  });
+
+  it("reports a non-JSON body rather than blaming the entries shape", async () => {
+    // A proxy's HTML error page parses as neither, and used to arrive as the
+    // same bare string as a malformed entry.
+    const { client } = harness({ body: "<html>502</html>" });
+
+    await expect(messageOf(client.fsList("s1", "/work"))).resolves.toBe(
+      "sprites_list_unexpected_shape: response body was not JSON",
     );
   });
 });
