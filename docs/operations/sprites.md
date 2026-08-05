@@ -209,6 +209,28 @@ filesystem — has no such cap. In nadi the exposed caller is
 `backend.runCommand(...)` call); its background path already uses
 `startProcess`.
 
+### Reading a `sprites_exec_no_exit` — the `after=` field names the side
+
+`provider_transient — sprites_exec_no_exit: code=1006 reason=WebSocket
+disconnected without sending Close frame.` means the exec socket ended before
+any exit code arrived, so the command's outcome is genuinely unknown.
+
+The code and reason do **not** say who hung up. Measured in workerd
+(2026-08-05): a socket **we** abort and a socket the **server** destroys without
+a close frame both surface as that exact text — it is workerd's own wording for
+any close it did not receive. So the error carries `after=<ms>`, the socket's
+lifetime, and that is the field to read:
+
+- **A cluster at one constant** is a timer on our side. This is how the shipped
+  bug looked: the exec upgrade's `AbortSignal.timeout(30_000)` stayed armed
+  after the handshake, workerd keeps a fetch's signal wired to the connection
+  that fetch produced, and for an upgrade that connection *is* the socket — so
+  every exec still running at 30 s was killed by our own timeout. Anything
+  longer than half a minute (an install, a test run, a clone) failed. Fixed by
+  disarming the timer once the handshake answers (`openExecSocket`).
+- **A spread that tracks how long each command ran** is the far end hanging up,
+  and is a provider matter rather than a clock of ours.
+
 ### Session ids are a small per-sprite counter — recycling is an open unknown
 
 The id returned in the server's `session_info` frame is a small integer string,

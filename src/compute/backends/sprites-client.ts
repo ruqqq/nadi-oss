@@ -132,6 +132,12 @@ export interface SpritesClientOptions {
   baseUrl?: string;
   /** Test seam; defaults to the global `fetch`. */
   fetchImpl?: typeof fetch;
+  /**
+   * How long the exec WebSocket UPGRADE may take. Test seam; defaults to
+   * `REQUEST_TIMEOUT_MS`. It bounds the handshake only — see `openExecSocket`,
+   * where disarming it afterwards is load-bearing.
+   */
+  execUpgradeTimeoutMs?: number;
 }
 
 export const SPRITES_DEFAULT_BASE_URL = "https://api.sprites.dev/v1";
@@ -441,9 +447,11 @@ class SpritesHttpClient implements SpritesClient {
   private readonly apiKey: string;
   private readonly baseUrl: string;
   private readonly doFetch: typeof fetch;
+  private readonly execUpgradeTimeoutMs: number;
 
   constructor(options: SpritesClientOptions) {
     this.apiKey = options.apiKey;
+    this.execUpgradeTimeoutMs = options.execUpgradeTimeoutMs ?? REQUEST_TIMEOUT_MS;
     this.baseUrl = (options.baseUrl ?? SPRITES_DEFAULT_BASE_URL).replace(/\/+$/, "");
     // A bare stored reference to the native `fetch` throws "illegal invocation"
     // on Workers when later called as a method, so wrap it in an arrow.
@@ -733,17 +741,33 @@ class SpritesHttpClient implements SpritesClient {
    *
    * Each caller therefore attaches its listeners first and calls `accept()`
    * itself, with no `await` in between.
+   *
+   * The upgrade's timeout is an `AbortController` that is DISARMED the moment
+   * the handshake answers, and that is load-bearing rather than tidy.
+   *
+   * REGRESSION (live, 2026-08-05): it used to be `AbortSignal.timeout(...)`,
+   * which cannot be disarmed. workerd keeps a fetch's signal wired to the
+   * connection that fetch produced, and for a WebSocket upgrade that connection
+   * IS the socket — so the signal firing 30s later killed an exec that was
+   * running perfectly well. Reproduced in workerd against a silent WebSocket
+   * server: with the signal the socket died at exactly the timeout with
+   * `code=1006 reason="WebSocket disconnected without sending Close frame."`,
+   * and without it the socket stayed open. That close is `sprites_exec_no_exit`,
+   * and it hit every exec that ran longer than 30 seconds — an install, a test
+   * run, a clone — which is why it read as a flaky provider rather than a clock.
+   *
+   * The bound itself still matters: `execCollect`'s own timer only arms AFTER
+   * this await resolves, so an upgrade that never answers would otherwise pin
+   * the Durable Object turn indefinitely.
    */
   private async openExecSocket(name: string, options: SpritesExecOptions): Promise<ExecSocket> {
     let response: Response;
+    const upgrade = new AbortController();
+    const upgradeTimer = setTimeout(() => upgrade.abort(), this.execUpgradeTimeoutMs);
     try {
       response = await this.doFetch(this.execUrl(name, options), {
         headers: { Upgrade: "websocket", Authorization: `Bearer ${this.apiKey}` },
-        // Every REST call is bounded; so is this one. `execCollect`'s own timer
-        // only arms AFTER this await resolves, so without a bound here a
-        // stalled upgrade pins the Durable Object turn indefinitely — the exact
-        // failure `REQUEST_TIMEOUT_MS` exists to prevent.
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        signal: upgrade.signal,
       });
     } catch (error) {
       // SECRET SAFETY: the transport error is NOT interpolated. workerd's fetch
@@ -763,6 +787,12 @@ class SpritesHttpClient implements SpritesClient {
         "provider_transient",
         "sprites_exec_upgrade_failed: transport error (detail withheld: the exec URL carries secrets)",
       );
+    } finally {
+      // Disarm on EVERY exit, success or throw: a timer left running past a
+      // successful handshake aborts the live socket (see the doc comment), and
+      // one left running past a failure aborts nothing but keeps the isolate's
+      // timer queue non-empty for no reason.
+      clearTimeout(upgradeTimer);
     }
     const ws = (response as unknown as { webSocket?: ExecSocket | null }).webSocket;
     if (!ws) throw mapError(response.status, "sprites_exec_upgrade_failed");
@@ -771,6 +801,7 @@ class SpritesHttpClient implements SpritesClient {
 
   async execCollect(name: string, options: SpritesExecOptions): Promise<SpritesExecResult> {
     const ws = await this.openExecSocket(name, options);
+    const openedAt = Date.now();
     return await new Promise<SpritesExecResult>((resolve, reject) => {
       const stdoutDecoder = new TextDecoder();
       const stderrDecoder = new TextDecoder();
@@ -942,15 +973,29 @@ class SpritesHttpClient implements SpritesClient {
         // The close code and reason ride in the message because this error was
         // the only production symptom of the dropped-frame bug, and without
         // them it named no cause at all.
+        //
+        // So does the elapsed time, and it is the field that names the SIDE.
+        // Measured in workerd: a socket we abort ourselves and a socket the
+        // server destroys without a close frame BOTH report
+        // `code=1006 reason="WebSocket disconnected without sending Close
+        // frame."` — the text is workerd's own, generated for any close it did
+        // not receive, so it cannot distinguish them. WHEN the close lands can:
+        // a cluster at one constant is a timer of ours (that is exactly how the
+        // 30s upgrade-signal bug looked — see `openExecSocket`), while a spread
+        // that tracks how long each command ran is the far end hanging up.
         const detail = event as { code?: unknown; reason?: unknown } | undefined;
         const code = typeof detail?.code === "number" ? String(detail.code) : "unknown";
         const reason =
           typeof detail?.reason === "string" && detail.reason.length > 0
             ? ` reason=${detail.reason}`
             : "";
+        const elapsed = ` after=${Date.now() - openedAt}ms`;
         settle(() =>
           reject(
-            new ComputeError("provider_transient", `sprites_exec_no_exit: code=${code}${reason}`),
+            new ComputeError(
+              "provider_transient",
+              `sprites_exec_no_exit: code=${code}${reason}${elapsed}`,
+            ),
           ),
         );
       });
