@@ -22,7 +22,10 @@ export async function deleteR2PrefixBestEffort(bucket: R2Bucket, prefix: string)
   }
 }
 
-export function artifactExpired(row: { status: string; expiresAt: number }, nowMs: number): boolean {
+export function artifactExpired(
+  row: { status: string; expiresAt: number },
+  nowMs: number,
+): boolean {
   return row.status === "expired" || row.expiresAt < nowMs;
 }
 
@@ -87,8 +90,7 @@ export async function handleArtifactHostRequest(req: Request, env: Env): Promise
     return new Response("Not found", { status: 404 });
   }
 
-  const mime =
-    object.httpMetadata?.contentType?.split(";")[0]?.trim() ?? mimeFromFilename(rel);
+  const mime = object.httpMetadata?.contentType?.split(";")[0]?.trim() ?? mimeFromFilename(rel);
   const headers = new Headers({
     "content-type": mime,
     "x-content-type-options": "nosniff",

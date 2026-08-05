@@ -180,7 +180,10 @@ describe("artifact routes", () => {
   it("returns 410 for expired artifacts on GET", async () => {
     const expiredAt = Date.now() - 60_000;
     const seeded = await seedArtifact({ expiresAt: expiredAt });
-    await env.ATTACHMENTS_BUCKET.put(`${seeded.workspaceId}/${seeded.threadId}/${seeded.artifactId}/index.html`, "html");
+    await env.ATTACHMENTS_BUCKET.put(
+      `${seeded.workspaceId}/${seeded.threadId}/${seeded.artifactId}/index.html`,
+      "html",
+    );
 
     const res = await SELF.fetch(`https://nadi.test/api/artifacts/${seeded.artifactId}`, {
       headers: cookie(seeded.token),

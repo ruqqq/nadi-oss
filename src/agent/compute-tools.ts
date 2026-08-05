@@ -1028,8 +1028,7 @@ export function buildComputeToolDefs(
             const createdAt = Date.now();
             const expiresAt = createdAt + 24 * 60 * 60 * 1000;
             const entryPath = input.entryPath ?? "index.html";
-            const title =
-              input.title ?? input.path.split("/").filter(Boolean).pop() ?? artifactId;
+            const title = input.title ?? input.path.split("/").filter(Boolean).pop() ?? artifactId;
             await new ArtifactRepository(env.REGISTRY_DB).insert({
               id: artifactId,
               workspaceId,

@@ -1,9 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ArtifactRow } from "../../../src/db/schema";
-import {
-  deriveArtifactViewSecret,
-  signArtifactViewToken,
-} from "../../../src/artifacts/view-token";
+import { deriveArtifactViewSecret, signArtifactViewToken } from "../../../src/artifacts/view-token";
 import { handleArtifactHostRequest } from "../../../src/artifacts/serve";
 import type { Env } from "../../../src/env";
 

@@ -17,10 +17,7 @@ export function resolveArtifactOrigin(req: Request, artifactsHost: string): stri
   const url = new URL(req.url);
   const host = url.hostname.toLowerCase();
   const isLocalhostStyle =
-    host === "localhost" ||
-    host.endsWith(".localhost") ||
-    host === "127.0.0.1" ||
-    host === "[::1]";
+    host === "localhost" || host.endsWith(".localhost") || host === "127.0.0.1" || host === "[::1]";
   if (isLocalhostStyle) {
     const port = url.port;
     return port ? `http://${artifactsHost}:${port}` : `http://${artifactsHost}`;
