@@ -7,6 +7,7 @@
  */
 
 import type { RequestHandler } from "msw";
+import { artifactHandlers } from "./artifacts";
 import { automataHandlers } from "./automata";
 import { bootstrapHandlers } from "./bootstrap";
 import { feedbackHandlers } from "./feedback";
@@ -23,6 +24,7 @@ export const restHandlers: RequestHandler[] = [
   ...projectHandlers,
   ...workbenchHandlers,
   ...automataHandlers,
+  ...artifactHandlers,
   ...miscHandlers,
   // Last: `/api/threads/:threadId/*` is the broadest family here, and the
   // attachment handler in `misc` shares its prefix.

@@ -22,6 +22,7 @@ const EXEC_TOOL_NAMES = [
   "exec_list",
   "exec_upload_file",
   "exec_download_file",
+  "exec_publish_artifact",
   "confirm_workbench_switch",
 ];
 

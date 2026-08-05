@@ -15,6 +15,7 @@ import { env } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { buildComputeToolDefs } from "../../src/agent/compute-tools";
 import { AttachmentRepository } from "../../src/db/attachment-repository";
+import { ArtifactRepository } from "../../src/db/artifact-repository";
 import { DEFAULT_COMPUTE_LIMITS } from "../../src/compute/config";
 import { FakeComputeBackend } from "../../src/compute/backends/fake";
 import { ThreadComputeService } from "../../src/compute/thread-service";
@@ -198,6 +199,56 @@ describe("sandbox file transfer tools", () => {
     });
     const after = await new AttachmentRepository(env.REGISTRY_DB).listByThread(THREAD_ID);
     expect(after.length).toBe(before);
+  });
+
+  it("exec_publish_artifact walks a sandbox directory into R2 and records an artifact row", async () => {
+    const provider = new FakeComputeBackend();
+    const tools = buildTools(provider);
+
+    await tools.exec_upload_file!.execute!(
+      {
+        sourceAttachmentId: await seedSourceAttachment("att-index", "<html></html>"),
+        destinationPath: "/tmp/site/index.html",
+      },
+      {} as never,
+    );
+    await tools.exec_upload_file!.execute!(
+      {
+        sourceAttachmentId: await seedSourceAttachment("att-css", "body {}"),
+        destinationPath: "/tmp/site/style.css",
+      },
+      {} as never,
+    );
+
+    const result = (await tools.exec_publish_artifact!.execute!(
+      { path: "/tmp/site", title: "Preview Site" },
+      {} as never,
+    )) as {
+      artifactId: string;
+      title: string;
+      entryPath: string;
+      fileCount: number;
+      byteSize: number;
+      url: string;
+    };
+
+    expect(result.title).toBe("Preview Site");
+    expect(result.entryPath).toBe("index.html");
+    expect(result.fileCount).toBe(2);
+    expect(result.url).toBe(`/api/artifacts/${result.artifactId}`);
+
+    const row = await new ArtifactRepository(env.REGISTRY_DB).getByIdInThread(
+      result.artifactId,
+      THREAD_ID,
+    );
+    expect(row).not.toBeNull();
+    expect(row?.status).toBe("active");
+    expect(row?.r2Prefix).toBe(`artifacts/${result.artifactId}/`);
+
+    const htmlObject = await env.ATTACHMENTS_BUCKET.get(`${row!.r2Prefix}index.html`);
+    expect(new TextDecoder().decode(await htmlObject!.arrayBuffer())).toBe("<html></html>");
+    const cssObject = await env.ATTACHMENTS_BUCKET.get(`${row!.r2Prefix}style.css`);
+    expect(new TextDecoder().decode(await cssObject!.arrayBuffer())).toBe("body {}");
   });
 });
 

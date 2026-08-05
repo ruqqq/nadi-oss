@@ -25,7 +25,12 @@ import type { MockFaults, MockStore } from "../store";
 import { TOOL_RUN_THREAD_ID, TOOL_WRITE_THREAD_ID } from "../chat/tool-run-transcript";
 import { MID_TURN_THREAD_ID } from "../chat/mid-turn-transcript";
 import { HERO_THREAD_ID } from "../chat/hero-transcript";
+import {
+  ASSISTANT_ARTIFACTS_THREAD_ID,
+  MOCK_ARTIFACT_ID,
+} from "../chat/assistant-artifact-transcript";
 import { ASSISTANT_DOWNLOAD_THREAD_ID } from "../chat/assistant-download-transcript";
+import type { MockArtifact } from "../store";
 
 /** Fixed clock so screenshots are byte-stable across runs. 2026-07-08T00:00:00Z. */
 const NOW = 1_752_000_000_000;
@@ -644,6 +649,7 @@ function emptyStore(): MockStore {
     ...baseExtras(),
     features: noFeatures(),
     feedback: emptyFeedback(),
+    artifacts: {},
     faults: noFaults(),
   };
 }
@@ -845,6 +851,7 @@ function defaultStore(): MockStore {
     ...richExtras(),
     features: noFeatures(),
     feedback: emptyFeedback(),
+    artifacts: {},
     faults: noFaults(),
     automata: [
       makeAutomaton({
@@ -1419,6 +1426,38 @@ function toolRunStore(): MockStore {
   };
 }
 
+export function makeArtifact(overrides: Partial<MockArtifact> = {}): MockArtifact {
+  return {
+    id: MOCK_ARTIFACT_ID,
+    title: "Usage dashboard",
+    entryPath: "index.html",
+    fileCount: 3,
+    byteSize: 28_400,
+    expiresAt: NOW + DAY,
+    status: "active",
+    ...overrides,
+  };
+}
+
+/** Assistant published an HTML artifact — chip + preview in the timeline. */
+function assistantArtifactsStore(): MockStore {
+  const base = defaultStore();
+  const artifact = makeArtifact();
+  return {
+    ...base,
+    artifacts: { [artifact.id]: artifact },
+    threads: [
+      makeThread({
+        threadId: ASSISTANT_ARTIFACTS_THREAD_ID,
+        title: "Usage dashboard preview",
+        lastMessagePreview: "The preview link expires in 24 hours.",
+        updatedAt: NOW - 2 * MINUTE,
+      }),
+      ...base.threads,
+    ],
+  };
+}
+
 /** Assistant sent an image via exec_download_file — chip + lightbox in the timeline. */
 function assistantAttachmentsStore(): MockStore {
   const base = defaultStore();
@@ -1440,6 +1479,7 @@ export const SCENARIOS: Record<string, () => MockStore> = {
   default: defaultStore,
   "tool-run": toolRunStore,
   "assistant-attachments": assistantAttachmentsStore,
+  "assistant-artifacts": assistantArtifactsStore,
   "empty-account": emptyStore,
   "fresh-account": freshAccountStore,
   "onboarding-empower": onboardingEmpowerStore,

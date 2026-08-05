@@ -1,4 +1,5 @@
 import { routeAgentRequest } from "agents";
+import { handleArtifactHostRequest } from "./artifacts/serve";
 import type { Env } from "./env";
 import { authorizeAgentRequest } from "./agent-routing/authorize";
 import { VOICE_PARTY_PREFIX, rewriteVoiceRoom } from "./agent-routing/voice-room";
@@ -26,6 +27,11 @@ export default {
     log.debug("worker.fetch", { method: req.method, url: req.url });
 
     const url = new URL(req.url);
+    const artifactsHost = (env.ARTIFACTS_HOST ?? "").trim().toLowerCase();
+    if (artifactsHost !== "" && url.hostname.toLowerCase() === artifactsHost) {
+      return handleArtifactHostRequest(req, env);
+    }
+
     const canonical = canonicalRedirectUrl(url, env);
     if (canonical !== null) {
       return Response.redirect(canonical, 308);

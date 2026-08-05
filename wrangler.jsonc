@@ -156,6 +156,8 @@
     // rebrand here; unset/blank falls back to "Nadi" in resolveAppName.
     "APP_NAME": "Nadi",
     "APP_BASE_URL": "http://localhost:8787",
+    // Isolated origin for published HTML artifacts (Host must match; see src/index.ts).
+    "ARTIFACTS_HOST": "artifacts.localhost",
     "DEFAULT_MODEL_PROVIDER": "openai-oauth",
     "DEFAULT_MODEL": "gpt-5.4-mini",
     "DEFAULT_WORKSPACE_ID": "default",

@@ -40,6 +40,13 @@ export interface Env extends Cloudflare.Env {
   /** Comma-separated hostnames this deployment has moved away from. */
   LEGACY_HOSTS?: string;
 
+  /**
+   * Isolated origin for signed artifact preview URLs, e.g. `artifacts.nadiai.app`.
+   * When set, requests whose Host matches serve only `GET /v/:token/:id/*` — no
+   * SPA or session cookies. Unset disables the artifact host gate entirely.
+   */
+  ARTIFACTS_HOST?: string;
+
   /** Operator-managed Daytona credential. Workspace keys take precedence. */
   DAYTONA_API_KEY?: string;
 
