@@ -15,7 +15,7 @@
     "fmt:check": "oxfmt --check .",
     "test": "node scripts/test-all.mjs",
     "test:unit": "vitest run --project=unit",
-    "test:integration": "vitest run --project=integration-fast --project=integration-shared --project=integration-isolated",
+    "test:integration": "vitest run --project=integration-fast --project=integration-grouped --project=integration-shared --project=integration-isolated",
     "check:wrangler": "node scripts/check-wrangler-parity.mjs",
     "check": "pnpm run typecheck && pnpm run lint && pnpm run fmt:check && pnpm test && pnpm run web:typecheck",
     "db:generate": "drizzle-kit generate && node scripts/bundle-celld-migrations.mjs",

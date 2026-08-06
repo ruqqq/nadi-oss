@@ -20,10 +20,15 @@ symlink back to that canonical directory.
 - Run type checks with `pnpm run typecheck`.
 - Run formatting/lint checks with `pnpm run check`.
 
-Vitest has four projects: `unit` (`test/unit/**`), `web-unit` (`web/src/**/*.test.ts`
-plus `test/unit/web/**`), `integration-fast`, and `integration-isolated`. Only a
-bare `pnpm test` runs all four — `test:unit` and `test:integration` together
-still miss every `web/src` test. Verify with `pnpm test`, not with the scripts.
+Vitest has six projects: `unit` (`test/unit/**`), `web-unit` (`web/src/**/*.test.ts`
+plus `test/unit/web/**`), `integration-fast`, `integration-grouped` (the heavyweight
+DO suites — think-thread-agent, work-ledger, ...), `integration-shared`, and
+`integration-isolated`. Only a bare `pnpm test` runs all six — `test:unit` and
+`test:integration` together still miss every `web/src` test. Verify with `pnpm
+test`, not with the scripts. `vitest.config.ts` also carries a coverage guard
+that fails any vitest invocation if a `test/**/*.test.ts` file matches no
+project (or more than one) — that is what keeps a newly-added suite from
+silently never running.
 
 ## Database Rules
 

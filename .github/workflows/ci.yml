@@ -60,9 +60,18 @@ jobs:
       # filter matches either; alongside a valid one it is silently dropped and
       # the run still exits 0. A stale filter naming a long-gone project sat
       # here doing nothing for exactly that reason.
+      # The coverage guard in vitest.config.ts catches a test file that matches
+      # no project; these steps are what keep a *project* that no runner names
+      # from silently dropping out the same way.
       - name: Unit tests
         run: pnpm exec vitest run --project=unit --project=web-unit
 
-      # Covers integration-fast, integration-shared and integration-isolated.
+      # Covers integration-fast, integration-grouped, integration-shared and
+      # integration-isolated — each name must stay in sync with package.json's
+      # test:integration script and scripts/test-all.mjs. One invocation with
+      # all four filters is safe: their sequence.groupOrder values (3→4→5→6)
+      # make vitest run the projects sequentially, not in parallel (scripts/
+      # test-all.mjs runs the same four as separate invocations for the same
+      # reason).
       - name: Integration tests
-        run: pnpm run test:integration
+        run: pnpm exec vitest run --project=integration-fast --project=integration-grouped --project=integration-shared --project=integration-isolated
