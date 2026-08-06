@@ -55,3 +55,7 @@ scratch/
 # Your own production config, derived from wrangler.prod.example.jsonc.
 # Deployment-specific ids belong to you, not to the repo.
 wrangler.prod.jsonc
+
+# Reasonix host session state (task lists, subagent snapshots). Never part of
+# the repo; without this, oxfmt picks up its JSON snapshots and fmt:check fails.
+.reasonix/
