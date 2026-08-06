@@ -29,7 +29,6 @@ have no equivalent:
 | Workers AI as a model provider | same — bring your own provider key instead |
 | Browser rendering for `web_fetch` | no browser binding; fetch degrades to direct HTTP |
 | Attachment vision extraction, `toMarkdown` | needs the Workers AI binding |
-| GitHub App auth (private repo clone/push) | celld's WebCrypto has no RSA |
 
 Nadi hides the first two rather than offering something that fails on use.
 
@@ -38,6 +37,14 @@ implemented in-repo against `@noble/curves`, selected by probing whether native
 ECDH is available rather than by platform, and verified byte-identical to the
 Cloudflare path. VAPID keys in either common format work — a raw 32-byte scalar
 (what `web-push generate-vapid-keys` emits) or PKCS#8.
+
+**GitHub App auth works**, though celld's WebCrypto has no RSA: the RS256 JWT
+that private-repo clone/push needs is signed in-repo with BigInt, selected by
+probing whether native `importKey("pkcs8", …, RSASSA-PKCS1-v1_5)` succeeds
+rather than by platform, and verified byte-identical to the Cloudflare path in
+the integration suite. Only PKCS#8 keys are accepted — if your GitHub App key
+is PKCS#1 (`BEGIN RSA PRIVATE KEY`), convert it with
+`openssl pkcs8 -topk8 -nocrypt -in github-app.pem -out github-app-pkcs8.pem`.
 
 ## Durability: read this before you rely on it
 
