@@ -183,7 +183,7 @@ import { AgentSkillRepository } from "../db/repositories/agent-skills";
 import { FeedbackRepository } from "../db/repositories/feedback";
 import { WorkspacePrivacySettingsRepository } from "../db/repositories/workspace-privacy-settings";
 import { ThreadRepository } from "../db/repositories/threads";
-import { registryBinding, registryDb } from "../db/client";
+import { hasRegistry, registryBinding, registryDb } from "../db/client";
 import { attachmentsBucket } from "../storage/bucket-binding";
 import { log } from "../log";
 import {
@@ -1658,7 +1658,10 @@ export class ThinkThreadAgent extends Think<Env> {
     const ctx = (this as unknown as { ctx?: { waitUntil?: (promise: Promise<unknown>) => void } })
       .ctx;
     const waitUntil = ctx?.waitUntil?.bind(ctx);
-    if (!waitUntil || !this.env?.REGISTRY_DB) return;
+    // Gate on the registry being reachable, not on the Cloudflare binding:
+    // `env.REGISTRY_DB` is absent on celld, where the registry lives in a
+    // Durable Object, and testing it here silently disabled projection there.
+    if (!waitUntil || !hasRegistry(this.env ?? {})) return;
 
     scheduleLocalThreadSearchProjection({
       env: this.env,

@@ -23,3 +23,16 @@ export function registryBinding(env: Env): D1Database {
 export function registryDb(env: Env) {
   return drizzle(registryBinding(env), { schema });
 }
+
+/**
+ * Whether a registry is reachable at all — real D1 on Cloudflare, the
+ * `RegistryDatabase` Durable Object on celld.
+ *
+ * Use this instead of testing a binding directly. `env.REGISTRY_DB` answers
+ * "is this Cloudflare?", which stopped meaning "is the registry available?"
+ * the moment the facades landed — and a binding used as a predicate silently
+ * disables whatever it guards on every other platform.
+ */
+export function hasRegistry(env: Partial<Env>): boolean {
+  return Boolean(env.REGISTRY_DB || env.REGISTRY_DO);
+}
