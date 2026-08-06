@@ -5,6 +5,10 @@ import * as schema from "../../src/db/schema";
 import { applyRegistryTestSchema } from "./helpers/registry";
 
 const now = 1_800_000_000_000;
+// NADI_PLATFORM is a celld-only var, absent from the Cloudflare-generated env
+// type; the pool env object still accepts it (see the NADI_PLATFORM mutations
+// below, which the runtime reads).
+const featureEnv = env as typeof env & { NADI_PLATFORM?: string | undefined };
 
 async function seedUser(userId: string, token: string) {
   const db = drizzle(env.REGISTRY_DB, { schema });
@@ -101,6 +105,26 @@ describe("voice dictation routing", () => {
       expect(started).toBe(true);
     } finally {
       env.VOICE_INPUT_ENABLED = previous;
+    }
+  });
+
+  // celld has no AI binding: the platform capability gate must refuse even
+  // when the operator turns VOICE_INPUT_ENABLED on. Same DO path as the flag
+  // kill switch — a boolean return, no error across the RPC boundary.
+  it("starts no transcriber on celld even when VOICE_INPUT_ENABLED is on", async () => {
+    const previousPlatform = featureEnv.NADI_PLATFORM;
+    const previousFlag = env.VOICE_INPUT_ENABLED;
+    featureEnv.NADI_PLATFORM = "celld";
+    env.VOICE_INPUT_ENABLED = "true";
+    try {
+      const stub = env.VOICE_AGENT.get(env.VOICE_AGENT.idFromName("celld-flag-on"));
+      const started = await runInDurableObject(stub, (instance) =>
+        instance.beforeCallStart({} as never),
+      );
+      expect(started).toBe(false);
+    } finally {
+      featureEnv.NADI_PLATFORM = previousPlatform;
+      env.VOICE_INPUT_ENABLED = previousFlag;
     }
   });
 });

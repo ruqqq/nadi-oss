@@ -121,12 +121,15 @@ export function buildAuth(env: Env) {
         resendStrategy: "reuse",
         async sendVerificationOTP({ email, otp }: { email: string; otp: string }) {
           const copy = buildEmailOtpCopy({ otp });
-          await sendOtpEmail({
+          const sent = await sendOtpEmail({
             env,
             to: email,
             subject: copy.subject,
             text: copy.text,
           });
+          // Only claim delivery when a sender actually ran; the unconfigured
+          // no-op logs its own warning, and a "sent" line beside it would lie.
+          if (!sent) return;
           console.log(
             JSON.stringify({
               ts: new Date().toISOString(),

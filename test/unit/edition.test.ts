@@ -70,13 +70,23 @@ describe("resolvePlatform", () => {
 });
 
 describe("platformCapabilities", () => {
-  it("grants hasManagedBindings only on cloudflare", () => {
-    expect(platformCapabilities({})).toEqual({ hasManagedBindings: true });
+  it("grants hasManagedBindings and speechToText only on cloudflare", () => {
+    expect(platformCapabilities({})).toEqual({ hasManagedBindings: true, speechToText: true });
     expect(platformCapabilities({ NADI_PLATFORM: "cloudflare" })).toEqual({
       hasManagedBindings: true,
+      speechToText: true,
     });
     expect(platformCapabilities({ NADI_PLATFORM: "celld" })).toEqual({
       hasManagedBindings: false,
+      speechToText: false,
     });
+  });
+
+  it("keeps speechToText tied to the platform, never to the voice flag", () => {
+    // celld has no AI binding; VOICE_INPUT_ENABLED is a separate switch and
+    // cannot grant the capability (the combined gate is voiceInputEnabled in
+    // src/flags.ts). A voice flag does not even reach this function.
+    expect(platformCapabilities({ NADI_PLATFORM: "celld" }).speechToText).toBe(false);
+    expect(platformCapabilities({ NADI_PLATFORM: "cloudflare" }).speechToText).toBe(true);
   });
 });

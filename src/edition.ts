@@ -55,12 +55,22 @@ export interface PlatformCapabilities {
    * facade instead. Gates which binding-backed services are worth attempting.
    */
   hasManagedBindings: boolean;
+  /**
+   * True when the platform can transcribe audio server-side (Workers AI on
+   * Cloudflare). celld has no AI binding, so voice dictation must fail closed
+   * there: the feature flag can only turn it off, never on, where the
+   * capability is absent. Gates VoiceAgent and bootstrap's `voiceInput`.
+   */
+  speechToText: boolean;
 }
 
 export function platformCapabilities(env: {
   NADI_PLATFORM?: string | undefined;
 }): PlatformCapabilities {
-  return { hasManagedBindings: resolvePlatform(env) === "cloudflare" };
+  return {
+    hasManagedBindings: resolvePlatform(env) === "cloudflare",
+    speechToText: resolvePlatform(env) === "cloudflare",
+  };
 }
 
 /**

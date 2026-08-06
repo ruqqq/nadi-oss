@@ -83,7 +83,9 @@ export interface Env extends Cloudflare.Env {
   /**
    * Voice dictation in the composer. Read with `isTruthyFlag`. When off, the mic
    * button does not render and VoiceAgent.beforeCallStart() refuses the call, so
-   * no audio is billed even against a forged socket.
+   * no audio is billed even against a forged socket. The flag can only turn
+   * voice OFF — resolve through `voiceInputEnabled` so platforms without
+   * speech-to-text (celld has no AI binding) stay refused regardless of the var.
    */
   VOICE_INPUT_ENABLED: string;
 
@@ -147,6 +149,13 @@ export interface Env extends Cloudflare.Env {
   EMAIL: SendEmail;
   AUTH_EMAIL_FROM: string;
   EMAIL_DELIVERY_DISABLED?: string;
+  /**
+   * Resend API key (https://resend.com) for OTP delivery on platforms without
+   * the Cloudflare `EMAIL` binding (celld). `sendOtpEmail` picks Resend when
+   * this key is set and `AUTH_EMAIL_FROM` provides the shared from-address.
+   * Set via `wrangler secret put RESEND_API_KEY` (or the celld equivalent).
+   */
+  RESEND_API_KEY?: string;
   /**
    * Local development fallback: write the sign-in email (OTP included) to the
    * log instead of sending it, so a self-hoster with no SMTP — or celld, which

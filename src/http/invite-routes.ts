@@ -67,12 +67,15 @@ async function notifyWaitlistAccepted(env: Env, email: string): Promise<void> {
   const signInUrl = env.APP_BASE_URL.replace(/\/$/, "");
   const copy = buildWaitlistAcceptedCopy({ signInUrl });
   try {
-    await sendOtpEmail({
+    const sent = await sendOtpEmail({
       env,
       to: email,
       subject: copy.subject,
       text: copy.text,
     });
+    // Only claim delivery when a sender actually ran; the unconfigured no-op
+    // logs its own warning, and a "sent" line beside it would lie.
+    if (!sent) return;
     console.log(
       JSON.stringify({
         ts: new Date().toISOString(),
