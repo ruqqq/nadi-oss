@@ -123,10 +123,14 @@ Add `--dry-run` to bundle without writing anything.
 ```bash
 CELLD_VARS_FILE=$PWD/celld-vars.env \
 CELLD_IDLE_EVICT_S=15 \
+CELLD_ALARM_RESIDENT_MS=1000 \
 celld --bucket s3://celld-fleet --endpoint http://127.0.0.1:9100 --listen 127.0.0.1:8080
 
-curl http://127.0.0.1:8080/    # arms the scheduler — see Operating
+curl http://127.0.0.1:8080/    # first run only — arms the scheduler
 ```
+
+Both `CELLD_*` settings matter; see [Operating](#operating) for what each one
+buys you.
 
 ## 5. First sign-in
 
@@ -179,17 +183,27 @@ but no redeploy.
 **One worker per fleet bucket.** The bucket records a single current deployment;
 deploying a second worker into it displaces the first for every request.
 
-**Arm the scheduler after every restart.** Automata, thread auto-archiving and
-search-index repair are driven by an internal ticker whose alarm **does not
-survive a restart**. One request to the deployment re-arms it. Without that,
-scheduled work silently never runs. The robust fix is a host-side watchdog:
+**`CELLD_ALARM_RESIDENT_MS` = 1000.** Automata, thread auto-archiving and
+search-index repair are driven by an internal ticker that re-arms itself every
+minute. celld keeps a cell resident while it has an imminent alarm — and with a
+60-second tick, the ticker's alarm is *always* imminent, so by default it never
+goes idle, never replicates, and its pending alarm dies with the node. Scheduled
+work then silently never resumes.
+
+Setting this to 1000 lets the ticker evict between ticks, so its alarm is
+persisted and celld's waker fires it after a restart. Verified: hard-kill the
+node, restart it, make no requests at all, and the ticker resumes on its own.
+
+**Arm the scheduler on first run.** A brand-new deployment has no alarm to
+restore, and the ticker is armed by the first request. One `curl` after the
+first start is enough — it is not needed on subsequent restarts. A host-side
+watchdog is still worth having as a backstop:
 
 ```cron
 * * * * * curl -sf http://127.0.0.1:8080/ >/dev/null
 ```
 
-That also recovers the scheduler after a crash. With `DEBUG_TOKEN` set you can
-check it:
+With `DEBUG_TOKEN` set you can check the ticker directly:
 
 ```bash
 curl -H "x-debug-token: $DEBUG_TOKEN" http://127.0.0.1:8080/api/debug/celld-ticker
@@ -225,8 +239,10 @@ says which variables are missing.
 **Everything behaves as though configuration is missing** — the vars file is
 probably JSON. It must be `KEY=VALUE` lines.
 
-**Automata never fire** — the ticker was not armed after the last restart. Make a
-request, and add the watchdog cron above.
+**Automata never fire** — either the deployment has never been requested (the
+first request arms the ticker), or `CELLD_ALARM_RESIDENT_MS` is unset, in which
+case the ticker never replicates and does not survive restarts. Check
+`/api/debug/celld-ticker`.
 
 **A route 404s that should exist** — `/api/debug/*` requires `DEBUG_TOKEN` to be
 set *and* the matching `x-debug-token` header.

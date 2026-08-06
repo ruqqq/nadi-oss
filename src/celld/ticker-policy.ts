@@ -24,6 +24,15 @@
  * unquiesced crash loses everything back to boot. At 60 s against a 15 s
  * threshold every tick leaves a ~45 s quiet window. Do not shorten the poll
  * interval without re-checking the celld eviction threshold.
+ *
+ * The ticker's own cell has the mirror-image problem. celld keeps a cell
+ * resident while it has an imminent alarm, and this one's alarm is always
+ * imminent — so by default the ticker never evicts, never replicates, and its
+ * pending alarm dies with the node, leaving scheduled work silently stopped
+ * after a restart. Deployments must set `CELLD_ALARM_RESIDENT_MS` low (1000)
+ * so the cell evicts between ticks and celld's waker can restore the alarm.
+ * Verified by hard-killing a node and watching the ticker resume with no
+ * inbound traffic. See docs/self-hosting-celld.md.
  */
 export const TICK_INTERVAL_MS = 60_000;
 
