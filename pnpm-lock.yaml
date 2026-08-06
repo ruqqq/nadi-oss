@@ -38,6 +38,12 @@ importers:
       '@daytona/sdk':
         specifier: ^0.193.0
         version: 0.193.0(ws@8.21.0)
+      '@noble/curves':
+        specifier: 1.9.7
+        version: 1.9.7
+      '@noble/hashes':
+        specifier: 2.2.0
+        version: 2.2.0
       '@openrouter/ai-sdk-provider':
         specifier: ^2.10.0
         version: 2.10.0(ai@6.0.213(zod@4.4.3))(zod@4.4.3)
@@ -2192,6 +2198,14 @@ packages:
   '@noble/ciphers@2.2.0':
     resolution: {integrity: sha512-Z6pjIZ/8IJcCGzb2S/0Px5J81yij85xASuk1teLNeg75bfT07MV3a/O2Mtn1I2se43k3lkVEcFaR10N4cgQcZA==}
     engines: {node: '>= 20.19.0'}
+
+  '@noble/curves@1.9.7':
+    resolution: {integrity: sha512-gbKGcRUYIjA3/zCCNaWDciTMFI0dCkvou3TL8Zmy5Nc7sJ47a0jtOeZoTaMxkuqRo9cRhjOdZJXegxYE5FN/xw==}
+    engines: {node: ^14.21.3 || >=16}
+
+  '@noble/hashes@1.8.0':
+    resolution: {integrity: sha512-jCs9ldd7NwzpgXDIf6P3+NrHh9/sD6CQdxHyjQI+h/6rDNo88ypBxxz45UDuZHz9r3tNz7N/VInSVoVdtXEI4A==}
+    engines: {node: ^14.21.3 || >=16}
 
   '@noble/hashes@2.2.0':
     resolution: {integrity: sha512-IYqDGiTXab6FniAgnSdZwgWbomxpy9FtYvLKs7wCUs2a8RkITG+DFGO1DM9cr+E3/RgADRpFjrKVaJ1z6sjtEg==}
@@ -9465,6 +9479,12 @@ snapshots:
     optional: true
 
   '@noble/ciphers@2.2.0': {}
+
+  '@noble/curves@1.9.7':
+    dependencies:
+      '@noble/hashes': 1.8.0
+
+  '@noble/hashes@1.8.0': {}
 
   '@noble/hashes@2.2.0': {}
 

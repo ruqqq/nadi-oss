@@ -45,6 +45,8 @@
     "@cloudflare/think": "0.11.1",
     "@cloudflare/voice": "0.3.3",
     "@daytona/sdk": "^0.193.0",
+    "@noble/curves": "1.9.7",
+    "@noble/hashes": "2.2.0",
     "@openrouter/ai-sdk-provider": "^2.10.0",
     "@posthog/ai": "^8.2.2",
     "agents": "^0.17.1",

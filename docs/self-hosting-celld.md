@@ -16,7 +16,9 @@ called out rather than left for you to discover.
 
 Working: the agent runtime and chat, threads and history, automata, MCP servers
 and tools, workspace secrets, attachments and published artifacts, sandboxes via
-Daytona or sprites, sign-in.
+Daytona or sprites, sign-in, and web push notifications (payloads are encrypted
+in-repo with @noble/curves + @noble/hashes + native AES-GCM because celld's
+WebCrypto has no ECDH; VAPID is signed with native ECDSA).
 
 **Not working on celld**, because they depend on Cloudflare-managed bindings that
 have no equivalent:
@@ -27,10 +29,15 @@ have no equivalent:
 | Workers AI as a model provider | same — bring your own provider key instead |
 | Browser rendering for `web_fetch` | no browser binding; fetch degrades to direct HTTP |
 | Attachment vision extraction, `toMarkdown` | needs the Workers AI binding |
-| Web push notifications | celld's WebCrypto has no ECDH |
 | GitHub App auth (private repo clone/push) | celld's WebCrypto has no RSA |
 
 Nadi hides the first two rather than offering something that fails on use.
+
+**Web push works**, though celld has no ECDH: the payload encryption is
+implemented in-repo against `@noble/curves`, selected by probing whether native
+ECDH is available rather than by platform, and verified byte-identical to the
+Cloudflare path. VAPID keys in either common format work — a raw 32-byte scalar
+(what `web-push generate-vapid-keys` emits) or PKCS#8.
 
 ## Durability: read this before you rely on it
 
