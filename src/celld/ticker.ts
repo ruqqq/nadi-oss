@@ -132,17 +132,42 @@ export type DailySweepOutcome =
   | { ran: false; reason: "not_due" | "no_registry_do"; lastRunMs?: number | null };
 
 /**
+ * Throttle for {@link armCelldTicker}, per isolate. `arm()` is idempotent but
+ * it is still a Durable Object RPC, and this runs on the Worker fetch path —
+ * unthrottled it is one RPC per request, forever, to re-arm something that
+ * re-arms itself every minute. It also keeps the ticker cell permanently
+ * resident, which is the opposite of what celld's replicate-on-idle durability
+ * model wants from a cell holding no state worth keeping.
+ *
+ * A throttle rather than a once-per-isolate latch, because the recovery
+ * property is the point: if the alarm is ever lost, the next request re-arms
+ * it. One window is all that costs.
+ */
+let lastArmAttemptMs = 0;
+
+/** Test-only: forget the throttle so a test can observe the next attempt. */
+export function resetCelldTickerArmThrottle(): void {
+  lastArmAttemptMs = 0;
+}
+
+/**
  * celld-only: ensure the ticker's first alarm exists. Called from the Worker
  * fetch path. Cloudflare has no CRON_TICKER binding (it runs `scheduled()`
- * instead), so this is a no-op there. The DO's `arm()` is idempotent and
- * cheap once armed (a storage read), so calling it fire-and-forget on every
- * request is fine, and the first request after a fresh deployment — or after
- * the alarm was lost for any reason — re-arms.
+ * instead), so this is a no-op there. Fire-and-forget: a fresh deployment, or
+ * an alarm lost for any reason, is re-armed by the next request that finds the
+ * throttle window open.
  */
-export function armCelldTicker(env: Env, ctx: ExecutionContext): void {
+export function armCelldTicker(env: Env, ctx: ExecutionContext, nowMs = Date.now()): void {
   if (!env.CRON_TICKER) return;
+  if (nowMs - lastArmAttemptMs < TICK_INTERVAL_MS) return;
+  lastArmAttemptMs = nowMs;
   const stub = env.CRON_TICKER.get(env.CRON_TICKER.idFromName(TICKER_INSTANCE_NAME));
   ctx.waitUntil(
-    stub.arm().catch((error) => log.warn("celld_ticker.arm_failed", { error: String(error) })),
+    stub.arm().catch((error) => {
+      // Reopen the window: a failed arm must not be throttled out for a full
+      // interval, or a transient error costs a tick.
+      lastArmAttemptMs = 0;
+      log.warn("celld_ticker.arm_failed", { error: String(error) });
+    }),
   );
 }

@@ -17,6 +17,7 @@
     "test:unit": "vitest run --project=unit",
     "test:integration": "vitest run --project=integration-fast --project=integration-grouped --project=integration-shared --project=integration-isolated",
     "check:wrangler": "node scripts/check-wrangler-parity.mjs",
+    "check:celld-bundle": "node scripts/check-celld-bundle.mjs",
     "check": "pnpm run typecheck && pnpm run lint && pnpm run fmt:check && pnpm test && pnpm run web:typecheck",
     "db:generate": "drizzle-kit generate && node scripts/bundle-celld-migrations.mjs",
     "celld:db:bundle": "node scripts/bundle-celld-migrations.mjs",

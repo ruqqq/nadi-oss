@@ -40,5 +40,30 @@
     "DEFAULT_MODEL_PROVIDER": "openai-oauth",
     "DEFAULT_MODEL": "gpt-5.4-mini",
     "LOG_LEVEL": "debug",
+    // Everything below works the same on celld as on Cloudflare and is kept in
+    // step with wrangler.jsonc by scripts/check-wrangler-parity.mjs. A var that
+    // genuinely cannot work here belongs in that script's CLOUDFLARE_ONLY_VARS
+    // with a reason, not silently absent from this file.
+    "CANONICAL_HOST": "app.example.com",
+    "LEGACY_HOSTS": "legacy.example.com",
+    // Process watchers + subagent dispatch. Fail closed unless explicitly enabled.
+    "BACKGROUND_WORK_ENABLED": "false",
+    // From-address for sign-in email. celld has no Cloudflare EMAIL binding, so
+    // delivery goes over HTTP via RESEND_API_KEY (a secret); with neither set,
+    // AUTH_OTP_LOG_FALLBACK writes the code to the log for local use.
+    "AUTH_EMAIL_FROM": "signin@example.com",
+    "WHITELISTED_EMAILS": "",
+    "SUPERUSER_EMAILS": "you@example.com",
+    "FEEDBACK_ADMIN_EMAILS": "you@example.com",
+    // GitHub App (private repo clone/push). Works on celld: the RS256 JWT is
+    // signed in-repo (src/github/rs256.ts) because celld's WebCrypto has no
+    // RSA. The private key must be PKCS#8 — convert a PKCS#1 key with
+    // `openssl pkcs8 -topk8 -nocrypt`.
+    "GITHUB_APP_ID": "",
+    "GITHUB_APP_CLIENT_ID": "",
+    "GITHUB_APP_SLUG": "",
+    "CODEX_DIRECT_ENABLED": "false",
+    "POSTHOG_HOST": "https://us.i.posthog.com",
+    "POSTHOG_CAPTURE_CONTENT": "true",
   },
 }

@@ -41,6 +41,9 @@ jobs:
       - name: Wrangler config parity
         run: pnpm run check:wrangler
 
+      - name: celld migration bundle up to date
+        run: pnpm run check:celld-bundle
+
       - name: Format check
         run: pnpm run fmt:check
 

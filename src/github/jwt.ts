@@ -1,14 +1,9 @@
 import type { GithubAppConfig } from "./config";
+import { bytesToBase64Url } from "../encoding";
 import { signRs256Pkcs8 } from "./rs256";
 
-function b64url(bytes: Uint8Array): string {
-  let s = "";
-  for (const b of bytes) s += String.fromCharCode(b);
-  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
 function b64urlJson(value: unknown): string {
-  return b64url(new TextEncoder().encode(JSON.stringify(value)));
+  return bytesToBase64Url(new TextEncoder().encode(JSON.stringify(value)));
 }
 
 /**
@@ -99,8 +94,8 @@ export async function createAppJwtWithRsa(
   if (nativeRsa) {
     const key = await importPkcs8(config.privateKeyPkcs8Pem);
     const sig = new Uint8Array(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, bytes));
-    return `${signingInput}.${b64url(sig)}`;
+    return `${signingInput}.${bytesToBase64Url(sig)}`;
   }
   const sig = await signRs256Pkcs8(pemToDer(config.privateKeyPkcs8Pem), bytes);
-  return `${signingInput}.${b64url(sig)}`;
+  return `${signingInput}.${bytesToBase64Url(sig)}`;
 }

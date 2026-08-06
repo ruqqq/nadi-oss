@@ -50,7 +50,7 @@ export function assertNotTransactionControl(sql: string): void {
  *  literals (`'…'`, `"…"`, `` `…` ``) and comments (`-- …` and `/* … *​/`).
  *  Chunks that contain nothing but whitespace/comments are dropped — workerd
  *  errors on a comment-only statement. */
-export function splitSqlStatements(sql: string): string[] {
+function splitSqlStatements(sql: string): string[] {
   const statements: string[] = [];
   let current = "";
   let quote: "'" | '"' | "`" | null = null;

@@ -23,12 +23,13 @@ import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import * as schema from "../../src/db/schema";
 import type { Env } from "../../src/env";
-import { armCelldTicker } from "../../src/celld/ticker";
+import { armCelldTicker, resetCelldTickerArmThrottle } from "../../src/celld/ticker";
 import {
   DAILY_INTERVAL_MS,
   TICKER_LAST_DAILY_RUN_KEY,
   TICKER_LAST_TICK_KEY,
   TICKER_INSTANCE_NAME,
+  TICK_INTERVAL_MS,
 } from "../../src/celld/ticker-policy";
 import { RegistryKV } from "../../src/db/registry-kv";
 import { seedRegistryThread } from "./helpers/registry";
@@ -191,6 +192,7 @@ describe("celld ticker (CRON_TICKER)", () => {
   it("arms the first alarm from the worker fetch path, and is a no-op on Cloudflare", async () => {
     // Start from a known state (DO storage is shared across tests here).
     await runInDurableObject(tickerStub(), async (_instance, state) => state.storage.deleteAlarm());
+    resetCelldTickerArmThrottle();
 
     // Cloudflare: no CRON_TICKER binding → nothing is armed and nothing throws.
     armCelldTicker(
@@ -206,6 +208,31 @@ describe("celld ticker (CRON_TICKER)", () => {
     const armedAt = await readAlarm();
     expect(armedAt).not.toBeNull();
     expect(armedAt as number).toBeGreaterThan(Date.now());
+  });
+
+  it("throttles arming to one attempt per tick interval, and reopens after it", async () => {
+    // Unthrottled this runs a Durable Object RPC on every single request.
+    await runInDurableObject(tickerStub(), async (_instance, state) => state.storage.deleteAlarm());
+    resetCelldTickerArmThrottle();
+
+    const first = createExecutionContext();
+    armCelldTicker(poolEnv, first, 1_000_000);
+    await waitOnExecutionContext(first);
+    expect(await readAlarm()).not.toBeNull();
+
+    // Inside the window: the alarm is deleted and the call must NOT re-arm it,
+    // which is only observable because nothing else re-arms in between.
+    await runInDurableObject(tickerStub(), async (_instance, state) => state.storage.deleteAlarm());
+    const throttled = createExecutionContext();
+    armCelldTicker(poolEnv, throttled, 1_000_000 + TICK_INTERVAL_MS - 1);
+    await waitOnExecutionContext(throttled);
+    expect(await readAlarm()).toBeNull();
+
+    // Once the window passes, a lost alarm is recovered.
+    const after = createExecutionContext();
+    armCelldTicker(poolEnv, after, 1_000_000 + TICK_INTERVAL_MS);
+    await waitOnExecutionContext(after);
+    expect(await readAlarm()).not.toBeNull();
   });
 
   it("runs the daily sweep when due but not every tick, deciding from registry state", async () => {

@@ -70,16 +70,10 @@ describe("resolvePlatform", () => {
 });
 
 describe("platformCapabilities", () => {
-  it("grants hasManagedBindings and speechToText only on cloudflare", () => {
-    expect(platformCapabilities({})).toEqual({ hasManagedBindings: true, speechToText: true });
-    expect(platformCapabilities({ NADI_PLATFORM: "cloudflare" })).toEqual({
-      hasManagedBindings: true,
-      speechToText: true,
-    });
-    expect(platformCapabilities({ NADI_PLATFORM: "celld" })).toEqual({
-      hasManagedBindings: false,
-      speechToText: false,
-    });
+  it("grants speechToText only on cloudflare", () => {
+    expect(platformCapabilities({})).toEqual({ speechToText: true });
+    expect(platformCapabilities({ NADI_PLATFORM: "cloudflare" })).toEqual({ speechToText: true });
+    expect(platformCapabilities({ NADI_PLATFORM: "celld" })).toEqual({ speechToText: false });
   });
 
   it("keeps speechToText tied to the platform, never to the voice flag", () => {
