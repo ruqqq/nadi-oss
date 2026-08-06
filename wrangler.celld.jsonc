@@ -30,6 +30,11 @@
     "APP_BASE_URL": "http://localhost:8080",
     "ARTIFACTS_HOST": "artifacts.localhost",
     "DEFAULT_WORKSPACE_ID": "default",
+    // Written into every new account's default agent (agents.provider/model are
+    // NOT NULL). Omitting them makes first sign-in fail with an opaque
+    // constraint error after the user row is already created.
+    "DEFAULT_MODEL_PROVIDER": "openai-oauth",
+    "DEFAULT_MODEL": "gpt-5.4-mini",
     "LOG_LEVEL": "debug",
   },
 }

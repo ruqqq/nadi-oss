@@ -147,6 +147,15 @@ export interface Env extends Cloudflare.Env {
   EMAIL: SendEmail;
   AUTH_EMAIL_FROM: string;
   EMAIL_DELIVERY_DISABLED?: string;
+  /**
+   * Local development fallback: write the sign-in email (OTP included) to the
+   * log instead of sending it, so a self-hoster with no SMTP — or celld, which
+   * has no email binding at all — can still complete a sign-in locally.
+   *
+   * This puts a working credential in the log. Off unless set to "true", and
+   * refused outright on the cloud edition regardless of this value.
+   */
+  AUTH_OTP_LOG_FALLBACK?: string;
 
   /** Exact comma-separated emails allowed to read the private feedback inbox. */
   FEEDBACK_ADMIN_EMAILS?: string;

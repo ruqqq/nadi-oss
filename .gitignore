@@ -59,3 +59,6 @@ wrangler.prod.jsonc
 # Reasonix host session state (task lists, subagent snapshots). Never part of
 # the repo; without this, oxfmt picks up its JSON snapshots and fmt:check fails.
 .reasonix/
+
+# Local celld smoke-test config, generated from .env.local (contains secrets).
+wrangler.smoke.jsonc
