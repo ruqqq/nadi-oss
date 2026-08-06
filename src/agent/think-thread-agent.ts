@@ -184,6 +184,7 @@ import { FeedbackRepository } from "../db/repositories/feedback";
 import { WorkspacePrivacySettingsRepository } from "../db/repositories/workspace-privacy-settings";
 import { ThreadRepository } from "../db/repositories/threads";
 import { registryBinding, registryDb } from "../db/client";
+import { attachmentsBucket } from "../storage/bucket-binding";
 import { log } from "../log";
 import {
   commitWorkbenchSwitchIfPending,
@@ -1122,7 +1123,7 @@ export class ThinkThreadAgent extends Think<Env> {
     );
     const referencedAttachmentIds = extractAttachmentIdsFromModelMessages(_ctx.messages);
     if (referencedAttachmentIds.length > 0) {
-      await new AttachmentRepository(this.env.REGISTRY_DB).markCommitted(
+      await new AttachmentRepository(registryBinding(this.env)).markCommitted(
         referencedAttachmentIds,
         this.name,
       );
@@ -1416,7 +1417,7 @@ export class ThinkThreadAgent extends Think<Env> {
     }
     const referencedAttachmentIds = extractAttachmentIdsFromModelMessages(_ctx.messages);
     if (referencedAttachmentIds.length > 0) {
-      await new AttachmentRepository(this.env.REGISTRY_DB).markCommitted(
+      await new AttachmentRepository(registryBinding(this.env)).markCommitted(
         referencedAttachmentIds,
         this.name,
       );
@@ -1562,7 +1563,7 @@ export class ThinkThreadAgent extends Think<Env> {
     messages: ModelMessage[],
     cfg: { inputModalities?: string[]; modelInputModalities?: string[] },
   ): Promise<ModelMessage[]> {
-    const repo = new AttachmentRepository(this.env.REGISTRY_DB);
+    const repo = new AttachmentRepository(registryBinding(this.env));
     return prepareModelMessagesForModel(messages, {
       inputModalities: cfg.modelInputModalities ?? cfg.inputModalities ?? ["text"],
       resolveAttachment: async (id) => {
@@ -1616,7 +1617,7 @@ export class ThinkThreadAgent extends Think<Env> {
     return {
       extract: createAttachmentExtractor({
         ai: ai as unknown as WorkersAi,
-        bucket: this.env.ATTACHMENTS_BUCKET,
+        bucket: attachmentsBucket(this.env),
         store,
       }),
     };
@@ -5211,7 +5212,7 @@ export class ThinkThreadAgent extends Think<Env> {
     return this.serializeQueuedRpc(async () => {
       await submitQueuedUserMessageBatch(this.queuedSubmissionPort(), normalized);
       if (normalized.attachmentIds.length > 0) {
-        await new AttachmentRepository(this.env.REGISTRY_DB).markCommitted(
+        await new AttachmentRepository(registryBinding(this.env)).markCommitted(
           normalized.attachmentIds,
           this.name,
         );
@@ -5244,7 +5245,7 @@ export class ThinkThreadAgent extends Think<Env> {
         interviewId: active.interviewId,
       });
       if (normalized.attachmentIds.length > 0) {
-        await new AttachmentRepository(this.env.REGISTRY_DB).markCommitted(
+        await new AttachmentRepository(registryBinding(this.env)).markCommitted(
           normalized.attachmentIds,
           this.name,
         );
@@ -5585,7 +5586,7 @@ export class ThinkThreadAgent extends Think<Env> {
   }
 
   private async assertFeedbackAttachmentsBelongToThread(attachmentIds: string[]): Promise<void> {
-    const repo = new AttachmentRepository(this.env.REGISTRY_DB);
+    const repo = new AttachmentRepository(registryBinding(this.env));
     for (const attachmentId of attachmentIds) {
       const row = await repo.getByIdInThread(attachmentId, this.name);
       if (!row) throw new Error("feedback_attachment_not_found");
@@ -5593,7 +5594,7 @@ export class ThinkThreadAgent extends Think<Env> {
   }
 
   private async assertFeedbackScreenshotsBelongToThread(attachmentIds: string[]): Promise<void> {
-    const repo = new AttachmentRepository(this.env.REGISTRY_DB);
+    const repo = new AttachmentRepository(registryBinding(this.env));
     for (const attachmentId of attachmentIds) {
       const row = await repo.getByIdInThread(attachmentId, this.name);
       if (!row || !row.mimeType.startsWith("image/")) {

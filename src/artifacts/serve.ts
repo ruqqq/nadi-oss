@@ -1,5 +1,7 @@
 import type { Env } from "../env";
+import { registryBinding } from "../db/client";
 import { ArtifactRepository } from "../db/artifact-repository";
+import { attachmentsBucket } from "../storage/bucket-binding";
 import { mimeFromFilename } from "./mime";
 import { normalizeArtifactRelPath } from "./paths";
 import { deriveArtifactViewSecret, verifyArtifactViewToken } from "./view-token";
@@ -41,7 +43,7 @@ export async function respondExpired(
     // best-effort
   }
   if (r2Prefix) {
-    await deleteR2PrefixBestEffort(env.ATTACHMENTS_BUCKET, r2Prefix);
+    await deleteR2PrefixBestEffort(attachmentsBucket(env), r2Prefix);
   }
   return new Response("Artifact expired", { status: 410 });
 }
@@ -67,7 +69,7 @@ export async function handleArtifactHostRequest(req: Request, env: Env): Promise
     return new Response("Unauthorized", { status: 401 });
   }
 
-  const repo = new ArtifactRepository(env.REGISTRY_DB);
+  const repo = new ArtifactRepository(registryBinding(env));
   const row = await repo.getById(artifactId);
   if (!row || artifactExpired(row, nowMs)) {
     return respondExpired(env, repo, artifactId, row?.r2Prefix);
@@ -85,7 +87,7 @@ export async function handleArtifactHostRequest(req: Request, env: Env): Promise
   }
 
   const key = `${row.r2Prefix}${rel}`;
-  const object = await env.ATTACHMENTS_BUCKET.get(key);
+  const object = await attachmentsBucket(env).get(key);
   if (!object) {
     return new Response("Not found", { status: 404 });
   }

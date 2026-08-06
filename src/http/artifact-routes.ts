@@ -3,7 +3,7 @@ import type { Env } from "../env";
 import { artifactExpired, respondExpired } from "../artifacts/serve";
 import { deriveArtifactViewSecret, signArtifactViewToken } from "../artifacts/view-token";
 import { validateRequestSession } from "../auth/session";
-import { registryDb } from "../db/client";
+import { registryBinding, registryDb } from "../db/client";
 import { ArtifactRepository } from "../db/artifact-repository";
 import { threadIndex, workspaceMembers } from "../db/schema";
 import { assertFeedbackReporter } from "../feedback/access";
@@ -101,7 +101,7 @@ async function loadAuthorizedArtifact(
   | { ok: true; row: NonNullable<Awaited<ReturnType<ArtifactRepository["getById"]>>> }
   | { ok: false; response: Response }
 > {
-  const repo = new ArtifactRepository(env.REGISTRY_DB);
+  const repo = new ArtifactRepository(registryBinding(env));
   const row = await repo.getById(id);
   if (!row) return { ok: false, response: new Response("Not found", { status: 404 }) };
 

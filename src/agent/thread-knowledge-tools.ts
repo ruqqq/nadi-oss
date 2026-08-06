@@ -1,7 +1,7 @@
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import { GREP_MAX_PATTERN_LENGTH } from "../compute/output";
-import { registryDb } from "../db/client";
+import { registryBinding, registryDb } from "../db/client";
 import type { Env } from "../env";
 import type { ThreadKnowledgeService } from "../thread-knowledge/service";
 import {
@@ -248,7 +248,7 @@ async function createService(input: {
   return new ThreadKnowledgeService({
     env: input.env,
     db: registryDb(input.env),
-    binding: input.env.REGISTRY_DB,
+    binding: registryBinding(input.env),
     scope,
   });
 }

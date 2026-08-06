@@ -167,6 +167,21 @@ export interface Env extends Cloudflare.Env {
   R2_SECRET_ACCESS_KEY: string;
 
   /**
+   * celld S3 config. When set, the `ATTACHMENTS_BUCKET` / `BACKUP_BUCKET`
+   * bindings are replaced by S3Bucket facades signed with these credentials
+   * against `S3_ENDPOINT` (path-style addressing: `{endpoint}/{bucket}/{key}`),
+   * and presigned attachment URLs are minted against `S3_ENDPOINT` too.
+   * Endpoint is a var; the access key id and secret are secrets. Absent on
+   * Cloudflare, which keeps the real R2 bindings. When only part of the S3
+   * config is present the bucket helpers fail loudly rather than guess.
+   */
+  S3_ENDPOINT?: string;
+  S3_ACCESS_KEY_ID?: string;
+  S3_SECRET_ACCESS_KEY?: string;
+  S3_ATTACHMENTS_BUCKET_NAME?: string;
+  S3_BACKUP_BUCKET_NAME?: string;
+
+  /**
    * PostHog project key for backend instrumentation. When unset, PostHog
    * capture is a no-op. Set via `wrangler secret put POSTHOG_KEY`.
    */

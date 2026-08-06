@@ -2,6 +2,7 @@ import { getAgentByName } from "agents";
 import { desc, eq } from "drizzle-orm";
 import type { Env } from "../env";
 import { registryDb } from "../db/client";
+import { attachmentsBucket } from "../storage/bucket-binding";
 import { agents, attachments, threadIndex, users } from "../db/schema";
 import { McpServerRepository } from "../db/repositories/mcp-servers";
 import { NotificationRepository } from "../db/repositories/notifications";
@@ -193,7 +194,7 @@ async function resolveVisionSource(
   if (!IMAGE_MIME_RE.test(row.mimeType)) {
     return new Response("attachment must be an image", { status: 415 });
   }
-  const object = await env.ATTACHMENTS_BUCKET.get(row.r2Key);
+  const object = await attachmentsBucket(env).get(row.r2Key);
   if (!object) return new Response("attachment bytes not found", { status: 404 });
   return {
     buffer: await object.arrayBuffer(),
@@ -598,7 +599,7 @@ export async function routeDebug(req: Request, env: Env): Promise<Response | nul
       return new Response("attachment must be an image", { status: 415 });
     }
 
-    const object = await env.ATTACHMENTS_BUCKET.get(row.r2Key);
+    const object = await attachmentsBucket(env).get(row.r2Key);
     if (!object) return new Response("attachment bytes not found", { status: 404 });
 
     return tryJson(async () => {

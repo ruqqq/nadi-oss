@@ -1,5 +1,6 @@
 import { tool } from "ai";
 import { z } from "zod";
+import { registryBinding } from "../db/client";
 import { AttachmentRepository } from "../db/attachment-repository";
 import {
   PRESIGN_EXPIRES_SECONDS,
@@ -38,7 +39,7 @@ function attachmentExtractionForTool(
 }
 
 export function createAttachmentTools(deps: { env: Env; threadId: string }) {
-  const repo = new AttachmentRepository(deps.env.REGISTRY_DB);
+  const repo = new AttachmentRepository(registryBinding(deps.env));
   return {
     listAttachments: tool({
       description:
