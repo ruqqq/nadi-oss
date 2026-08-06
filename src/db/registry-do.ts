@@ -18,6 +18,13 @@ import { runRegistryMigrations } from "./registry-migrations";
  * statements and `execBatch(statements)` for the whole-array-in-one-transaction
  * path `batch()` needs. Everything else (bind, first, raw, exec multi-
  * statement, D1 result/meta shapes) is facade-side.
+ *
+ * The celld edition also keeps workspace secrets here: `kvGet`/`kvPut`/
+ * `kvDelete`/`kvList` serve the KVNamespace-shaped `RegistryKV` facade over a
+ * DO-private `__celld_kv` table created at boot (see ensureCelldKvTable).
+ * Values are opaque text (already AES-GCM ciphertext) — the table stores them
+ * verbatim and the facade owns all KV semantics, including rejecting options
+ * that would change them (expiration/expirationTtl/metadata).
  */
 
 export interface RegistryAllResult {
@@ -41,11 +48,66 @@ export interface RegistryBatchItem {
   params: unknown[];
 }
 
+/** One page of `kvList` results, shaped like a real KV `list()` page. */
+export interface RegistryKvListPage {
+  keys: { name: string }[];
+  list_complete: boolean;
+  /** Present only when `list_complete` is false; opaque to the facade. */
+  cursor: string | null;
+  cacheStatus: string | null;
+}
+
+export interface RegistryKvListRequest {
+  prefix: string;
+  limit: number;
+  cursor: string | null;
+}
+
 function toSqlStorageValue(value: unknown): SqlStorageValue {
   // D1 accepts booleans and stores them as 1/0; SqlStorage bind values are
   // string | number | null | ArrayBuffer, so coerce before binding.
   if (typeof value === "boolean") return value ? 1 : 0;
   return value as SqlStorageValue;
+}
+
+/** The celld-only KV table. Created by the DO at boot, never a migration:
+ *  it is DO-private storage, not part of the shared Cloudflare schema. */
+const CELLD_KV_TABLE_DDL = `CREATE TABLE IF NOT EXISTS __celld_kv (
+	key TEXT PRIMARY KEY,
+	value TEXT NOT NULL
+)`;
+
+/** KV lists keys in lexicographic byte order; the default/maximum page size
+ *  mirrors real KV (1000). */
+const KV_LIST_DEFAULT_LIMIT = 1000;
+/** U+10FFFF — the largest valid UTF-8 code point. `prefix + this` is the
+ *  bytewise upper bound for "keys starting with `prefix`" under SQLite's
+ *  BINARY collation. Edge note: a key whose first code point after `prefix`
+ *  is exactly U+10FFFF sorts at the bound and is excluded — unreachable for
+ *  secrets keys (ASCII `workspaces/<id>/secrets/<name>`), so the cheaper
+ *  range bound wins over a LIKE-based predicate (LIKE is ASCII-case-insensitive
+ *  in SQLite, which would break key ordering). */
+const KV_LIST_PREFIX_CEILING = "\u{10FFFF}";
+
+/** Encode the pagination state into the opaque cursor string the facade hands
+ *  back verbatim: the prefix the page belongs to plus the last key returned,
+ *  so a cursor is only ever applied to the query that produced it. */
+function encodeKvCursor(prefix: string, lastKey: string): string {
+  const json = JSON.stringify({ p: prefix, k: lastKey });
+  let binary = "";
+  for (const byte of new TextEncoder().encode(json)) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function decodeKvCursor(cursor: string): { p: string; k: string } | null {
+  try {
+    const binary = atob(cursor);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return JSON.parse(new TextDecoder().decode(bytes)) as { p: string; k: string };
+  } catch {
+    return null;
+  }
 }
 
 export class RegistryDatabase extends DurableObject<Env> {
@@ -56,6 +118,7 @@ export class RegistryDatabase extends DurableObject<Env> {
     void ctx.blockConcurrencyWhile(async () => {
       try {
         await runRegistryMigrations(this.ctx.storage);
+        ensureCelldKvTable(this.ctx.storage.sql);
       } catch (error) {
         this.migrationError = error;
       }
@@ -137,4 +200,72 @@ export class RegistryDatabase extends DurableObject<Env> {
   private throwIfMigrationFailed(): void {
     if (this.migrationError) throw this.migrationError;
   }
+
+  async kvGet(key: string): Promise<string | null> {
+    this.throwIfMigrationFailed();
+    const row = this.ctx.storage.sql
+      .exec("SELECT value FROM __celld_kv WHERE key = ?", key)
+      .toArray()[0];
+    return row ? (row.value as string) : null;
+  }
+
+  async kvPut(key: string, value: string): Promise<void> {
+    this.throwIfMigrationFailed();
+    this.ctx.storage.sql.exec(
+      "INSERT INTO __celld_kv (key, value) VALUES (?, ?) " +
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      key,
+      value,
+    );
+  }
+
+  async kvDelete(key: string): Promise<void> {
+    this.throwIfMigrationFailed();
+    this.ctx.storage.sql.exec("DELETE FROM __celld_kv WHERE key = ?", key);
+  }
+
+  async kvList(request: RegistryKvListRequest): Promise<RegistryKvListPage> {
+    this.throwIfMigrationFailed();
+    const { prefix, cursor } = request;
+    const limit = Math.min(Math.max(request.limit, 1), KV_LIST_DEFAULT_LIMIT);
+    const after = cursor === null ? null : decodeKvCursor(cursor);
+    if (cursor !== null && after === null) {
+      throw new Error("RegistryKV list: malformed cursor");
+    }
+    if (after !== null && after.p !== prefix) {
+      throw new Error(
+        "RegistryKV list: cursor was issued for a different prefix; refusing to apply it",
+      );
+    }
+    // `prefix + U+10FFFF` is the bytewise upper bound for "keys starting with
+    // `prefix`" under SQLite's BINARY collation (the same order KV lists keys
+    // in).
+    const params: SqlStorageValue[] = [prefix, prefix + KV_LIST_PREFIX_CEILING];
+    let sql = "SELECT key FROM __celld_kv WHERE key >= ? AND key < ?";
+    if (after) {
+      sql += " AND key > ?";
+      params.push(after.k);
+    }
+    // Fetch one row past the page so `list_complete` reflects the namespace,
+    // not just the page (a facade that always says complete silently
+    // truncates for callers that loop on the cursor).
+    sql += " ORDER BY key LIMIT ?";
+    params.push(limit + 1);
+    const keys = this.ctx.storage.sql
+      .exec(sql, ...params)
+      .toArray()
+      .map((row) => row.key as string);
+    const page = keys.slice(0, limit);
+    const hasMore = keys.length > limit;
+    return {
+      keys: page.map((name) => ({ name })),
+      list_complete: !hasMore,
+      cursor: hasMore ? encodeKvCursor(prefix, page[page.length - 1]!) : null,
+      cacheStatus: null,
+    };
+  }
+}
+
+function ensureCelldKvTable(storage: SqlStorage): void {
+  storage.exec(CELLD_KV_TABLE_DDL);
 }
