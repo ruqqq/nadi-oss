@@ -183,7 +183,7 @@ import { AgentSkillRepository } from "../db/repositories/agent-skills";
 import { FeedbackRepository } from "../db/repositories/feedback";
 import { WorkspacePrivacySettingsRepository } from "../db/repositories/workspace-privacy-settings";
 import { ThreadRepository } from "../db/repositories/threads";
-import { registryDb } from "../db/client";
+import { registryBinding, registryDb } from "../db/client";
 import { log } from "../log";
 import {
   commitWorkbenchSwitchIfPending,
@@ -2708,8 +2708,9 @@ export class ThinkThreadAgent extends Think<Env> {
       title: string;
       source: "manual" | "automaton";
     }) => {
-      await this.env.REGISTRY_DB.prepare(
-        `
+      await registryBinding(this.env)
+        .prepare(
+          `
           INSERT INTO thread_index (
             id, workspace_id, agent_id, title, title_set, runtime, source,
             automaton_id, automaton_run_id, last_event_id, last_message_preview,
@@ -2717,7 +2718,7 @@ export class ThinkThreadAgent extends Think<Env> {
           )
           VALUES (?, ?, ?, ?, 1, 'think', ?, ?, ?, NULL, '', ?, ?)
         `,
-      )
+        )
         .bind(
           input.threadId,
           runtimeConfig.workspaceId,
@@ -2832,19 +2833,19 @@ export class ThinkThreadAgent extends Think<Env> {
       }
       try {
         const placeholders = tempThreadIds.map(() => "?").join(", ");
-        await this.env.REGISTRY_DB.batch([
-          this.env.REGISTRY_DB.prepare(
-            `DELETE FROM thread_search_messages WHERE thread_id IN (${placeholders})`,
-          ).bind(...tempThreadIds),
-          this.env.REGISTRY_DB.prepare(
-            `DELETE FROM archived_message WHERE thread_id IN (${placeholders})`,
-          ).bind(...tempThreadIds),
-          this.env.REGISTRY_DB.prepare(
-            `DELETE FROM archived_compaction WHERE thread_id IN (${placeholders})`,
-          ).bind(...tempThreadIds),
-          this.env.REGISTRY_DB.prepare(
-            `DELETE FROM thread_index WHERE id IN (${placeholders})`,
-          ).bind(...tempThreadIds),
+        await registryBinding(this.env).batch([
+          registryBinding(this.env)
+            .prepare(`DELETE FROM thread_search_messages WHERE thread_id IN (${placeholders})`)
+            .bind(...tempThreadIds),
+          registryBinding(this.env)
+            .prepare(`DELETE FROM archived_message WHERE thread_id IN (${placeholders})`)
+            .bind(...tempThreadIds),
+          registryBinding(this.env)
+            .prepare(`DELETE FROM archived_compaction WHERE thread_id IN (${placeholders})`)
+            .bind(...tempThreadIds),
+          registryBinding(this.env)
+            .prepare(`DELETE FROM thread_index WHERE id IN (${placeholders})`)
+            .bind(...tempThreadIds),
         ]);
       } catch (error) {
         errors.push(error instanceof Error ? error.message : String(error));

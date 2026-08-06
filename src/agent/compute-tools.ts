@@ -5,7 +5,7 @@ import { AttachmentRepository } from "../db/attachment-repository";
 import { deleteR2PrefixBestEffort } from "../artifacts/serve";
 import { ArtifactRepository } from "../db/artifact-repository";
 import { AgentSkillRepository } from "../db/repositories/agent-skills";
-import { registryDb } from "../db/client";
+import { registryBinding, registryDb } from "../db/client";
 import { computeConfigFromInputs, loadComputeConfigInputs } from "../compute/settings";
 import { ThreadComputeStore } from "../compute/thread-store";
 import { ThreadComputeService } from "../compute/thread-service";
@@ -547,7 +547,7 @@ export function buildComputeQuotaGate(input: {
   if (!isQuotaGatedProvider(input.effectiveConfig.provider, input.daytonaMode, input.spritesMode))
     return undefined;
   return createComputeQuotaGate({
-    ledger: new ContainerLedger(input.env.REGISTRY_DB),
+    ledger: new ContainerLedger(registryBinding(input.env)),
     workspaceId: input.workspaceId,
     threadId: input.threadId,
     provider: input.effectiveConfig.provider,
