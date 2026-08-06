@@ -5,6 +5,13 @@ import { registryDb } from "../db/client";
 import { attachmentsBucket } from "../storage/bucket-binding";
 import { agents, attachments, threadIndex, users } from "../db/schema";
 import { McpServerRepository } from "../db/repositories/mcp-servers";
+import { RegistryKV } from "../db/registry-kv";
+import {
+  DAILY_INTERVAL_MS,
+  TICKER_LAST_DAILY_RUN_KEY,
+  TICKER_LAST_TICK_KEY,
+  TICK_INTERVAL_MS,
+} from "../celld/ticker-policy";
 import { NotificationRepository } from "../db/repositories/notifications";
 import { isWebPushConfigured, sendWebPush } from "../notifications/web-push";
 import { WorkspaceRepository } from "../db/repositories/workspaces";
@@ -1145,6 +1152,37 @@ export async function routeDebug(req: Request, env: Env): Promise<Response | nul
       return Response.json({ error: "SPRITES_API_KEY not set" }, { status: 400 });
     }
     return tryJson(async () => runSpritesSmoke(env));
+  }
+
+  // GET /api/debug/celld-ticker — celld-only: is the ticker alive? Reads the
+  // liveness markers the CelldTicker writes into the registry DO every tick
+  // (the ticker itself keeps no state, so there is nothing to read off it).
+  // On Cloudflare there is no REGISTRY_DO — scheduled() runs there instead —
+  // so the route reports not_applicable rather than a stale-looking null.
+  if (url.pathname === "/api/debug/celld-ticker" && req.method === "GET") {
+    if (!env.REGISTRY_DO) {
+      return Response.json({
+        ticker: "not_applicable",
+        note: "no REGISTRY_DO binding — Cloudflare runs scheduled() instead",
+      });
+    }
+    // `registry` is captured so the narrowed (non-undefined) type survives
+    // into the tryJson closure — TS does not keep property narrowing there.
+    const registry = env.REGISTRY_DO;
+    return tryJson(async () => {
+      const kv = new RegistryKV(registry);
+      const [lastTickRaw, lastDailyRunRaw] = await Promise.all([
+        kv.get(TICKER_LAST_TICK_KEY),
+        kv.get(TICKER_LAST_DAILY_RUN_KEY),
+      ]);
+      return {
+        ticker: "celld",
+        tickIntervalMs: TICK_INTERVAL_MS,
+        dailyIntervalMs: DAILY_INTERVAL_MS,
+        lastTickMs: lastTickRaw === null ? null : Number(lastTickRaw),
+        lastDailyRunMs: lastDailyRunRaw === null ? null : Number(lastDailyRunRaw),
+      };
+    });
   }
 
   return new Response("debug route not found", { status: 404 });

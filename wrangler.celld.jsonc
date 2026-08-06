@@ -10,6 +10,7 @@
   "durable_objects": {
     "bindings": [
       { "name": "REGISTRY_DO", "class_name": "RegistryDatabase" },
+      { "name": "CRON_TICKER", "class_name": "CelldTicker" },
       { "name": "THINK_THREAD_AGENT", "class_name": "ThinkThreadAgent" },
       { "name": "WORKSPACE_MCP_AGENT", "class_name": "WorkspaceMcpAgent" },
       { "name": "USER_HUB", "class_name": "UserHub" },
@@ -22,6 +23,9 @@
     { "tag": "v3", "new_sqlite_classes": ["ThinkThreadAgent"] },
     { "tag": "v4", "new_sqlite_classes": ["VoiceAgent"] },
     { "tag": "v5", "new_sqlite_classes": ["RegistryDatabase"] },
+    // celld-only ticker standing in for Cloudflare's scheduled() cron (celld
+    // rejects triggers). Its alarm re-arms itself every minute.
+    { "tag": "v6", "new_sqlite_classes": ["CelldTicker"] },
   ],
   "vars": {
     "NADI_EDITION": "self-hosted",
