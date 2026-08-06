@@ -9,24 +9,27 @@
   "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
     "bindings": [
+      { "name": "REGISTRY_DO", "class_name": "RegistryDatabase" },
       { "name": "THINK_THREAD_AGENT", "class_name": "ThinkThreadAgent" },
       { "name": "WORKSPACE_MCP_AGENT", "class_name": "WorkspaceMcpAgent" },
       { "name": "USER_HUB", "class_name": "UserHub" },
-      { "name": "VOICE_AGENT", "class_name": "VoiceAgent" }
-    ]
+      { "name": "VOICE_AGENT", "class_name": "VoiceAgent" },
+    ],
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["WorkspaceMcpAgent"] },
     { "tag": "v2", "new_sqlite_classes": ["UserHub"] },
     { "tag": "v3", "new_sqlite_classes": ["ThinkThreadAgent"] },
-    { "tag": "v4", "new_sqlite_classes": ["VoiceAgent"] }
+    { "tag": "v4", "new_sqlite_classes": ["VoiceAgent"] },
+    { "tag": "v5", "new_sqlite_classes": ["RegistryDatabase"] },
   ],
   "vars": {
     "NADI_EDITION": "self-hosted",
+    "NADI_PLATFORM": "celld",
     "APP_NAME": "Nadi",
     "APP_BASE_URL": "http://localhost:8080",
     "ARTIFACTS_HOST": "artifacts.localhost",
     "DEFAULT_WORKSPACE_ID": "default",
-    "LOG_LEVEL": "debug"
-  }
+    "LOG_LEVEL": "debug",
+  },
 }
