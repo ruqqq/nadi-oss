@@ -177,9 +177,19 @@ class RegistryD1Statement implements D1PreparedStatement {
     return this.boundParams;
   }
 
-  bind(...values: unknown[]): this {
-    this.boundParams = values;
-    return this;
+  /**
+   * Returns a NEW statement rather than mutating this one — D1's prepared
+   * statements are immutable, and `drizzle-orm/d1` depends on it: it caches one
+   * statement per prepared query (`this.stmt`) and calls `.bind(...)` on it for
+   * every execution, and its `batch` path pushes each `stmt.bind(...)` result
+   * into a list. Mutating and returning `this` makes two executions of the same
+   * cached query share whichever params were bound last — silently reading or
+   * writing the wrong rows, with no error to notice.
+   */
+  bind(...values: unknown[]): D1PreparedStatement {
+    const bound = new RegistryD1Statement(this.stub, this.sql);
+    bound.boundParams = values;
+    return bound;
   }
 
   async first<T = Record<string, unknown>>(): Promise<T | null>;

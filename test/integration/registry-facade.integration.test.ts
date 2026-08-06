@@ -156,6 +156,46 @@ describe("RegistryD1 D1 surface", () => {
   });
 });
 
+describe("prepared statement immutability", () => {
+  // D1 statements are immutable: bind() returns a NEW statement. drizzle-orm/d1
+  // caches one statement per prepared query and re-binds it per execution, so a
+  // mutating bind() makes concurrent (or same-batch) executions share whichever
+  // params were bound last — wrong rows, silently.
+  it("bind() returns a new statement and leaves earlier bindings intact", async () => {
+    const db = freshFacade();
+    const base = db.prepare("SELECT ?1 AS v");
+    const first = base.bind(1);
+    const second = base.bind(2);
+
+    expect(first).not.toBe(second);
+    expect(await first.first<{ v: number }>("v")).toBe(1);
+    expect(await second.first<{ v: number }>("v")).toBe(2);
+  });
+
+  it("statements bound ahead of execution keep their own params", async () => {
+    const db = freshFacade();
+    const cached = db.prepare("SELECT ?1 AS v");
+    const values = [10, 20, 30, 40];
+
+    // Bind all of them BEFORE awaiting any — this is the shape that breaks with
+    // a mutating bind(), and the shape drizzle's batch path builds. Binding and
+    // awaiting one at a time would pass either way, so it would guard nothing.
+    const bound = values.map((value) => cached.bind(value));
+    const results = await Promise.all(bound.map((s) => s.first<{ v: number }>("v")));
+
+    expect(results).toEqual(values);
+  });
+
+  it("batch applies each statement's own params", async () => {
+    const db = freshFacade();
+    const cached = db.prepare("SELECT ?1 AS v");
+    const [a, b] = await db.batch<{ v: number }>([cached.bind(7), cached.bind(9)]);
+
+    expect(a?.results?.[0]?.v).toBe(7);
+    expect(b?.results?.[0]?.v).toBe(9);
+  });
+});
+
 describe("transaction control", () => {
   it("run() of a transaction-control statement throws the D1-shaped error", async () => {
     const db = freshFacade();
