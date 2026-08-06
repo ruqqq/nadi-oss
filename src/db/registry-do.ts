@@ -2,6 +2,15 @@ import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../env";
 import { assertNotTransactionControl } from "./registry-d1";
 import { runRegistryMigrations } from "./registry-migrations";
+import { runRegistryBatch, toSqlStorageValue } from "./registry-batch";
+
+export {
+  runRegistryBatch,
+  toSqlStorageValue,
+  type RegistryAllResult,
+  type RegistryBatchItem,
+} from "./registry-batch";
+import type { RegistryAllResult, RegistryBatchItem } from "./registry-batch";
 
 /**
  * The celld registry: a single Durable Object holding the whole registry
@@ -27,12 +36,6 @@ import { runRegistryMigrations } from "./registry-migrations";
  * that would change them (expiration/expirationTtl/metadata).
  */
 
-export interface RegistryAllResult {
-  results: Record<string, SqlStorageValue>[];
-  success: true;
-  meta: D1Meta;
-}
-
 export interface RegistryRunResult {
   success: true;
   meta: D1Meta;
@@ -41,11 +44,6 @@ export interface RegistryRunResult {
 export interface RegistryRawResult {
   columnNames: string[];
   rows: SqlStorageValue[][];
-}
-
-export interface RegistryBatchItem {
-  sql: string;
-  params: unknown[];
 }
 
 /** One page of `kvList` results, shaped like a real KV `list()` page. */
@@ -61,13 +59,6 @@ export interface RegistryKvListRequest {
   prefix: string;
   limit: number;
   cursor: string | null;
-}
-
-function toSqlStorageValue(value: unknown): SqlStorageValue {
-  // D1 accepts booleans and stores them as 1/0; SqlStorage bind values are
-  // string | number | null | ArrayBuffer, so coerce before binding.
-  if (typeof value === "boolean") return value ? 1 : 0;
-  return value as SqlStorageValue;
 }
 
 /** The celld-only KV table. Created by the DO at boot, never a migration:
@@ -150,20 +141,9 @@ export class RegistryDatabase extends DurableObject<Env> {
   async execBatch(statements: RegistryBatchItem[]): Promise<RegistryAllResult[]> {
     this.throwIfMigrationFailed();
     for (const statement of statements) assertNotTransactionControl(statement.sql);
-    const results: RegistryAllResult[] = [];
-    this.ctx.storage.transactionSync(() => {
-      const storage = this.ctx.storage.sql;
-      for (const statement of statements) {
-        const start = performance.now();
-        const cursor = storage.exec(statement.sql, ...statement.params.map(toSqlStorageValue));
-        results.push({
-          results: cursor.toArray(),
-          success: true,
-          meta: this.metaFor(cursor, false, start),
-        });
-      }
-    });
-    return results;
+    return runRegistryBatch(this.ctx.storage, statements, (cursor, start) =>
+      this.metaFor(cursor, false, start),
+    );
   }
 
   /** The workerd SqlStorage cursor exposes no query meta, so `changes` and

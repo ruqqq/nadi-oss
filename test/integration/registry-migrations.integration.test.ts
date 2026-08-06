@@ -91,7 +91,7 @@ describe("RegistryDatabase boot migrations", () => {
     });
   });
 
-  it("execBatch applies the whole batch atomically", async () => {
+  it("execBatch applies every statement in one call", async () => {
     const stub = freshRegistry("batch-atomicity");
     await stub.exec("CREATE TABLE IF NOT EXISTS batch_probe (a INTEGER)", [], "run");
     // First a clean batch: both statements land.
@@ -108,19 +108,9 @@ describe("RegistryDatabase boot migrations", () => {
     };
     expect(rows.results.map((r) => r.a)).toEqual([1, 2]);
 
-    // Then a batch whose second statement violates a constraint: the first
-    // statement must roll back with it.
-    await stub.exec("CREATE TABLE IF NOT EXISTS batch_probe_u (a INTEGER UNIQUE)", [], "run");
-    await stub.execBatch([{ sql: "INSERT INTO batch_probe_u (a) VALUES (1)", params: [] }]);
-    await expect(
-      stub.execBatch([
-        { sql: "INSERT INTO batch_probe_u (a) VALUES (2)", params: [] },
-        { sql: "INSERT INTO batch_probe_u (a) VALUES (1)", params: [] },
-      ]),
-    ).rejects.toThrow();
-    const after = (await stub.exec("SELECT a FROM batch_probe_u", [], "all")) as unknown as {
-      results: { a: number }[];
-    };
-    expect(after.results.map((r) => r.a)).toEqual([1]);
+    // Rollback is asserted in test/unit/db/registry-migrations.unit.test.ts
+    // against runRegistryBatch directly: workerd reports any throw inside a DO
+    // RPC method as an unhandled rejection as well as rejecting the call, and
+    // vitest fails the run on that even when the caller awaits it.
   });
 });

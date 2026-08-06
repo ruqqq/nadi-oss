@@ -1,5 +1,6 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { describe, expect, it } from "vitest";
+import { runRegistryBatch } from "../../../src/db/registry-batch";
 import {
   RegistryMigrationsError,
   registryMigrationBundle,
@@ -200,5 +201,49 @@ describe("runRegistryMigrations", () => {
     expect(countRows(db, "__drizzle_migrations")).toBe(60);
     // ...and a bundle that cannot see an applied migration fails loudly.
     await expect(runRegistryMigrations(storage, bundle)).rejects.toThrow(RegistryMigrationsError);
+  });
+});
+
+describe("runRegistryBatch", () => {
+  it("rolls the whole batch back when a statement fails", () => {
+    const { storage, db } = createStorage();
+    storage.sql.exec("CREATE TABLE batch_probe (a INTEGER)");
+    const meta = () => ({ duration: 0, changes: 0, last_row_id: 0 }) as never;
+
+    // A clean batch lands.
+    runRegistryBatch(
+      storage,
+      [
+        { sql: "INSERT INTO batch_probe (a) VALUES (1)", params: [] },
+        { sql: "INSERT INTO batch_probe (a) VALUES (2)", params: [] },
+      ],
+      meta,
+    );
+    expect(countRows(db, "batch_probe")).toBe(2);
+
+    // A batch whose second statement fails takes the first down with it.
+    expect(() =>
+      runRegistryBatch(
+        storage,
+        [
+          { sql: "INSERT INTO batch_probe (a) VALUES (3)", params: [] },
+          { sql: "INSERT INTO batch_probe (a) VALUES (?)", params: [{ not: "bindable" }] },
+        ],
+        meta,
+      ),
+    ).toThrow(/cannot bind an? object parameter/);
+    expect(countRows(db, "batch_probe")).toBe(2);
+  });
+
+  it("refuses parameters SqlStorage cannot bind", () => {
+    const { storage } = createStorage();
+    storage.sql.exec("CREATE TABLE p (a INTEGER)");
+    expect(() =>
+      runRegistryBatch(
+        storage,
+        [{ sql: "INSERT INTO p (a) VALUES (?)", params: [undefined] }],
+        () => ({ duration: 0, changes: 0, last_row_id: 0 }) as never,
+      ),
+    ).toThrow(/cannot bind an? undefined parameter/);
   });
 });
