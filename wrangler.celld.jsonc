@@ -1,0 +1,32 @@
+{
+  // Trimmed celld variant of wrangler.jsonc — celld deploy rejects
+  // d1_databases, r2_buckets, kv_namespaces, ai, browser, send_email,
+  // triggers and containers. Everything dropped here is a binding seam that
+  // tasks 04/05/09/11 already own.
+  "name": "nadi",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-05-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      { "name": "THINK_THREAD_AGENT", "class_name": "ThinkThreadAgent" },
+      { "name": "WORKSPACE_MCP_AGENT", "class_name": "WorkspaceMcpAgent" },
+      { "name": "USER_HUB", "class_name": "UserHub" },
+      { "name": "VOICE_AGENT", "class_name": "VoiceAgent" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["WorkspaceMcpAgent"] },
+    { "tag": "v2", "new_sqlite_classes": ["UserHub"] },
+    { "tag": "v3", "new_sqlite_classes": ["ThinkThreadAgent"] },
+    { "tag": "v4", "new_sqlite_classes": ["VoiceAgent"] }
+  ],
+  "vars": {
+    "NADI_EDITION": "self-hosted",
+    "APP_NAME": "Nadi",
+    "APP_BASE_URL": "http://localhost:8080",
+    "ARTIFACTS_HOST": "artifacts.localhost",
+    "DEFAULT_WORKSPACE_ID": "default",
+    "LOG_LEVEL": "debug"
+  }
+}
