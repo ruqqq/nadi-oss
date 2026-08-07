@@ -62,3 +62,8 @@ wrangler.prod.jsonc
 
 # Local celld smoke-test config, generated from .env.local (contains secrets).
 wrangler.smoke.jsonc
+
+# scripts/push-catcher.mjs generates its subscription keypair and a self-signed
+# TLS cert here on first run. Local-only by construction: a committed
+# subscription private key would be a shared secret that decrypts nothing real.
+.push-catcher/
