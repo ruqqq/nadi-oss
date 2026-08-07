@@ -2,6 +2,7 @@
 import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { McpServer } from "../../mcp-api";
 
 const mocks = vi.hoisted(() => ({
@@ -30,6 +31,16 @@ const markdump: McpServer = {
   enabled: true,
   createdAt: 0,
 };
+
+/**
+ * The value is reported when Continue is pressed, not as connections resolve —
+ * so every assertion about it has to go through the button. That is the point
+ * of the design: the wizard reads this to arm the post-onboarding nudge, and
+ * only a click-time read is guaranteed to reflect what had resolved by then.
+ */
+async function continueAfterLoad(): Promise<void> {
+  await userEvent.click(screen.getByRole("button", { name: /^continue$/i }));
+}
 
 function connectButtons(): HTMLButtonElement[] {
   return screen
@@ -85,9 +96,7 @@ describe("EmpowerStep", () => {
     );
 
     await screen.findByRole("button", { name: /authorize/i });
-    await waitFor(() => {
-      expect(onCalendarConnectedChange).toHaveBeenCalled();
-    });
+    await continueAfterLoad();
     expect(onCalendarConnectedChange).toHaveBeenLastCalledWith(false);
   });
 
@@ -111,13 +120,11 @@ describe("EmpowerStep", () => {
     );
 
     await screen.findByText(/Connected · 1 tool/);
-    await waitFor(() => {
-      expect(onCalendarConnectedChange).toHaveBeenCalled();
-    });
+    await continueAfterLoad();
     expect(onCalendarConnectedChange).toHaveBeenLastCalledWith(false);
   });
 
-  it("reports calendarConnected once a calendar-named tool resolves", async () => {
+  it("reports calendarConnected when a calendar-named tool resolved before Continue", async () => {
     mocks.listMcpServers.mockResolvedValue([markdump]);
     mocks.listMcpServerTools.mockResolvedValue({
       needsAuth: false,
@@ -134,8 +141,11 @@ describe("EmpowerStep", () => {
     );
 
     await screen.findByText(/Connected · 1 tool/);
-    await waitFor(() => {
-      expect(onCalendarConnectedChange).toHaveBeenLastCalledWith(true);
-    });
+    // Deliberately no settling step between the text appearing and the click.
+    // The text lands one commit before the card reports its tools upward, so a
+    // click here is exactly the race that made the wizard arm a generic nudge
+    // for a user with a calendar connected.
+    await continueAfterLoad();
+    expect(onCalendarConnectedChange).toHaveBeenLastCalledWith(true);
   });
 });
