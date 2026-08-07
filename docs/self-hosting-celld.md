@@ -169,6 +169,84 @@ curl -X POST -H 'Content-Type: application/json' \
 
 Signing in provisions your workspace and a default agent.
 
+## Running on a server
+
+Steps 1–5 bring the API up on localhost. A real server adds four requirements
+that localhost hides, and the first is the one that surprises people:
+
+**celld does not serve the web UI.** On Cloudflare the SPA comes from the
+`assets` binding; `wrangler.celld.jsonc` has no such binding and `celld deploy`
+uploads only the Worker bundle, so `src/index.ts` falls through to `route()`
+and answers every non-API path with a 404. Something else has to serve
+`web/dist`. This is not a gap you can configure away — it is what the reverse
+proxy is for.
+
+**TLS is required, not recommended.** `resolveArtifactOrigin` hardcodes
+`https://` for any non-localhost artifact host, so artifact previews break over
+plain HTTP. Better Auth also derives its cookie settings from `APP_BASE_URL`;
+an `http://` value there yields cookies that never stick, which presents as
+"sign-in succeeds, then I am immediately signed out".
+
+**Two hostnames, not one.** Published artifacts are served from their own
+origin so untrusted HTML never shares an origin with the app's cookies.
+`ARTIFACTS_HOST` is matched against the request hostname, so it must be a real
+DNS name pointing at the same machine.
+
+**`S3_ENDPOINT` must be reachable by the browser.** Attachment and feedback
+downloads answer with a 302 to a presigned S3 URL built from it. An
+endpoint that only resolves inside your network — a Docker service name, a
+private address — produces links only the server can open, and attachments
+fail for everyone while every other feature looks fine.
+
+### The packaged setup
+
+`deploy/celld/` has a Dockerfile and Compose file covering all four: Caddy
+serves `web/dist` and terminates TLS for both hostnames, and celld runs behind
+it with no published port.
+
+```bash
+cd deploy/celld
+cp .env.example .env                          # hostnames, bucket, S3 credentials
+cp celld-vars.env.example celld-vars.env      # app config and secrets
+```
+
+Point both hostnames at the machine first — Caddy issues certificates on
+startup and cannot if DNS does not resolve yet.
+
+Then edit `wrangler.celld.jsonc`, which is committed and still carries
+localhost defaults. `ARTIFACTS_HOST` and `APP_BASE_URL` in particular must
+match your real hostnames; set `APP_BASE_URL` the same in both files so the
+value is right regardless of which source wins.
+
+```bash
+docker compose --profile minio up -d     # only if you want the bundled S3
+docker compose run --rm deploy           # bundle + upload the Worker
+docker compose up -d                     # celld + Caddy + ticker watchdog
+```
+
+Sign in as in step 5, against your real hostname.
+
+### Deploying a change
+
+A node loads a deployment at startup only, so uploading a new bundle changes
+nothing until the node restarts:
+
+```bash
+docker compose run --rm deploy
+./drain-stop.sh --restart
+```
+
+### Stopping
+
+**Use `./drain-stop.sh`, not `docker compose down`.** celld replicates a cell
+only when that cell goes idle, so stopping the node while traffic is live
+discards everything written since the last eviction — on a healthy machine,
+with the disk intact. The script cuts traffic, waits past the eviction
+threshold, and only then stops the node.
+
+`stop_grace_period` is set to 60s as a backstop, but whether celld quiesces on
+SIGTERM is unverified. Do not rely on it.
+
 ## Operating
 
 These are not tips. A deployment that ignores them loses data or silently stops

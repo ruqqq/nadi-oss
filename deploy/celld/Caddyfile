@@ -1,0 +1,63 @@
+# Caddy in front of a celld node. Two jobs: serve the SPA (celld has no assets
+# binding and cannot), and terminate TLS (the app hardcodes https:// for any
+# non-localhost artifact origin, so plain HTTP is not an option on a server).
+#
+# Hostnames come from deploy/celld/.env — see .env.example.
+
+{
+	email {$ACME_EMAIL}
+}
+
+{$NADI_HOST} {
+	# Everything the Worker owns. Anything not listed here is a static file,
+	# so a route added to src/index.ts must be added here too or it will be
+	# answered with index.html and 200 — which looks like a broken SPA, not a
+	# missing proxy rule.
+	#
+	# Enumerated from src/index.ts: /api/*, /agents/* (which covers
+	# VOICE_PARTY_PREFIX = /agents/voice-agent/), /think-agents/*, and the
+	# exact path /live.
+	@worker path /api/* /agents/* /think-agents/* /live
+	handle @worker {
+		# reverse_proxy detects and upgrades WebSockets on its own, with no
+		# timeout on an upgraded connection — /agents/*, /think-agents/* and
+		# /live are all long-lived sockets and need no extra configuration.
+		reverse_proxy celld:8080
+	}
+
+	handle {
+		root * /srv
+
+		# Hashed bundles are content-addressed, so they can be cached hard.
+		@immutable path /assets/*
+		header @immutable Cache-Control "public, max-age=31536000, immutable"
+
+		# The shell and the service worker must NOT be, or a deploy is
+		# invisible to an open tab until the cache expires.
+		@shell path / /index.html /sw.js /manifest.webmanifest
+		header @shell Cache-Control "no-cache"
+
+		# Matches Cloudflare's not_found_handling: single-page-application.
+		# Note this makes a deleted JS chunk return index.html with 200 rather
+		# than 404 — the same behaviour the app's stale-bundle recovery is
+		# written against, so keep it.
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+# Published artifacts get their own origin so untrusted HTML cannot touch the
+# app's cookies. Every path here belongs to the Worker.
+{$ARTIFACTS_HOST} {
+	reverse_proxy celld:8080
+}
+
+# Attachment downloads 302 the BROWSER to a presigned S3 URL built from
+# S3_ENDPOINT (src/http/attachment-routes.ts). With bundled MinIO that endpoint
+# must therefore be publicly resolvable — an internal `minio:9000` produces
+# links only the container can open. Uncomment with the `minio` profile, and
+# set S3_ENDPOINT to https://{$S3_HOST} in celld-vars.env.
+#
+# {$S3_HOST} {
+# 	reverse_proxy minio:9000
+# }

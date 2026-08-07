@@ -1,0 +1,144 @@
+# Nadi on celld, packaged. See docs/self-hosting-celld.md for what each knob
+# buys you — especially the "Operating" section, which is not optional reading.
+#
+#   cp .env.example .env && cp celld-vars.env.example celld-vars.env   # then edit both
+#   docker compose --profile minio up -d          # only if you want bundled MinIO
+#   docker compose run --rm deploy                # push the Worker bundle
+#   docker compose up -d                          # start the node + proxy
+#
+# Shut down with ./drain-stop.sh, NOT `docker compose down`. celld replicates a
+# cell to the bucket only when that cell goes idle, so stopping the node while
+# traffic is live discards everything written since the last eviction.
+
+name: nadi-celld
+
+services:
+  # One-shot: bundles the Worker and uploads it to the fleet bucket. Re-run
+  # after every code change, then restart `celld` — nodes read a deployment at
+  # startup only, so a deploy alone changes nothing.
+  deploy:
+    profiles: [deploy]
+    build:
+      context: ../..
+      dockerfile: deploy/celld/Dockerfile
+      target: deployer
+    command: ["--bucket", "${CELLD_BUCKET}", "--endpoint", "${S3_ENDPOINT_INTERNAL}"]
+    environment:
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+    depends_on:
+      minio:
+        condition: service_healthy
+        required: false
+
+  celld:
+    build:
+      context: ../..
+      dockerfile: deploy/celld/Dockerfile
+      target: node
+    restart: unless-stopped
+    command:
+      - "--bucket"
+      - "${CELLD_BUCKET}"
+      - "--endpoint"
+      - "${S3_ENDPOINT_INTERNAL}"
+      # 0.0.0.0 inside the container, and deliberately NOT published to the
+      # host: Caddy is the only thing that should reach it.
+      - "--listen"
+      - "0.0.0.0:8080"
+    environment:
+      CELLD_VARS_FILE: /etc/nadi/celld-vars.env
+      # Bounds what an unclean stop costs, by deciding how soon a quiet cell
+      # replicates. Must stay well under the 60s ticker interval.
+      CELLD_IDLE_EVICT_S: ${CELLD_IDLE_EVICT_S:-15}
+      # Without this the ticker's always-imminent 60s alarm keeps its cell
+      # resident forever, so it never replicates and scheduled work silently
+      # stops after a restart.
+      CELLD_ALARM_RESIDENT_MS: ${CELLD_ALARM_RESIDENT_MS:-1000}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+    volumes:
+      - ./celld-vars.env:/etc/nadi/celld-vars.env:ro
+    # Long enough to replicate on the way out IF celld quiesces on SIGTERM.
+    # Whether it does is unverified — do not rely on it. drain-stop.sh does not.
+    stop_grace_period: 60s
+    depends_on:
+      minio:
+        condition: service_healthy
+        required: false
+
+  caddy:
+    build:
+      context: ../..
+      dockerfile: deploy/celld/Dockerfile
+      target: web-server
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      NADI_HOST: ${NADI_HOST}
+      ARTIFACTS_HOST: ${ARTIFACTS_HOST}
+      S3_HOST: ${S3_HOST:-}
+      ACME_EMAIL: ${ACME_EMAIL}
+    volumes:
+      # Persist the certificates. Without this every recreate re-issues, and
+      # Let's Encrypt rate-limits you out after a handful.
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - celld
+
+  # Arms the scheduler after a fresh deployment and backstops a lost alarm.
+  # A brand-new deployment has no alarm to restore and is armed by the first
+  # request; this makes that automatic rather than a curl you must remember.
+  ticker-watchdog:
+    image: curlimages/curl:latest
+    restart: unless-stopped
+    command:
+      ["sh", "-c", "while true; do curl -sf http://celld:8080/ >/dev/null || true; sleep 60; done"]
+    depends_on:
+      - celld
+
+  # Optional bundled S3. Omit the profile and point CELLD_BUCKET / S3_* at R2,
+  # AWS, or any other S3-compatible service instead.
+  minio:
+    profiles: [minio]
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${AWS_ACCESS_KEY_ID}
+      MINIO_ROOT_PASSWORD: ${AWS_SECRET_ACCESS_KEY}
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Creates both buckets, then exits.
+  minio-init:
+    profiles: [minio]
+    image: minio/mc:latest
+    entrypoint:
+      - sh
+      - -c
+      - |
+        mc alias set local http://minio:9000 "$$AWS_ACCESS_KEY_ID" "$$AWS_SECRET_ACCESS_KEY" &&
+        mc mb --ignore-existing local/${CELLD_FLEET_BUCKET} &&
+        mc mb --ignore-existing local/${S3_ATTACHMENTS_BUCKET_NAME}
+    environment:
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+    depends_on:
+      minio:
+        condition: service_healthy
+
+volumes:
+  caddy-data:
+  caddy-config:
+  minio-data:
