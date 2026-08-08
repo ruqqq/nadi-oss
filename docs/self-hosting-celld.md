@@ -57,6 +57,23 @@ This is an accepted trade for a single-user deployment, bounded by the rules in
 [Operating](#operating). It is not a bug you can configure away, and it is why
 the recommended posture is one node with a low idle-eviction threshold.
 
+Verified here rather than assumed: write a thread and a message, `SIGKILL` the
+node seconds later, recreate the container, and both are gone. Waiting past the
+eviction threshold first leaves the earlier writes intact. Preserving celld's
+local working directory does **not** rescue them — a kill with the same
+container restarted loses the same data, so there is no volume you can add to
+avoid this.
+
+> **Worse than a rollback.** Killing a node while a cell is *actively writing*
+> can leave that cell permanently unrecoverable, not merely reverted. celld
+> writes a snapshot referencing pages the bucket never received, and every later
+> request to that cell fails with `RestoreFailed` /
+> `missing page N in restore plan (incomplete backup)`, forever. Reproduced on a
+> minimal worker (github.com/ruqqq/celld-incomplete-backup-repro); on Nadi
+> itself we have only observed the rollback, not the corruption, so treat the
+> two as related but not confirmed identical. This is the real reason to drain
+> rather than kill.
+
 ## Prerequisites
 
 - A machine with Node 22+, `pnpm`, and `git`.
@@ -348,12 +365,22 @@ rather than a limit of the runtime. If you need the availability, there is an
 untested starting point in [`deploy/celld/README.md`](../deploy/celld/README.md)
 — read what failover costs there before deciding it is worth it.
 
-**`CELLD_IDLE_EVICT_S` = 15–30 s.** This is the only thing bounding what a crash
+**`CELLD_IDLE_EVICT_S` = 31–40 s.** This is the only thing bounding what a crash
 costs, because it decides how soon a quiet cell replicates. It must also stay
-well below the scheduler's 60-second tick: at 15 s, each cycle leaves a ~45 s
+well below the scheduler's 60-second tick: at 35 s, each cycle leaves a ~25 s
 quiet window in which the registry replicates. Raise it past ~60 s and the
 registry never idles, never replicates, and a crash loses everything back to the
 last restart.
+
+The lower bound is not about durability but about a heartbeat. The SPA posts
+presence every 30 s (`setInterval(sendPresence, 30_000)`, `web/src/App.tsx`), so
+**any value below 30 makes every open tab cold-start the `UserHub` cell forever**
+— too slow to keep it warm, fast enough to keep dragging it back. Measured at
+15 s, `UserHub` cold-started every 30.0 s to the millisecond, ~190 ms each time.
+Crossing above the heartbeat costs nothing for that cell, because `UserHub`
+stores nothing of its own (`src/agent/user-hub.ts` — live sockets only, presence
+on `serializeAttachment`). It does widen the loss window for the cells that do
+hold state.
 
 **Quiesce before restarting.** Stop traffic, wait past the eviction threshold,
 then restart. A quiesced restart loses nothing. An unquiesced one reverts to the

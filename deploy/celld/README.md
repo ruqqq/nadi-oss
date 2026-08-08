@@ -117,7 +117,15 @@ change means nothing was rebuilt.
 **Use `./drain-stop.sh`, not `docker compose down`.** The script cuts traffic,
 waits past the eviction threshold so every cell replicates, and only then stops
 the node. Stopping mid-traffic discards everything written since the last
-eviction — on a healthy machine, with the disk intact.
+eviction — on a healthy machine, with the disk intact. Preserving celld's local
+working directory does not help; a kill with the same container restarted loses
+the same data.
+
+Worse, killing a node while a cell is _actively writing_ can leave that cell
+permanently unrecoverable rather than merely reverted — `RestoreFailed` /
+`missing page N in restore plan (incomplete backup)`, on every later request.
+That is the real reason to drain. See the durability section of
+[the main guide](../../docs/self-hosting-celld.md#durability-read-this-before-you-rely-on-it).
 
 Persistent state is a bind mount under `./data/`, not a named volume, so even
 `docker compose down -v` leaves it intact. That is a backstop for the volume,
