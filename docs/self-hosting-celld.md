@@ -213,10 +213,46 @@ cp celld-vars.env.example celld-vars.env      # app config and secrets
 Point both hostnames at the machine first — Caddy issues certificates on
 startup and cannot if DNS does not resolve yet.
 
-Then edit `wrangler.celld.jsonc`, which is committed and still carries
-localhost defaults. `ARTIFACTS_HOST` and `APP_BASE_URL` in particular must
-match your real hostnames; set `APP_BASE_URL` the same in both files so the
-value is right regardless of which source wins.
+**`wrangler.celld.jsonc` does not need editing.** It is read only by `celld
+deploy`, which bakes its `vars` into the uploaded bundle; the node takes no
+`--config` at all. `CELLD_VARS_FILE` is documented by celld as *"Worker
+variable overrides"* and does exactly that, so `APP_BASE_URL`,
+`SUPERUSER_EMAILS` and the rest belong in `celld-vars.env` — which is
+gitignored, so per-deployment values and personal email addresses never enter
+a tracked file. (Verified: with `FEEDBACK_ADMIN_EMAILS` set only in the vars
+file, `/api/bootstrap` reports `features.feedbackAdmin: true` against a bundle
+built with the committed default.)
+
+### Running the packaged setup locally
+
+The stack also runs with no domain, no certificates and no open ports, which is
+the fastest way to try it. Set the three site addresses to `.localhost` names
+with an explicit `http://` scheme:
+
+```bash
+NADI_SITE=http://app.localhost
+ARTIFACTS_SITE=http://artifacts.localhost
+S3_SITE=http://s3.localhost
+S3_HOSTNAME=s3.localhost
+```
+
+Two details make this work, and neither generalises to other local hostnames:
+
+- The `http://` prefix turns Caddy's auto-HTTPS **off**. A bare hostname turns
+  it on and Caddy tries to issue a certificate it cannot get.
+- `.localhost` is required, not cosmetic. `resolveArtifactOrigin` mints
+  `http://` origins only for `localhost` and `*.localhost` hosts and `https://`
+  for everything else, so `nadi.test` or `nadi.local` would produce artifact
+  URLs on an origin nothing serves. Better Auth's cookies rely on the same
+  property. macOS and the major browsers resolve `*.localhost` to `127.0.0.1`
+  natively, so no `/etc/hosts` entry is needed.
+
+`S3_HOSTNAME` is attached to the Caddy container as a Docker network alias.
+That is what lets `S3_ENDPOINT` be a **single** value that resolves from both
+sides — the browser via loopback, the Worker via Docker DNS. It has to be a
+single value: the Worker signs its own uploads against `S3_ENDPOINT` *and*
+presigns browser download URLs from it, and SigV4 signs the `Host` header, so
+two hostnames means one of the two fails its signature check.
 
 ```bash
 docker compose --profile minio up -d     # only if you want the bundled S3
@@ -246,6 +282,17 @@ threshold, and only then stops the node.
 
 `stop_grace_period` is set to 60s as a backstop, but whether celld quiesces on
 SIGTERM is unverified. Do not rely on it.
+
+What `down` **cannot** destroy is the bucket: every piece of persistent state
+is a bind mount under `deploy/celld/data/`, not a named volume, so even
+`docker compose down -v` leaves it intact. Verified end to end — sign in,
+`./drain-stop.sh`, `docker compose down -v`, bring the stack back up, and the
+same user, workspace and agent are still there, with the ticker resuming from
+its persisted alarm.
+
+That is a backstop for the volume, not for the eviction rule above. Stopping
+the node mid-traffic still discards whatever has not replicated yet, which is
+why the drain still matters.
 
 ## Operating
 
@@ -338,3 +385,14 @@ case the ticker never replicates and does not survive restarts. Check
 
 **A route 404s that should exist** — `/api/debug/*` requires `DEBUG_TOKEN` to be
 set *and* the matching `x-debug-token` header.
+
+**The node exits immediately with `--advertise is required when --listen uses
+an unspecified address`** — celld refuses to bind `0.0.0.0` without being told
+the address peers would dial, even though the recommended posture has no peers.
+The Compose file passes `--advertise celld:8080` for this. Running celld by
+hand on `0.0.0.0` needs the same flag; the localhost form in step 4 does not,
+because `127.0.0.1` is not an unspecified address.
+
+**Caddy exits on startup with an `email` or site-address parse error** — a
+`*_SITE` variable is empty. All three (`NADI_SITE`, `ARTIFACTS_SITE`,
+`S3_SITE`) plus `ACME_EMAIL` must be non-empty, even when auto-HTTPS is off.

@@ -2,13 +2,17 @@
 # binding and cannot), and terminate TLS (the app hardcodes https:// for any
 # non-localhost artifact origin, so plain HTTP is not an option on a server).
 #
-# Hostnames come from deploy/celld/.env — see .env.example.
+# Site addresses come from deploy/celld/.env — see .env.example. They carry a
+# scheme, and the scheme is load-bearing: a bare hostname turns on auto-HTTPS
+# and Caddy issues a certificate, while an explicit `http://` turns it off
+# entirely. That is what lets one file serve both a real server and a local
+# `*.localhost` setup, where there is no DNS to validate against.
 
 {
 	email {$ACME_EMAIL}
 }
 
-{$NADI_HOST} {
+{$NADI_SITE} {
 	# Everything the Worker owns. Anything not listed here is a static file,
 	# so a route added to src/index.ts must be added here too or it will be
 	# answered with index.html and 200 — which looks like a broken SPA, not a
@@ -48,16 +52,28 @@
 
 # Published artifacts get their own origin so untrusted HTML cannot touch the
 # app's cookies. Every path here belongs to the Worker.
-{$ARTIFACTS_HOST} {
+{$ARTIFACTS_SITE} {
 	reverse_proxy celld:8080
 }
 
 # Attachment downloads 302 the BROWSER to a presigned S3 URL built from
-# S3_ENDPOINT (src/http/attachment-routes.ts). With bundled MinIO that endpoint
-# must therefore be publicly resolvable — an internal `minio:9000` produces
-# links only the container can open. Uncomment with the `minio` profile, and
-# set S3_ENDPOINT to https://{$S3_HOST} in celld-vars.env.
+# S3_ENDPOINT (src/http/attachment-routes.ts), so that endpoint must be one the
+# browser can resolve — an internal `minio:9000` produces links only the
+# container can open.
 #
-# {$S3_HOST} {
-# 	reverse_proxy minio:9000
-# }
+# But the Worker ALSO talks to S3_ENDPOINT directly for every upload and read
+# (S3Bucket in src/storage/s3-bucket.ts), from inside the container. So the one
+# value has to resolve on both sides, and it cannot be two values: SigV4 signs
+# the Host header, so a URL presigned for one hostname fails the signature
+# check when it arrives bearing another.
+#
+# This block is what makes a single hostname work both ways. The browser
+# reaches it via /etc/hosts -> 127.0.0.1 -> the published port; the Worker
+# reaches it via a Docker network alias on this container (see S3_HOSTNAME in
+# docker-compose.yaml). Both arrive here with the same Host, and both are
+# proxied to MinIO's real port.
+#
+# Harmless without the `minio` profile: nothing routes here, so nothing asks.
+{$S3_SITE} {
+	reverse_proxy minio:9000
+}

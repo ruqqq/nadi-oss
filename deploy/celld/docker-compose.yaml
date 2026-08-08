@@ -47,6 +47,12 @@ services:
       # host: Caddy is the only thing that should reach it.
       - "--listen"
       - "0.0.0.0:8080"
+      # celld REFUSES to start on an unspecified listen address without this —
+      # it is the address peers would dial. There are no peers in the
+      # single-node posture this deployment is built around, but the flag is
+      # still mandatory, so it names this container on the compose network.
+      - "--advertise"
+      - "celld:8080"
     environment:
       CELLD_VARS_FILE: /etc/nadi/celld-vars.env
       # Bounds what an unclean stop costs, by deciding how soon a quiet cell
@@ -79,15 +85,26 @@ services:
       - "80:80"
       - "443:443"
     environment:
-      NADI_HOST: ${NADI_HOST}
-      ARTIFACTS_HOST: ${ARTIFACTS_HOST}
-      S3_HOST: ${S3_HOST:-}
+      NADI_SITE: ${NADI_SITE}
+      ARTIFACTS_SITE: ${ARTIFACTS_SITE}
+      S3_SITE: ${S3_SITE}
       ACME_EMAIL: ${ACME_EMAIL}
+    networks:
+      default:
+        aliases:
+          # Makes the browser-facing S3 hostname resolve to Caddy from INSIDE
+          # the network too, so S3_ENDPOINT is a single value that works for
+          # both the browser and the Worker. SigV4 signs the Host header, so it
+          # has to be a single value. See the S3 block in the Caddyfile.
+          - ${S3_HOSTNAME}
     volumes:
+      # Live-mounted rather than baked in, so a routing change is a restart
+      # instead of an image rebuild. The image still carries a copy.
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
       # Persist the certificates. Without this every recreate re-issues, and
       # Let's Encrypt rate-limits you out after a handful.
-      - caddy-data:/data
-      - caddy-config:/config
+      - ./data/caddy:/data
+      - ./data/caddy-config:/config
     depends_on:
       - celld
 
@@ -113,7 +130,11 @@ services:
       MINIO_ROOT_USER: ${AWS_ACCESS_KEY_ID}
       MINIO_ROOT_PASSWORD: ${AWS_SECRET_ACCESS_KEY}
     volumes:
-      - minio-data:/data
+      # A bind mount, NOT a named volume: this directory is the durable copy of
+      # the registry, every thread's history, and your workspace secrets. On a
+      # host path it survives `docker compose down -v`, is visible to `ls`, and
+      # is trivially backed up. A named volume is none of those things.
+      - ./data/minio:/data
     healthcheck:
       test: ["CMD", "mc", "ready", "local"]
       interval: 5s
@@ -138,7 +159,6 @@ services:
       minio:
         condition: service_healthy
 
-volumes:
-  caddy-data:
-  caddy-config:
-  minio-data:
+# No named volumes. Every piece of persistent state is a bind mount under
+# ./data/ so that `docker compose down -v` — the command that silently destroys
+# a named-volume setup — cannot touch it.

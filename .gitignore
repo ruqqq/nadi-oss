@@ -15,8 +15,14 @@ web/dist/
 !.dev.vars.example
 .env
 .env.*
+!.env.example
 !.env.local.example
 !web/.env.local.example
+# The celld vars file holds BETTER_AUTH_SECRET, the KEK and S3 credentials, and
+# is NOT named `.env`, so nothing above covers it. Only the example is tracked.
+deploy/celld/celld-vars.env
+# Bind-mounted MinIO/Caddy state for the local celld stack.
+deploy/celld/data/
 
 # Test / coverage
 coverage/
