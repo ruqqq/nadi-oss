@@ -110,6 +110,27 @@ Already set for you in `wrangler.celld.jsonc`, but worth knowing:
 last two are not optional: without them the *first sign-in* fails on a database
 constraint after the user row is created, leaving a half-provisioned account.
 
+**`DEFAULT_SANDBOX_PROVIDER` is required, and nothing sets it for you.** It is
+not in `wrangler.celld.jsonc`, and unset resolves to `cloudflare` — the one
+provider celld structurally cannot run, because it rejects the `containers` and
+`r2_buckets` bindings. Every new workspace is then provisioned with a sandbox
+whose first use fails, and it takes the *whole message submission* down with it,
+not just the sandbox tools:
+
+```
+compute_unavailable: cloudflare_config_missing: NADI_SANDBOX_SMALL,NADI_SANDBOX_MEDIUM,…
+```
+
+Set it to `sprites` or `daytona` (each needs an API key, here or per-workspace
+in Settings), or `mock` for a local trial — an in-memory backend that runs no
+real commands and resets on every node restart. `mock` is also gated on this
+var: it is offered in Settings *only* where `DEFAULT_SANDBOX_PROVIDER=mock`, and
+refused by the API elsewhere, so a production workspace cannot be pointed at a
+test double.
+
+The value applies to workspaces created *after* a restart. An existing workspace
+keeps what it was provisioned with, and is changed in Settings → Sandbox.
+
 Optional:
 
 - `RESEND_API_KEY` — without it, **outbound mail is a no-op**. Sign-in codes go
@@ -264,13 +285,29 @@ Sign in as in step 5, against your real hostname.
 
 ### Deploying a change
 
-A node loads a deployment at startup only, so uploading a new bundle changes
-nothing until the node restarts:
+Both images bake the repo in with `COPY . .`, so **rebuild before deploying** —
+`docker compose run --rm deploy` reuses a cached image and will happily upload
+the source as it was when that image was last built:
 
 ```bash
+docker compose build deploy      # Worker changes (src/)
 docker compose run --rm deploy
-./drain-stop.sh --restart
+./drain-stop.sh --restart        # a node loads a deployment at startup only
+
+docker compose build caddy       # SPA changes (web/) — no redeploy needed
+docker compose up -d caddy
 ```
+
+Skipping the build does not fail. It prints `Uploaded nadi` and a
+`Current Version ID` exactly as a real deploy does, then the restart serves the
+old code and the change appears simply not to work. **The Version ID is the
+tell**: it is a content hash, so an unchanged one after a real source change
+means nothing was rebuilt. A suspiciously fast `Bundled nadi (0.6s)` against the
+usual ~35s says the same thing.
+
+The SPA is served by Caddy, not by celld, so a `web/`-only change needs the
+`caddy` rebuild and no `deploy`/restart at all. The running service worker
+picks it up and shows "Updated to the latest version".
 
 ### Stopping
 
@@ -374,6 +411,17 @@ says which variables are missing.
 
 **First sign-in fails with a database error** — `DEFAULT_MODEL_PROVIDER` or
 `DEFAULT_MODEL` is unset.
+
+**Sending a message fails with `cloudflare_config_missing`** —
+`DEFAULT_SANDBOX_PROVIDER` is unset, so the workspace was provisioned with the
+Cloudflare provider, which cannot exist on celld. Set the var *and* switch the
+existing workspace in Settings → Sandbox: the var only affects new workspaces,
+because the provider is persisted per workspace at sign-up.
+
+**A code change appears to do nothing after deploying** — the `deploy` image was
+not rebuilt, so it uploaded the source baked into the cached image. Check the
+`Current Version ID`: it is a content hash, so an unchanged one after a real
+source change means nothing was rebuilt. See "Deploying a change".
 
 **Everything behaves as though configuration is missing** — the vars file is
 probably JSON. It must be `KEY=VALUE` lines.
