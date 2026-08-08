@@ -230,7 +230,9 @@ export function resolveDefaultSandboxProvider(env: {
  * mock backend for a workspace already configured with one, so tests (which
  * construct backends directly) and an existing local workspace are unaffected.
  */
-export function mockSandboxEnabled(env: { DEFAULT_SANDBOX_PROVIDER?: string | undefined }): boolean {
+export function mockSandboxEnabled(env: {
+  DEFAULT_SANDBOX_PROVIDER?: string | undefined;
+}): boolean {
   return resolveDefaultSandboxProvider(env) === "mock";
 }
 
