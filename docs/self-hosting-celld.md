@@ -64,15 +64,24 @@ local working directory does **not** rescue them — a kill with the same
 container restarted loses the same data, so there is no volume you can add to
 avoid this.
 
-> **Worse than a rollback.** Killing a node while a cell is *actively writing*
-> can leave that cell permanently unrecoverable, not merely reverted. celld
-> writes a snapshot referencing pages the bucket never received, and every later
-> request to that cell fails with `RestoreFailed` /
-> `missing page N in restore plan (incomplete backup)`, forever. Reproduced on a
-> minimal worker (github.com/ruqqq/celld-incomplete-backup-repro); on Nadi
-> itself we have only observed the rollback, not the corruption, so treat the
-> two as related but not confirmed identical. This is the real reason to drain
-> rather than kill.
+> **A separate, worse failure: concurrent writes can corrupt the backup, and
+> draining does not save you.** Under concurrent writes to one cell, celld can
+> replicate a chain that is missing pages it references. That cell then fails
+> every later request with `RestoreFailed` /
+> `missing page N in restore plan (incomplete backup)`, permanently.
+>
+> The damage happens during the writes, not at shutdown. Measured: a cell driven
+> by four concurrent writers, then left completely quiet for 50 s so it evicted
+> and replicated, was still unrecoverable afterwards — via a hard kill **and via
+> a graceful `SIGTERM` stop**. So `./drain-stop.sh` does not protect against
+> this, and neither does any other shutdown discipline; only the amount of
+> write concurrency matters.
+>
+> Reproduced on a minimal worker
+> (github.com/ruqqq/celld-incomplete-backup-repro). On Nadi itself we have only
+> observed the plain rollback above, never this corruption — treat them as two
+> distinct problems, not one. Root-caused upstream to a capture/checkpoint race
+> in celld's LTX replication; a fix is in review.
 
 ## Prerequisites
 

@@ -121,10 +121,12 @@ eviction — on a healthy machine, with the disk intact. Preserving celld's loca
 working directory does not help; a kill with the same container restarted loses
 the same data.
 
-Worse, killing a node while a cell is _actively writing_ can leave that cell
-permanently unrecoverable rather than merely reverted — `RestoreFailed` /
-`missing page N in restore plan (incomplete backup)`, on every later request.
-That is the real reason to drain. See the durability section of
+There is also a separate failure that draining does **not** prevent: under
+concurrent writes, celld can replicate a chain missing pages it references,
+leaving that cell permanently unrecoverable (`RestoreFailed` /
+`missing page N in restore plan (incomplete backup)`). Measured to survive a
+graceful `SIGTERM` stop as well as a hard kill, because the damage is done
+during the writes rather than at shutdown. See the durability section of
 [the main guide](../../docs/self-hosting-celld.md#durability-read-this-before-you-rely-on-it).
 
 Persistent state is a bind mount under `./data/`, not a named volume, so even
