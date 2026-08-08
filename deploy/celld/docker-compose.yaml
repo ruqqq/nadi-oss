@@ -1,5 +1,9 @@
-# Nadi on celld, packaged. See docs/self-hosting-celld.md for what each knob
-# buys you — especially the "Operating" section, which is not optional reading.
+# Nadi on celld, packaged — SINGLE NODE. See README.md in this directory for
+# how to operate it, and docs/self-hosting-celld.md for what each knob buys you
+# — especially the "Operating" section, which is not optional reading.
+#
+# For more than one node, see docker-compose.multinode.yaml. Read the failover
+# section of README.md first: a second node buys availability, not durability.
 #
 #   cp .env.example .env && cp celld-vars.env.example celld-vars.env   # then edit both
 #   docker compose --profile minio up -d          # only if you want bundled MinIO
