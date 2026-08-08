@@ -109,6 +109,10 @@ export interface SandboxSettingsResponse {
   spritesMode: "system" | "byok";
   spritesAvailable: boolean;
   spritesSecretPresent: boolean;
+  /** Whether `mock` may be selected — false unless the deployment set
+   *  DEFAULT_SANDBOX_PROVIDER=mock. Optional so an older server that does not
+   *  send it is treated as "not available" rather than crashing the panel. */
+  mockAvailable?: boolean;
   workspaceSecretEnvVars: Array<{ name: string; updatedAt: string }>;
   agentSecretEnvVars: Array<{ name: string; updatedAt: string }>;
   effective: {

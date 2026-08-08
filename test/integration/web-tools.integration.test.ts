@@ -11,7 +11,7 @@ import type { WebFetchProvider, WebSearchProvider } from "../../src/web/types";
  * class under strict TS. Runtime access is fine (it's a plain property) —
  * this narrow cast is scoped to this test file only, not production code
  * (mirrors the pattern in test/integration/web-document-store.integration.test.ts
- * and test/integration/sandbox-thread-store.test.ts).
+ * and test/integration/compute-thread-store.test.ts).
  */
 function storageOf(instance: ThinkThreadAgent): DurableObjectStorage {
   return (instance as unknown as { ctx: { storage: DurableObjectStorage } }).ctx.storage;

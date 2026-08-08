@@ -550,14 +550,20 @@ describe("provider settings service", () => {
     const allowed = "you@example.com";
     const denied = "someone@else.com";
     let previous: string | undefined;
+    let previousAi: unknown;
 
     beforeEach(() => {
       previous = env.WORKERS_AI_EMAILS;
       env.WORKERS_AI_EMAILS = "you@example.com, teammate@example.com";
+      // Workers AI needs its binding before the allowlist is even consulted;
+      // these cases are about the allowlist, so make sure one is present.
+      previousAi = (env as { AI?: unknown }).AI;
+      (env as { AI?: unknown }).AI ??= {};
     });
 
     afterEach(() => {
       env.WORKERS_AI_EMAILS = previous as string;
+      (env as { AI?: unknown }).AI = previousAi;
     });
 
     it("offers workers-ai to an allowlisted viewer, usable with no secret stored", async () => {

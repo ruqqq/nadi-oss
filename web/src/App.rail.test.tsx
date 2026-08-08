@@ -932,3 +932,121 @@ describe("RailContent row menu", () => {
     await openMenu("Narrow desktop");
   });
 });
+
+describe("a thread deleted while it is open", () => {
+  function thread(over: Partial<ThreadSummary> & { threadId: string }): ThreadSummary {
+    return {
+      kind: "regular",
+      workspaceId: "ws_1",
+      agentId: "agt_1",
+      provider: "openai",
+      model: "gpt-5.4-mini",
+      modelInputModalities: ["text"],
+      showReasoning: false,
+      reasoningEffort: "medium",
+      modelSupportsReasoning: null,
+      runtime: "think",
+      title: "Open thread",
+      source: "manual",
+      lastMessagePreview: "",
+      archivedAt: null,
+      readOnly: false,
+      status: "active",
+      projectId: null,
+      projectName: null,
+      workbenchId: null,
+      workbenchName: null,
+      ...over,
+    } as ThreadSummary;
+  }
+
+  function renderOpenThread(target: ThreadSummary) {
+    vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
+    window.history.replaceState(null, "", `/threads/${target.threadId}`);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === `/think-agents/think-thread-agent/${target.threadId}/get-messages`) {
+          return Promise.resolve(Response.json({ messages: [] }));
+        }
+        if (url === "/api/invites") {
+          return Promise.resolve(
+            Response.json({ invites: [], quota: { used: 0, limit: 5 }, isSuperuser: false, waitingList: [] }),
+          );
+        }
+        if (url.startsWith("/api/workbenches")) return Promise.resolve(Response.json({ workbenches: [] }));
+        if (url.startsWith("/api/projects")) return Promise.resolve(Response.json({ projects: [] }));
+        if (url.startsWith("/api/threads")) {
+          return Promise.resolve(Response.json({ threads: [target], nextCursor: null }));
+        }
+        return Promise.resolve(Response.json({}));
+      }),
+    );
+    const socket: ThreadAgentSocket = {
+      readyState: WebSocket.OPEN,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      call: vi.fn(async () => undefined),
+    };
+    const threadChat = {
+      useThreadAgent: () => socket as never,
+      useThreadChat: (agent: ThreadAgentSocket, initialMessages: ThreadChatApi["messages"]) =>
+        ({
+          agent,
+          messages: initialMessages,
+          setMessages: vi.fn(),
+          sendMessage: vi.fn(),
+          addToolApprovalResponse: vi.fn(),
+          status: "ready",
+          isStreaming: false,
+          error: undefined,
+          stop: vi.fn(),
+        }) satisfies ThreadChatApi,
+    };
+    render(
+      <ChatApp
+        consentWorkspaceId={null}
+        user={{ id: "u1", email: "you@example.com" } as never}
+        initialProjects={[]}
+        initialThreads={[target]}
+        initialThreadsNextCursor={null}
+        onActiveWorkspaceChange={() => {}}
+        onSignOut={() => {}}
+        voiceEnabled={false}
+        backgroundWorkEnabled={false}
+        feedbackAdminEnabled={false}
+        threadChat={threadChat}
+      />,
+    );
+  }
+
+  it("leaves the route instead of holding a socket open against a thread that is gone", async () => {
+    // Deleting from another tab/device broadcasts thread.deleted. Dropping it
+    // from the rail is not enough while it is the thread on screen: the route
+    // still points at it, so ThreadChat keeps dialing a thread the server no
+    // longer has and the composer sits on "Connecting…" forever.
+    const target = thread({ threadId: "thr_open", title: "Open thread" });
+    renderOpenThread(target);
+
+    await waitFor(() => expect(window.location.pathname).toBe("/threads/thr_open"));
+
+    live.emitMessage({ type: "thread.deleted", threadId: "thr_open", workspaceId: "ws_1" });
+
+    await waitFor(() => expect(window.location.pathname).toBe("/chats"));
+  });
+
+  it("stays put when the deleted thread is a different one", async () => {
+    // The guard is "is this what the user is looking at", so an unrelated
+    // deletion must not navigate anyone anywhere.
+    const target = thread({ threadId: "thr_open", title: "Open thread" });
+    renderOpenThread(target);
+
+    await waitFor(() => expect(window.location.pathname).toBe("/threads/thr_open"));
+
+    live.emitMessage({ type: "thread.deleted", threadId: "thr_other", workspaceId: "ws_1" });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(window.location.pathname).toBe("/threads/thr_open");
+  });
+});

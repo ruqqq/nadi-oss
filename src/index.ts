@@ -7,6 +7,7 @@ import { validateRequestSession } from "./auth/session";
 import { canonicalRedirectUrl } from "./http/canonical-host";
 import { route } from "./http/router";
 import { log, setLogLevel } from "./log";
+import { armCelldTicker } from "./celld/ticker";
 import { autoArchiveIdleThreads } from "./agent/auto-archive";
 import { AUTOMATA_CRON, fireDueAutomata } from "./automata/fire-due";
 import { repairStaleThreadSearchProjections } from "./thread-knowledge/repair";
@@ -15,6 +16,8 @@ export { SubAgent } from "./agent/subagent";
 export { WorkspaceMcpAgent } from "./agent/workspace-mcp-agent";
 export { UserHub } from "./agent/user-hub";
 export { VoiceAgent } from "./agent/voice-agent";
+export { RegistryDatabase } from "./db/registry-do";
+export { CelldTicker } from "./celld/ticker";
 export {
   ContainerProxy,
   NadiSandboxSmall,
@@ -25,6 +28,12 @@ export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     setLogLevel(env.LOG_LEVEL);
     log.debug("worker.fetch", { method: req.method, url: req.url });
+
+    // celld-only: it rejects the `triggers` config key and never invokes
+    // `scheduled()`, so the ticker DO replaces the cron. This arms its first
+    // alarm (idempotent; it re-arms itself every minute thereafter).
+    // Cloudflare has no CRON_TICKER binding and runs scheduled() — no-op.
+    if (env.CRON_TICKER) armCelldTicker(env, ctx);
 
     const url = new URL(req.url);
     const artifactsHost = (env.ARTIFACTS_HOST ?? "").trim().toLowerCase();

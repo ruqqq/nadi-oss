@@ -1,4 +1,6 @@
 import { AwsClient } from "aws4fetch";
+import type { Env } from "../env";
+import { s3BucketBaseUrl } from "./s3-bucket";
 
 /** Presign window: 5 days in ms. URLs are bucketed within this window for cache stability. */
 export const PRESIGN_WINDOW_MS = 5 * 24 * 60 * 60 * 1000;
@@ -10,10 +12,14 @@ export const PRESIGN_WINDOW_MS = 5 * 24 * 60 * 60 * 1000;
 export const PRESIGN_EXPIRES_SECONDS = 6 * 24 * 60 * 60;
 
 export type PresignDeps = {
-  accountId: string;
+  /** Cloudflare R2 account id; unused when `endpoint` is set (celld). */
+  accountId?: string;
   accessKeyId: string;
   secretAccessKey: string;
   bucketName: string;
+  /** S3-compatible endpoint override (celld). When unset, URLs are built on
+   *  the Cloudflare R2 host and stay byte-identical to the pre-celld output. */
+  endpoint?: string;
 };
 
 /** Round a timestamp down to the start of its window, so presigned URLs are stable within it. */
@@ -30,11 +36,22 @@ function toAmzDate(ms: number): string {
 }
 
 export function presignDepsFromEnv(env: Env): PresignDeps {
+  // Cloudflare keeps the R2_* vars; celld configures S3_* equivalents. R2 wins
+  // when both are somehow present so the Cloudflare behavior is untouched.
+  const accessKeyId = env.R2_ACCESS_KEY_ID ?? env.S3_ACCESS_KEY_ID;
+  const secretAccessKey = env.R2_SECRET_ACCESS_KEY ?? env.S3_SECRET_ACCESS_KEY;
+  const bucketName = env.R2_BUCKET_NAME ?? env.S3_ATTACHMENTS_BUCKET_NAME;
+  if (!accessKeyId || !secretAccessKey || !bucketName) {
+    throw new Error(
+      "presignDepsFromEnv: missing S3 credentials or bucket name — set R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY/R2_BUCKET_NAME or the S3_* equivalents",
+    );
+  }
   return {
     accountId: env.R2_ACCOUNT_ID,
-    accessKeyId: env.R2_ACCESS_KEY_ID,
-    secretAccessKey: env.R2_SECRET_ACCESS_KEY,
-    bucketName: env.R2_BUCKET_NAME,
+    accessKeyId,
+    secretAccessKey,
+    bucketName,
+    ...(env.S3_ENDPOINT ? { endpoint: env.S3_ENDPOINT } : {}),
   };
 }
 
@@ -56,7 +73,7 @@ export async function presignGet(
     region: "auto",
   });
   const url = new URL(
-    `https://${deps.accountId}.r2.cloudflarestorage.com/${deps.bucketName}/${key}`,
+    `${s3BucketBaseUrl(deps.endpoint, deps.accountId)}/${deps.bucketName}/${key}`,
   );
   url.searchParams.set("X-Amz-Expires", String(opts.expiresInSeconds));
   if (opts.responseContentDisposition) {

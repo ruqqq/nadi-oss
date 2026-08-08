@@ -1,7 +1,9 @@
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import type { Env } from "../env";
+import { registryBinding } from "../db/client";
 import { AttachmentRepository, type AttachmentRow } from "../db/attachment-repository";
+import { attachmentsBucket } from "../storage/bucket-binding";
 import { assertSafeUrl, UrlGuardError } from "../web/url-guard";
 
 export const MAX_SIGNED_UPLOAD_SOURCE_BYTES = 10 * 1024 * 1024;
@@ -67,7 +69,7 @@ export interface AttachmentRepositoryLike {
 }
 
 export interface UploadToSignedUrlDeps {
-  env: Pick<Env, "ATTACHMENTS_BUCKET" | "REGISTRY_DB">;
+  env: Pick<Env, "ATTACHMENTS_BUCKET" | "REGISTRY_DB" | "REGISTRY_DO">;
   threadId: string;
   fetchImpl?: typeof fetch;
   attachmentRepository?: AttachmentRepositoryLike;
@@ -185,7 +187,8 @@ async function resolveAttachmentSource(
   attachmentId: string,
   deps: UploadToSignedUrlDeps,
 ): Promise<{ ok: true; source: ResolvedSource } | TransferError> {
-  const repo = deps.attachmentRepository ?? new AttachmentRepository(deps.env.REGISTRY_DB);
+  const repo =
+    deps.attachmentRepository ?? new AttachmentRepository(registryBinding(deps.env as Env));
   const row = await repo.getByIdInThread(attachmentId, deps.threadId);
   if (!row || row.status !== "committed") {
     return error(
@@ -200,7 +203,7 @@ async function resolveAttachmentSource(
     );
   }
 
-  const object = await deps.env.ATTACHMENTS_BUCKET.get(row.r2Key);
+  const object = await attachmentsBucket(deps.env).get(row.r2Key);
   if (!object) {
     return error("attachment_bytes_missing", `attachment ${attachmentId} bytes are missing`);
   }

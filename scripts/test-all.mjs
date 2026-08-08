@@ -34,7 +34,7 @@ async function runStage(name, commands) {
   return statuses.every((status) => status === 0);
 }
 
-// The three workers-pool projects run one at a time on purpose. Each spins up
+// The four workers-pool projects run one at a time on purpose. Each spins up
 // its own workerd pool, and running them concurrently peaks well past a small
 // dev box's RAM — the failure mode is an OOM SIGKILL that reads as a test
 // failure. Sequential is also no slower now that integration-shared imports the
@@ -49,8 +49,14 @@ async function runStagesSequentially(names) {
   return true;
 }
 
+// Every project in vitest.config.ts must be named here (and in
+// .github/workflows/ci.yml), or it silently stops running — the bug that
+// orphaned the integration-grouped suites from the initial commit. The guard
+// in vitest.config.ts catches a test file that matches no project, but it
+// cannot catch a project that no runner invokes.
 const workersPassed = await runStagesSequentially([
   "integration-fast",
+  "integration-grouped",
   "integration-shared",
   "integration-isolated",
 ]);

@@ -4,6 +4,7 @@ import {
   PRESIGN_WINDOW_MS,
   attachmentContentDisposition,
   bucketedAnchorMs,
+  presignDepsFromEnv,
   presignGet,
 } from "../../src/storage/r2-presign";
 
@@ -87,5 +88,98 @@ describe("attachmentContentDisposition", () => {
   it("falls back to attachment when filename is empty", () => {
     expect(attachmentContentDisposition(null)).toBe('attachment; filename="attachment"');
     expect(attachmentContentDisposition("  ")).toBe('attachment; filename="attachment"');
+  });
+});
+
+describe("presignGet with a configurable endpoint (celld)", () => {
+  const anchorMs = bucketedAnchorMs(1_700_000_000_000, WINDOW);
+  const { accountId: _accountId, ...cloudflareDeps } = DEPS;
+  const celldDeps = { ...cloudflareDeps, endpoint: "https://s3.example.com" };
+
+  it("builds the URL on the configured endpoint with the same signed query shape", async () => {
+    const u = await presignGet(celldDeps, "ws1/th1/abc.png", {
+      anchorMs,
+      expiresInSeconds: 600,
+    });
+    const url = new URL(u);
+    expect(url.origin).toBe("https://s3.example.com");
+    expect(url.pathname).toBe("/nadi-attachments/ws1/th1/abc.png");
+    expect(url.searchParams.get("X-Amz-SignedHeaders")).toBe("host");
+    expect(url.searchParams.get("X-Amz-Expires")).toBe("600");
+    expect(url.searchParams.get("X-Amz-Algorithm")).toBe("AWS4-HMAC-SHA256");
+    expect(url.searchParams.get("X-Amz-Signature")).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("keeps Cloudflare's R2 URLs byte-identical to the pre-celld output", async () => {
+    const u = await presignGet(DEPS, "ws1/th1/abc.png", { anchorMs, expiresInSeconds: 600 });
+    // Golden value captured from the pre-celld URL construction
+    // (`https://{accountId}.r2.cloudflarestorage.com/{bucket}/{key}` + the same
+    // signQuery options) for these exact inputs.
+    expect(u).toBe(
+      "https://acct123.r2.cloudflarestorage.com/nadi-attachments/ws1/th1/abc.png?" +
+        "X-Amz-Expires=600&X-Amz-Date=20231109T000000Z&X-Amz-Algorithm=AWS4-HMAC-SHA256" +
+        "&X-Amz-Credential=AKIAEXAMPLE%2F20231109%2Fauto%2Fs3%2Faws4_request" +
+        "&X-Amz-SignedHeaders=host" +
+        "&X-Amz-Signature=fae3e60213a458f3db508bd43d5c1ce6679b9c310b6019337965e83a6d85d605",
+    );
+  });
+
+  it("throws when there is neither an endpoint nor an accountId to address", async () => {
+    const { endpoint: _endpoint, ...noEndpoint } = celldDeps;
+    await expect(presignGet(noEndpoint, "k", { anchorMs, expiresInSeconds: 600 })).rejects.toThrow(
+      /no S3_ENDPOINT and no R2_ACCOUNT_ID/,
+    );
+  });
+});
+
+describe("presignDepsFromEnv", () => {
+  it("keeps reading the R2_* vars on Cloudflare and adds no endpoint", () => {
+    const deps = presignDepsFromEnv({
+      R2_ACCOUNT_ID: "acct123",
+      R2_ACCESS_KEY_ID: "AKIAEXAMPLE",
+      R2_SECRET_ACCESS_KEY: "secretEXAMPLE",
+      R2_BUCKET_NAME: "nadi-attachments",
+    } as never);
+    expect(deps).toEqual({
+      accountId: "acct123",
+      accessKeyId: "AKIAEXAMPLE",
+      secretAccessKey: "secretEXAMPLE",
+      bucketName: "nadi-attachments",
+    });
+    expect("endpoint" in deps).toBe(false);
+  });
+
+  it("falls back to the S3_* vars on celld and picks up the endpoint", () => {
+    const deps = presignDepsFromEnv({
+      S3_ENDPOINT: "https://s3.example.com",
+      S3_ACCESS_KEY_ID: "AKIACELLD",
+      S3_SECRET_ACCESS_KEY: "secretCELLD",
+      S3_ATTACHMENTS_BUCKET_NAME: "nadi-attachments",
+    } as never);
+    expect(deps).toEqual({
+      accountId: undefined,
+      accessKeyId: "AKIACELLD",
+      secretAccessKey: "secretCELLD",
+      bucketName: "nadi-attachments",
+      endpoint: "https://s3.example.com",
+    });
+  });
+
+  it("prefers R2_* when both are present (Cloudflare behavior is untouched)", () => {
+    const deps = presignDepsFromEnv({
+      R2_ACCOUNT_ID: "acct123",
+      R2_ACCESS_KEY_ID: "AKIAEXAMPLE",
+      R2_SECRET_ACCESS_KEY: "secretEXAMPLE",
+      R2_BUCKET_NAME: "nadi-attachments",
+      S3_ENDPOINT: "https://s3.example.com",
+      S3_ACCESS_KEY_ID: "AKIACELLD",
+      S3_SECRET_ACCESS_KEY: "secretCELLD",
+    } as never);
+    expect(deps.accessKeyId).toBe("AKIAEXAMPLE");
+    expect(deps.endpoint).toBe("https://s3.example.com");
+  });
+
+  it("fails loudly when no credentials or bucket name are configured", () => {
+    expect(() => presignDepsFromEnv({} as never)).toThrow(/missing S3 credentials or bucket name/);
   });
 });

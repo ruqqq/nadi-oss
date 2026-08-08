@@ -1,5 +1,5 @@
 import type { Env } from "../env";
-import { registryDb } from "../db/client";
+import { registryBinding, registryDb } from "../db/client";
 import type { ThreadIndex } from "../db/schema";
 import { ThreadSearchProjectionRepository } from "../db/repositories/thread-search-projection";
 import type { SearchProjectionDocument } from "../db/repositories/thread-search-projection";
@@ -61,7 +61,7 @@ export async function reconcileThreadSearchProjectionFromMessages(
     );
   }
 
-  await new ThreadSearchProjectionRepository(env.REGISTRY_DB).reconcile({
+  await new ThreadSearchProjectionRepository(registryBinding(env)).reconcile({
     workspaceId: thread.workspaceId,
     threadId: thread.id,
     observedUpdatedAt: input.observedUpdatedAt,
@@ -94,7 +94,7 @@ async function reconcileThreadSearchProjectionFromSource(
 ): Promise<void> {
   const startedAt = Date.now();
   const observedUpdatedAt = thread.updatedAt;
-  const projection = new ThreadSearchProjectionRepository(env.REGISTRY_DB);
+  const projection = new ThreadSearchProjectionRepository(registryBinding(env));
   const currentState = new Map(
     (await projection.listState(thread.id)).map((row) => [row.messageId, row.sourceHash]),
   );

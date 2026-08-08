@@ -1,5 +1,5 @@
 import { and, desc, eq } from "drizzle-orm";
-import { registryDb } from "../client";
+import { registryBinding, registryDb } from "../client";
 import { providerConfigs } from "../schema";
 import type { Env } from "../../env";
 
@@ -327,21 +327,22 @@ export async function upsertProviderConfig(
 
   const id = `pcfg_${crypto.randomUUID()}`;
 
-  await env.REGISTRY_DB.prepare(
-    [
-      "INSERT INTO provider_configs",
-      "(id, workspace_id, provider, display_name, secret_name, config_json, created_at)",
-      "VALUES (",
-      "?,",
-      "?,",
-      "?,",
-      "coalesce(nullif(?, ''), nullif((select display_name from provider_configs where workspace_id = ? and provider = ? order by created_at desc, id desc limit 1), ''), ?),",
-      "coalesce(nullif(?, ''), nullif((select secret_name from provider_configs where workspace_id = ? and provider = ? order by created_at desc, id desc limit 1), ''), ?),",
-      "?,",
-      "max(coalesce((select max(created_at) from provider_configs where workspace_id = ? and provider = ?), 0) + 1, ?)",
-      ")",
-    ].join(" "),
-  )
+  await registryBinding(env)
+    .prepare(
+      [
+        "INSERT INTO provider_configs",
+        "(id, workspace_id, provider, display_name, secret_name, config_json, created_at)",
+        "VALUES (",
+        "?,",
+        "?,",
+        "?,",
+        "coalesce(nullif(?, ''), nullif((select display_name from provider_configs where workspace_id = ? and provider = ? order by created_at desc, id desc limit 1), ''), ?),",
+        "coalesce(nullif(?, ''), nullif((select secret_name from provider_configs where workspace_id = ? and provider = ? order by created_at desc, id desc limit 1), ''), ?),",
+        "?,",
+        "max(coalesce((select max(created_at) from provider_configs where workspace_id = ? and provider = ?), 0) + 1, ?)",
+        ")",
+      ].join(" "),
+    )
     .bind(
       id,
       workspaceId,

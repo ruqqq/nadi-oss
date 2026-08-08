@@ -7,7 +7,10 @@ import { applyRegistryTestSchema } from "./helpers/registry";
 import { DEFAULT_THREAD_PAGE } from "../../src/http/thread-routes";
 
 const now = 1_800_000_000_000;
-const featureEnv = env as typeof env & { BACKGROUND_WORK_ENABLED?: string | undefined };
+const featureEnv = env as typeof env & {
+  BACKGROUND_WORK_ENABLED?: string | undefined;
+  NADI_PLATFORM?: string | undefined;
+};
 
 function cookie(token: string) {
   return { cookie: `better-auth.session_token=${token}` };
@@ -233,6 +236,26 @@ describe("bootstrap route", () => {
       expect(body.features.voiceInput).toBe(true);
     } finally {
       env.VOICE_INPUT_ENABLED = previous;
+    }
+  });
+
+  it("reports voiceInput off on celld even when the flag is set", async () => {
+    // celld has no AI binding: the flag can only turn voice OFF, never on, and
+    // bootstrap must agree with VoiceAgent's runtime refusal.
+    const { token } = await seedOwner();
+    const previousPlatform = featureEnv.NADI_PLATFORM;
+    const previousFlag = env.VOICE_INPUT_ENABLED;
+    featureEnv.NADI_PLATFORM = "celld";
+    env.VOICE_INPUT_ENABLED = "true";
+
+    try {
+      const res = await SELF.fetch("https://nadi.test/api/bootstrap", { headers: cookie(token) });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { features: { voiceInput: boolean } };
+      expect(body.features.voiceInput).toBe(false);
+    } finally {
+      featureEnv.NADI_PLATFORM = previousPlatform;
+      env.VOICE_INPUT_ENABLED = previousFlag;
     }
   });
 

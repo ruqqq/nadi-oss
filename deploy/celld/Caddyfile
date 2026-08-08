@@ -1,0 +1,79 @@
+# Caddy in front of a celld node. Two jobs: serve the SPA (celld has no assets
+# binding and cannot), and terminate TLS (the app hardcodes https:// for any
+# non-localhost artifact origin, so plain HTTP is not an option on a server).
+#
+# Site addresses come from deploy/celld/.env — see .env.example. They carry a
+# scheme, and the scheme is load-bearing: a bare hostname turns on auto-HTTPS
+# and Caddy issues a certificate, while an explicit `http://` turns it off
+# entirely. That is what lets one file serve both a real server and a local
+# `*.localhost` setup, where there is no DNS to validate against.
+
+{
+	email {$ACME_EMAIL}
+}
+
+{$NADI_SITE} {
+	# Everything the Worker owns. Anything not listed here is a static file,
+	# so a route added to src/index.ts must be added here too or it will be
+	# answered with index.html and 200 — which looks like a broken SPA, not a
+	# missing proxy rule.
+	#
+	# Enumerated from src/index.ts: /api/*, /agents/* (which covers
+	# VOICE_PARTY_PREFIX = /agents/voice-agent/), /think-agents/*, and the
+	# exact path /live.
+	@worker path /api/* /agents/* /think-agents/* /live
+	handle @worker {
+		# reverse_proxy detects and upgrades WebSockets on its own, with no
+		# timeout on an upgraded connection — /agents/*, /think-agents/* and
+		# /live are all long-lived sockets and need no extra configuration.
+		reverse_proxy celld:8080
+	}
+
+	handle {
+		root * /srv
+
+		# Hashed bundles are content-addressed, so they can be cached hard.
+		@immutable path /assets/*
+		header @immutable Cache-Control "public, max-age=31536000, immutable"
+
+		# The shell and the service worker must NOT be, or a deploy is
+		# invisible to an open tab until the cache expires.
+		@shell path / /index.html /sw.js /manifest.webmanifest
+		header @shell Cache-Control "no-cache"
+
+		# Matches Cloudflare's not_found_handling: single-page-application.
+		# Note this makes a deleted JS chunk return index.html with 200 rather
+		# than 404 — the same behaviour the app's stale-bundle recovery is
+		# written against, so keep it.
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+# Published artifacts get their own origin so untrusted HTML cannot touch the
+# app's cookies. Every path here belongs to the Worker.
+{$ARTIFACTS_SITE} {
+	reverse_proxy celld:8080
+}
+
+# Attachment downloads 302 the BROWSER to a presigned S3 URL built from
+# S3_ENDPOINT (src/http/attachment-routes.ts), so that endpoint must be one the
+# browser can resolve — an internal `minio:9000` produces links only the
+# container can open.
+#
+# But the Worker ALSO talks to S3_ENDPOINT directly for every upload and read
+# (S3Bucket in src/storage/s3-bucket.ts), from inside the container. So the one
+# value has to resolve on both sides, and it cannot be two values: SigV4 signs
+# the Host header, so a URL presigned for one hostname fails the signature
+# check when it arrives bearing another.
+#
+# This block is what makes a single hostname work both ways. The browser
+# reaches it via /etc/hosts -> 127.0.0.1 -> the published port; the Worker
+# reaches it via a Docker network alias on this container (see S3_HOSTNAME in
+# docker-compose.yaml). Both arrive here with the same Host, and both are
+# proxied to MinIO's real port.
+#
+# Harmless without the `minio` profile: nothing routes here, so nothing asks.
+{$S3_SITE} {
+	reverse_proxy minio:9000
+}

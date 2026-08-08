@@ -2,7 +2,7 @@ import type { Env } from "../env";
 import { resolveAppName } from "../app-name";
 import {
   backgroundWorkEnabled,
-  isTruthyFlag,
+  voiceInputEnabled,
   resolveWorkspaceBackgroundWork,
   resolveWorkspaceWorkbenchNetworkAllowlist,
 } from "../flags";
@@ -64,7 +64,10 @@ export async function routeBootstrap(req: Request, env: Env): Promise<Response |
     threadsNextCursor,
     projects,
     features: {
-      voiceInput: isTruthyFlag(env.VOICE_INPUT_ENABLED),
+      // Resolved through voiceInputEnabled so bootstrap and VoiceAgent agree:
+      // the flag can only turn voice off, never on where the platform has no
+      // speech-to-text (celld has no AI binding).
+      voiceInput: voiceInputEnabled(env),
       workersAi: canUseProvider(env, "workers-ai", session.user.email),
       feedbackAdmin: isFeedbackAdmin(env, session.user.email),
       backgroundWork: resolveWorkspaceBackgroundWork({

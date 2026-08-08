@@ -108,8 +108,12 @@ Live constraints, not aspirations — you will meet these:
   does not reach a sandbox that already exists; it takes a fresh one.
 - **Subagents and process watchers are off by default**
   (`BACKGROUND_WORK_ENABLED`). They work, but they are still being hardened.
-- **Self-hosting is not yet a documented afternoon.** Deploying takes reading
-  `wrangler.jsonc` and the runbooks; the guided path is the next milestone.
+- **Self-hosting off Cloudflare is new.** Nadi runs on
+  [celld](https://github.com/denoland/celld) with your own S3 bucket — see
+  [`docs/self-hosting-celld.md`](./docs/self-hosting-celld.md). Voice, Workers
+  AI, browser rendering, web push and GitHub App auth need Cloudflare bindings
+  celld has no equivalent for, and are unavailable there; the guide says so
+  plainly and explains what a crash costs.
 
 ## Roadmap
 
@@ -139,6 +143,7 @@ traps worth knowing before your first PR. Report vulnerabilities privately via
 - [`AGENTS.md`](./AGENTS.md) — working conventions, design system, the rules that bite
 - [`docs/runbooks/`](./docs/runbooks) — local dev and day-to-day operations
 - [`docs/operations/`](./docs/operations) — Cloudflare Sandbox provisioning and smoke checks
+- [`docs/self-hosting-celld.md`](./docs/self-hosting-celld.md) — running Nadi off Cloudflare, on your own machine
 - [`docs/github-app-setup.md`](./docs/github-app-setup.md) — GitHub App for sandbox git access
 - [`.dev.vars.example`](./.dev.vars.example) — every knob, documented in place
 

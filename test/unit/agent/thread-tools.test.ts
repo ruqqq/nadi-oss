@@ -66,10 +66,10 @@ describe("mergeNativeThreadTools", () => {
 });
 
 describe("createBaseNativeThreadTools automaton tools", () => {
-  const base = createBaseNativeThreadTools({ env: {} as Env, threadId: "th_base" }) as Record<
-    string,
-    { needsApproval?: boolean }
-  >;
+  const base = createBaseNativeThreadTools({
+    env: { REGISTRY_DB: {} } as Env,
+    threadId: "th_base",
+  }) as Record<string, { needsApproval?: boolean }>;
 
   it("includes the four Automata management tools", () => {
     expect(base).toHaveProperty("list_automata");
@@ -89,7 +89,7 @@ describe("createBaseNativeThreadTools automaton tools", () => {
 describe("createBaseNativeThreadTools thread knowledge tools", () => {
   it("includes the four model-native thread knowledge tools as read-only tools", () => {
     const base = createBaseNativeThreadTools({
-      env: {} as Env,
+      env: { REGISTRY_DB: {} } as Env,
       threadId: "th_base",
       resolveThreadKnowledgeScope: async () => ({
         workspaceId: "workspace-base",

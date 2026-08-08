@@ -183,7 +183,8 @@ import { AgentSkillRepository } from "../db/repositories/agent-skills";
 import { FeedbackRepository } from "../db/repositories/feedback";
 import { WorkspacePrivacySettingsRepository } from "../db/repositories/workspace-privacy-settings";
 import { ThreadRepository } from "../db/repositories/threads";
-import { registryDb } from "../db/client";
+import { hasRegistry, registryBinding, registryDb } from "../db/client";
+import { attachmentsBucket } from "../storage/bucket-binding";
 import { log } from "../log";
 import {
   commitWorkbenchSwitchIfPending,
@@ -1122,7 +1123,7 @@ export class ThinkThreadAgent extends Think<Env> {
     );
     const referencedAttachmentIds = extractAttachmentIdsFromModelMessages(_ctx.messages);
     if (referencedAttachmentIds.length > 0) {
-      await new AttachmentRepository(this.env.REGISTRY_DB).markCommitted(
+      await new AttachmentRepository(registryBinding(this.env)).markCommitted(
         referencedAttachmentIds,
         this.name,
       );
@@ -1416,7 +1417,7 @@ export class ThinkThreadAgent extends Think<Env> {
     }
     const referencedAttachmentIds = extractAttachmentIdsFromModelMessages(_ctx.messages);
     if (referencedAttachmentIds.length > 0) {
-      await new AttachmentRepository(this.env.REGISTRY_DB).markCommitted(
+      await new AttachmentRepository(registryBinding(this.env)).markCommitted(
         referencedAttachmentIds,
         this.name,
       );
@@ -1562,7 +1563,7 @@ export class ThinkThreadAgent extends Think<Env> {
     messages: ModelMessage[],
     cfg: { inputModalities?: string[]; modelInputModalities?: string[] },
   ): Promise<ModelMessage[]> {
-    const repo = new AttachmentRepository(this.env.REGISTRY_DB);
+    const repo = new AttachmentRepository(registryBinding(this.env));
     return prepareModelMessagesForModel(messages, {
       inputModalities: cfg.modelInputModalities ?? cfg.inputModalities ?? ["text"],
       resolveAttachment: async (id) => {
@@ -1616,7 +1617,7 @@ export class ThinkThreadAgent extends Think<Env> {
     return {
       extract: createAttachmentExtractor({
         ai: ai as unknown as WorkersAi,
-        bucket: this.env.ATTACHMENTS_BUCKET,
+        bucket: attachmentsBucket(this.env),
         store,
       }),
     };
@@ -1657,7 +1658,10 @@ export class ThinkThreadAgent extends Think<Env> {
     const ctx = (this as unknown as { ctx?: { waitUntil?: (promise: Promise<unknown>) => void } })
       .ctx;
     const waitUntil = ctx?.waitUntil?.bind(ctx);
-    if (!waitUntil || !this.env?.REGISTRY_DB) return;
+    // Gate on the registry being reachable, not on the Cloudflare binding:
+    // `env.REGISTRY_DB` is absent on celld, where the registry lives in a
+    // Durable Object, and testing it here silently disabled projection there.
+    if (!waitUntil || !hasRegistry(this.env ?? {})) return;
 
     scheduleLocalThreadSearchProjection({
       env: this.env,
@@ -2708,8 +2712,9 @@ export class ThinkThreadAgent extends Think<Env> {
       title: string;
       source: "manual" | "automaton";
     }) => {
-      await this.env.REGISTRY_DB.prepare(
-        `
+      await registryBinding(this.env)
+        .prepare(
+          `
           INSERT INTO thread_index (
             id, workspace_id, agent_id, title, title_set, runtime, source,
             automaton_id, automaton_run_id, last_event_id, last_message_preview,
@@ -2717,7 +2722,7 @@ export class ThinkThreadAgent extends Think<Env> {
           )
           VALUES (?, ?, ?, ?, 1, 'think', ?, ?, ?, NULL, '', ?, ?)
         `,
-      )
+        )
         .bind(
           input.threadId,
           runtimeConfig.workspaceId,
@@ -2832,19 +2837,19 @@ export class ThinkThreadAgent extends Think<Env> {
       }
       try {
         const placeholders = tempThreadIds.map(() => "?").join(", ");
-        await this.env.REGISTRY_DB.batch([
-          this.env.REGISTRY_DB.prepare(
-            `DELETE FROM thread_search_messages WHERE thread_id IN (${placeholders})`,
-          ).bind(...tempThreadIds),
-          this.env.REGISTRY_DB.prepare(
-            `DELETE FROM archived_message WHERE thread_id IN (${placeholders})`,
-          ).bind(...tempThreadIds),
-          this.env.REGISTRY_DB.prepare(
-            `DELETE FROM archived_compaction WHERE thread_id IN (${placeholders})`,
-          ).bind(...tempThreadIds),
-          this.env.REGISTRY_DB.prepare(
-            `DELETE FROM thread_index WHERE id IN (${placeholders})`,
-          ).bind(...tempThreadIds),
+        await registryBinding(this.env).batch([
+          registryBinding(this.env)
+            .prepare(`DELETE FROM thread_search_messages WHERE thread_id IN (${placeholders})`)
+            .bind(...tempThreadIds),
+          registryBinding(this.env)
+            .prepare(`DELETE FROM archived_message WHERE thread_id IN (${placeholders})`)
+            .bind(...tempThreadIds),
+          registryBinding(this.env)
+            .prepare(`DELETE FROM archived_compaction WHERE thread_id IN (${placeholders})`)
+            .bind(...tempThreadIds),
+          registryBinding(this.env)
+            .prepare(`DELETE FROM thread_index WHERE id IN (${placeholders})`)
+            .bind(...tempThreadIds),
         ]);
       } catch (error) {
         errors.push(error instanceof Error ? error.message : String(error));
@@ -5210,7 +5215,7 @@ export class ThinkThreadAgent extends Think<Env> {
     return this.serializeQueuedRpc(async () => {
       await submitQueuedUserMessageBatch(this.queuedSubmissionPort(), normalized);
       if (normalized.attachmentIds.length > 0) {
-        await new AttachmentRepository(this.env.REGISTRY_DB).markCommitted(
+        await new AttachmentRepository(registryBinding(this.env)).markCommitted(
           normalized.attachmentIds,
           this.name,
         );
@@ -5243,7 +5248,7 @@ export class ThinkThreadAgent extends Think<Env> {
         interviewId: active.interviewId,
       });
       if (normalized.attachmentIds.length > 0) {
-        await new AttachmentRepository(this.env.REGISTRY_DB).markCommitted(
+        await new AttachmentRepository(registryBinding(this.env)).markCommitted(
           normalized.attachmentIds,
           this.name,
         );
@@ -5584,7 +5589,7 @@ export class ThinkThreadAgent extends Think<Env> {
   }
 
   private async assertFeedbackAttachmentsBelongToThread(attachmentIds: string[]): Promise<void> {
-    const repo = new AttachmentRepository(this.env.REGISTRY_DB);
+    const repo = new AttachmentRepository(registryBinding(this.env));
     for (const attachmentId of attachmentIds) {
       const row = await repo.getByIdInThread(attachmentId, this.name);
       if (!row) throw new Error("feedback_attachment_not_found");
@@ -5592,7 +5597,7 @@ export class ThinkThreadAgent extends Think<Env> {
   }
 
   private async assertFeedbackScreenshotsBelongToThread(attachmentIds: string[]): Promise<void> {
-    const repo = new AttachmentRepository(this.env.REGISTRY_DB);
+    const repo = new AttachmentRepository(registryBinding(this.env));
     for (const attachmentId of attachmentIds) {
       const row = await repo.getByIdInThread(attachmentId, this.name);
       if (!row || !row.mimeType.startsWith("image/")) {

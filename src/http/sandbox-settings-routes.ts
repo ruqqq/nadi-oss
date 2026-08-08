@@ -9,6 +9,7 @@ import {
   DEFAULT_COMPUTE_LIMITS,
   clampPositiveInt,
   defaultProviderConfig,
+  mockSandboxEnabled,
   parseDomainList,
   providerConfigSchema,
   validateSandboxDomain,
@@ -163,6 +164,12 @@ async function updateWorkspaceSandboxSettings(
   }
   if (provider !== providerConfig.kind)
     return new Response("provider config does not match provider", { status: 400 });
+  // Mock is a test double, selectable only where the deployment opted into it.
+  // Enforced here and not just hidden in the UI, because hiding an option does
+  // not stop a hand-rolled PUT from setting it. Switching AWAY from mock stays
+  // allowed, so a workspace left on mock is never stuck.
+  if (provider === "mock" && !mockSandboxEnabled(env))
+    return new Response("provider unavailable", { status: 400 });
   const networkRestrictionEnabled =
     typeof body.networkRestrictionEnabled === "boolean"
       ? body.networkRestrictionEnabled

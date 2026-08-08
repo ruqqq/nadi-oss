@@ -1,7 +1,8 @@
 import { and, eq } from "drizzle-orm";
 import type { Env } from "../env";
 import { validateRequestSession } from "../auth/session";
-import { registryDb } from "../db/client";
+import { registryBinding, registryDb } from "../db/client";
+import { attachmentsBucket } from "../storage/bucket-binding";
 import { threadIndex, workspaceMembers, attachments } from "../db/schema";
 import { AttachmentRepository } from "../db/attachment-repository";
 import { ThreadRepository } from "../db/repositories/threads";
@@ -189,7 +190,7 @@ async function handleUpload(req: Request, env: Env, threadId: string): Promise<R
 
   const id = crypto.randomUUID();
   const r2Key = `${workspaceId}/${threadId}/${id}.${resolved.ext}`;
-  await env.ATTACHMENTS_BUCKET.put(r2Key, await file.arrayBuffer(), {
+  await attachmentsBucket(env).put(r2Key, await file.arrayBuffer(), {
     httpMetadata: { contentType: resolved.mimeType },
   });
 
@@ -198,7 +199,7 @@ async function handleUpload(req: Request, env: Env, threadId: string): Promise<R
   const width = Number.isFinite(widthRaw) && widthRaw > 0 ? widthRaw : null;
   const height = Number.isFinite(heightRaw) && heightRaw > 0 ? heightRaw : null;
 
-  await new AttachmentRepository(env.REGISTRY_DB).insert({
+  await new AttachmentRepository(registryBinding(env)).insert({
     id,
     workspaceId,
     threadId,

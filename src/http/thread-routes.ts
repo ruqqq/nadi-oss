@@ -2,7 +2,7 @@ import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 
 import { getAgentByName } from "agents";
 import type { Env } from "../env";
 import { validateRequestSession, type ValidatedSession } from "../auth/session";
-import { registryDb } from "../db/client";
+import { registryBinding, registryDb } from "../db/client";
 import {
   DEFAULT_REASONING_EFFORT,
   parseReasoningEffort,
@@ -1034,7 +1034,7 @@ async function deleteThread(
   // The summaries are archived alongside the raw transcript — delete them with it,
   // or a deleted thread leaves its digest behind in D1.
   await new ArchivedCompactionRepository(db).deleteForThread(threadId);
-  await new ThreadSearchProjectionRepository(env.REGISTRY_DB).deleteForThread(threadId);
+  await new ThreadSearchProjectionRepository(registryBinding(env)).deleteForThread(threadId);
   await repo.delete(threadId);
 
   ctx.waitUntil(

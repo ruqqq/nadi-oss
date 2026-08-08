@@ -185,7 +185,15 @@ export function Onboarding({
   // connection. Composio finishing OAuth is not the same as a calendar
   // account being attached inside it, so this is derived from resolved tool
   // names, never from which connections are authorized.
-  const [calendarConnected, setCalendarConnected] = useState(false);
+  //
+  // A ref because nothing renders from it and `advance` is the only reader.
+  // As state, EmpowerStep reporting upward would have to re-render this
+  // component before `advance`'s closure saw the new value — so a Continue in
+  // the same tick as the report still armed the nudge from `false`.
+  const calendarConnectedRef = useRef(false);
+  const handleCalendarConnectedChange = useCallback((connected: boolean) => {
+    calendarConnectedRef.current = connected;
+  }, []);
 
   // Only reached once the required steps are done, so load the current state
   // lazily rather than paying for it on every onboarding mount.
@@ -254,10 +262,10 @@ export function Onboarding({
     const next = steps[index + 1];
     if (next) goToStep(next.id);
     else {
-      armAutomatonNudge(localStorage, { calendarConnected });
+      armAutomatonNudge(localStorage, { calendarConnected: calendarConnectedRef.current });
       onComplete();
     }
-  }, [steps, step, goToStep, onComplete, calendarConnected]);
+  }, [steps, step, goToStep, onComplete]);
 
   const secretName = useMemo(
     () => settings.providers.find((p) => p.provider === provider)?.configuredSecretName,
@@ -704,7 +712,7 @@ export function Onboarding({
             </Card>
           ) : step === "empower" ? (
             <EmpowerStep
-              onCalendarConnectedChange={setCalendarConnected}
+              onCalendarConnectedChange={handleCalendarConnectedChange}
               exaCard={
                 <Card className="gap-3 p-4">
                   <form className="space-y-4" onSubmit={submitWebSearch}>

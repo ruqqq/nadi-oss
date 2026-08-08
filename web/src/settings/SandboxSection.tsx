@@ -192,6 +192,7 @@ function SandboxSettingsForm({
         spritesSecretPresent={settings.spritesSecretPresent}
         spritesMode={settings.spritesMode}
         spritesAvailable={settings.spritesAvailable}
+        mockAvailable={settings.mockAvailable ?? false}
         operatorManagedCompute={settings.operatorManagedCompute ?? false}
         onSaved={onSaved}
       />
@@ -208,6 +209,7 @@ function WorkspaceSandboxCard({
   spritesSecretPresent,
   spritesMode: confirmedSpritesMode,
   spritesAvailable,
+  mockAvailable,
   operatorManagedCompute,
   onSaved,
 }: {
@@ -219,6 +221,10 @@ function WorkspaceSandboxCard({
   spritesSecretPresent: boolean;
   spritesMode: SandboxSettingsResponse["spritesMode"];
   spritesAvailable: boolean;
+  /** Whether `mock` may be selected — only on a deployment that opted in with
+   *  DEFAULT_SANDBOX_PROVIDER=mock. The server refuses it on the same
+   *  condition, so this hides an option rather than being the only guard. */
+  mockAvailable: boolean;
   /** Hides the read-only deployment panel — an operator set this compute up. */
   operatorManagedCompute: boolean;
   onSaved: (settings: SandboxSettingsResponse) => void;
@@ -249,6 +255,13 @@ function WorkspaceSandboxCard({
   // (derived from the effective allowlist); the UI only consumes it.
   const cloudflareNetworkUnsupported =
     readiness.cloudflare.unsupported.includes("network_restrictions");
+  // Mock is a test double and stays out of the list unless the deployment opted
+  // in. The `provider === "mock"` escape keeps a workspace already on mock from
+  // rendering a Select with no matching item — which would read as an empty
+  // provider and silently re-save as something else on the next submit.
+  const providerOptions = SANDBOX_PROVIDER_OPTIONS.filter(
+    (option) => option.value !== "mock" || mockAvailable || provider === "mock",
+  );
   const [enabled, setEnabled] = useState(base.enabled);
   const [smallKind, setSmallKind] = useState(config.profiles.small?.kind ?? "snapshot");
   const [smallValue, setSmallValue] = useState(config.profiles.small?.value ?? "");
@@ -482,7 +495,7 @@ function WorkspaceSandboxCard({
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {SANDBOX_PROVIDER_OPTIONS.map((option) => (
+              {providerOptions.map((option) => (
                 <SelectItem
                   key={option.value}
                   value={option.value}

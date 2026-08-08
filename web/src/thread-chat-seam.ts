@@ -58,6 +58,18 @@ export interface ThreadChatApi {
 export function useThreadAgent(thread: ThreadSummary) {
   return useAgent({
     ...agentConnectionOptionsForThread(thread),
+    // partysocket picks ws/wss from the HOSTNAME, never from the page protocol,
+    // and its insecure test is `host.startsWith("localhost:")` — a literal
+    // "localhost" WITH a port. Any other host served over plain http (a
+    // `*.localhost` name, a LAN hostname, a self-hosted box behind a
+    // TLS-terminating proxy that forwards http) is therefore dialed as `wss://`
+    // against a port with no TLS listener. That fails before the request leaves
+    // the browser: no console error, nothing in any server log, and the composer
+    // sits on "Connecting…" retrying forever.
+    //
+    // Follow the page instead — the same rule `liveUrl` already applies to the
+    // user-hub socket, which is why /live connects on http while this did not.
+    protocol: window.location.protocol === "https:" ? "wss" : "ws",
     // Uncomment for cross-origin local dev (set VITE_AGENT_HOST in web/.env.local):
     // host: import.meta.env.VITE_AGENT_HOST,
   });

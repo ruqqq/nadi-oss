@@ -302,7 +302,10 @@ describe("createFileTransferTools", () => {
   });
 
   it("is included in base native thread tools", () => {
-    const tools = createBaseNativeThreadTools({ env: {} as never, threadId: "thr_1" });
+    const tools = createBaseNativeThreadTools({
+      env: { REGISTRY_DB: {} } as never,
+      threadId: "thr_1",
+    });
 
     expect(Object.keys(tools)).toContain("upload_to_signed_url");
   });
