@@ -1,0 +1,140 @@
+# Nadi on a celld CLUSTER — one copy of this stack per host.
+#
+# UNTESTED. The single-node docker-compose.yaml in this directory has been run
+# end to end; this file has not. It is a starting point derived from celld's
+# documented flags, not a proven recipe. Read multinode.md before using it, and
+# expect to debug.
+#
+#   cp .env.multinode.example .env.multinode   # then edit, PER HOST
+#   cp celld-vars.env.example celld-vars.env   # identical on every host
+#
+#   # once, from any host:
+#   docker compose -f docker-compose.multinode.yaml --env-file .env.multinode \
+#     --profile deploy run --rm deploy
+#
+#   # on every host:
+#   docker compose -f docker-compose.multinode.yaml --env-file .env.multinode up -d
+#
+# Every host runs a full copy: one celld node plus its own Caddy. Any node can
+# answer any request — celld routes internally to whichever node currently owns
+# the cell — so the load balancer in front needs NO session affinity, and
+# WebSockets work through a plain round-robin. That is the property this whole
+# layout is built on.
+#
+# There is no bundled MinIO here on purpose. Every node must reach the SAME
+# fleet bucket, so S3 has to be external (R2, AWS, or a MinIO cluster of its
+# own). A per-host MinIO would give you N isolated apps that silently ignore
+# each other.
+
+name: nadi-celld-node
+
+services:
+  # One-shot, run from ONE host only. Uploads the Worker bundle to the fleet
+  # bucket, which records a single current deployment for the whole cluster.
+  # Nodes read a deployment at startup only, so this changes nothing until you
+  # restart them — see the rolling-restart section of multinode.md.
+  deploy:
+    profiles: [deploy]
+    build:
+      context: ../..
+      dockerfile: deploy/celld/Dockerfile
+      target: deployer
+    command: ["--bucket", "${CELLD_BUCKET}", "--endpoint", "${S3_ENDPOINT_INTERNAL}"]
+    environment:
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+
+  celld:
+    build:
+      context: ../..
+      dockerfile: deploy/celld/Dockerfile
+      target: node
+    restart: unless-stopped
+    command:
+      - "--bucket"
+      - "${CELLD_BUCKET}"
+      - "--endpoint"
+      - "${S3_ENDPOINT_INTERNAL}"
+      - "--listen"
+      - "0.0.0.0:8080"
+      # THE per-host value, and the one thing most likely to be wrong. Peers
+      # read this out of the fleet bucket and dial it directly, so it must be
+      # an address reachable from the OTHER hosts — not a Docker service name.
+      # The single-node file gets away with `celld:8080` precisely because it
+      # has no peers.
+      - "--advertise"
+      - "${CELLD_ADVERTISE}"
+    ports:
+      # Peer traffic is unencrypted (celld refuses a public advertise address
+      # without --unsafe-public-advertise, and that flag is named honestly).
+      # Bind the peer port to the PRIVATE interface only. Never 0.0.0.0 here:
+      # this port speaks for the whole cluster's storage.
+      - "${PEER_BIND_IP}:8080:8080"
+    environment:
+      CELLD_VARS_FILE: /etc/nadi/celld-vars.env
+      # Two knobs decide how much a node dying costs, and they compound:
+      # a peer takes over after the dead node's lease expires (TTL), and
+      # restores each cell from its last replication (IDLE_EVICT). Everything
+      # written in between is discarded silently. See multinode.md.
+      CELLD_TTL_MS: ${CELLD_TTL_MS:-10000}
+      CELLD_IDLE_EVICT_S: ${CELLD_IDLE_EVICT_S:-15}
+      CELLD_ALARM_RESIDENT_MS: ${CELLD_ALARM_RESIDENT_MS:-1000}
+      # `release` lets a loaded node hand cells to a quieter peer instead of
+      # shedding under pressure — the multi-node-only behaviour. `sticky`
+      # keeps them local, which is what you want with one node.
+      CELLD_PRESSURE_OWNERSHIP: ${CELLD_PRESSURE_OWNERSHIP:-release}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+    volumes:
+      # Identical on every host. A node that disagrees with its peers about
+      # BETTER_AUTH_SECRET or the KEK will serve sessions and secrets the
+      # others cannot read, and the failure looks like random sign-outs.
+      - ./celld-vars.env:/etc/nadi/celld-vars.env:ro
+    stop_grace_period: 60s
+
+  # Serves the SPA and proxies the Worker's routes to the LOCAL node. Reuses
+  # the single-node Caddyfile unchanged: `reverse_proxy celld:8080` resolves to
+  # this host's node, which is correct — it can serve any request.
+  #
+  # The Caddyfile's S3 block is inert here (no `minio` service to route to)
+  # and its site address is only reached if you point S3_SITE at this host,
+  # which you should not with external S3.
+  caddy:
+    build:
+      context: ../..
+      dockerfile: deploy/celld/Dockerfile
+      target: web-server
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      NADI_SITE: ${NADI_SITE}
+      ARTIFACTS_SITE: ${ARTIFACTS_SITE}
+      S3_SITE: ${S3_SITE}
+      ACME_EMAIL: ${ACME_EMAIL}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./data/caddy:/data
+      - ./data/caddy-config:/config
+    depends_on:
+      - celld
+
+  # Arms the scheduler and backstops a lost alarm. Harmless to run on every
+  # host — it is a GET to `/`, and whichever node owns the ticker cell answers
+  # it regardless of which node received it. If N pokes a minute bothers you,
+  # delete the service from all but one host's copy.
+  ticker-watchdog:
+    image: curlimages/curl:latest
+    restart: unless-stopped
+    command:
+      ["sh", "-c", "while true; do curl -sf http://celld:8080/ >/dev/null || true; sleep 60; done"]
+    depends_on:
+      - celld
+
+# No named volumes, for the same reason as the single-node file: persistent
+# state lives under ./data/ where `docker compose down -v` cannot reach it.
+# Note that here ./data/ holds only Caddy's certificates — the durable copy of
+# your application data is the external fleet bucket.

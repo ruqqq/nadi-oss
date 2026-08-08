@@ -341,6 +341,11 @@ Adding a second introduces failover, where a node that dies hands its cells to a
 peer that restores them from the bucket — losing everything since those cells
 last went idle. Do not scale out without revisiting it.
 
+celld itself is built for a cluster, so this is a property of *this* deployment
+rather than a limit of the runtime. If you need the availability, there is an
+untested starting point in [`deploy/celld/multinode.md`](../deploy/celld/multinode.md)
+— read what failover costs there before deciding it is worth it.
+
 **`CELLD_IDLE_EVICT_S` = 15–30 s.** This is the only thing bounding what a crash
 costs, because it decides how soon a quiet cell replicates. It must also stay
 well below the scheduler's 60-second tick: at 15 s, each cycle leaves a ~45 s

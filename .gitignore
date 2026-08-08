@@ -17,6 +17,7 @@ web/dist/
 .env.*
 !.env.example
 !.env.local.example
+!.env.multinode.example
 !web/.env.local.example
 # The celld vars file holds BETTER_AUTH_SECRET, the KEK and S3 credentials, and
 # is NOT named `.env`, so nothing above covers it. Only the example is tracked.
