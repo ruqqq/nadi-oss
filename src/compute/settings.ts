@@ -8,6 +8,7 @@ import {
   DEFAULT_COMPUTE_LIMITS,
   clampPositiveInt,
   defaultProviderConfig,
+  mockSandboxEnabled,
   parseProviderConfigJson,
   resolveEffectiveComputeConfig,
 } from "./config";
@@ -401,6 +402,12 @@ export interface ComputeSettingsView {
   spritesMode: SpritesConfigurationMode;
   spritesAvailable: boolean;
   spritesSecretPresent: boolean;
+  /**
+   * Whether the `mock` provider may be selected here. False on any deployment
+   * that did not opt in with `DEFAULT_SANDBOX_PROVIDER=mock`, which hides it
+   * from the provider list; the PUT handler refuses it on the same condition.
+   */
+  mockAvailable: boolean;
   workspaceSecretEnvVars: Array<{ name: string; updatedAt: string }>;
   agentSecretEnvVars: Array<{ name: string; updatedAt: string }>;
 }
@@ -487,6 +494,7 @@ export async function getComputeSettingsView(input: {
     spritesMode: spritesConfiguration.mode,
     spritesAvailable: spritesConfiguration.apiKey !== null,
     spritesSecretPresent: spritesConfiguration.mode === "byok",
+    mockAvailable: mockSandboxEnabled(input.env),
     workspaceSecretEnvVars: secretNames.workspace,
     agentSecretEnvVars: secretNames.agent,
   };

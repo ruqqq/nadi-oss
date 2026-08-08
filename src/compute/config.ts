@@ -214,6 +214,26 @@ export function resolveDefaultSandboxProvider(env: {
   return "cloudflare";
 }
 
+/**
+ * Whether the in-memory `mock` provider may be SELECTED on this deployment.
+ *
+ * Mock is a test double: its state is process-global, resets on restart, and
+ * runs no real commands. Offering it in Settings on a deployment that never
+ * asked for it invites someone to pick "Mock (local dev)" on a production
+ * workspace and watch every sandbox tool silently do nothing.
+ *
+ * The gate is the deployment already having opted in via
+ * `DEFAULT_SANDBOX_PROVIDER=mock` — the same signal `.dev.vars` sets for local
+ * offline dev — rather than a second flag that could drift out of step with it.
+ *
+ * This gates SELECTION, not construction: `buildComputeBackend` still builds a
+ * mock backend for a workspace already configured with one, so tests (which
+ * construct backends directly) and an existing local workspace are unaffected.
+ */
+export function mockSandboxEnabled(env: { DEFAULT_SANDBOX_PROVIDER?: string | undefined }): boolean {
+  return resolveDefaultSandboxProvider(env) === "mock";
+}
+
 export function defaultProviderConfig(provider: string): ProviderConfig {
   if (provider === "cloudflare") return { kind: "cloudflare" };
   if (provider === "mock") return { kind: "mock" };
