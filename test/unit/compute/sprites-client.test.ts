@@ -724,25 +724,39 @@ async function flush(): Promise<void> {
 }
 
 describe("execCollect", () => {
-  // REGRESSION: the upgrade went out as `https:` + `Upgrade: websocket`, which
-  // workerd accepts and celld rejects before the request leaves the isolate
-  // ("not a WebSocket scheme: https"), so every exec failed on self-hosted
-  // celld while REST over the same base URL worked. The scheme is the fix, so
-  // it is asserted on its own rather than only inside the URL-shape test — and
-  // for a custom `baseUrl` too, since that is what a self-hoster overrides.
-  it("upgrades over wss, mapping a custom http base url to ws", async () => {
-    for (const [baseUrl, scheme] of [
-      [undefined, "wss:"],
-      ["https://sprites.internal/v1", "wss:"],
-      ["http://sprites.internal:8080/v1", "ws:"],
+  // REGRESSION (both directions). The upgrade scheme is per-RUNTIME and each
+  // runtime rejects the other's form before the request leaves the isolate:
+  // celld refuses `https:` ("not a WebSocket scheme: https"), and workerd
+  // refuses `wss:` inside `fetch()` (`TypeError: Fetch API cannot load: wss://…`,
+  // reproduced in the workers pool). Shipping `wss:` unconditionally fixed
+  // celld and broke every exec on Cloudflare, so BOTH mappings are asserted —
+  // including a custom `baseUrl`, which is what a self-hoster overrides.
+  it("dials the upgrade on the scheme family the runtime requires", async () => {
+    for (const [scheme, baseUrl, expected] of [
+      // Default (absent option) must stay the Cloudflare form.
+      [undefined, undefined, "https:"],
+      ["http", undefined, "https:"],
+      ["http", "http://sprites.internal:8080/v1", "http:"],
+      ["ws", undefined, "wss:"],
+      ["ws", "https://sprites.internal/v1", "wss:"],
+      ["ws", "http://sprites.internal:8080/v1", "ws:"],
     ] as const) {
       const ws = new FakeWebSocket();
-      const { calls, client } = harness({ webSocket: ws }, baseUrl ? { baseUrl } : {});
+      const { calls, client } = harness(
+        { webSocket: ws },
+        {
+          ...(baseUrl ? { baseUrl } : {}),
+          ...(scheme ? { execUpgradeScheme: scheme } : {}),
+        },
+      );
       const pending = client.execCollect("s1", { argv: ["bash"] });
       await flush();
       ws.emitFrame(3, new Uint8Array([0]));
       await pending;
-      expect(new URL(calls[0]!.url).protocol).toBe(scheme);
+      expect(new URL(calls[0]!.url).protocol).toBe(expected);
+      // The header form is what makes the http scheme an upgrade at all, so it
+      // rides on every variant.
+      expect((calls[0]!.init.headers as Record<string, string>).Upgrade).toBe("websocket");
     }
   });
 
@@ -767,7 +781,7 @@ describe("execCollect", () => {
     await pending;
 
     const url = new URL(calls[0]!.url);
-    expect(url.protocol).toBe("wss:");
+    expect(url.protocol).toBe("https:");
     expect(url.pathname).toBe("/v1/sprites/s1/exec");
     expect(url.searchParams.getAll("cmd")).toEqual(["bash", "-c", "echo hi"]);
     expect(url.searchParams.get("dir")).toBe("/work");

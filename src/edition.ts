@@ -69,6 +69,25 @@ export interface PlatformCapabilities {
    * silently reinterprets stored config.
    */
   containerSandbox: boolean;
+  /**
+   * True when an OUTBOUND WebSocket upgrade must be dialled on a `ws:`/`wss:`
+   * URL; false when it must be dialled on `http:`/`https:` with an
+   * `Upgrade: websocket` header.
+   *
+   * The two runtimes disagree and each one REFUSES the other's form, so there
+   * is no shape that works on both:
+   *
+   * - workerd rejects a `wss:` URL inside `fetch()` before the request leaves
+   *   the isolate — `TypeError: Fetch API cannot load: wss://…` (reproduced in
+   *   the workers pool, 2026-08-11; the same URL on `https:` answers 401).
+   * - celld dispatches on the scheme and rejects the http form the same way —
+   *   "WebSocket upgrade failed: not a WebSocket scheme: https".
+   *
+   * Only the upgrade is affected; REST over the same base URL is unchanged on
+   * both. Cloudflare is the default because it is the platform the stored
+   * `baseUrl` scheme already matches.
+   */
+  wsSchemeUpgrade: boolean;
 }
 
 export function platformCapabilities(env: {
@@ -78,6 +97,7 @@ export function platformCapabilities(env: {
   return {
     speechToText: platform === "cloudflare",
     containerSandbox: platform === "cloudflare",
+    wsSchemeUpgrade: platform === "celld",
   };
 }
 

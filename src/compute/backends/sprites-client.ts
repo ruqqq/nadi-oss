@@ -138,7 +138,18 @@ export interface SpritesClientOptions {
    * where disarming it afterwards is load-bearing.
    */
   execUpgradeTimeoutMs?: number;
+  /**
+   * Which scheme family the exec upgrade is dialled on — see {@link execUrl}.
+   * Defaults to `"http"`, the form workerd requires; celld needs `"ws"`.
+   */
+  execUpgradeScheme?: ExecUpgradeScheme;
 }
+
+/**
+ * `"http"` keeps the base URL's `http:`/`https:` and relies on the
+ * `Upgrade: websocket` header; `"ws"` rewrites to `ws:`/`wss:`.
+ */
+export type ExecUpgradeScheme = "http" | "ws";
 
 export const SPRITES_DEFAULT_BASE_URL = "https://api.sprites.dev/v1";
 
@@ -500,10 +511,12 @@ class SpritesHttpClient implements SpritesClient {
   private readonly baseUrl: string;
   private readonly doFetch: typeof fetch;
   private readonly execUpgradeTimeoutMs: number;
+  private readonly execUpgradeScheme: ExecUpgradeScheme;
 
   constructor(options: SpritesClientOptions) {
     this.apiKey = options.apiKey;
     this.execUpgradeTimeoutMs = options.execUpgradeTimeoutMs ?? REQUEST_TIMEOUT_MS;
+    this.execUpgradeScheme = options.execUpgradeScheme ?? "http";
     this.baseUrl = (options.baseUrl ?? SPRITES_DEFAULT_BASE_URL).replace(/\/+$/, "");
     // A bare stored reference to the native `fetch` throws "illegal invocation"
     // on Workers when later called as a method, so wrap it in an arrow.
@@ -788,22 +801,28 @@ class SpritesHttpClient implements SpritesClient {
   }
 
   /**
-   * `wss:`/`ws:`, never `https:`/`http:` — this is the WebSocket upgrade URL,
-   * and the scheme is load-bearing on self-hosted celld.
+   * The WebSocket upgrade URL, whose SCHEME is per-runtime and cannot be one
+   * value: each runtime refuses the other's form, before the request leaves
+   * the isolate in both cases.
    *
-   * workerd accepts either form for a client upgrade, so `https:` + an
-   * `Upgrade: websocket` header (the shape the Cloudflare docs show) works on
-   * Cloudflare and hid this for as long as that was the only target. celld
-   * dispatches on the scheme and rejects the http one outright — "WebSocket
-   * upgrade failed: not a WebSocket scheme: https", thrown before any request
-   * leaves the isolate — so EVERY exec failed there while plain REST over the
-   * same `baseUrl` was fine. `wss:` is accepted by both.
+   * - workerd (Cloudflare) wants the shape the Cloudflare docs show —
+   *   `https:` + an `Upgrade: websocket` header — and rejects a `wss:` URL
+   *   inside `fetch()` with `TypeError: Fetch API cannot load: wss://…`.
+   * - celld dispatches on the scheme instead and rejects the http form:
+   *   "WebSocket upgrade failed: not a WebSocket scheme: https".
+   *
+   * Shipping `wss:` unconditionally therefore traded one broken platform for
+   * the other: it fixed every exec on celld and broke every exec on
+   * Cloudflare, where the rejection surfaced as `sprites_exec_upgrade_failed:
+   * Fetch API cannot load` (the URL truncated away by
+   * {@link redactTransportError}). `execUpgradeScheme` is resolved from
+   * `platformCapabilities(env).wsSchemeUpgrade` in `compute/registry.ts`.
    *
    * REST keeps `baseUrl` verbatim (see `url()`): only the upgrade is affected.
    */
   private execUrl(name: string, options: SpritesExecOptions): string {
     const url = new URL(`${this.baseUrl}/sprites/${encodeURIComponent(name)}/exec`);
-    url.protocol = url.protocol === "http:" ? "ws:" : "wss:";
+    if (this.execUpgradeScheme === "ws") url.protocol = url.protocol === "http:" ? "ws:" : "wss:";
     for (const arg of options.argv) url.searchParams.append("cmd", arg);
     // The vendor SDK always pairs the repeated `cmd` params with `path`, the
     // executable to resolve — argv[0], verbatim, not an absolute path.
