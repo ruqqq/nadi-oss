@@ -1,3 +1,4 @@
+import { platformCapabilities } from "../../edition";
 import type { Env } from "../../env";
 import type { BackendProcessReference, BackendReference, ComputeSpec } from "../backend";
 import { SPRITES_PROFILE_MEMORY_MB, SpritesComputeBackend } from "./sprites";
@@ -73,7 +74,14 @@ export async function runSpritesSmoke(env: Env): Promise<SpritesSmokeReport> {
     };
   }
 
-  const client = createSpritesClient({ apiKey });
+  // Same resolution as `compute/registry.ts` — the exec upgrade's scheme is a
+  // property of the runtime, and a smoke that dialled the other one would
+  // exercise a path production never takes. (The `listSprites` probe below is
+  // REST-only and unaffected.)
+  const client = createSpritesClient({
+    apiKey,
+    execUpgradeScheme: platformCapabilities(env).wsSchemeUpgrade ? "ws" : "http",
+  });
   const backend = new SpritesComputeBackend({ client });
 
   const steps: SpritesSmokeStep[] = [];

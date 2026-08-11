@@ -1,3 +1,4 @@
+import { platformCapabilities } from "../edition";
 import type { Env } from "../env";
 import type { ComputeBackend } from "./backend";
 import { CloudflareComputeBackend } from "./backends/cloudflare";
@@ -5,7 +6,7 @@ import type { CloudflareSandboxFactory } from "./backends/cloudflare-client";
 import { DaytonaComputeBackend } from "./backends/daytona";
 import { MockComputeBackend } from "./backends/mock";
 import { SpritesComputeBackend } from "./backends/sprites";
-import { createSpritesClient } from "./backends/sprites-client";
+import { createSpritesClient, type ExecUpgradeScheme } from "./backends/sprites-client";
 import { resolveDaytonaConfiguration } from "./daytona-config";
 import { resolveSpritesConfiguration } from "./sprites-config";
 import { ComputeError } from "./errors";
@@ -24,7 +25,11 @@ export interface BuildComputeBackendOverrides {
     target: string | null;
     source: { image?: string; snapshot?: string };
   }) => ComputeBackend;
-  spritesFactory?: (config: { apiKey: string; env: Record<string, string> }) => ComputeBackend;
+  spritesFactory?: (config: {
+    apiKey: string;
+    env: Record<string, string>;
+    execUpgradeScheme: ExecUpgradeScheme;
+  }) => ComputeBackend;
 }
 
 /**
@@ -179,14 +184,24 @@ async function buildSpritesBackend(
   const resolved = await resolveSpritesConfiguration({ env, workspaceId, providerConfig });
   if (!resolved.apiKey)
     throw new ComputeError("compute_unavailable", "compute_sprites_secret_missing");
+  // Which scheme the exec upgrade is dialled on is a property of the RUNTIME we
+  // are executing in, not of the sprites deployment we are talking to — workerd
+  // and celld each reject the other's form. See `sprites-client.ts`'s `execUrl`.
+  const execUpgradeScheme: ExecUpgradeScheme = platformCapabilities(env).wsSchemeUpgrade
+    ? "ws"
+    : "http";
   const create =
     factoryOverride ??
-    ((c: { apiKey: string; env: Record<string, string> }) =>
+    ((c) =>
       new SpritesComputeBackend({
-        client: createSpritesClient({ apiKey: c.apiKey }),
+        client: createSpritesClient({ apiKey: c.apiKey, execUpgradeScheme: c.execUpgradeScheme }),
         // Carried on every exec — sprites has no create-time environment that
         // reaches a command. Instance-only; never written to a reference.
         env: c.env,
       }));
-  return create({ apiKey: resolved.apiKey, env: execEnv });
+  // `execUpgradeScheme` goes through the FACTORY rather than being closed over,
+  // so the override sees it too: the default factory is the only thing that
+  // touches `createSpritesClient`, and a test that replaces it would otherwise
+  // have no way to observe whether the platform reached the client at all.
+  return create({ apiKey: resolved.apiKey, env: execEnv, execUpgradeScheme });
 }

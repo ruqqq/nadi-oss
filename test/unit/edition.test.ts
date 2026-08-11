@@ -71,15 +71,31 @@ describe("resolvePlatform", () => {
 
 describe("platformCapabilities", () => {
   it("grants speechToText only on cloudflare", () => {
-    expect(platformCapabilities({})).toEqual({ speechToText: true, containerSandbox: true });
+    expect(platformCapabilities({})).toEqual({
+      speechToText: true,
+      containerSandbox: true,
+      wsSchemeUpgrade: false,
+    });
     expect(platformCapabilities({ NADI_PLATFORM: "cloudflare" })).toEqual({
       speechToText: true,
       containerSandbox: true,
+      wsSchemeUpgrade: false,
     });
     expect(platformCapabilities({ NADI_PLATFORM: "celld" })).toEqual({
       speechToText: false,
       containerSandbox: false,
+      wsSchemeUpgrade: true,
     });
+  });
+
+  it("grants wsSchemeUpgrade only on celld", () => {
+    // This one is INVERTED relative to its neighbours: it is the only
+    // capability celld has and Cloudflare does not. workerd rejects a `wss:`
+    // URL inside `fetch()`, celld rejects the `https:` + `Upgrade` form, and an
+    // unset platform must land on the Cloudflare answer.
+    expect(platformCapabilities({}).wsSchemeUpgrade).toBe(false);
+    expect(platformCapabilities({ NADI_PLATFORM: "CELLD" }).wsSchemeUpgrade).toBe(true);
+    expect(platformCapabilities({ NADI_PLATFORM: "celd" }).wsSchemeUpgrade).toBe(false);
   });
 
   it("grants containerSandbox only on cloudflare", () => {

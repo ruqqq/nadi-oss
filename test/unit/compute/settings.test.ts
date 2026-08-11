@@ -41,6 +41,29 @@ function spritesEnv(spritesApiKey?: string): Env {
   } as unknown as Env;
 }
 
+type SpritesFactoryConfig = {
+  apiKey: string;
+  env: Record<string, string>;
+  execUpgradeScheme: "http" | "ws";
+};
+
+function recordingSpritesFactory(): {
+  calls: SpritesFactoryConfig[];
+  spritesFactory: (config: SpritesFactoryConfig) => ComputeBackend;
+  fakeBackend: ComputeBackend;
+} {
+  const calls: SpritesFactoryConfig[] = [];
+  const fakeBackend = { id: "sprites" } as ComputeBackend;
+  return {
+    calls,
+    fakeBackend,
+    spritesFactory: (config) => {
+      calls.push(config);
+      return fakeBackend;
+    },
+  };
+}
+
 function spritesEffectiveConfig(): EffectiveComputeConfig {
   return {
     ...cloudflareEffectiveConfig(),
@@ -404,22 +427,37 @@ describe("buildComputeBackend Sprites dispatch", () => {
     await writer.ensureWorkspaceDek("ws-x");
     await writer.set("ws-x", "sandbox:sprites", "workspace-key");
 
-    const calls: Array<{ apiKey: string; env: Record<string, string> }> = [];
-    const fakeBackend = { id: "sprites" } as ComputeBackend;
-    const spritesFactory = (config: {
-      apiKey: string;
-      env: Record<string, string>;
-    }): ComputeBackend => {
-      calls.push(config);
-      return fakeBackend;
-    };
+    const { calls, spritesFactory, fakeBackend } = recordingSpritesFactory();
 
     const backend = await buildComputeBackend(env, "ws-x", "thread-y", spritesEffectiveConfig(), {
       spritesFactory,
     });
 
     expect(backend).toBe(fakeBackend);
-    expect(calls).toEqual([{ apiKey: "workspace-key", env: {} }]);
+    expect(calls).toEqual([{ apiKey: "workspace-key", env: {}, execUpgradeScheme: "http" }]);
+  });
+
+  // REGRESSION: the exec upgrade's scheme is per-RUNTIME — workerd rejects a
+  // `wss:` URL inside `fetch()` ("Fetch API cannot load"), celld rejects the
+  // `https:` + `Upgrade` form — so this is the one place the running platform
+  // has to reach the sprites client. Shipping it as a constant broke every exec
+  // on whichever platform it did not name.
+  it("resolves the exec upgrade scheme from the running platform", async () => {
+    for (const [platform, expected] of [
+      [undefined, "http"],
+      ["cloudflare", "http"],
+      ["celld", "ws"],
+    ] as const) {
+      const env = spritesEnv("system-key");
+      if (platform) (env as unknown as { NADI_PLATFORM?: string }).NADI_PLATFORM = platform;
+      const { calls, spritesFactory } = recordingSpritesFactory();
+
+      await buildComputeBackend(env, "ws-x", "thread-y", spritesEffectiveConfig(), {
+        spritesFactory,
+      });
+
+      expect(calls[0]?.execUpgradeScheme).toBe(expected);
+    }
   });
 
   it("fails closed when no sprites key is resolvable", async () => {
