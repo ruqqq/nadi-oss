@@ -150,6 +150,39 @@ export const SPRITES_DEFAULT_BASE_URL = "https://api.sprites.dev/v1";
 const REQUEST_TIMEOUT_MS = 30_000;
 const CREATE_TIMEOUT_MS = 120_000;
 
+/** Anything past one of these may be part of the exec URL. See {@link redactTransportError}. */
+const EXEC_URL_MARKERS = /\b(?:https?|wss?):\/\/|\?|(?:^|[^A-Za-z])env=/i;
+
+/**
+ * An exec-upgrade transport error, cut back to the part that cannot carry a
+ * secret.
+ *
+ * The exec URL's query holds `env=GH_TOKEN=ghs_…` and every other workbench
+ * secret, and this message reaches the MODEL (as `compute-tools.ts`'s `detail`),
+ * the persisted transcript, and the logs — so it may not carry the URL. It used
+ * to withhold the message entirely for that reason, which is safe and also made
+ * every transport failure here identical: a celld deployment where the upgrade
+ * was rejected outright read exactly like a network blip, and finding the
+ * difference took a purpose-built probe worker.
+ *
+ * So: TRUNCATE at the first marker that could begin a URL rather than trying to
+ * strip one out. What precedes a scheme, a `?`, or an `env=` is the runtime's
+ * own prose about what went wrong ("connect api.sprites.dev:443", "TLS
+ * handshake with …", "not a WebSocket scheme"), which is the diagnostic part;
+ * everything after it is unsafe by construction. Truncating cannot leak on a
+ * runtime whose phrasing we have never seen, which stripping could.
+ */
+function redactTransportError(error: unknown): string {
+  const name = error instanceof Error ? error.name : "";
+  const raw = error instanceof Error ? error.message : String(error);
+  const marker = raw.search(EXEC_URL_MARKERS);
+  const kept = (marker === -1 ? raw : raw.slice(0, marker)).trim().slice(0, 200);
+  const detail = kept || "transport error";
+  return marker === -1
+    ? `${detail} [${name || "unknown"}]`
+    : `${detail} … [${name || "unknown"}, detail truncated: the exec URL carries secrets]`;
+}
+
 /**
  * The `workingDir` every `/fs` route resolves relative paths against. We only
  * ever send absolute paths, so this is belt-and-braces — but the SDK sends it on
@@ -754,8 +787,23 @@ class SpritesHttpClient implements SpritesClient {
     });
   }
 
+  /**
+   * `wss:`/`ws:`, never `https:`/`http:` — this is the WebSocket upgrade URL,
+   * and the scheme is load-bearing on self-hosted celld.
+   *
+   * workerd accepts either form for a client upgrade, so `https:` + an
+   * `Upgrade: websocket` header (the shape the Cloudflare docs show) works on
+   * Cloudflare and hid this for as long as that was the only target. celld
+   * dispatches on the scheme and rejects the http one outright — "WebSocket
+   * upgrade failed: not a WebSocket scheme: https", thrown before any request
+   * leaves the isolate — so EVERY exec failed there while plain REST over the
+   * same `baseUrl` was fine. `wss:` is accepted by both.
+   *
+   * REST keeps `baseUrl` verbatim (see `url()`): only the upgrade is affected.
+   */
   private execUrl(name: string, options: SpritesExecOptions): string {
     const url = new URL(`${this.baseUrl}/sprites/${encodeURIComponent(name)}/exec`);
+    url.protocol = url.protocol === "http:" ? "ws:" : "wss:";
     for (const arg of options.argv) url.searchParams.append("cmd", arg);
     // The vendor SDK always pairs the repeated `cmd` params with `path`, the
     // executable to resolve — argv[0], verbatim, not an absolute path.
@@ -832,7 +880,7 @@ class SpritesHttpClient implements SpritesClient {
       }
       throw new ComputeError(
         "provider_transient",
-        "sprites_exec_upgrade_failed: transport error (detail withheld: the exec URL carries secrets)",
+        `sprites_exec_upgrade_failed: ${redactTransportError(error)}`,
       );
     } finally {
       // Disarm on EVERY exit, success or throw: a timer left running past a

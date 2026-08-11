@@ -21,7 +21,7 @@ interface FetchScript {
 
 function harness(
   script: FetchScript | FetchScript[] = {},
-  options: { execUpgradeTimeoutMs?: number } = {},
+  options: { execUpgradeTimeoutMs?: number; baseUrl?: string } = {},
 ) {
   const calls: RecordedCall[] = [];
   const queue = Array.isArray(script) ? [...script] : [script];
@@ -724,6 +724,35 @@ async function flush(): Promise<void> {
 }
 
 describe("execCollect", () => {
+  // REGRESSION: the upgrade went out as `https:` + `Upgrade: websocket`, which
+  // workerd accepts and celld rejects before the request leaves the isolate
+  // ("not a WebSocket scheme: https"), so every exec failed on self-hosted
+  // celld while REST over the same base URL worked. The scheme is the fix, so
+  // it is asserted on its own rather than only inside the URL-shape test — and
+  // for a custom `baseUrl` too, since that is what a self-hoster overrides.
+  it("upgrades over wss, mapping a custom http base url to ws", async () => {
+    for (const [baseUrl, scheme] of [
+      [undefined, "wss:"],
+      ["https://sprites.internal/v1", "wss:"],
+      ["http://sprites.internal:8080/v1", "ws:"],
+    ] as const) {
+      const ws = new FakeWebSocket();
+      const { calls, client } = harness({ webSocket: ws }, baseUrl ? { baseUrl } : {});
+      const pending = client.execCollect("s1", { argv: ["bash"] });
+      await flush();
+      ws.emitFrame(3, new Uint8Array([0]));
+      await pending;
+      expect(new URL(calls[0]!.url).protocol).toBe(scheme);
+    }
+  });
+
+  // REST must NOT be rewritten — only the upgrade is scheme-sensitive.
+  it("leaves REST calls on the base url scheme", async () => {
+    const { calls, client } = harness({ body: '{"sprites":[]}' });
+    await client.listSprites();
+    expect(new URL(calls[0]!.url).protocol).toBe("https:");
+  });
+
   it("builds the exec URL with repeated cmd and env params and upgrades the connection", async () => {
     const ws = new FakeWebSocket();
     const { calls, client } = harness({ webSocket: ws });
@@ -738,6 +767,7 @@ describe("execCollect", () => {
     await pending;
 
     const url = new URL(calls[0]!.url);
+    expect(url.protocol).toBe("wss:");
     expect(url.pathname).toBe("/v1/sprites/s1/exec");
     expect(url.searchParams.getAll("cmd")).toEqual(["bash", "-c", "echo hi"]);
     expect(url.searchParams.get("dir")).toBe("/work");
@@ -872,6 +902,41 @@ describe("execCollect", () => {
     await expect(messageOf(client.execCollect("s1", { argv: ["bash"] }))).resolves.toBe(
       "sprites_exec_upgrade_timeout",
     );
+  });
+
+  // The exec URL's query carries every workbench secret, and this message
+  // reaches the model, the transcript and the logs. It must stay diagnostic
+  // WITHOUT ever carrying the URL, so both halves are asserted.
+  describe("upgrade transport errors", () => {
+    it("keeps the runtime's own description of the failure", async () => {
+      const { client } = harness({
+        throws: new Error("WebSocket upgrade failed: connect api.sprites.dev:443: refused"),
+      });
+      const message = await messageOf(client.execCollect("s1", { argv: ["bash"] }));
+      expect(message).toContain("connect api.sprites.dev:443: refused");
+      expect(message).toContain("[Error]");
+    });
+
+    it.each([
+      ["a url", "Network connection lost fetching https://api.sprites.dev/x?env=T=ghs_SECRET"],
+      ["a wss url", "failed: wss://api.sprites.dev/v1/x?env=AWS_SECRET_ACCESS_KEY=abc"],
+      ["a bare query", "upgrade died ?cmd=bash&env=GH_TOKEN=ghs_SECRET"],
+      ["a leading env", "env=GH_TOKEN=ghs_SECRET came first"],
+    ])("truncates before %s", async (_label, raw) => {
+      const { client } = harness({ throws: new Error(raw) });
+      const message = await messageOf(client.execCollect("s1", { argv: ["bash"] }));
+      expect(message).not.toContain("SECRET");
+      expect(message).not.toContain("abc");
+      expect(message).not.toContain("://");
+      expect(message).toContain("detail truncated");
+    });
+
+    it("still says something when the whole message is unsafe", async () => {
+      const { client } = harness({ throws: new Error("?env=GH_TOKEN=ghs_SECRET") });
+      const message = await messageOf(client.execCollect("s1", { argv: ["bash"] }));
+      expect(message).toContain("sprites_exec_upgrade_failed: transport error");
+      expect(message).not.toContain("SECRET");
+    });
   });
 
   it("reports an unknown close code rather than omitting it", async () => {
