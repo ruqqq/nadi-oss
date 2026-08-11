@@ -76,6 +76,74 @@ describe("voice dictation routing", () => {
     expect(victimSocketCount).toBe(0);
   });
 
+  // Duration is billed while the DO is resident, and a socket accepted with
+  // `connection.accept()` pins it for the whole time the tab is open — which is
+  // minutes of dead air per dictation. Handing the socket to the runtime with
+  // ctx.acceptWebSocket() instead lets an idle connection hibernate, which is
+  // what @cloudflare/voice already assumes (it takes an explicit keepAlive() for
+  // the duration of a call and releases it at end_call).
+  //
+  // getWebSockets() is exactly the difference: partyserver's non-hibernating
+  // manager calls connection.accept() (partyserver/dist/index.js:196) and the
+  // runtime never learns about the socket; the hibernating manager calls
+  // ctx.acceptWebSocket() (line 243) and it shows up here.
+  it("hands voice sockets to the runtime so an idle connection can hibernate", async () => {
+    await seedUser("hibernator", "hibernator-token");
+    const res = await SELF.fetch("https://nadi.test/agents/voice-agent/hibernator", {
+      headers: { upgrade: "websocket", cookie: "better-auth.session_token=hibernator-token" },
+    });
+    expect(res.status).toBe(101);
+
+    const stub = env.VOICE_AGENT.get(env.VOICE_AGENT.idFromName("hibernator"));
+    await vi.waitFor(async () => {
+      const runtimeOwned = await runInDurableObject(
+        stub,
+        (_instance, state) => state.getWebSockets().length,
+      );
+      expect(runtimeOwned).toBe(1);
+    });
+  });
+
+  // The ceiling is the only server-side bound on how long one client can bill
+  // audio, and under hibernation a setTimeout is instance state: it dies with the
+  // isolate and takes the guarantee with it, silently. The mixin's keepAlive()
+  // usually keeps the object resident for the length of a call, which makes the
+  // failure rare rather than impossible — the wrong property for a cost guard.
+  // A schedule row is durable, so the ceiling survives whatever happens to the
+  // instance.
+  it("arms the call ceiling durably, so losing the instance cannot lose the ceiling", async () => {
+    const stub = env.VOICE_AGENT.get(env.VOICE_AGENT.idFromName("ceiling-armed"));
+    const schedules = await runInDurableObject(stub, async (instance) => {
+      await instance.onCallStart({ id: "conn-1" } as never);
+      return instance.listSchedules();
+    });
+    expect(schedules).toHaveLength(1);
+  });
+
+  it("clears the durable ceiling when the call ends", async () => {
+    const stub = env.VOICE_AGENT.get(env.VOICE_AGENT.idFromName("ceiling-cleared"));
+    const remaining = await runInDurableObject(stub, async (instance) => {
+      await instance.onCallStart({ id: "conn-1" } as never);
+      await instance.onCallEnd({ id: "conn-1" } as never);
+      return instance.listSchedules();
+    });
+    expect(remaining).toHaveLength(0);
+  });
+
+  // The DO is per-user and shared across every tab, so the ceilings have to stay
+  // keyed by connection — one tab ending its call must not disarm another's.
+  it("ends one tab's call without disarming another tab's ceiling", async () => {
+    const stub = env.VOICE_AGENT.get(env.VOICE_AGENT.idFromName("ceiling-two-tabs"));
+    const remaining = await runInDurableObject(stub, async (instance) => {
+      await instance.onCallStart({ id: "tab-a" } as never);
+      await instance.onCallStart({ id: "tab-b" } as never);
+      await instance.onCallEnd({ id: "tab-a" } as never);
+      return instance.listSchedules();
+    });
+    expect(remaining).toHaveLength(1);
+    expect((remaining[0]?.payload as { connectionId?: string })?.connectionId).toBe("tab-b");
+  });
+
   // The kill switch has to bite on the server, not just hide the mic: a forged
   // socket must bill no audio. beforeCallStart runs before createTranscriber, so
   // returning false is what stops a transcriber from ever starting.

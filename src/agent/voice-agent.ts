@@ -22,14 +22,29 @@ const VoiceInputAgent = withVoiceInput(Agent);
  * written to storage.
  */
 export class VoiceAgent extends VoiceInputAgent<Env> {
-  // The instance name is the user id; don't echo it back over the socket.
-  static options = { sendIdentityOnConnect: false };
+  static options = {
+    // The instance name is the user id; don't echo it back over the socket.
+    sendIdentityOnConnect: false,
+    // Duration is billed while the DO is resident, and partyserver's default
+    // (hibernate: false) attaches JS handlers to the socket, which pins the
+    // object for as long as a tab holds a connection — minutes of dead air per
+    // dictation. Hibernating hands the socket to the runtime instead, so an
+    // idle connection costs nothing.
+    //
+    // This is what @cloudflare/voice already expects: the mixin takes an
+    // explicit keepAlive() at start_call and releases it at end_call
+    // (voice.js:520, :546). That pin is what keeps the transcriber's outbound
+    // WebSocket and audio buffers alive for the duration of a call — none of
+    // which could survive eviction. With hibernate:false that keepAlive was
+    // redundant and its release bought nothing.
+    hibernate: true,
+  };
 
+  // Written in beforeCallStart and read by createTranscriber, which the mixin
+  // calls in the same #handleStartCall invocation (voice.js:507-510). A DO is
+  // never evicted with a task in flight, so this one instance field is safe to
+  // hold across that gap even under hibernation.
   #language = "en";
-  // Keyed by connection.id: the DO is per-user and shared across every tab that
-  // user has open, so a single field would let one tab's call cancel another's
-  // ceiling — or leak a timer when its connection went away.
-  #ceilings = new Map<string, ReturnType<typeof setTimeout>>();
 
   /**
    * Runs before createTranscriber() on every call start (voice.js:506-510), so
@@ -66,38 +81,49 @@ export class VoiceAgent extends VoiceInputAgent<Env> {
   }
 
   /** Arms the ceiling. Closing the socket is what actually stops the audio: it
-   *  runs the mixin's onClose, which tears down the transcriber session. */
-  onCallStart(connection: Connection) {
-    this.#clearCeiling(connection.id);
-    this.#ceilings.set(
-      connection.id,
-      setTimeout(() => {
-        this.#ceilings.delete(connection.id);
-        log.warn("voice.call.ceiling", { connectionId: connection.id });
-        try {
-          connection.close(1000, "voice call exceeded the maximum duration");
-        } catch {
-          // Already gone; onClose has cleaned up.
-        }
-      }, VOICE_CALL_CEILING_MS),
-    );
+   *  runs the mixin's onClose, which tears down the transcriber session.
+   *
+   *  The schedule row is the record — there is no in-memory mirror of it. That
+   *  is deliberate: a Map keyed by connection id would be instance state, and
+   *  under hibernation the instance that armed a ceiling need not be the one
+   *  that disarms it. */
+  async onCallStart(connection: Connection) {
+    await this.#clearCeiling(connection.id);
+    await this.schedule(VOICE_CALL_CEILING_MS / 1000, "closeCallAtCeiling", {
+      connectionId: connection.id,
+    });
   }
 
-  onCallEnd(connection: Connection) {
-    this.#clearCeiling(connection.id);
+  async onCallEnd(connection: Connection) {
+    await this.#clearCeiling(connection.id);
+  }
+
+  /** Fired by the durable schedule armed in onCallStart. Public because
+   *  `schedule()` dispatches by method name. */
+  async closeCallAtCeiling(payload: { connectionId: string }) {
+    log.warn("voice.call.ceiling", { connectionId: payload.connectionId });
+    for (const connection of this.getConnections()) {
+      if (connection.id !== payload.connectionId) continue;
+      try {
+        connection.close(1000, "voice call exceeded the maximum duration");
+      } catch {
+        // Already gone; onClose has cleaned up.
+      }
+    }
   }
 
   // A dropped socket never sends end_call, so the ceiling has to be cleared here
-  // too or the timer outlives the connection it was guarding.
-  onClose(connection: Connection) {
-    this.#clearCeiling(connection.id);
+  // too or the schedule outlives the connection it was guarding.
+  async onClose(connection: Connection) {
+    await this.#clearCeiling(connection.id);
   }
 
-  #clearCeiling(connectionId: string) {
-    const timer = this.#ceilings.get(connectionId);
-    if (timer !== undefined) {
-      clearTimeout(timer);
-      this.#ceilings.delete(connectionId);
+  async #clearCeiling(connectionId: string) {
+    for (const schedule of await this.listSchedules()) {
+      if (schedule.callback !== "closeCallAtCeiling") continue;
+      const payload = schedule.payload as { connectionId?: string } | undefined;
+      if (payload?.connectionId !== connectionId) continue;
+      await this.cancelSchedule(schedule.id);
     }
   }
 }
