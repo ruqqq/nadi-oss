@@ -193,6 +193,7 @@ function SandboxSettingsForm({
         spritesMode={settings.spritesMode}
         spritesAvailable={settings.spritesAvailable}
         mockAvailable={settings.mockAvailable ?? false}
+        cloudflareAvailable={settings.cloudflareAvailable ?? true}
         operatorManagedCompute={settings.operatorManagedCompute ?? false}
         onSaved={onSaved}
       />
@@ -210,6 +211,7 @@ function WorkspaceSandboxCard({
   spritesMode: confirmedSpritesMode,
   spritesAvailable,
   mockAvailable,
+  cloudflareAvailable,
   operatorManagedCompute,
   onSaved,
 }: {
@@ -225,6 +227,11 @@ function WorkspaceSandboxCard({
    *  DEFAULT_SANDBOX_PROVIDER=mock. The server refuses it on the same
    *  condition, so this hides an option rather than being the only guard. */
   mockAvailable: boolean;
+  /** Whether `cloudflare` may be selected — false on celld, which has no
+   *  container bindings. Distinct from `readiness.cloudflare`, which answers
+   *  "provisioned yet?" on a platform that HAS containers. The server refuses
+   *  it on the same condition. */
+  cloudflareAvailable: boolean;
   /** Hides the read-only deployment panel — an operator set this compute up. */
   operatorManagedCompute: boolean;
   onSaved: (settings: SandboxSettingsResponse) => void;
@@ -259,9 +266,16 @@ function WorkspaceSandboxCard({
   // in. The `provider === "mock"` escape keeps a workspace already on mock from
   // rendering a Select with no matching item — which would read as an empty
   // provider and silently re-save as something else on the next submit.
-  const providerOptions = SANDBOX_PROVIDER_OPTIONS.filter(
-    (option) => option.value !== "mock" || mockAvailable || provider === "mock",
-  );
+  // Both escapes keep a workspace ALREADY on the provider from rendering a
+  // Select with no matching item — which reads as an empty provider and
+  // silently re-saves as something else on the next submit. That case is real
+  // on celld: a deploy that never set DEFAULT_SANDBOX_PROVIDER seeds new
+  // workspaces `cloudflare`, and the operator needs to see it to change it.
+  const providerOptions = SANDBOX_PROVIDER_OPTIONS.filter((option) => {
+    if (option.value === "mock") return mockAvailable || provider === "mock";
+    if (option.value === "cloudflare") return cloudflareAvailable || provider === "cloudflare";
+    return true;
+  });
   const [enabled, setEnabled] = useState(base.enabled);
   const [smallKind, setSmallKind] = useState(config.profiles.small?.kind ?? "snapshot");
   const [smallValue, setSmallValue] = useState(config.profiles.small?.value ?? "");

@@ -3,6 +3,7 @@ import { validateRequestSession } from "../auth/session";
 import { registryDb } from "../db/client";
 import { agents, workspaceSandboxSettings } from "../db/schema";
 import { WorkspaceRepository } from "../db/repositories/workspaces";
+import { platformCapabilities } from "../edition";
 import type { Env } from "../env";
 import { log } from "../log";
 import {
@@ -169,6 +170,14 @@ async function updateWorkspaceSandboxSettings(
   // not stop a hand-rolled PUT from setting it. Switching AWAY from mock stays
   // allowed, so a workspace left on mock is never stuck.
   if (provider === "mock" && !mockSandboxEnabled(env))
+    return new Response("provider unavailable", { status: 400 });
+  // Same shape as the mock gate, for the same reason: hiding an option in the
+  // UI does not stop a hand-rolled PUT. celld has no container bindings, so
+  // `cloudflare` there is a workspace whose every sandbox tool fails at
+  // acquire. Switching AWAY stays allowed, so a workspace that arrived on
+  // `cloudflare` (a celld deploy that never set DEFAULT_SANDBOX_PROVIDER seeds
+  // it) is never stuck on it.
+  if (provider === "cloudflare" && !platformCapabilities(env).containerSandbox)
     return new Response("provider unavailable", { status: 400 });
   const networkRestrictionEnabled =
     typeof body.networkRestrictionEnabled === "boolean"

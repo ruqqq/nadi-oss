@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import type { Env } from "../env";
-import { editionCapabilities } from "../edition";
+import { editionCapabilities, platformCapabilities } from "../edition";
 import { registryDb } from "../db/client";
 import { agents, mcpServers, workspaceSandboxSettings } from "../db/schema";
 import { createWorkspaceSecretsServices } from "../secrets";
@@ -408,6 +408,14 @@ export interface ComputeSettingsView {
    * from the provider list; the PUT handler refuses it on the same condition.
    */
   mockAvailable: boolean;
+  /**
+   * Whether the `cloudflare` provider may be selected here. False on celld,
+   * which has no container bindings at all — distinct from
+   * `readiness.cloudflare`, which answers "is this provisioned yet" on a
+   * platform that HAS containers. The PUT handler refuses it on the same
+   * condition.
+   */
+  cloudflareAvailable: boolean;
   workspaceSecretEnvVars: Array<{ name: string; updatedAt: string }>;
   agentSecretEnvVars: Array<{ name: string; updatedAt: string }>;
 }
@@ -495,6 +503,7 @@ export async function getComputeSettingsView(input: {
     spritesAvailable: spritesConfiguration.apiKey !== null,
     spritesSecretPresent: spritesConfiguration.mode === "byok",
     mockAvailable: mockSandboxEnabled(input.env),
+    cloudflareAvailable: platformCapabilities(input.env).containerSandbox,
     workspaceSecretEnvVars: secretNames.workspace,
     agentSecretEnvVars: secretNames.agent,
   };

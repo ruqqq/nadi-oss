@@ -56,13 +56,28 @@ export interface PlatformCapabilities {
    * capability is absent. Gates VoiceAgent and bootstrap's `voiceInput`.
    */
   speechToText: boolean;
+  /**
+   * True when the platform can run the container-backed sandbox — the
+   * `cloudflare` compute provider, whose backend is a Container Durable Object
+   * (`NadiSandboxSmall`/`NadiSandboxMedium`).
+   *
+   * celld has no containers, and `wrangler.celld.jsonc` drops both classes
+   * rather than binding something that cannot start. Selecting `cloudflare`
+   * there therefore yields a workspace whose every sandbox tool fails at
+   * acquire, with nothing an operator can set to fix it. Gates SELECTION only:
+   * a workspace already configured for it still builds its backend, so nothing
+   * silently reinterprets stored config.
+   */
+  containerSandbox: boolean;
 }
 
 export function platformCapabilities(env: {
   NADI_PLATFORM?: string | undefined;
 }): PlatformCapabilities {
+  const platform = resolvePlatform(env);
   return {
-    speechToText: resolvePlatform(env) === "cloudflare",
+    speechToText: platform === "cloudflare",
+    containerSandbox: platform === "cloudflare",
   };
 }
 

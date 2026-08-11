@@ -405,6 +405,12 @@ function makeSandbox({
     spritesMode: "system",
     spritesAvailable: false,
     spritesSecretPresent: false,
+    // The mocked app stands in for a Cloudflare deployment, so the container
+    // provider is selectable. It is OPTIONAL on the wire and absent means
+    // available, so without this line the mock would still render the same
+    // panel — set explicitly so a celld-shaped scenario is a one-word edit
+    // rather than a rediscovery of which default applies.
+    cloudflareAvailable: true,
     workspaceSecretEnvVars: [{ name: "GH_TOKEN", updatedAt: "2026-07-01T09:00:00.000Z" }],
     agentSecretEnvVars: [],
     effective: {

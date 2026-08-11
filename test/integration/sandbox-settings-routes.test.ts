@@ -35,6 +35,20 @@ async function withMockSandboxEnabled(body: () => Promise<void>): Promise<void> 
   }
 }
 
+/** Same shape as {@link withMockSandboxEnabled}, for the opposite direction:
+ *  celld is the platform that WITHDRAWS a provider rather than granting one. */
+async function withCelldPlatform(body: () => Promise<void>): Promise<void> {
+  const bag = env as unknown as Record<string, unknown>;
+  const previous = bag.NADI_PLATFORM;
+  bag.NADI_PLATFORM = "celld";
+  try {
+    await body();
+  } finally {
+    if (previous === undefined) delete bag.NADI_PLATFORM;
+    else bag.NADI_PLATFORM = previous;
+  }
+}
+
 function daytonaProviderConfig(source: { kind: "image" | "snapshot"; value: string }) {
   return {
     kind: "daytona",
@@ -914,6 +928,51 @@ describe("sandbox settings routes", () => {
       });
       const view = (await viewRes.json()) as { mockAvailable: boolean };
       expect(view.mockAvailable).toBe(false);
+    });
+
+    it("refuses to select cloudflare on celld, which has no containers", async () => {
+      const { token } = await seedUserWorkspace();
+      await withCelldPlatform(async () => {
+        const res = await SELF.fetch("https://nadi.test/api/settings/sandbox", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", ...cookie(token) },
+          body: JSON.stringify({
+            enabled: true,
+            provider: "cloudflare",
+            providerConfig: { kind: "cloudflare" },
+          }),
+        });
+        expect(res.status).toBe(400);
+
+        const viewRes = await SELF.fetch("https://nadi.test/api/settings/sandbox", {
+          headers: cookie(token),
+        });
+        const view = (await viewRes.json()) as { cloudflareAvailable: boolean };
+        expect(view.cloudflareAvailable).toBe(false);
+      });
+    });
+
+    it("still allows cloudflare on a platform that has containers", async () => {
+      // The gate must be the PLATFORM, not the provider name: withdrawing it
+      // everywhere would break every Cloudflare deployment, which is the only
+      // place the provider is meant to work.
+      const { token } = await seedUserWorkspace();
+      const res = await SELF.fetch("https://nadi.test/api/settings/sandbox", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...cookie(token) },
+        body: JSON.stringify({
+          enabled: true,
+          provider: "cloudflare",
+          providerConfig: { kind: "cloudflare" },
+        }),
+      });
+      expect(res.status).toBe(200);
+
+      const viewRes = await SELF.fetch("https://nadi.test/api/settings/sandbox", {
+        headers: cookie(token),
+      });
+      const view = (await viewRes.json()) as { cloudflareAvailable: boolean };
+      expect(view.cloudflareAvailable).toBe(true);
     });
 
     it("uses the system Daytona key and small system snapshot without a workspace key", async () => {

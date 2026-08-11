@@ -71,9 +71,25 @@ describe("resolvePlatform", () => {
 
 describe("platformCapabilities", () => {
   it("grants speechToText only on cloudflare", () => {
-    expect(platformCapabilities({})).toEqual({ speechToText: true });
-    expect(platformCapabilities({ NADI_PLATFORM: "cloudflare" })).toEqual({ speechToText: true });
-    expect(platformCapabilities({ NADI_PLATFORM: "celld" })).toEqual({ speechToText: false });
+    expect(platformCapabilities({})).toEqual({ speechToText: true, containerSandbox: true });
+    expect(platformCapabilities({ NADI_PLATFORM: "cloudflare" })).toEqual({
+      speechToText: true,
+      containerSandbox: true,
+    });
+    expect(platformCapabilities({ NADI_PLATFORM: "celld" })).toEqual({
+      speechToText: false,
+      containerSandbox: false,
+    });
+  });
+
+  it("grants containerSandbox only on cloudflare", () => {
+    // celld drops both sandbox container classes from its wrangler config, so
+    // the `cloudflare` compute provider has nothing to bind. An unset or
+    // misspelled platform must resolve to cloudflare — the capability may never
+    // be withdrawn from the platform that actually has it.
+    expect(platformCapabilities({}).containerSandbox).toBe(true);
+    expect(platformCapabilities({ NADI_PLATFORM: "CELLD" }).containerSandbox).toBe(false);
+    expect(platformCapabilities({ NADI_PLATFORM: "celd" }).containerSandbox).toBe(true);
   });
 
   it("keeps speechToText tied to the platform, never to the voice flag", () => {
