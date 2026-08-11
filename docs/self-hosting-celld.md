@@ -29,8 +29,13 @@ have no equivalent:
 | Workers AI as a model provider | same — bring your own provider key instead |
 | Browser rendering for `web_fetch` | no browser binding; fetch degrades to direct HTTP |
 | Attachment vision extraction, `toMarkdown` | needs the Workers AI binding |
+| The `cloudflare` sandbox provider | needs Containers; `wrangler.celld.jsonc` binds no sandbox classes |
 
-Nadi hides the first two rather than offering something that fails on use.
+Nadi hides these rather than offering something that fails on use — voice and
+Workers AI via `platformCapabilities`, and the Cloudflare sandbox via
+`containerSandbox`, which the settings PUT enforces too so a hand-rolled request
+cannot select it either. **Sandboxes work** on Daytona and on sprites; pick one
+in Settings → Sandbox.
 
 **Web push works**, though celld has no ECDH: the payload encryption is
 implemented in-repo against `@noble/curves`, selected by probing whether native
@@ -365,6 +370,13 @@ The SPA is served by Caddy, not by celld, so a `web/`-only change needs the
 `caddy` rebuild and no `deploy`/restart at all. The running service worker
 picks it up and shows "Updated to the latest version".
 
+**A deploy is not zero-downtime.** For roughly ten seconds after the node comes
+back, registry RPC answers `remote RPC owner was stale` while cell ownership
+settles. Signed-in requests fail with a 500 in that window — Better Auth cannot
+read its session table — and the ticker logs `celld_ticker.arm_failed`. It
+clears on its own and needs no intervention, but anyone using the app during a
+deploy sees errors rather than a retry. Deploy when nobody is mid-turn.
+
 ### Stopping
 
 **Use `./drain-stop.sh`, not `docker compose down`.** celld replicates a cell
@@ -482,6 +494,19 @@ says which variables are missing.
 
 **First sign-in fails with a database error** — `DEFAULT_MODEL_PROVIDER` or
 `DEFAULT_MODEL` is unset.
+
+**Every cell starts once a minute in the node log** (`reused local hibernation
+snapshot`, then `cell isolate startup completed ... fresh=false`, for the whole
+fleet within a couple of seconds). Expected noise on celld today, not a symptom
+of anything in Nadi. It is not the app: the minute tick reports
+`automata:{fired:0,skipped:0}`, the woken cells hold no alarms of their own, and
+the burst begins ~260ms BEFORE the Worker's fetch handler is even entered. It
+costs isolate startups and largely defeats hibernation, but the cells wake, do
+nothing, and hibernate again at the same epoch. Root cause is unresolved and
+sits inside celld's `ltx_repl` restore path.
+
+**`remote RPC owner was stale` right after a restart** — expected for about ten
+seconds while ownership settles; see "Deploying a change".
 
 **Sending a message fails with `cloudflare_config_missing`** —
 `DEFAULT_SANDBOX_PROVIDER` is unset, so the workspace was provisioned with the

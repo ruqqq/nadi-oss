@@ -53,6 +53,40 @@ Changing an API contract — a new `/api/*` route, a new or newly-required field
 on a payload type, a changed response shape — means updating the mocked app in
 the same change. See "Keeping the mocks current" below.
 
+## Runtime invariants (both platforms)
+
+Nadi runs on Cloudflare and on self-hosted celld. Nothing below is enforced by
+the type system, and each one cost a production incident or a broken feature.
+
+- **Never call a backend from inside `ctx.blockConcurrencyWhile`.** celld kills a
+  _successful_ outbound WebSocket upgrade held in the gate ("handler stalled:
+  awaited work with no pending op"), and on Cloudflare a long call in the gate
+  freezes every other event on the object and, past ~30s, cancels the callback
+  and RESETS the object — one `exec` held it 154s and did exactly that. Sandbox
+  provisioning is serialized by the `acquisitionInFlight` latch, NOT the gate
+  (`ThreadComputeService.ensureRuntime`); teardown paths call the backend
+  directly rather than routing through `ensureRuntime`. The gate is fine for
+  storage-only work.
+- **Outbound WebSocket upgrades must use `wss:`/`ws:`, never `https:`/`http:`.**
+  workerd accepts either, so the http form works on Cloudflare and hides the
+  bug; celld dispatches on scheme and rejects it before the request leaves the
+  isolate. REST keeps the base URL verbatim — only the upgrade is rewritten
+  (`execUrl` in `src/compute/backends/sprites-client.ts`).
+- **Alarm handlers must be idempotent.** celld replays an alarm on every
+  stall-retry; one armed alarm has been observed running 7 times.
+- **Never let an error message carry a URL that holds secrets.** The sandbox
+  exec URL carries `env=` for every workbench secret plus `GH_TOKEN`. Truncate
+  at the first URL-ish marker rather than stripping — truncating cannot leak on
+  a runtime whose phrasing we have never seen (`redactTransportError`).
+- **A platform divergence gets a named capability, not a platform check.** Add it
+  to `PlatformCapabilities` in `src/edition.ts` and branch on the capability, so
+  each divergence has one honest name and one place to flip. Gate SELECTION on
+  the server too, not just in the UI — hiding an option does not stop a
+  hand-rolled `PUT` (see `containerSandbox`, `mockSandboxEnabled`).
+
+See `docs/self-hosting-celld.md` for celld's durability posture and its known
+defects.
+
 ## Design System (web)
 
 The SPA uses the **Dispatch** design language — warm, editorial, calm — built on
