@@ -1,3 +1,5 @@
+import { existsSync, globSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
@@ -31,13 +33,11 @@ const integrationGroupedIsolatedFiles = [
   "test/integration/injection-buffer.test.ts",
   "test/integration/injection-drain.test.ts",
   "test/integration/kv-oauth-provider.integration.test.ts",
-  "test/integration/sandbox-thread-store.test.ts",
   "test/integration/skill-script-runner-gating.integration.test.ts",
   "test/integration/subagent-detached-injection.test.ts",
   "test/integration/subagent.integration.test.ts",
   "test/integration/think-thread-agent.integration.test.ts",
   "test/integration/thread-draft.integration.test.ts",
-  "test/integration/user-hub-broadcast.integration.test.ts",
   "test/integration/web-document-store.integration.test.ts",
   "test/integration/web-tools.integration.test.ts",
   "test/integration/work-ledger.integration.test.ts",
@@ -120,6 +120,15 @@ function integrationPlugins() {
           // parent ThinkThreadAgent). This binding lets integration tests
           // drive it directly in-pool without a real facet parent call.
           SUB_AGENT: { className: "SubAgent", useSQLite: true },
+          // TEST-ONLY: the celld registry Durable Object. It is bound only in
+          // wrangler.celld.jsonc in production; this binding lets the registry
+          // facade / migration tests drive it in-pool on the Cloudflare side.
+          REGISTRY_DO: { className: "RegistryDatabase", useSQLite: true },
+          // TEST-ONLY: the celld ticker Durable Object (celld's replacement for
+          // scheduled(), which that platform never invokes). Bound only in
+          // wrangler.celld.jsonc; this binding lets the ticker integration
+          // tests drive its alarm in-pool.
+          CRON_TICKER: { className: "CelldTicker", useSQLite: true },
         },
         bindings: {
           LOG_LEVEL: "warn",
@@ -150,6 +159,78 @@ function integrationPlugins() {
   ];
 }
 
+/**
+ * Every `test/**` file must be matched by exactly one project.
+ *
+ * `integrationGroupedIsolatedFiles` was excluded from `integration-fast` and
+ * included by no project from the initial commit onward, so 15 files and 108
+ * tests never ran — and nothing said so, because tests that never execute do
+ * not fail. This runs at config load, so any vitest invocation enforces it.
+ *
+ * It also rejects a literal include entry naming a file that does not exist:
+ * the same list carried `sandbox-thread-store.test.ts`, a path no commit ever
+ * contained, and vitest skips a missing path silently.
+ */
+function assertTestFileProjectCoverage(
+  projects: { test?: { name?: string; include?: string[]; exclude?: string[] } }[],
+) {
+  const problems: string[] = [];
+  const testFiles = globSync("test/**/*.test.ts", { cwd: import.meta.dirname }).concat(
+    globSync("test/**/*.test.tsx", { cwd: import.meta.dirname }),
+  );
+
+  const toRegExp = (pattern: string) =>
+    new RegExp(
+      "^" +
+        pattern
+          .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+          // `**/` first, via a placeholder no glob can contain, so the
+          // single-star rule below cannot eat it.
+          .split("**/")
+          .map((part) => part.replace(/\*/g, "[^/]*"))
+          .join("(?:.*/)?") +
+        "$",
+    );
+
+  for (const project of projects) {
+    for (const entry of project.test?.include ?? []) {
+      if (entry.includes("*")) continue;
+      if (!entry.startsWith("test/")) continue;
+      if (!existsSync(join(import.meta.dirname, entry))) {
+        problems.push(`${entry} is listed by project "${project.test?.name}" but does not exist`);
+      }
+    }
+  }
+
+  for (const file of testFiles) {
+    const matches = projects.filter((project) => {
+      const include = project.test?.include ?? [];
+      const exclude = project.test?.exclude ?? [];
+      const included = include.some((pattern) => toRegExp(pattern).test(file));
+      const excluded = exclude.some((pattern) => toRegExp(pattern).test(file));
+      return included && !excluded;
+    });
+    if (matches.length === 0) {
+      problems.push(`${file} matches NO project and will never run`);
+    } else if (matches.length > 1) {
+      problems.push(
+        `${file} matches ${matches.length} projects (${matches.map((m) => m.test?.name).join(", ")})`,
+      );
+    }
+  }
+
+  if (problems.length > 0) {
+    throw new Error("vitest project coverage guard failed:\n  - " + problems.join("\n  - "));
+  }
+}
+
+function assertedProjects<
+  T extends { test?: { name?: string; include?: string[]; exclude?: string[] } }[],
+>(...projects: T): T {
+  assertTestFileProjectCoverage(projects);
+  return projects;
+}
+
 export default defineConfig({
   resolve: {
     alias: {
@@ -158,7 +239,7 @@ export default defineConfig({
     },
   },
   test: {
-    projects: [
+    projects: assertedProjects(
       {
         test: {
           name: "unit",
@@ -217,8 +298,14 @@ export default defineConfig({
       {
         plugins: integrationPlugins(),
         test: {
-          name: "integration-shared",
-          include: integrationSharedIsolateFiles,
+          name: "integration-grouped",
+          include: integrationGroupedIsolatedFiles,
+          // Deliberately NO setupFiles. These suites seed the registry once in
+          // `beforeAll` and run many tests against that state; the shared
+          // setup's per-test registry reset runs after that seeding and wipes
+          // the rows out from under them (50 failures, all
+          // `think_thread_not_registered`). integration-fast's suites seed
+          // per-test instead, which is why they tolerate it.
           isolate: false,
           fileParallelism: false,
           sequence: { groupOrder: 4 },
@@ -227,12 +314,22 @@ export default defineConfig({
       {
         plugins: integrationPlugins(),
         test: {
-          name: "integration-isolated",
-          include: integrationPristineRegistryFiles,
-          maxWorkers: 1,
+          name: "integration-shared",
+          include: integrationSharedIsolateFiles,
+          isolate: false,
+          fileParallelism: false,
           sequence: { groupOrder: 5 },
         },
       },
-    ],
+      {
+        plugins: integrationPlugins(),
+        test: {
+          name: "integration-isolated",
+          include: integrationPristineRegistryFiles,
+          maxWorkers: 1,
+          sequence: { groupOrder: 6 },
+        },
+      },
+    ),
   },
 });

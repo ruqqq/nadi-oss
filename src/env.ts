@@ -8,10 +8,34 @@ import type { ThinkThreadAgent } from "./agent/think-thread-agent";
 import type { WorkspaceMcpAgent } from "./agent/workspace-mcp-agent";
 import type { ComputeBackend } from "./compute/backend";
 import type { NadiSandboxMedium, NadiSandboxSmall } from "./compute/cloudflare-sandbox-classes";
+import type { RegistryDatabase } from "./db/registry-do";
+import type { CelldTicker } from "./celld/ticker";
 
 export interface Env extends Cloudflare.Env {
   THINK_THREAD_AGENT: DurableObjectNamespace<ThinkThreadAgent>;
   WORKSPACE_MCP_AGENT: DurableObjectNamespace<WorkspaceMcpAgent>;
+
+  /**
+   * The registry Durable Object namespace on celld, where there is no D1
+   * binding. `registryBinding` in `src/db/client.ts` returns a `RegistryD1`
+   * facade over the `registry` singleton inside it whenever `REGISTRY_DB` is
+   * absent. Only the celld deploy binds it, so it is optional here and absent
+   * from worker-configuration.d.ts (which `pnpm types` regenerates from the
+   * Cloudflare configs).
+   */
+  REGISTRY_DO?: DurableObjectNamespace<RegistryDatabase>;
+
+  /**
+   * The celld-only ticker Durable Object that stands in for Cloudflare's
+   * `scheduled()` cron: celld rejects the `triggers` config key and never
+   * invokes a `scheduled()` handler, so this DO re-arms itself every minute
+   * and calls the same job functions `scheduled()` calls. The fetch handler
+   * arms its first alarm (`armCelldTicker` in `src/celld/ticker.ts`); it
+   * re-arms itself thereafter. Only the celld deploy binds it, so it is
+   * optional here and absent from worker-configuration.d.ts — the Cloudflare
+   * configs keep `scheduled()` as the only scheduler, unchanged.
+   */
+  CRON_TICKER?: DurableObjectNamespace<CelldTicker>;
 
   /**
    * Which edition this deploy is: `cloud` for the hosted service, anything else
@@ -20,6 +44,14 @@ export interface Env extends Cloudflare.Env {
    * because only the cloud deploy sets it.
    */
   NADI_EDITION?: string;
+
+  /**
+   * Which platform this deploy runs on: `celld` for the single-node local-first
+   * runtime, anything else (including unset) for Cloudflare Workers. Read via
+   * `resolvePlatform` / `platformCapabilities` in `src/edition.ts`, never
+   * compared inline. Optional because only the celld deploy sets it.
+   */
+  NADI_PLATFORM?: string;
 
   /**
    * Product display name for this deployment. Used as the OAuth `client_name`
@@ -64,7 +96,9 @@ export interface Env extends Cloudflare.Env {
   /**
    * Voice dictation in the composer. Read with `isTruthyFlag`. When off, the mic
    * button does not render and VoiceAgent.beforeCallStart() refuses the call, so
-   * no audio is billed even against a forged socket.
+   * no audio is billed even against a forged socket. The flag can only turn
+   * voice OFF — resolve through `voiceInputEnabled` so platforms without
+   * speech-to-text (celld has no AI binding) stay refused regardless of the var.
    */
   VOICE_INPUT_ENABLED: string;
 
@@ -128,6 +162,22 @@ export interface Env extends Cloudflare.Env {
   EMAIL: SendEmail;
   AUTH_EMAIL_FROM: string;
   EMAIL_DELIVERY_DISABLED?: string;
+  /**
+   * Resend API key (https://resend.com) for OTP delivery on platforms without
+   * the Cloudflare `EMAIL` binding (celld). `sendOtpEmail` picks Resend when
+   * this key is set and `AUTH_EMAIL_FROM` provides the shared from-address.
+   * Set via `wrangler secret put RESEND_API_KEY` (or the celld equivalent).
+   */
+  RESEND_API_KEY?: string;
+  /**
+   * Local development fallback: write the sign-in email (OTP included) to the
+   * log instead of sending it, so a self-hoster with no SMTP — or celld, which
+   * has no email binding at all — can still complete a sign-in locally.
+   *
+   * This puts a working credential in the log. Off unless set to "true", and
+   * refused outright on the cloud edition regardless of this value.
+   */
+  AUTH_OTP_LOG_FALLBACK?: string;
 
   /** Exact comma-separated emails allowed to read the private feedback inbox. */
   FEEDBACK_ADMIN_EMAILS?: string;
@@ -146,6 +196,21 @@ export interface Env extends Cloudflare.Env {
    */
   R2_ACCESS_KEY_ID: string;
   R2_SECRET_ACCESS_KEY: string;
+
+  /**
+   * celld S3 config. When set, the `ATTACHMENTS_BUCKET` / `BACKUP_BUCKET`
+   * bindings are replaced by S3Bucket facades signed with these credentials
+   * against `S3_ENDPOINT` (path-style addressing: `{endpoint}/{bucket}/{key}`),
+   * and presigned attachment URLs are minted against `S3_ENDPOINT` too.
+   * Endpoint is a var; the access key id and secret are secrets. Absent on
+   * Cloudflare, which keeps the real R2 bindings. When only part of the S3
+   * config is present the bucket helpers fail loudly rather than guess.
+   */
+  S3_ENDPOINT?: string;
+  S3_ACCESS_KEY_ID?: string;
+  S3_SECRET_ACCESS_KEY?: string;
+  S3_ATTACHMENTS_BUCKET_NAME?: string;
+  S3_BACKUP_BUCKET_NAME?: string;
 
   /**
    * PostHog project key for backend instrumentation. When unset, PostHog

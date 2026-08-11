@@ -1,3 +1,5 @@
+import { base64UrlToBytes, bytesToBase64Url } from "../encoding";
+
 export interface ArtifactViewTokenPayload {
   artifactId: string;
   exp: number; // epoch ms
@@ -5,20 +7,6 @@ export interface ArtifactViewTokenPayload {
 
 const ARTIFACT_VIEW_CONTEXT = "nadi-artifact-view-v1";
 const encoder = new TextEncoder();
-
-function b64url(bytes: Uint8Array): string {
-  let s = "";
-  for (const b of bytes) s += String.fromCharCode(b);
-  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-function b64urlDecode(value: string): Uint8Array {
-  const padded = value.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((value.length + 3) % 4);
-  const raw = atob(padded);
-  const out = new Uint8Array(raw.length);
-  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
-  return out;
-}
 
 async function hmacKey(secret: string): Promise<CryptoKey> {
   return crypto.subtle.importKey(
@@ -41,10 +29,10 @@ export async function signArtifactViewToken(
   secret: string,
   payload: ArtifactViewTokenPayload,
 ): Promise<string> {
-  const body = b64url(encoder.encode(JSON.stringify(payload)));
+  const body = bytesToBase64Url(encoder.encode(JSON.stringify(payload)));
   const key = await hmacKey(secret);
   const sig = new Uint8Array(await crypto.subtle.sign("HMAC", key, encoder.encode(body)));
-  return `${body}.${b64url(sig)}`;
+  return `${body}.${bytesToBase64Url(sig)}`;
 }
 
 export async function verifyArtifactViewToken(
@@ -67,7 +55,7 @@ export async function verifyArtifactViewToken(
     ok = await crypto.subtle.verify(
       "HMAC",
       key,
-      b64urlDecode(sig) as BufferSource,
+      base64UrlToBytes(sig) as BufferSource,
       encoder.encode(body),
     );
   } catch {
@@ -76,7 +64,9 @@ export async function verifyArtifactViewToken(
   if (!ok) return null;
   let payload: ArtifactViewTokenPayload;
   try {
-    payload = JSON.parse(new TextDecoder().decode(b64urlDecode(body))) as ArtifactViewTokenPayload;
+    payload = JSON.parse(
+      new TextDecoder().decode(base64UrlToBytes(body)),
+    ) as ArtifactViewTokenPayload;
   } catch {
     return null;
   }

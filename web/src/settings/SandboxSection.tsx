@@ -192,6 +192,8 @@ function SandboxSettingsForm({
         spritesSecretPresent={settings.spritesSecretPresent}
         spritesMode={settings.spritesMode}
         spritesAvailable={settings.spritesAvailable}
+        mockAvailable={settings.mockAvailable ?? false}
+        cloudflareAvailable={settings.cloudflareAvailable ?? true}
         operatorManagedCompute={settings.operatorManagedCompute ?? false}
         onSaved={onSaved}
       />
@@ -208,6 +210,8 @@ function WorkspaceSandboxCard({
   spritesSecretPresent,
   spritesMode: confirmedSpritesMode,
   spritesAvailable,
+  mockAvailable,
+  cloudflareAvailable,
   operatorManagedCompute,
   onSaved,
 }: {
@@ -219,6 +223,15 @@ function WorkspaceSandboxCard({
   spritesSecretPresent: boolean;
   spritesMode: SandboxSettingsResponse["spritesMode"];
   spritesAvailable: boolean;
+  /** Whether `mock` may be selected — only on a deployment that opted in with
+   *  DEFAULT_SANDBOX_PROVIDER=mock. The server refuses it on the same
+   *  condition, so this hides an option rather than being the only guard. */
+  mockAvailable: boolean;
+  /** Whether `cloudflare` may be selected — false on celld, which has no
+   *  container bindings. Distinct from `readiness.cloudflare`, which answers
+   *  "provisioned yet?" on a platform that HAS containers. The server refuses
+   *  it on the same condition. */
+  cloudflareAvailable: boolean;
   /** Hides the read-only deployment panel — an operator set this compute up. */
   operatorManagedCompute: boolean;
   onSaved: (settings: SandboxSettingsResponse) => void;
@@ -249,6 +262,20 @@ function WorkspaceSandboxCard({
   // (derived from the effective allowlist); the UI only consumes it.
   const cloudflareNetworkUnsupported =
     readiness.cloudflare.unsupported.includes("network_restrictions");
+  // Mock is a test double and stays out of the list unless the deployment opted
+  // in. The `provider === "mock"` escape keeps a workspace already on mock from
+  // rendering a Select with no matching item — which would read as an empty
+  // provider and silently re-save as something else on the next submit.
+  // Both escapes keep a workspace ALREADY on the provider from rendering a
+  // Select with no matching item — which reads as an empty provider and
+  // silently re-saves as something else on the next submit. That case is real
+  // on celld: a deploy that never set DEFAULT_SANDBOX_PROVIDER seeds new
+  // workspaces `cloudflare`, and the operator needs to see it to change it.
+  const providerOptions = SANDBOX_PROVIDER_OPTIONS.filter((option) => {
+    if (option.value === "mock") return mockAvailable || provider === "mock";
+    if (option.value === "cloudflare") return cloudflareAvailable || provider === "cloudflare";
+    return true;
+  });
   const [enabled, setEnabled] = useState(base.enabled);
   const [smallKind, setSmallKind] = useState(config.profiles.small?.kind ?? "snapshot");
   const [smallValue, setSmallValue] = useState(config.profiles.small?.value ?? "");
@@ -482,7 +509,7 @@ function WorkspaceSandboxCard({
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {SANDBOX_PROVIDER_OPTIONS.map((option) => (
+              {providerOptions.map((option) => (
                 <SelectItem
                   key={option.value}
                   value={option.value}

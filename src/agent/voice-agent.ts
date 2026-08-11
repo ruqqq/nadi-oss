@@ -2,8 +2,9 @@ import { Agent, type Connection } from "agents";
 import { withVoiceInput, WorkersAINova3STT } from "@cloudflare/voice";
 import { registryDb } from "../db/client";
 import { VoiceRepository } from "../db/repositories/voice";
+import { platformCapabilities } from "../edition";
 import type { Env } from "../env";
-import { isTruthyFlag } from "../flags";
+import { voiceInputEnabled } from "../flags";
 import { log } from "../log";
 import { resolveVoiceLanguage } from "./voice-language";
 import { VOICE_CALL_CEILING_MS } from "./voice-limits";
@@ -37,8 +38,12 @@ export class VoiceAgent extends VoiceInputAgent<Env> {
    * forged socket bills no audio.
    */
   async beforeCallStart(_connection: Connection): Promise<boolean> {
-    if (!isTruthyFlag(this.env.VOICE_INPUT_ENABLED)) {
-      log.info("voice.call.rejected", { reason: "flag_off" });
+    if (!voiceInputEnabled(this.env)) {
+      log.info("voice.call.rejected", {
+        reason: platformCapabilities(this.env).speechToText
+          ? "flag_off"
+          : "platform_lacks_speech_to_text",
+      });
       return false;
     }
     // this.name is the session user id, but partyserver passes the raw path

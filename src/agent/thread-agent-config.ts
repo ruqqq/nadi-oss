@@ -11,7 +11,7 @@ import { eq } from "drizzle-orm";
 import type { Env } from "../env";
 import { backgroundWorkEnabled, isTruthyFlag, resolveWorkspaceBackgroundWork } from "../flags";
 import { resolveEgressProxy } from "../providers/egress-proxy";
-import { canUseProvider, isGatedProvider } from "../auth/provider-gate";
+import { canUseProvider, isGatedProvider, providerBindingMissing } from "../auth/provider-gate";
 import { registryDb } from "../db/client";
 import { DEFAULT_REASONING_EFFORT } from "./reasoning-options";
 import { WorkspaceRepository } from "../db/repositories/workspaces";
@@ -187,6 +187,12 @@ export async function buildThreadModelForWorkspace(
   if (isGatedProvider(cfg.provider)) {
     if (!workspaceId) {
       throw new Error(`gated_provider_workspace_id_required:${cfg.provider}`);
+    }
+    // Distinguish the two denials: a missing binding is a deployment problem
+    // and must not be reported as an allowlist decision, or the operator debugs
+    // the wrong thing.
+    if (providerBindingMissing(env, cfg.provider)) {
+      throw new Error("workers_ai_binding_required");
     }
     const ownerEmail = await new WorkspaceRepository(registryDb(env)).getOwnerEmail(workspaceId);
     if (!canUseProvider(env, cfg.provider, ownerEmail)) {

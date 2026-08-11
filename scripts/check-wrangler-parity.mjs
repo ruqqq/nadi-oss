@@ -89,10 +89,88 @@ if (vars.onlyInA.length || vars.onlyInB.length) {
   for (const n of vars.onlyInB) console.error(`  only in wrangler.prod.example.jsonc: ${n}`);
 }
 
+// ---------------------------------------------------------------------------
+// wrangler.celld.jsonc — the non-Cloudflare deploy.
+//
+// This one cannot be a set-equality check: celld has no D1/KV/R2/AI/browser/
+// email/container bindings at all, so the whole point of the file is that it
+// differs. What must NOT happen is a var key or Durable Object binding being
+// added to wrangler.jsonc and quietly missed here — the celld deploy then
+// reads `undefined` and a feature is off with no signal.
+//
+// So the rule is: celld carries everything, except what is explicitly listed
+// below as Cloudflare-only. The allowlist is the point — dropping something
+// has to be a decision someone wrote down, not an omission.
+
+const CLOUDFLARE_ONLY_VARS = {
+  R2_ACCOUNT_ID: "R2 attachments; celld signs S3 instead (S3_ATTACHMENTS_BUCKET_NAME)",
+  R2_BUCKET_NAME: "R2 attachments; celld signs S3 instead (S3_ATTACHMENTS_BUCKET_NAME)",
+  BACKUP_BUCKET_NAME: "R2 compute backups; celld uses S3_BACKUP_BUCKET_NAME",
+  CLOUDFLARE_ACCOUNT_ID: "only used to presign R2 backup URLs",
+  SANDBOX_TRANSPORT: "Cloudflare Sandbox container transport; celld has no containers",
+  MAX_ACTIVE_CONTAINERS_PER_WORKSPACE: "caps Cloudflare containers; celld has none",
+  WORKERS_AI_EMAILS: "Workers AI provider allowlist; celld has no AI binding",
+  ATTACHMENT_EXTRACTION: "vision + toMarkdown extraction; needs the AI binding",
+  VOICE_INPUT_ENABLED:
+    "voiceInputEnabled() refuses on any platform without speechToText, so the var cannot turn it on here",
+};
+
+const CLOUDFLARE_ONLY_BINDINGS = {
+  "durable_object:NADI_SANDBOX_SMALL": "Cloudflare container class",
+  "durable_object:NADI_SANDBOX_MEDIUM": "Cloudflare container class",
+};
+
+const celld = parseJsonc(readFileSync("wrangler.celld.jsonc", "utf8"));
+
+const celldVars = Object.keys(celld.vars ?? {});
+const missingVars = Object.keys(local.vars ?? {}).filter(
+  (k) => !celldVars.includes(k) && !(k in CLOUDFLARE_ONLY_VARS),
+);
+if (missingVars.length) {
+  failed = true;
+  console.error("\n`vars` keys in wrangler.jsonc but missing from wrangler.celld.jsonc:");
+  for (const n of missingVars) console.error(`  ${n}`);
+  console.error("\nAdd each to wrangler.celld.jsonc, or — if it genuinely cannot work on celld —");
+  console.error("to CLOUDFLARE_ONLY_VARS in this script, with the reason.");
+}
+
+// Only Durable Objects are comparable: every other binding kind is one celld
+// does not have, which is what the facades exist for.
+const celldDoNames = (celld.durable_objects?.bindings ?? []).map((b) => `durable_object:${b.name}`);
+const localDoNames = (local.durable_objects?.bindings ?? []).map((b) => `durable_object:${b.name}`);
+const missingDo = localDoNames.filter(
+  (n) => !celldDoNames.includes(n) && !(n in CLOUDFLARE_ONLY_BINDINGS),
+);
+if (missingDo.length) {
+  failed = true;
+  console.error(
+    "\nDurable Object bindings in wrangler.jsonc but missing from wrangler.celld.jsonc:",
+  );
+  for (const n of missingDo) console.error(`  ${n}`);
+  console.error("\nAdd each to wrangler.celld.jsonc (and to its `migrations` list), or to");
+  console.error("CLOUDFLARE_ONLY_BINDINGS in this script, with the reason.");
+}
+
+// A Durable Object class with no migration entry fails the celld deploy — loud,
+// but only at deploy time, which is a slow way to learn it.
+const migratedClasses = new Set(
+  (celld.migrations ?? []).flatMap((m) => [
+    ...(m.new_sqlite_classes ?? []),
+    ...(m.new_classes ?? []),
+  ]),
+);
+const unmigrated = (celld.durable_objects?.bindings ?? [])
+  .map((b) => b.class_name)
+  .filter((c) => !migratedClasses.has(c));
+if (unmigrated.length) {
+  failed = true;
+  console.error("\nDurable Object classes in wrangler.celld.jsonc with no `migrations` entry:");
+  for (const c of unmigrated) console.error(`  ${c}`);
+}
+
 if (failed) {
-  console.error("\nAdd the missing entry to whichever file lacks it. Values may differ; the");
-  console.error("SET of bindings and var keys may not.");
+  console.error("\nValues may differ between configs; the SET of bindings and var keys may not.");
   process.exit(1);
 }
 
-console.log("wrangler config parity: OK");
+console.log("wrangler config parity: OK (cloudflare + celld)");

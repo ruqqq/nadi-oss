@@ -44,6 +44,49 @@ export const MAX_WATCH_TIMEOUT_MS = 3_600_000;
 const REMINDER_TAIL_MAX_LINES = 20;
 const REMINDER_TAIL_MAX_BYTES = 2_048;
 
+/**
+ * How long one caller waits on an acquisition before giving up on ITS call.
+ *
+ * Each backend call is already individually bounded (30s per sprites request,
+ * 120s for a create); it is their SUM that is not, which is how a single `exec`
+ * once ran 154s. An unbounded tool call is the worst shape for that: the model
+ * blocks with nothing to report and the user sees a dead thread.
+ *
+ * NOT a cancellation, and this is the point: the acquisition keeps running
+ * (nothing here can cancel a backend call) and stays in `acquisitionInFlight`,
+ * so the retry the model makes attaches to the SAME provisioning instead of
+ * asking an already-slow backend for a second sandbox.
+ *
+ * Historically this also had to beat the ~30s `blockConcurrencyWhile` budget,
+ * because overrunning it CANCELLED the callback and reset the whole Durable
+ * Object. Acquisition no longer runs inside that gate (see `ensureRuntime`), so
+ * that constraint is gone — the value stays 25s only because bounding the tool
+ * call is worth doing on its own.
+ */
+const ACQUIRE_DEADLINE_MS = 25_000;
+
+/**
+ * Rejects with `onTimeout()` if `promise` has not settled within `ms`.
+ *
+ * The timer is cleared on both settle paths: a pending timer keeps the isolate's
+ * timer queue non-empty for no reason, and on Workers that is not free.
+ */
+function withDeadline<T>(promise: Promise<T>, ms: number, onTimeout: () => Error): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(onTimeout()), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
+  });
+}
+
 const LOST_COMPUTE_REMINDER =
   "The previous thread compute environment was missing from its backend, so stale local state was cleared. Future commands will run in a fresh environment. Files and running processes from the missing environment are gone, but previous command output remains available in this conversation.";
 const EXPIRED_RECOVERY_REMINDER =
@@ -148,7 +191,8 @@ interface ThreadComputeServiceDeps {
       };
     },
   ) => Promise<void>;
-  serializeCreation?: <T>(fn: () => Promise<T>) => Promise<T>;
+  /** Test seam; defaults to {@link ACQUIRE_DEADLINE_MS}. */
+  acquireDeadlineMs?: number;
   attachedRuntime?: BackendReference;
   hasBlockingWork?: () => Promise<boolean>;
   supportsProcessMonitor?: boolean;
@@ -286,10 +330,9 @@ export class ThreadComputeService {
    * path: `runWorkLedgerSweep`, `getCurrentGeneration`, `hasBlockingWork`, and
    * everything they await (including `backfillLegacySubagentRuns`). That path
    * stays backend-free by design — a call that can block on a dead sandbox there
-   * wedges the whole Durable Object (`blockConcurrencyWhile() waited for too
-   * long`), which is the production incident this design exists to fix. Its
-   * generation source is `getGenerationView`, a pure store read, and must stay
-   * one.
+   * stalls the alarm and wedges the whole Durable Object, which is the production
+   * incident this design exists to fix. Its generation source is
+   * `getGenerationView`, a pure store read, and must stay one.
    *
    * NOT "the alarm tick is backend-free" — that claim is false and was never
    * true: `runComputeTick` -> `pollDueWatchers` calls `getProcessStatus` and, on
@@ -1062,7 +1105,7 @@ export class ThreadComputeService {
     // watcher, so the row must close here or the reaper faults settled work.
     // Covers THIS path only. `stopAllRunningProcesses` (turn cancel) does not
     // route through here — it goes straight to `stopProcessDirect` to stay out
-    // of `ensureRuntime`/`blockConcurrencyWhile` — and closes its rows itself.
+    // of `ensureRuntime` entirely — and closes its rows itself.
     //
     // `stopped`, never `exited`: a kill is not a clean exit, and now that
     // terminals are delivered the outcome is what the model is TOLD. Reporting
@@ -1104,12 +1147,12 @@ export class ThreadComputeService {
    * keep the thread polling forever.
    *
    * Uses `stopProcessDirect`, not `execStop`, for the reason `reapProcess`
-   * documents at length: `execStop` routes through `ensureRuntime`, which runs
-   * inside `serializeCreation` (= `ctx.blockConcurrencyWhile`) and, on a freshly
-   * constructed service, mkdirs the workspace root first. `status === "active"`
-   * is our bookkeeping, not evidence the container answers. Stakes are lower
-   * here than in the sweep — a human is present and the sandbox answered seconds
-   * ago — but the hazard is the same, and it is a hang of the whole DO.
+   * documents at length: `execStop` routes through `ensureRuntime`, which on a
+   * freshly constructed service mkdirs the workspace root first and can provision
+   * a whole sandbox. `status === "active"` is our bookkeeping, not evidence the
+   * container answers. Stakes are lower here than in the sweep — a human is
+   * present and the sandbox answered seconds ago — but the hazard is the same: a
+   * teardown path must never block on the backend it exists to stop touching.
    */
   async stopAllRunningProcesses(
     mode: StopMode = "terminate",
@@ -1155,7 +1198,7 @@ export class ThreadComputeService {
 
   /**
    * Stop one process by talking to the backend DIRECTLY — no `ensureRuntime`, so
-   * no `serializeCreation`/`blockConcurrencyWhile` and no workspace-root mkdir.
+   * no provisioning and no workspace-root mkdir.
    * Local bookkeeping only beyond that; the LEDGER is the caller's business,
    * because the two callers owe opposite things (the reaper's caller already
    * closed and delivered the row; turn-cancel must close it itself).
@@ -1903,6 +1946,40 @@ export class ThreadComputeService {
     return runtime;
   }
 
+  /**
+   * Provisioning is serialized by the `acquisitionInFlight` latch ALONE — never
+   * by `ctx.blockConcurrencyWhile`. It used to run inside it (as
+   * `serializeCreation`), and that is now deliberately gone.
+   *
+   * What the gate bought: nothing else about creation. A Durable Object is
+   * single-threaded, so the gate never prevented parallelism — it prevented
+   * OTHER events (fetch, alarm, RPC) from interleaving at the awaits inside
+   * `readOrAcquireRuntime`. Duplicate provisioning was, and still is, prevented
+   * by the latch: two concurrent execs in one turn await one `backend.acquire`.
+   *
+   * What it cost, three ways:
+   *
+   *  1. Self-hosted celld kills an outbound WebSocket upgrade that SUCCEEDS
+   *     while the gate is held — its stall detector does not count the pending
+   *     upgrade as pending work ("handler stalled: awaited work with no pending
+   *     op"). The sprites backend reaches `prepare()` through `execCollect`, so
+   *     the upgrade is nested inside `acquire` itself. Reproduced minimally: the
+   *     identical upgrade returns 101 outside the gate and stalls inside it.
+   *     Every exec on celld failed on this.
+   *  2. On Cloudflare, a gated acquire freezes EVERY event on the thread for as
+   *     long as it runs — up to {@link ACQUIRE_DEADLINE_MS}. A sandbox booting
+   *     should not stop the thread from answering.
+   *  3. Overrunning the ~30s budget cancels the callback and RESETS the object,
+   *     destroying the turn. One `exec` held it 154s and did exactly that.
+   *
+   * A backend call inside `blockConcurrencyWhile` is the hazard `reapProcess`
+   * and `stopProcessDirect` already refuse to take; this was the last path
+   * still taking it.
+   *
+   * The one thing the gate did protect is handled explicitly instead: see the
+   * in-flight check in `cleanupExpiredRecovery`, which stops an interleaving
+   * alarm from destroying the very snapshot a restore is reading.
+   */
   private async ensureRuntime(): Promise<BackendReference> {
     if (this.deps.attachedRuntime) {
       const state = this.deps.store.getComputeState();
@@ -1911,30 +1988,46 @@ export class ThreadComputeService {
       }
       return this.ensureWorkspaceRootOnce(this.deps.attachedRuntime);
     }
-    const acquire = () => this.readOrAcquireRuntime().then((r) => this.ensureWorkspaceRootOnce(r));
-    if (this.deps.serializeCreation) {
-      const result = await this.deps.serializeCreation(async () => {
-        try {
-          return { ok: true as const, runtime: await acquire() };
-        } catch (error) {
-          return { ok: false as const, error };
-        }
-      });
-      if (!result.ok) throw result.error;
-      return result.runtime;
+    const runtime = await this.boundedAcquisition(() => this.readOrAcquireRuntime());
+    return this.ensureWorkspaceRootOnce(runtime);
+  }
+
+  /**
+   * One acquisition at a time, bounded by {@link ACQUIRE_DEADLINE_MS}.
+   *
+   * The deadline expiring does NOT abandon the provisioning — it is retained in
+   * `acquisitionInFlight`, so a later call (a retry, or the next turn) awaits
+   * the SAME work rather than asking the backend for a second sandbox. That
+   * matters most in exactly the case the deadline fires: a slow backend is the
+   * last thing that should be handed a duplicate create.
+   */
+  private boundedAcquisition(acquire: () => Promise<BackendReference>): Promise<BackendReference> {
+    if (!this.acquisitionInFlight) {
+      const started = acquire();
+      this.acquisitionInFlight = started;
+      // `catch` before `finally` so the cleanup chain cannot itself surface as
+      // an unhandled rejection once a timed-out acquisition finally fails.
+      // `started` keeps rejecting for its real awaiters either way.
+      void started
+        .catch(() => {})
+        .finally(() => {
+          if (this.acquisitionInFlight === started) this.acquisitionInFlight = undefined;
+        });
     }
-    if (this.acquisitionInFlight) return this.acquisitionInFlight;
-    this.acquisitionInFlight = acquire();
-    try {
-      return await this.acquisitionInFlight;
-    } finally {
-      this.acquisitionInFlight = undefined;
-    }
+    return withDeadline(
+      this.acquisitionInFlight,
+      this.deps.acquireDeadlineMs ?? ACQUIRE_DEADLINE_MS,
+      () =>
+        new ComputeError(
+          "provider_transient",
+          "sandbox_acquire_deadline: the sandbox did not finish starting in time",
+        ),
+    );
   }
 
   private async readOrAcquireRuntime(): Promise<BackendReference> {
     const now = this.deps.now();
-    await this.cleanupExpiredRecovery(now);
+    await this.cleanupExpiredRecovery(now, { fromAcquisition: true });
     const state = this.deps.store.getComputeState();
     if (
       this.deps.config.provider === "daytona" &&
@@ -2275,8 +2368,8 @@ export class ThreadComputeService {
     // interleaved between the guard and here, this last-writer-wins over its
     // nonce; that is the accepted Task-5 "I5 first-write race" class, now
     // reachable with a container write attached. Narrowing it further needs the
-    // restore to run inside `serializeCreation`, which would put a backend write
-    // under the provisioning lock.
+    // restore to hold the provisioning latch across this write, which would put
+    // a backend write under that latch.
     this.deps.store.setGeneration({ kind: "known", nonce }, this.deps.now());
   }
 
@@ -2475,7 +2568,29 @@ export class ThreadComputeService {
     }).text;
   }
 
-  private async cleanupExpiredRecovery(now: number): Promise<boolean> {
+  /**
+   * @param fromAcquisition True only for the call `readOrAcquireRuntime` makes
+   * on its own way in, which runs BEFORE it decides whether to restore and so
+   * is never the racing caller this guards against.
+   *
+   * Every other caller is a different DO event — an alarm, a tick, a route —
+   * and one of those landing mid-restore is the hazard. A restore does not move
+   * the status off `recoverable` while it runs (`markAcquiring` fires only on
+   * the fresh-acquire branch, by design), so a TTL expiring during one would
+   * otherwise destroy the very backup the restore is reading, losing the
+   * workspace.
+   *
+   * `blockConcurrencyWhile` used to make that unreachable by queueing the alarm
+   * behind the acquisition; `ensureRuntime` no longer holds that gate, so the
+   * exclusion is stated here instead. Skipping is safe: the recovery is about
+   * to become `active`, and a failed restore leaves the latch clear for the
+   * next tick to re-run this.
+   */
+  private async cleanupExpiredRecovery(
+    now: number,
+    { fromAcquisition = false }: { fromAcquisition?: boolean } = {},
+  ): Promise<boolean> {
+    if (this.acquisitionInFlight && !fromAcquisition) return false;
     const state = this.deps.store.getComputeState();
     if (
       state?.status !== "recoverable" ||

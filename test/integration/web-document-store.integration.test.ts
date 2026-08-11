@@ -8,7 +8,7 @@ import type { ThinkThreadAgent } from "../../src/agent/think-thread-agent";
  * @cloudflare/workers-types), so it isn't reachable from outside the agent
  * class under strict TS. Runtime access is fine (it's a plain property) —
  * this narrow cast is scoped to this test file only, not production code
- * (mirrors the pattern in test/integration/sandbox-thread-store.test.ts).
+ * (mirrors the pattern in test/integration/compute-thread-store.test.ts).
  */
 function storageOf(instance: ThinkThreadAgent): DurableObjectStorage {
   return (instance as unknown as { ctx: { storage: DurableObjectStorage } }).ctx.storage;

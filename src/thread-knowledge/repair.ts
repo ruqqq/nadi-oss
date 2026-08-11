@@ -1,5 +1,5 @@
 import type { Env } from "../env";
-import { registryDb } from "../db/client";
+import { registryBinding, registryDb } from "../db/client";
 import { ArchivedMessageRepository } from "../db/repositories/archived-messages";
 import { ThreadSearchProjectionRepository } from "../db/repositories/thread-search-projection";
 import { ThreadRepository } from "../db/repositories/threads";
@@ -27,7 +27,7 @@ export async function repairStaleThreadSearchProjections(
   env: Env,
   limit: number = SEARCH_REPAIR_BATCH,
 ): Promise<ThreadSearchRepairResult> {
-  const projection = new ThreadSearchProjectionRepository(env.REGISTRY_DB);
+  const projection = new ThreadSearchProjectionRepository(registryBinding(env));
   const batch = Math.min(Math.max(Math.floor(limit), 0), SEARCH_REPAIR_MAX_BATCH);
   const selected = await projection.selectStaleThreads(batch);
   let succeeded = 0;

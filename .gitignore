@@ -15,8 +15,15 @@ web/dist/
 !.dev.vars.example
 .env
 .env.*
+!.env.example
 !.env.local.example
+!.env.multinode.example
 !web/.env.local.example
+# The celld vars file holds BETTER_AUTH_SECRET, the KEK and S3 credentials, and
+# is NOT named `.env`, so nothing above covers it. Only the example is tracked.
+deploy/celld/celld-vars.env
+# Bind-mounted MinIO/Caddy state for the local celld stack.
+deploy/celld/data/
 
 # Test / coverage
 coverage/
@@ -55,3 +62,15 @@ scratch/
 # Your own production config, derived from wrangler.prod.example.jsonc.
 # Deployment-specific ids belong to you, not to the repo.
 wrangler.prod.jsonc
+
+# Reasonix host session state (task lists, subagent snapshots). Never part of
+# the repo; without this, oxfmt picks up its JSON snapshots and fmt:check fails.
+.reasonix/
+
+# Local celld smoke-test config, generated from .env.local (contains secrets).
+wrangler.smoke.jsonc
+
+# scripts/push-catcher.mjs generates its subscription keypair and a self-signed
+# TLS cert here on first run. Local-only by construction: a committed
+# subscription private key would be a shared secret that decrypts nothing real.
+.push-catcher/

@@ -5,7 +5,8 @@ import { AttachmentRepository } from "../db/attachment-repository";
 import { deleteR2PrefixBestEffort } from "../artifacts/serve";
 import { ArtifactRepository } from "../db/artifact-repository";
 import { AgentSkillRepository } from "../db/repositories/agent-skills";
-import { registryDb } from "../db/client";
+import { registryBinding, registryDb } from "../db/client";
+import { attachmentsBucket } from "../storage/bucket-binding";
 import { computeConfigFromInputs, loadComputeConfigInputs } from "../compute/settings";
 import { ThreadComputeStore } from "../compute/thread-store";
 import { ThreadComputeService } from "../compute/thread-service";
@@ -114,12 +115,6 @@ export interface ComputeToolHostDeps {
     mode: "deferred" | "proactive",
     options?: { watcher?: WatcherCompletionInfo },
   ) => Promise<void>;
-  /**
-   * Serializes lazy environment creation across concurrent compute exec tool
-   * calls in a turn. The DO backs this with `ctx.blockConcurrencyWhile` so
-   * exactly one backend environment is created (see {@link ThreadComputeService}).
-   */
-  serializeCreation?: <T>(fn: () => Promise<T>) => Promise<T>;
   now?: () => number;
   /**
    * Test seam: substitute the backend (e.g. the in-memory fake) instead of
@@ -470,7 +465,6 @@ export async function resolveComputeService(deps: ComputeToolHostDeps): Promise<
     deliverSystemReminder: deps.deliverSystemReminder,
     supportsProcessMonitor: deps.supportsProcessMonitor,
     backgroundLongRunningExec,
-    ...(deps.serializeCreation ? { serializeCreation: deps.serializeCreation } : {}),
     ...(deps.attachedRuntime ? { attachedRuntime: deps.attachedRuntime } : {}),
     ...(quota ? { quota } : {}),
     ...(deps.hasBlockingWork ? { hasBlockingWork: deps.hasBlockingWork } : {}),
@@ -547,7 +541,7 @@ export function buildComputeQuotaGate(input: {
   if (!isQuotaGatedProvider(input.effectiveConfig.provider, input.daytonaMode, input.spritesMode))
     return undefined;
   return createComputeQuotaGate({
-    ledger: new ContainerLedger(input.env.REGISTRY_DB),
+    ledger: new ContainerLedger(registryBinding(input.env)),
     workspaceId: input.workspaceId,
     threadId: input.threadId,
     provider: input.effectiveConfig.provider,
@@ -931,12 +925,12 @@ export function buildComputeToolDefs(
       execute: async (input) => {
         try {
           const { env, threadId } = await getFileContext();
-          const row = await new AttachmentRepository(env.REGISTRY_DB).getByIdInThread(
+          const row = await new AttachmentRepository(registryBinding(env)).getByIdInThread(
             input.sourceAttachmentId,
             threadId,
           );
           if (!row) throw new Error("sandbox_upload_source_not_found");
-          const object = await env.ATTACHMENTS_BUCKET.get(row.r2Key);
+          const object = await attachmentsBucket(env).get(row.r2Key);
           if (!object) throw new Error("sandbox_upload_source_not_found");
           const bytes = await object.arrayBuffer();
           return await (
@@ -974,8 +968,8 @@ export function buildComputeToolDefs(
           const mimeType =
             download.mimeType ?? guessMimeFromFilename(filename) ?? "application/octet-stream";
           const r2Key = `${workspaceId}/${threadId}/${attachmentId}`;
-          await env.ATTACHMENTS_BUCKET.put(r2Key, download.bytes);
-          await new AttachmentRepository(env.REGISTRY_DB).insert({
+          await attachmentsBucket(env).put(r2Key, download.bytes);
+          await new AttachmentRepository(registryBinding(env)).insert({
             id: attachmentId,
             workspaceId,
             threadId,
@@ -1021,7 +1015,7 @@ export function buildComputeToolDefs(
           const r2Prefix = `artifacts/${artifactId}/`;
           try {
             for (const f of published.files) {
-              await env.ATTACHMENTS_BUCKET.put(r2Prefix + f.relativePath, f.bytes, {
+              await attachmentsBucket(env).put(r2Prefix + f.relativePath, f.bytes, {
                 httpMetadata: { contentType: f.mimeType },
               });
             }
@@ -1029,7 +1023,7 @@ export function buildComputeToolDefs(
             const expiresAt = createdAt + 24 * 60 * 60 * 1000;
             const entryPath = input.entryPath ?? "index.html";
             const title = input.title ?? input.path.split("/").filter(Boolean).pop() ?? artifactId;
-            await new ArtifactRepository(env.REGISTRY_DB).insert({
+            await new ArtifactRepository(registryBinding(env)).insert({
               id: artifactId,
               workspaceId,
               threadId,
@@ -1053,7 +1047,7 @@ export function buildComputeToolDefs(
             };
           } catch (error) {
             // Puts-then-insert can leave unreachable R2 objects; reclaim the prefix.
-            await deleteR2PrefixBestEffort(env.ATTACHMENTS_BUCKET, r2Prefix);
+            await deleteR2PrefixBestEffort(attachmentsBucket(env), r2Prefix);
             throw error;
           }
         } catch (error) {

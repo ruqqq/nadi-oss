@@ -18,6 +18,37 @@ function cookie(token: string) {
   return { cookie: `better-auth.session_token=${token}` };
 }
 
+/**
+ * Runs `body` against a deployment that has opted into the mock sandbox.
+ * Selecting mock is gated on `DEFAULT_SANDBOX_PROVIDER=mock`, and the miniflare
+ * env sets no vars, so anything exercising mock has to declare that here.
+ */
+async function withMockSandboxEnabled(body: () => Promise<void>): Promise<void> {
+  const bag = env as unknown as Record<string, unknown>;
+  const previous = bag.DEFAULT_SANDBOX_PROVIDER;
+  bag.DEFAULT_SANDBOX_PROVIDER = "mock";
+  try {
+    await body();
+  } finally {
+    if (previous === undefined) delete bag.DEFAULT_SANDBOX_PROVIDER;
+    else bag.DEFAULT_SANDBOX_PROVIDER = previous;
+  }
+}
+
+/** Same shape as {@link withMockSandboxEnabled}, for the opposite direction:
+ *  celld is the platform that WITHDRAWS a provider rather than granting one. */
+async function withCelldPlatform(body: () => Promise<void>): Promise<void> {
+  const bag = env as unknown as Record<string, unknown>;
+  const previous = bag.NADI_PLATFORM;
+  bag.NADI_PLATFORM = "celld";
+  try {
+    await body();
+  } finally {
+    if (previous === undefined) delete bag.NADI_PLATFORM;
+    else bag.NADI_PLATFORM = previous;
+  }
+}
+
 function daytonaProviderConfig(source: { kind: "image" | "snapshot"; value: string }) {
   return {
     kind: "daytona",
@@ -857,20 +888,91 @@ describe("sandbox settings routes", () => {
 
     it("passes for the mock provider using the real in-memory backend (no deployment config)", async () => {
       const { token } = await seedUserWorkspace();
-      await SELF.fetch("https://nadi.test/api/settings/sandbox", {
+      // Selecting mock requires the deployment to have opted in; the miniflare
+      // env sets no vars, so without this the PUT below is refused and the test
+      // would be asserting against a workspace still on its previous provider.
+      await withMockSandboxEnabled(async () => {
+        await SELF.fetch("https://nadi.test/api/settings/sandbox", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", ...cookie(token) },
+          body: JSON.stringify({
+            enabled: true,
+            provider: "mock",
+            providerConfig: { kind: "mock" },
+          }),
+        });
+
+        // No backend override and no credentials: the mock backend is built
+        // directly and its `printf nadi-compute-ready` probe round-trips.
+        const res = await SELF.fetch("https://nadi.test/api/settings/sandbox/test", {
+          method: "POST",
+          headers: cookie(token),
+        });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ ok: true, provider: "mock" });
+      });
+    });
+
+    it("refuses to select mock on a deployment that did not opt in", async () => {
+      const { token } = await seedUserWorkspace();
+      const res = await SELF.fetch("https://nadi.test/api/settings/sandbox", {
         method: "PUT",
         headers: { "Content-Type": "application/json", ...cookie(token) },
         body: JSON.stringify({ enabled: true, provider: "mock", providerConfig: { kind: "mock" } }),
       });
+      expect(res.status).toBe(400);
 
-      // No backend override and no credentials: the mock backend is built
-      // directly and its `printf nadi-compute-ready` probe round-trips.
-      const res = await SELF.fetch("https://nadi.test/api/settings/sandbox/test", {
-        method: "POST",
+      // And the view does not advertise it, so the UI has nothing to render.
+      const viewRes = await SELF.fetch("https://nadi.test/api/settings/sandbox", {
         headers: cookie(token),
       });
+      const view = (await viewRes.json()) as { mockAvailable: boolean };
+      expect(view.mockAvailable).toBe(false);
+    });
+
+    it("refuses to select cloudflare on celld, which has no containers", async () => {
+      const { token } = await seedUserWorkspace();
+      await withCelldPlatform(async () => {
+        const res = await SELF.fetch("https://nadi.test/api/settings/sandbox", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", ...cookie(token) },
+          body: JSON.stringify({
+            enabled: true,
+            provider: "cloudflare",
+            providerConfig: { kind: "cloudflare" },
+          }),
+        });
+        expect(res.status).toBe(400);
+
+        const viewRes = await SELF.fetch("https://nadi.test/api/settings/sandbox", {
+          headers: cookie(token),
+        });
+        const view = (await viewRes.json()) as { cloudflareAvailable: boolean };
+        expect(view.cloudflareAvailable).toBe(false);
+      });
+    });
+
+    it("still allows cloudflare on a platform that has containers", async () => {
+      // The gate must be the PLATFORM, not the provider name: withdrawing it
+      // everywhere would break every Cloudflare deployment, which is the only
+      // place the provider is meant to work.
+      const { token } = await seedUserWorkspace();
+      const res = await SELF.fetch("https://nadi.test/api/settings/sandbox", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...cookie(token) },
+        body: JSON.stringify({
+          enabled: true,
+          provider: "cloudflare",
+          providerConfig: { kind: "cloudflare" },
+        }),
+      });
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ ok: true, provider: "mock" });
+
+      const viewRes = await SELF.fetch("https://nadi.test/api/settings/sandbox", {
+        headers: cookie(token),
+      });
+      const view = (await viewRes.json()) as { cloudflareAvailable: boolean };
+      expect(view.cloudflareAvailable).toBe(true);
     });
 
     it("uses the system Daytona key and small system snapshot without a workspace key", async () => {

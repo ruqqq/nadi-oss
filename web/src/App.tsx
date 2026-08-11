@@ -1501,6 +1501,17 @@ export function ChatApp({
   // Opening a thread lives further down the component; a ref keeps this effect
   // from depending on declaration order.
   const openThreadFromNoticeRef = useRef<(threadId: string) => void>(() => {});
+  // Same reason, for the reverse: leaving a thread that no longer exists. Both
+  // the hub-socket handler and the reconcile pass need it, and neither can
+  // depend on route state without being rebuilt on every navigation.
+  const leaveThreadIfOpenRef = useRef<(threadId: string) => void>(() => {});
+  // The routed thread id, readable from those same callbacks. `activeThreadRef`
+  // only carries a RESOLVED thread, so it is null in the window between
+  // navigating and the summary loading — exactly when a stale route matters.
+  const routeThreadIdRef = useRef<string | null>(routeThreadId);
+  useEffect(() => {
+    routeThreadIdRef.current = routeThreadId;
+  }, [routeThreadId]);
   // The cursor from the shared array's own most recent page-one fetch. Only the
   // rail's overflow link reads this — it is what turns "unknowable count" into
   // "there is definitely more" without a COUNT query.
@@ -1551,6 +1562,12 @@ export function ChatApp({
         confirmInactiveThreads([event.thread.threadId]);
       } else if (event.type === "thread.deleted") {
         confirmInactiveThreads([event.threadId]);
+        // Dropping it from the rail is not enough when it is the thread on
+        // screen. Nothing else clears the route — unlike `thread.archived`
+        // below, a deletion has no summary to swap in — so ThreadChat keeps a
+        // socket dialing a thread the server no longer has, retrying forever
+        // behind a composer stuck on "Connecting…".
+        leaveThreadIfOpenRef.current(event.threadId);
       }
 
       // The in-app half of a push notification. The server declines to send an
@@ -1938,8 +1955,29 @@ export function ChatApp({
     const ids = threadsRef.current
       .map((thread) => thread.threadId)
       .filter((id) => !inactiveThreadIdsRef.current.has(id));
+    // The thread on screen, even when it is not in the rail — which is exactly
+    // the case that used to be missed. A deletion this tab did not witness
+    // (offline, or before the socket connected) removed it from the list, and
+    // `confirmInactiveThreads` removes it too, so the one thread that most
+    // needs checking was the one never sent.
+    //
+    // Gated to match the server's filter (active, non-feedback), because
+    // reconcile reports anything else as inactive: sending an archived thread —
+    // legitimately viewable read-only from the archived tab — would evict the
+    // user from a thread that is perfectly fine.
+    const open = activeThreadRef.current;
+    if (
+      open &&
+      open.archivedAt === null &&
+      open.kind === "regular" &&
+      !inactiveThreadIdsRef.current.has(open.threadId) &&
+      !ids.includes(open.threadId)
+    ) {
+      ids.push(open.threadId);
+    }
     const inactive = await findInactiveThreadIds(ids);
     confirmInactiveThreads(inactive);
+    for (const id of inactive) leaveThreadIfOpenRef.current(id);
   }, [confirmInactiveThreads]);
 
   useEffect(() => {
@@ -2038,6 +2076,22 @@ export function ChatApp({
   // Published for the hub-socket handler above, which fires the in-app activity
   // toast and needs to open a thread from it.
   openThreadFromNoticeRef.current = (threadId: string) => navigateToThread(threadId, "push");
+
+  // Published for the hub-socket handler and the reconcile pass: send the user
+  // out of `threadId` if that is what they are looking at, and do nothing
+  // otherwise. Deliberately the same landing as the load path's "not found"
+  // branch below, so a thread that dies while open and one that is already gone
+  // when opened behave identically.
+  leaveThreadIfOpenRef.current = (threadId: string) => {
+    const openThreadId = activeThreadRef.current?.threadId ?? routeThreadIdRef.current;
+    if (openThreadId !== threadId) return;
+    toast.error("This chat is no longer available.");
+    window.history.replaceState(null, "", "/chats");
+    setRoutePath("/chats");
+    setRouteThreadId(null);
+    setResolvedActiveThread(null);
+    setDraft(true);
+  };
 
   // Take the thread a notification tap points at, if one is waiting, and open
   // it. This — not the postMessage below — is what makes a tap land on the

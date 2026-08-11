@@ -1263,8 +1263,8 @@ describe("stopAllRunningProcesses — turn cancel never blocks on a dead sandbox
     expect(calls.stopProcess).toEqual(["terminate", "terminate"]);
     // THE assertion. `status === "active"` is bookkeeping, not evidence the
     // container answers; routing through `execStop`/`ensureRuntime` would mkdir
-    // the workspace root inside `serializeCreation` (= `blockConcurrencyWhile`)
-    // on this fresh instance and wedge the DO against a hung sandbox.
+    // the workspace root on this fresh instance and block the teardown path on a
+    // hung sandbox.
     expect(calls.createDirectory).toEqual([]);
     expect(calls.acquires()).toBe(acquiresBefore);
     expect(store.getProcess(a)?.status).toBe("stopped");

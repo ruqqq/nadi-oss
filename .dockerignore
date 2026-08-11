@@ -1,0 +1,41 @@
+# Build context exclusions for deploy/celld/Dockerfile, whose context is this
+# directory. Without this, `COPY . .` ships the host's node_modules over the
+# ones installed in the image, plus .git and every local secret file.
+#
+# The Cloudflare sandbox image (container/Dockerfile) is unaffected: wrangler
+# builds it with container/ as the context, so none of these patterns apply.
+
+.git
+.github
+
+node_modules
+web/node_modules
+.pnpm-store
+
+# Rebuilt inside the image.
+dist
+web/dist
+.wrangler
+.mf
+*.tsbuildinfo
+coverage
+
+# Local secrets and state — never belong in an image layer.
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.env
+.env.*
+!.env.local.example
+wrangler.prod.jsonc
+wrangler.smoke.jsonc
+codex-auth.json
+.push-catcher
+.reasonix
+.superpowers
+.worktrees
+scratch
+
+# The operator's own filled-in copies, which sit next to the Dockerfile.
+deploy/celld/.env
+deploy/celld/celld-vars.env

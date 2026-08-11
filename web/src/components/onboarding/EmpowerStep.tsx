@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "../ui/button";
 import { Notebook, PlugsConnected } from "../../icons";
 import { FEATURED_CONNECTIONS, findFeaturedServer } from "../../lib/featured-connections";
@@ -42,7 +42,14 @@ export function EmpowerStep({
   // `FeaturedConnectionCard`'s `onResolved` doc explains why collapsing them
   // at the source would be the wrong place to lose it.
   type ResolvedMap = Partial<Record<FeaturedConnectionId, string[] | null>>;
-  const [resolvedTools, setResolvedTools] = useState<ResolvedMap>({});
+  // A ref, not state: nothing renders from this, and its only consumer reads
+  // it at click time. As state it was a render behind the card's own
+  // "Connected · N tools" text — the card sets that in one commit and reports
+  // upward from an effect in the next — so a Continue pressed the instant the
+  // text appeared armed the nudge from an empty map. That is a real ordering
+  // hazard, not just a flaky test: the user who clicks fastest is the one who
+  // gets the wrong nudge.
+  const resolvedToolsRef = useRef<ResolvedMap>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -61,23 +68,30 @@ export function EmpowerStep({
   }, []);
 
   const handleResolved = useCallback((id: FeaturedConnectionId, toolNames: string[] | null) => {
-    setResolvedTools((current) => ({ ...current, [id]: toolNames }));
+    resolvedToolsRef.current = { ...resolvedToolsRef.current, [id]: toolNames };
   }, []);
 
-  useEffect(() => {
-    // `resolvedTools[id]` is `null` for anything short of a fully
-    // introspected connection, and `?? []` folds that into "no tools to
-    // check" — the same outcome a genuinely empty, connected tool list
-    // produces. `hasCalendarTool` only ever sees names that actually
-    // resolved, so this can't arm the calendar prompt off an unresolved or
-    // not-yet-connected row; it can still be bypassed by a future call site
-    // that reaches into `resolvedTools` directly instead of going through
-    // this derivation.
-    const calendarConnected = FEATURED_CONNECTIONS.some((c) =>
-      hasCalendarTool(resolvedTools[c.id] ?? []),
+  /**
+   * Derived here, at the moment Continue is pressed, rather than mirrored
+   * upward from an effect as connections resolve. The nudge is armed from this
+   * value, and reading it late is the only way to be sure it reflects every
+   * connection that had finished resolving by the time the user committed.
+   *
+   * `resolvedToolsRef.current[id]` is `null` for anything short of a fully
+   * introspected connection, and `?? []` folds that into "no tools to check" —
+   * the same outcome a genuinely empty, connected tool list produces.
+   * `hasCalendarTool` only ever sees names that actually resolved, so this
+   * can't arm the calendar prompt off an unresolved or not-yet-connected row;
+   * it can still be bypassed by a future call site that reaches into the ref
+   * directly instead of going through this derivation.
+   */
+  const handleContinue = useCallback(() => {
+    const resolved = resolvedToolsRef.current;
+    onCalendarConnectedChange?.(
+      FEATURED_CONNECTIONS.some((c) => hasCalendarTool(resolved[c.id] ?? [])),
     );
-    onCalendarConnectedChange?.(calendarConnected);
-  }, [resolvedTools, onCalendarConnectedChange]);
+    onContinue();
+  }, [onCalendarConnectedChange, onContinue]);
 
   return (
     <div className="mt-4 space-y-4">
@@ -102,7 +116,7 @@ export function EmpowerStep({
       {exaCard}
 
       <div className="flex justify-end">
-        <Button type="button" onClick={onContinue}>
+        <Button type="button" onClick={handleContinue}>
           Continue
         </Button>
       </div>
