@@ -2076,8 +2076,12 @@ export class ThinkThreadAgent extends Think<Env> {
    * Serialize a lease mutation so concurrent spawns can't lose an update: the
    * AI SDK executes multiple tool calls in one step concurrently, and
    * `spawn_subagent`'s description explicitly invites spawning several at once.
-   * `blockConcurrencyWhile` queues concurrent callbacks strictly one-at-a-time,
-   * matching the same pattern already used for `serializeCreation` below.
+   * `blockConcurrencyWhile` queues concurrent callbacks strictly one-at-a-time.
+   *
+   * Safe here in a way it was NOT for sandbox provisioning (which used to use it
+   * and deliberately no longer does — see `ThreadComputeService.ensureRuntime`):
+   * this callback touches storage only. Nothing inside it calls a backend, so it
+   * cannot hold the gate on a network round-trip.
    *
    * The lease is now a ledger row (`kind: "subagent"`), so the mutation is a
    * single atomic SQL statement rather than the read-modify-write over one
@@ -4054,10 +4058,6 @@ export class ThinkThreadAgent extends Think<Env> {
           submitQueuedUserMessageBatch(this.queuedSubmissionPort(), normalized),
         );
       },
-      // Serialize lazy environment creation: blockConcurrencyWhile runs the
-      // create callback to completion before any other DO event, so two
-      // concurrent exec calls in one turn create exactly one backend environment.
-      serializeCreation: (fn) => this.ctx.blockConcurrencyWhile(fn),
       // Defer idle eviction of the shared machine while any subagent is live.
       // DERIVED from the ledger now (an open `kind: "subagent"` row IS the
       // lease), so a reaped run releases the hold with nothing to forget.

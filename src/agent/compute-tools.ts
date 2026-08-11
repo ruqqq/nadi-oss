@@ -115,12 +115,6 @@ export interface ComputeToolHostDeps {
     mode: "deferred" | "proactive",
     options?: { watcher?: WatcherCompletionInfo },
   ) => Promise<void>;
-  /**
-   * Serializes lazy environment creation across concurrent compute exec tool
-   * calls in a turn. The DO backs this with `ctx.blockConcurrencyWhile` so
-   * exactly one backend environment is created (see {@link ThreadComputeService}).
-   */
-  serializeCreation?: <T>(fn: () => Promise<T>) => Promise<T>;
   now?: () => number;
   /**
    * Test seam: substitute the backend (e.g. the in-memory fake) instead of
@@ -471,7 +465,6 @@ export async function resolveComputeService(deps: ComputeToolHostDeps): Promise<
     deliverSystemReminder: deps.deliverSystemReminder,
     supportsProcessMonitor: deps.supportsProcessMonitor,
     backgroundLongRunningExec,
-    ...(deps.serializeCreation ? { serializeCreation: deps.serializeCreation } : {}),
     ...(deps.attachedRuntime ? { attachedRuntime: deps.attachedRuntime } : {}),
     ...(quota ? { quota } : {}),
     ...(deps.hasBlockingWork ? { hasBlockingWork: deps.hasBlockingWork } : {}),

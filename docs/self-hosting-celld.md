@@ -46,6 +46,34 @@ the integration suite. Only PKCS#8 keys are accepted — if your GitHub App key
 is PKCS#1 (`BEGIN RSA PRIVATE KEY`), convert it with
 `openssl pkcs8 -topk8 -nocrypt -in github-app.pem -out github-app-pkcs8.pem`.
 
+### Two celld runtime constraints the code works around
+
+Both cost every sandbox `exec` on celld before they were found, and neither
+shows up on Cloudflare. If you touch this code, keep them in mind — nothing in
+the type system enforces either one.
+
+**Outbound WebSocket upgrades must use `wss:`/`ws:`, not `https:`/`http:`.**
+workerd accepts either scheme for a client upgrade, so the shape the Cloudflare
+docs show works there and hid this. celld dispatches on the scheme and rejects
+the http one before the request leaves the isolate ("not a WebSocket scheme:
+https"). REST over the same base URL is unaffected — only the upgrade. See
+`execUrl` in `src/compute/backends/sprites-client.ts`.
+
+**No backend call may run inside `ctx.blockConcurrencyWhile`.** celld's stall
+detector does not count a pending outbound upgrade as pending work, so it kills
+a handler that is legitimately waiting on one — "handler stalled: awaited work
+with no pending op" — even though the identical upgrade succeeds outside the
+gate. Sandbox provisioning is therefore serialized by an in-process latch rather
+than the gate (`ThreadComputeService.ensureRuntime`), and teardown paths call
+the backend directly rather than routing through `ensureRuntime`. This is worth
+keeping on Cloudflare too: a gated acquire freezes every other event on the
+thread while a sandbox boots, and overrunning the ~30s budget resets the object
+outright.
+
+The same stall detector also re-runs an alarm on every retry, so one armed alarm
+can execute several times if it lands while a gate is held. Alarm handlers
+should be idempotent.
+
 ## Durability: read this before you rely on it
 
 celld replicates a cell to your bucket **only when that cell goes idle**. An
