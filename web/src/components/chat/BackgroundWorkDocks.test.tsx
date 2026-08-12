@@ -12,8 +12,20 @@ describe("BackgroundWorkDock", () => {
       <BackgroundWorkDock
         enabled
         rows={[
-          { id: "p1", kind: "process", label: "make build", terminal: { outcome: "exited" } },
-          { id: "s1", kind: "subagent", label: "review the diff", terminal: null },
+          {
+            id: "p1",
+            kind: "process",
+            label: "make build",
+            startedAt: 1_000,
+            terminal: { outcome: "exited", reason: "process_exit" },
+          },
+          {
+            id: "s1",
+            kind: "subagent",
+            label: "review the diff",
+            startedAt: 2_000,
+            terminal: null,
+          },
         ]}
       />,
     );
@@ -29,7 +41,15 @@ describe("BackgroundWorkDock", () => {
     const { container } = render(
       <BackgroundWorkDock
         enabled={false}
-        rows={[{ id: "p1", kind: "process", label: "make build", terminal: { outcome: "exited" } }]}
+        rows={[
+          {
+            id: "p1",
+            kind: "process",
+            label: "make build",
+            startedAt: 1_000,
+            terminal: { outcome: "exited", reason: "process_exit" },
+          },
+        ]}
       />,
     );
     expect(container).toBeEmptyDOMElement();

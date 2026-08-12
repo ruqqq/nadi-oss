@@ -32,14 +32,15 @@ export interface BackgroundWorkRow {
  * the terminal outcome the two old per-kind views (`listActiveWatchers`, the
  * subagent event stream) could never both show. Reads the `listBackgroundWork`
  * callable, which is backed by the ledger (`WorkLedgerStore.listRecent`) —
- * open rows plus terminal rows the model was told about in the last 10
- * minutes, newest first.
+ * open rows, rows delivered in the last 10 minutes, AND any row still owed a
+ * delivery (terminal but not yet told to the model — see `listRecent`'s doc),
+ * newest first.
  *
- * Refresh cadence mirrors `useWatcherRuns`: on mount/enable, on the message
- * stream (a completion delivery appends a message so the row's outcome lands
- * within one refetch), one delayed refetch to cover the turn-end sweep racing
- * the client's own refetch, and a steady safety poll so a silently-attached
- * row (no message) still surfaces within one interval.
+ * Refresh cadence mirrors the deleted `useWatcherRuns`: on mount/enable, on
+ * the message stream (a completion delivery appends a message so the row's
+ * outcome lands within one refetch), one delayed refetch to cover the
+ * turn-end sweep racing the client's own refetch, and a steady safety poll so
+ * a silently-attached row (no message) still surfaces within one interval.
  */
 export function useBackgroundWork(
   agent: AgentSocket,

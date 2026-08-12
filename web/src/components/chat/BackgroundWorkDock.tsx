@@ -18,8 +18,8 @@ export interface BackgroundWorkDockRow {
   id: string;
   kind: BackgroundWorkKind;
   label: string | null;
-  startedAt?: number;
-  terminal: { outcome: BackgroundWorkOutcome; reason?: BackgroundWorkReason } | null;
+  startedAt: number;
+  terminal: { outcome: BackgroundWorkOutcome; reason: BackgroundWorkReason } | null;
 }
 
 type Tone = "running" | "success" | "warning" | "error";
@@ -120,12 +120,10 @@ function BackgroundWorkRowChip({ row }: { row: BackgroundWorkDockRow }) {
             <div className="break-all">
               <span className="text-muted-foreground">Id</span> · {row.id}
             </div>
-            {row.startedAt !== undefined && (
-              <div>
-                <span className="text-muted-foreground">Started</span> ·{" "}
-                {new Date(row.startedAt).toLocaleTimeString()}
-              </div>
-            )}
+            <div>
+              <span className="text-muted-foreground">Started</span> ·{" "}
+              {new Date(row.startedAt).toLocaleTimeString()}
+            </div>
           </CardContent>
         </Card>
       </DialogContent>

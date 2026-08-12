@@ -4,52 +4,9 @@ import {
   NADI_WATCHER_COMPLETION_KIND,
   isWatcherCompletionMessage,
   parseWatcherCompletion,
-  watcherCardModel,
   watcherResultModel,
-  type ActiveWatcher,
   type WatcherCompletionInfo,
 } from "./watcher-runs";
-
-const watcher = (over: Partial<ActiveWatcher> = {}): ActiveWatcher => ({
-  processId: "proc_abcdef123456",
-  label: null,
-  command: "pnpm build",
-  createdAt: 1000,
-  deadlineAt: 1000 + 300_000,
-  ...over,
-});
-
-describe("watcherCardModel", () => {
-  it("uses the label as title when present, command as subtitle", () => {
-    const model = watcherCardModel(watcher({ label: "build" }), { nowMs: 6000 });
-    expect(model).toMatchObject({ title: "build", subtitle: "pnpm build" });
-  });
-
-  it("falls back to the command as title when there is no label", () => {
-    const model = watcherCardModel(watcher({ label: null }), { nowMs: 6000 });
-    expect(model.title).toBe("pnpm build");
-  });
-
-  it("derives an elapsed label from createdAt and nowMs", () => {
-    const model = watcherCardModel(watcher({ createdAt: 1000 }), { nowMs: 6000 });
-    expect(model.elapsedLabel).toBe("5s");
-  });
-
-  it("derives an expected label from the remaining time to the deadline", () => {
-    const model = watcherCardModel(watcher({ deadlineAt: 1000 + 300_000 }), { nowMs: 1000 });
-    expect(model.expectedLabel).toBe("~5m 0s left");
-  });
-
-  it("shows the deadline as passed once nowMs is at or beyond it", () => {
-    const model = watcherCardModel(watcher({ deadlineAt: 2000 }), { nowMs: 9000 });
-    expect(model.expectedLabel).toBe("deadline passed");
-  });
-
-  it("truncates a long process id for display", () => {
-    const model = watcherCardModel(watcher({ processId: "proc_abcdef123456" }), { nowMs: 6000 });
-    expect(model.shortId).toBe("proc_abc");
-  });
-});
 
 const completionMessage = (watcher: unknown): UIMessage => ({
   id: "sysrem_1",
@@ -222,8 +179,9 @@ describe("watcherResultModel", () => {
   // an unrecognized outcome must not silently render as a clean exit.
   it("parseWatcherCompletion keeps every known outcome and falls back to exited", () => {
     for (const outcome of ["exited", "timeout", "fault", "stopped"] as const) {
-      expect(parseWatcherCompletion(completionMessage({ title: "t", command: "c", outcome }))
-        ?.outcome).toBe(outcome);
+      expect(
+        parseWatcherCompletion(completionMessage({ title: "t", command: "c", outcome }))?.outcome,
+      ).toBe(outcome);
     }
     expect(
       parseWatcherCompletion(

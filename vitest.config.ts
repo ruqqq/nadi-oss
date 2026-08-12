@@ -81,6 +81,7 @@ const integrationSharedIsolateFiles = [
   "test/unit/agent/think-model-messages-override.test.ts",
   "test/unit/agent/thread-compaction-wiring.test.ts",
   "test/unit/agent/work-ledger-store.test.ts",
+  "test/unit/agent/list-background-work.test.ts",
   "test/unit/agent/tool-call-timing-store.test.ts",
   "test/unit/agent/work-delivery-ownership.test.ts",
   "test/unit/agent/workbench-switch-commit-wiring.test.ts",

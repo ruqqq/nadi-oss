@@ -24,7 +24,7 @@ import { cn } from "@/lib/utils";
 import { CaretDown } from "@/icons";
 import { MessageRow } from "./MessageRow";
 import { CompletionGroup } from "./CompletionGroup";
-import type { SubagentRunWithParts } from "@/lib/use-subagent-events";
+import type { SubagentRunView } from "@/lib/subagent-runs";
 import { TypingDots } from "./TypingDots";
 import { assistantHasPainted, withRenderableContent } from "@/lib/message-state";
 
@@ -149,7 +149,7 @@ export function ChatLog({
   /** Live subagent run state (SDK event stream), keyed by run id; absent for
    *  the read-only archive view (no socket). Only `runsById` is needed here —
    *  see `useSubagentEvents`. */
-  subagentRuns?: { runsById: Record<string, SubagentRunWithParts> };
+  subagentRuns?: { runsById: Record<string, SubagentRunView> };
   onFeedbackDraftSubmit?: (
     draft: FeedbackDraftView,
     diagnostics: FeedbackDiagnostics,

@@ -2336,15 +2336,6 @@ export class ThinkThreadAgent extends Think<Env> {
     await this.cancelAgentTool(runId);
   }
 
-  /**
-   * Clear terminal subagent runs (completed / error / aborted) from the run
-   * ledger — the "clear finished" affordance. Never touches running or
-   * soft-interrupted runs. Callable over the authorized client socket.
-   */
-  async clearFinishedSubagentRuns(): Promise<void> {
-    await this.clearAgentToolRuns({ status: ["completed", "error", "aborted"] });
-  }
-
   // ---------------------------------------------------------------------------
   // DEBUG-ONLY RPC (driven from the DEBUG_TOKEN-gated /api/debug routes so a
   // maintainer can create + drive a thread's sandbox/subagents without the UI).
@@ -3838,17 +3829,6 @@ export class ThinkThreadAgent extends Think<Env> {
   }
 
   /**
-   * Server-persisted run timing for the web run cards (accurate after a
-   * refresh, unlike a client-only first-seen map). Callable over the
-   * authorized client socket.
-   */
-  async getSubagentRunTimings(): Promise<
-    Record<string, { startedAt: number; finishedAt?: number }>
-  > {
-    return this.subagentRunTimings();
-  }
-
-  /**
    * Enumerate this parent's subagent runs with current status + summary, for the
    * `check_subagents` tool. The run list comes from the work ledger; the
    * SDK-internal `_readAgentToolRun` (already used by the detached-completion
@@ -5101,8 +5081,21 @@ export class ThinkThreadAgent extends Think<Env> {
       terminal: { outcome: WorkOutcome; reason: WorkReason } | null;
     }>
   > {
-    if (!(await this.backgroundWorkAdmissionEnabled())) return [];
+    const admission = await this.backgroundWorkAdmissionEnabled();
+    if (!admission) return [];
     const rows = this.workLedger.listRecent();
+    // Resolved ONCE for the whole list, not per row: `workFacts` accepts a
+    // `resolvedService` precisely so a caller with several rows to label can
+    // share one resolve. Without this, every `process` row on every 5s dock
+    // poll (per connected client) paid its own `resolveComputeService` — the
+    // callable this replaced (`listActiveWatchers`) was "a cheap read-only
+    // callable"; this kept that name without keeping the property.
+    // Caught to `null`, not left to propagate: `workFacts` treats `null` as
+    // "no service" (the same as a clean disabled/not-configured resolve) and
+    // falls back to the row id for the label, whereas `undefined` would make
+    // it resolve independently per row — re-paying (and re-throwing on) the
+    // same failure once per row instead of once for the whole list.
+    const resolved = await resolveComputeService(this.sandboxHostDeps(admission)).catch(() => null);
     const out: Array<{
       id: string;
       kind: WorkKind;
@@ -5113,7 +5106,7 @@ export class ThinkThreadAgent extends Think<Env> {
     for (const row of rows) {
       let label: string | null = null;
       try {
-        const facts = await this.workFacts(row.id, row.kind);
+        const facts = await this.workFacts(row.id, row.kind, resolved);
         label = facts.label;
       } catch {
         // workFacts already swallows its own failures; this is belt-and-braces
@@ -6397,14 +6390,6 @@ callable()(
 );
 callable()(
   ThinkThreadAgent.prototype.cancelSubagentRun,
-  null as unknown as ClassMethodDecoratorContext,
-);
-callable()(
-  ThinkThreadAgent.prototype.clearFinishedSubagentRuns,
-  null as unknown as ClassMethodDecoratorContext,
-);
-callable()(
-  ThinkThreadAgent.prototype.getSubagentRunTimings,
   null as unknown as ClassMethodDecoratorContext,
 );
 callable()(

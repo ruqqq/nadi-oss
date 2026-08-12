@@ -291,25 +291,19 @@ describe("SubAgent", () => {
     expect(parentRole).toBeNull();
   });
 
-  it("cancelSubagentRun delegates to cancelAgentTool; clearFinishedSubagentRuns clears exactly the terminal statuses", async () => {
+  it("cancelSubagentRun delegates to cancelAgentTool, idempotently", async () => {
     const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName("sub-parent"));
     const out = await (runInDurableObject as any)(stub, async (parent: any) => {
       await parent.__unsafe_ensureInitialized?.();
       const cancelled: string[] = [];
-      let clearedOpts: unknown = "NOT_CALLED";
       parent.cancelAgentTool = async (id: string) => {
         cancelled.push(id);
       };
-      parent.clearAgentToolRuns = async (opts: unknown) => {
-        clearedOpts = opts;
-      };
       await parent.cancelSubagentRun("sub_x");
       await parent.cancelSubagentRun("sub_unknown"); // idempotent: must not throw
-      await parent.clearFinishedSubagentRuns();
-      return { cancelled, clearedOpts };
+      return { cancelled };
     });
     expect(out.cancelled).toEqual(["sub_x", "sub_unknown"]);
-    expect(out.clearedOpts).toEqual({ status: ["completed", "error", "aborted"] });
   });
 
   /**

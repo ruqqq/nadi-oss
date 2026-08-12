@@ -232,13 +232,22 @@ export class WorkLedgerStore implements WorkLedgerSink {
    * which is what the dock should stay in sync with. `within` bounds how far
    * back a delivered terminal still counts as recent (the dock is a live
    * status surface, not history — `listAll` covers audit).
+   *
+   * A THIRD branch, `delivered_at IS NULL` on a terminal row, is not an edge
+   * case — it is `listUndelivered()`'s exact set: "delivery owed and
+   * retryable" (see that method's doc, and `WORK_DELIVERY_RETRY_MS`). Without
+   * it, the moment a delivery throws is exactly the moment a row disappears
+   * from the dock until the sweep retries — the moment a status surface is
+   * most useful. An owed row has no age to bound: it stays visible until
+   * delivered (then it ages out on the `within` window like any other).
    */
   listRecent(now = Date.now(), within = 10 * 60_000): WorkRow[] {
     return this.storage.sql
       .exec<WorkLedgerRow>(
         `SELECT * FROM background_work
          WHERE terminal_outcome IS NULL
-            OR (delivered_at IS NOT NULL AND delivered_at >= ?)
+            OR delivered_at IS NULL
+            OR delivered_at >= ?
          ORDER BY started_at DESC`,
         now - within,
       )
