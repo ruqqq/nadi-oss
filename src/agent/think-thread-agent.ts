@@ -162,6 +162,7 @@ import {
   nextSweepAt,
   type CurrentGeneration,
   type WorkKind,
+  type WorkOutcome,
   type WorkRow,
   type WorkTerminal,
 } from "./work-ledger";
@@ -5072,6 +5073,93 @@ export class ThinkThreadAgent extends Think<Env> {
     return resolved.service.listActiveWatchersView();
   }
 
+  /**
+   * Push completion from a sandbox wrapper (the HTTP half lives in
+   * `completion-routes.ts`). Idempotent on the ledger row, NOT on the token:
+   * `verifyCompletionToken` is stateless and replayable until `exp`, so
+   * at-most-once delivery is enforced here, by the row going terminal exactly
+   * once (`workLedger.terminalize`'s exactly-once return) rather than by a
+   * nonce store.
+   *
+   * Never throws — a throw inside a DO RPC method also fires an unhandled
+   * rejection, which fails the caller even when its own assertions pass. Every
+   * failure path returns a result object instead.
+   *
+   * Deliberately does NOT bypass `backgroundWorkAdmissionEnabled()`: a
+   * workspace that turned background work off mid-flight should stop being
+   * told about it, same as every other work-ledger writer.
+   */
+  async reportProcessCompletion(input: {
+    processId: string;
+    exitCode: number;
+  }): Promise<{ accepted: boolean; reason?: string }> {
+    try {
+      if (!(await this.backgroundWorkAdmissionEnabled())) {
+        return { accepted: false, reason: "background_work_disabled" };
+      }
+      const row = this.workLedger.get(input.processId);
+      if (!row || row.kind !== "process") {
+        return { accepted: false, reason: "unknown_process" };
+      }
+      if (row.terminal !== null) {
+        // Replay, or a race with the poll path closing the same row first.
+        // Collapse to a no-op rather than deliver a second card.
+        return { accepted: true, reason: "already_terminal" };
+      }
+
+      const now = Date.now();
+      // "exited" regardless of the code: a non-zero status is still a clean
+      // exit, and `WorkOutcome` has no "failed" member. The code itself is
+      // what the model reads, and it rides in the message body below.
+      const outcome: WorkOutcome = "exited";
+      const terminal: WorkTerminal = {
+        outcome,
+        reason: "process_exit",
+        at: now,
+        detail: `exit code ${input.exitCode}`,
+      };
+      if (!this.workLedger.terminalize(input.processId, terminal)) {
+        // Lost a race with another writer (e.g. the backstop poll) that
+        // terminalized this row between our `get` and now.
+        return { accepted: true, reason: "already_terminal" };
+      }
+
+      // The SAME funnel the poll path uses (`pollWatcher` in
+      // thread-service.ts): `deliverInjection`'s dedupe key is
+      // `watcher:<processId>:<outcome>`, so a callback racing the backstop
+      // collapses onto the same queued entry instead of appending a second
+      // one, and a mid-turn arrival still STEERS into the running turn's next
+      // step rather than queuing behind it.
+      const facts = await this.workFacts(input.processId, "process");
+      this.deliverInjection({
+        dedupeKey: `watcher:${input.processId}:${outcome}`,
+        kind: "watcher-completion",
+        message: buildWatcherCompletionMessage(
+          `Background process ${facts.label} (${facts.command}) exited with code ${input.exitCode}.`,
+          {
+            title: facts.label,
+            command: facts.command,
+            processId: input.processId,
+            outcome,
+            reason: "process_exit",
+            exitCode: input.exitCode,
+          },
+        ),
+      });
+      // Ownership is DECLARED by stamping `delivered_at`, never inferred from
+      // `reason` — that conflation previously caused a re-delivered reminder.
+      this.workLedger.markDelivered(input.processId, now);
+      return { accepted: true };
+    } catch (error) {
+      log.warn("think_thread.report_process_completion_failed", {
+        threadId: this.name,
+        processId: input.processId,
+        error: String(error),
+      });
+      return { accepted: false, reason: "internal_error" };
+    }
+  }
+
   toolProbeForTest() {
     return Object.keys({ ...this.getTools(), ...this._testToolOverride }).sort();
   }
@@ -6246,6 +6334,10 @@ callable()(
 );
 callable()(
   ThinkThreadAgent.prototype.listActiveWatchers,
+  null as unknown as ClassMethodDecoratorContext,
+);
+callable()(
+  ThinkThreadAgent.prototype.reportProcessCompletion,
   null as unknown as ClassMethodDecoratorContext,
 );
 callable()(

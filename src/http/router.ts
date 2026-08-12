@@ -10,6 +10,7 @@ import { routeSettings } from "./settings-routes";
 import { routeSandboxSettings } from "./sandbox-settings-routes";
 import { routeGithub } from "./github-routes";
 import { routeDebug } from "./debug-routes";
+import { routeCompletion } from "./completion-routes";
 import { routeSkills } from "./skill-routes";
 import { routeMemories } from "./memory-routes";
 import { routeProjects } from "./project-routes";
@@ -21,6 +22,11 @@ import { routeInvites } from "./invite-routes";
 export async function route(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const debug = await routeDebug(req, env);
   if (debug) return debug;
+  // Unauthenticated by design — gated only by the completion HMAC, since a
+  // sandbox posting here has no session. Must sit before the authenticated
+  // routes below.
+  const completion = await routeCompletion(req, env);
+  if (completion) return completion;
   const auth = await routeAuth(req, env);
   if (auth) return auth;
   const invites = await routeInvites(req, env);
