@@ -344,6 +344,28 @@ export class DaytonaComputeBackend implements ComputeBackend {
     this.invalidateSandbox(parsed.payload.sandboxId);
   }
 
+  /**
+   * NO completion callback, deliberately, and it is a known REGRESSION rather
+   * than a neutral omission.
+   *
+   * `StartProcessInput.completionCallback` is ignored here — nothing assembles
+   * it into what runs — so this backend declares no
+   * `consumesCompletionCallback` and pushes nothing to
+   * `/api/compute/completion`. Its completions therefore come only from the
+   * watcher poll, and that poll was widened 7s -> 60s
+   * (`DEFAULT_MONITOR_POLL_INTERVAL_MS`) on the strength of the push the OTHER
+   * providers now have. So for Daytona specifically, background-work delivery
+   * is ~8x slower than before that change.
+   *
+   * Accepted, not overlooked: Daytona is being retired over `domainAllowList`
+   * REPLACING the org default (applied at sandbox creation only, so a
+   * workspace allowlist silently blocks the callback host with no repair path
+   * on a live sandbox), and wiring a wrapper into a provider on its way out
+   * buys a mechanism nobody will maintain. It is still selectable
+   * (`resolveDefaultSandboxProvider` in compute/settings.ts), so a workspace
+   * that picks it should expect completion notices up to a minute late. If
+   * Daytona is ever un-retired, the wrapper — not a narrower poll — is the fix.
+   */
   async startProcess(
     runtime: BackendReference,
     input: StartProcessInput,
