@@ -303,19 +303,30 @@ export class SpritesComputeBackend implements ComputeBackend {
   };
 
   /**
-   * Documented in `ComputeBackend.buildBackstopProbe`. One exec, two jobs:
-   * read the rc sentinel (same path `startProcess`/`readRcOnce` use) and
-   * re-assert the hold, so `pollWatcher` never pays for the reassert with a
-   * second round trip.
+   * Documented in `ComputeBackend.buildBackstopProbe`. One exec, branching on
+   * whether the rc sentinel exists: if it does, report it (marked, so the
+   * caller can never confuse it with warning text a fast-path replay merged
+   * ahead of it — see `parseStat`'s doc for the same live hazard); if it does
+   * NOT, the process may still need the sandbox awake, so re-assert the hold
+   * in the SAME exec instead of reading in a way that costs a second one.
+   *
+   * The branch matters: reporting the rc when found does NOT also reassert —
+   * a process that already exited already released its own hold (see
+   * `buildSpritesWrapper`), and reasserting anyway would recreate a
+   * 5-minute hold on a finished process that nothing will ever release
+   * again, billing an idle VM awake for no reason.
    *
    * `acquireFor` is safe to re-run: it 409s when the task already exists,
    * which its own `-sf` turns into a non-zero exit that `|| true` swallows
    * here (the fragment already redirects its own stdout/stderr, so nothing
-   * from the curl leaks into the `cat` output this method's caller parses).
+   * from the curl can land on the stream this method's caller parses).
    */
   buildBackstopProbe = (process: BackendProcessReference): string => {
     const rcPath = sentinelPath("rc", this.processPayload(process).processId);
-    return `cat ${rcPath} 2>/dev/null || true; ${this.workHold.acquireFor(process)} || true`;
+    return (
+      `if [ -f ${rcPath} ]; then printf 'nadi-rc:%s\\n' "$(cat ${rcPath} 2>/dev/null)"; ` +
+      `else ${this.workHold.acquireFor(process)} || true; fi`
+    );
   };
   private readonly client: SpritesClient;
   /**

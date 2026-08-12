@@ -2737,19 +2737,26 @@ export class ThreadComputeService {
   }
 
   /**
-   * The watcher poll's status read. Uses `ComputeBackend.buildBackstopProbe`
-   * — a single exec that reads the rc sentinel AND re-asserts `workHold` —
-   * when the backend declares one, INSTEAD of `getProcessStatus`, not
-   * alongside it: adding a second call here would double the round-trips
-   * this exact widening (7s poll -> 60s backstop) was meant to justify, and
-   * on sprites every exec risks waking a hibernated VM. Backends without the
-   * capability (no hold to reassert, e.g. Cloudflare, or none of the above,
-   * e.g. tests) fall back to the plain read.
+   * The watcher poll's status read. When the backend declares
+   * `ComputeBackend.buildBackstopProbe`, runs it FIRST: one exec that either
+   * reports a recorded exit or (only when there is none) re-asserts
+   * `workHold` in the same breath. If it reports an exit, that answer is
+   * authoritative and `getProcessStatus` is skipped entirely.
    *
-   * See `ComputeBackend.buildBackstopProbe`'s doc for the accepted trade:
-   * this cannot tell "still running" from "died without recording an exit"
-   * the way `getProcessStatus`'s session check can, so that case is bounded
-   * by the watcher's absolute timeout instead of being caught sooner.
+   * If it does NOT report an exit, this still falls back to
+   * `getProcessStatus` — deliberately, on every such poll, not just once.
+   * `getProcessStatus` is NOT an exec on sprites (it is `fsRead` +
+   * `listSessions`, two control-plane reads with no shell involved), so this
+   * fallback costs no exec and risks no VM wake; skipping it would mean
+   * `classifyWatcher` never sees `"failed"` again for a process that died
+   * without recording an exit, so the model would be told (falsely) that a
+   * process which died up to an hour ago "is still running" once the
+   * watcher's absolute timeout finally fires. The one exec this widening
+   * exists to save is the hold reassert, not this read — see
+   * `ComputeBackend.buildBackstopProbe`'s doc.
+   *
+   * Backends without the capability (no hold to reassert, e.g. Cloudflare,
+   * or none of the above, e.g. tests) just call `getProcessStatus` directly.
    */
   private async pollProcessStatus(
     runtime: BackendReference,
@@ -2762,10 +2769,23 @@ export class ThreadComputeService {
     }
     const result = await backend.runCommand(runtime, {
       command: buildProbe(process),
+      // Bounded generously: a hibernated sprite's wake plus this exec can
+      // exceed a tighter budget, but a timeout here degrades safely — the
+      // poll just falls through to `getProcessStatus` below, and a process
+      // that is genuinely wedged is still caught by the reaper's own
+      // `no_liveness` fault (PROCESS_STALE_AFTER_MS, now 180s) if polls keep
+      // failing to stamp liveness.
       timeoutMs: 10_000,
     });
     const exitCode = parseBackstopRc(result.stdout);
-    return exitCode === undefined ? { status: "running" } : { status: "exited", exitCode };
+    if (exitCode !== undefined) return { status: "exited", exitCode };
+    // No rc yet: fall back to the session-backed read so a process that died
+    // without ever recording an exit is still detected as `"failed"`, not
+    // silently `"running"` for an hour. A thrown `runCommand` (exec failure,
+    // timeout) propagates past this method uncaught, same as a thrown
+    // `getProcessStatus` always has — the sweep loop that calls `pollWatcher`
+    // already treats a poll failure as "do not stamp, retry next poll".
+    return backend.getProcessStatus(runtime, process);
   }
 
   private async pollWatcher(
@@ -3194,15 +3214,27 @@ function defaultSleep(ms: number): Promise<void> {
 }
 
 /**
- * Parses `ComputeBackend.buildBackstopProbe`'s stdout: the FIRST LINE is the
- * rc sentinel's raw text. Preserves the same "unparsable means no answer"
- * contract `readRcOnce` (sprites.ts) applies to its own sentinel reads — an
- * empty read, a partial write caught mid-flight, or anything that isn't a
- * bare integer must never be mistaken for exit code 0.
+ * Parses `ComputeBackend.buildBackstopProbe`'s stdout for a `nadi-rc:<n>`
+ * MARKED line, scanning from the end. Never the first line, and never a bare
+ * unmarked number: sprites' fast-path replay can merge stderr onto the same
+ * stream ahead of a command's real output (the same live hazard `parseStat`,
+ * a few hundred lines down, exists to survive), so a warning line landing
+ * before the marker must not shift which line this reads. Scanning backward
+ * from the end also means a stray line that merged in AFTER the marker
+ * cannot mask it either.
+ *
+ * Preserves the same "unparsable means no answer" contract `readRcOnce`
+ * (sprites.ts) applies to its own sentinel reads: no marker line, an empty
+ * read, or anything that isn't a bare integer after the marker must never be
+ * mistaken for exit code 0.
  */
 function parseBackstopRc(stdout: string): number | undefined {
-  const firstLine = (stdout.split("\n")[0] ?? "").trim();
-  if (!/^-?\d+$/.test(firstLine)) return undefined;
-  const code = Number.parseInt(firstLine, 10);
-  return Number.isSafeInteger(code) ? code : undefined;
+  const lines = stdout.split("\n");
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const match = /^nadi-rc:(-?\d+)$/.exec((lines[i] ?? "").trim());
+    if (!match) continue;
+    const code = Number.parseInt(match[1] ?? "", 10);
+    return Number.isSafeInteger(code) ? code : undefined;
+  }
+  return undefined;
 }

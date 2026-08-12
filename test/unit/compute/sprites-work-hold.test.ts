@@ -182,3 +182,56 @@ describe("sprites workHold", () => {
     expect(wrapper.trimEnd().endsWith('exit "$__nadi_rc"')).toBe(true);
   });
 });
+
+describe("sprites buildBackstopProbe", () => {
+  // Tests the REAL `SpritesComputeBackend.buildBackstopProbe`, not a
+  // lookalike: a hand-rolled copy would agree with whatever a caller-side
+  // test asserts by construction, which is exactly how the first,
+  // unconditional-acquire version of this probe passed review.
+
+  it("reports the rc sentinel via a MARKED line when it exists, and does not reassert the hold", () => {
+    const probe = backend.buildBackstopProbe!(processRef("abc"));
+    expect(probe).toContain("if [ -f /tmp/.nadi-rc-abc ]");
+    expect(probe).toContain("then printf 'nadi-rc:%s\\n'");
+    expect(probe).toContain('"$(cat /tmp/.nadi-rc-abc');
+    // The then-branch (rc found) must not also acquire the hold — a finished
+    // process already released its own hold, and reasserting one nothing
+    // will ever release again bills an idle VM awake for no reason.
+    const thenBranch = probe.slice(probe.indexOf("then"), probe.indexOf("else"));
+    expect(thenBranch).not.toContain("/v1/tasks");
+  });
+
+  it("reasserts the hold ONLY in the else branch (no rc yet)", () => {
+    const probe = backend.buildBackstopProbe!(processRef("abc"));
+    const elseBranch = probe.slice(probe.indexOf("else"));
+    expect(elseBranch).toContain("-X POST");
+    expect(elseBranch).toContain('"name":"nadi-work-abc"');
+    // `acquireFor` 409s when the hold already exists; that must be swallowed
+    // here too, same as the wrapper's own acquire.
+    expect(elseBranch).toMatch(/\|\| true; fi\s*$/);
+  });
+
+  it("orders if / then-report / else-reassert / fi correctly", () => {
+    const probe = backend.buildBackstopProbe!(processRef("abc"));
+    const ifAt = probe.indexOf("if [ -f");
+    const thenAt = probe.indexOf("then printf");
+    const elseAt = probe.indexOf("else");
+    const fiAt = probe.lastIndexOf("fi");
+    expect(ifAt).toBeGreaterThanOrEqual(0);
+    expect(ifAt).toBeLessThan(thenAt);
+    expect(thenAt).toBeLessThan(elseAt);
+    expect(elseAt).toBeLessThan(fiAt);
+  });
+
+  it("targets the SAME hold id the wrapper embedded and workHold.releaseFor computes", () => {
+    // Same regression shape as the wrapper's own "same hold id" test: the
+    // probe's acquire must key on the same `processId`-derived id as every
+    // other hold fragment for this process, not a second derivation.
+    const processId = "same-id-probe-1";
+    const probe = backend.buildBackstopProbe!(processRef(processId, "some-other-session"));
+    const release = backend.workHold!.releaseFor(processRef(processId, "yet-another-session"));
+    const holdId = release.match(/\/v1\/tasks\/(\S+?) >/)?.[1];
+    expect(holdId).toBe(`nadi-work-${processId}`);
+    expect(probe).toContain(`"name":"${holdId}"`);
+  });
+});

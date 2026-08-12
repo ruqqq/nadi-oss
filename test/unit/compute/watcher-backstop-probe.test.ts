@@ -12,6 +12,18 @@ import type {
 import type { WorkRow, WorkTerminal } from "../../../src/agent/work-ledger";
 import { createMemoryComputeStore } from "./helpers/memory-store";
 
+/**
+ * These tests exercise `ThreadComputeService.pollProcessStatus`'s WIRING —
+ * dispatch to the combined probe, the fallback, the exec-count invariant —
+ * against a deliberately thin fake. The probe's actual shell command shape
+ * (the conditional acquire, the `nadi-rc:` marker, ordering) is tested
+ * against the REAL `SpritesComputeBackend.buildBackstopProbe` in
+ * `sprites-work-hold.test.ts` instead: a hand-rolled lookalike here would
+ * agree with whatever this file asserts by construction, which is exactly
+ * what let the marker-less, unconditional first version of this probe pass
+ * review.
+ */
+
 const CONFIG: EffectiveComputeConfig = {
   provider: "fake",
   providerConfig: { kind: "cloudflare" },
@@ -58,11 +70,11 @@ function createLedgerSpy() {
 }
 
 /**
- * A backend declaring `workHold` + `buildBackstopProbe` (the sprites shape).
- * `getProcessStatus` calls are counted (execWatch's own baseline read still
- * goes through it — that's a separate call site, not the poll) so a test can
- * assert `pollWatcher` itself never calls it when the combined probe is
- * available. `runCommand`'s reply is steered per-test via `nextRcStdout`.
+ * A backend declaring `workHold` + `buildBackstopProbe` (the sprites SHAPE,
+ * not its real command string — see this file's top comment). `runCommand`'s
+ * reply is steered per-test via `nextRcStdout`, using the same `nadi-rc:<n>`
+ * marker format the real probe emits, so `parseBackstopRc`'s own contract is
+ * exercised end to end.
  */
 class HoldBackedBackend extends FakeComputeBackend {
   nextRcStdout = "";
@@ -78,7 +90,8 @@ class HoldBackedBackend extends FakeComputeBackend {
   };
 
   buildBackstopProbe = (process: BackendProcessReference): string =>
-    `cat /tmp/.nadi-rc-${this.pidOf(process)} 2>/dev/null || true; ${this.workHold.acquireFor(process)} || true`;
+    `if [ -f /tmp/.nadi-rc-${this.pidOf(process)} ]; then printf 'nadi-rc:%s\\n' "$(cat /tmp/.nadi-rc-${this.pidOf(process)})"; ` +
+    `else ${this.workHold.acquireFor(process)} || true; fi`;
 
   constructor() {
     super();
@@ -108,9 +121,10 @@ class HoldBackedBackend extends FakeComputeBackend {
 
 function createService(backend: FakeComputeBackend, now: { value: number }) {
   const ledger = createLedgerSpy();
+  const store = createMemoryComputeStore();
   const service = new ThreadComputeService({
     backend,
-    store: createMemoryComputeStore(),
+    store,
     config: CONFIG,
     environmentId: "thread_test",
     env: {},
@@ -119,11 +133,11 @@ function createService(backend: FakeComputeBackend, now: { value: number }) {
     supportsProcessMonitor: true,
     workLedger: ledger.sink,
   });
-  return { service, ledger };
+  return { service, ledger, store };
 }
 
-describe("pollWatcher backstop probe", () => {
-  it("uses the combined probe (one runCommand call) instead of getProcessStatus, reasserting the hold", async () => {
+describe("pollWatcher backstop probe (wiring)", () => {
+  it("uses the combined probe (one runCommand call) when there is no rc yet, reasserting the hold", async () => {
     const backend = new HoldBackedBackend();
     const now = { value: 1_000 };
     const { service } = createService(backend, now);
@@ -131,21 +145,39 @@ describe("pollWatcher backstop probe", () => {
     const started = await service.execStart({ command: "sleep 30", label: "long" });
     await service.execWatch({ processId: started.processId });
     backend.runCommandCalls.length = 0; // clear anything execStart/execWatch issued
-    const baselineStatusCalls = backend.getProcessStatusCalls;
 
-    backend.nextRcStdout = ""; // still running: no rc recorded yet
+    backend.nextRcStdout = ""; // no rc, no marker: still running
     now.value = 2_000;
     await service.runComputeTick();
 
+    // Exactly one exec carried the hold reassert, regardless of whether the
+    // fallback (a control-plane call, not an exec) also ran.
     expect(backend.runCommandCalls).toHaveLength(1);
     const command = backend.runCommandCalls[0]?.command ?? "";
-    expect(command).toContain("cat /tmp/.nadi-rc-");
     expect(command).toContain("/tasks/nadi-work-");
-    // The poll used the combined probe, not a separate getProcessStatus call.
+  });
+
+  it("skips the fallback entirely when the probe reports a real rc (marked, from the end of stdout)", async () => {
+    const backend = new HoldBackedBackend();
+    const now = { value: 1_000 };
+    const { service, ledger } = createService(backend, now);
+
+    const started = await service.execStart({ command: "sleep 30", label: "long" });
+    await service.execWatch({ processId: started.processId });
+    const baselineStatusCalls = backend.getProcessStatusCalls;
+
+    // A stray line ahead of the marker (the fast-path-replay hazard) must not
+    // shift which line is read — the marker, not position, decides.
+    backend.nextRcStdout = "warning: something unrelated\nnadi-rc:0\n";
+    now.value = 2_000;
+    await service.runComputeTick();
+
+    expect(ledger.terminalized).toContain(started.processId);
+    // Never fell back to getProcessStatus: the marker alone was authoritative.
     expect(backend.getProcessStatusCalls).toBe(baselineStatusCalls);
   });
 
-  it("treats an unparsable/empty rc as still running, never exit code 0", async () => {
+  it("treats an unmarked/empty stdout as no answer, never exit code 0", async () => {
     const backend = new HoldBackedBackend();
     const now = { value: 1_000 };
     const { service, ledger } = createService(backend, now);
@@ -160,15 +192,23 @@ describe("pollWatcher backstop probe", () => {
     expect(ledger.terminalized).not.toContain(started.processId);
   });
 
-  it("closes the watcher when the probe's first stdout line is a real rc", async () => {
+  it("falls back to getProcessStatus (control-plane, no second exec) when the probe has no answer yet", async () => {
     const backend = new HoldBackedBackend();
     const now = { value: 1_000 };
-    const { service, ledger } = createService(backend, now);
+    const { service, ledger, store } = createService(backend, now);
 
     const started = await service.execStart({ command: "sleep 30", label: "long" });
     await service.execWatch({ processId: started.processId });
 
-    backend.nextRcStdout = "0\n";
+    // The probe reports no rc (still the common "hold needs a nudge" case),
+    // but the process actually died WITHOUT ever recording an exit — the one
+    // case the marker probe alone cannot see. Without the fallback this
+    // watcher would sit "running" until the 1h absolute timeout; the
+    // fallback must catch it via `getProcessStatus`'s session check instead.
+    const ref = store.getProcess(started.processId)!.backendProcessRef!;
+    backend.finishProcess(ref, "failed");
+    backend.nextRcStdout = "";
+
     now.value = 2_000;
     await service.runComputeTick();
 
