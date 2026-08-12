@@ -277,6 +277,15 @@ describe("CloudflareComputeBackend completion callback wrapping", () => {
     expect(backend.consumesCompletionCallback).toBe(true);
   });
 
+  it("declares that the callback DELAYS its only completion signal", () => {
+    // `waitForProcessExit` settles on the log stream closing — the wrapper
+    // exiting — and the callback runs inside that wrapper. Dropping this
+    // declaration silently restores the generous 25s curl bound, which lands
+    // inside `exec()`'s 10s foreground window.
+    const { backend } = createFakeCloudflareBackend();
+    expect(backend.completionCallbackDelaysCompletion).toBe(true);
+  });
+
   it("wraps the command so the callback runs after it, preserving the command's exit code", async () => {
     const { env, runtime } = await acquired();
     const sandbox = env.factory.peek(deriveSandboxId("workspace-1", "thread-1"))!;

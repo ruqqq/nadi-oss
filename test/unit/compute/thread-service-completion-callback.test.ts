@@ -121,6 +121,83 @@ describe("ThreadComputeService completion callback", () => {
     expect(payload!.exp).toBe(now.value + longRunConfig.maxProcessRuntimeMs + 300_000);
   });
 
+  it("omits the callback entirely when background work is not admitted, leaving the wrapper byte-identical", async () => {
+    // C1: `supportsProcessMonitor: false` is how `sandboxHostDeps()` reports
+    // `BACKGROUND_WORK_ENABLED` off (and SubAgent's own opt-out). With the flag
+    // off nothing registers a watcher, so a callback would report a completion
+    // `reportProcessCompletion` rejects — and on a backend whose completion
+    // signal IS the wrapper's exit it would re-time every command. The flag-off
+    // command must therefore match the pre-push one EXACTLY, not just closely.
+    const normalize = (script: string) =>
+      script.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, "UUID");
+
+    const build = async (admitted: boolean) => {
+      const { backend, client } = createFakeSpritesBackend();
+      const service = new ThreadComputeService({
+        backend,
+        store: createMemoryComputeStore(),
+        config: CONFIG,
+        environmentId: "thread_test",
+        threadId: "thread_abc",
+        env: {},
+        appBaseUrl: "https://nadi.example.com",
+        betterAuthSecret: SECRET,
+        setAlarm: async () => {},
+        now: () => 1_000,
+        ...(admitted ? {} : { supportsProcessMonitor: false }),
+      });
+      await service.exec({ command: "true" });
+      return { script: client.execDetachedOptions[0]!.argv[2]! };
+    };
+
+    const off = await build(false);
+    const on = await build(true);
+
+    expect(off.script).not.toContain("/api/compute/completion");
+    expect(off.script).not.toContain("NADI_EXIT_CODE");
+    // ANTI-VACUITY: the admitted run through the same wrapper DOES carry it,
+    // so the assertions above are about the gate and not about the fixture.
+    expect(on.script).toContain("/api/compute/completion");
+    // And the difference is EXACTLY the callback: strip it from the admitted
+    // script and the two scripts are the same bytes.
+    const withoutCallback = normalize(on.script).replace(
+      /; NADI_EXIT_CODE="\$\(cat [^)]+\)"; curl [^;]+/,
+      "",
+    );
+    expect(withoutCallback).toBe(normalize(off.script));
+  });
+
+  it("bounds the curl tightly when the callback DELAYS the only completion signal", async () => {
+    // Cloudflare's ordering: the callback sits inside the wrapper, before the
+    // `exit` that closes the log stream `waitForProcessExit` is waiting on — so
+    // its latency lands inside `exec()`'s 10s foreground window. 25s there makes
+    // a sub-second command report as "backgrounded".
+    const backend = new FakeComputeBackend() as FakeComputeBackend & {
+      completionCallbackDelaysCompletion?: boolean;
+    };
+    backend.completionCallbackDelaysCompletion = true;
+    const service = new ThreadComputeService({
+      backend,
+      store: createMemoryComputeStore(),
+      config: CONFIG,
+      environmentId: "thread_test",
+      threadId: "thread_abc",
+      env: {},
+      appBaseUrl: "https://nadi.example.com",
+      betterAuthSecret: SECRET,
+      setAlarm: async () => {},
+      now: () => 1_000,
+    });
+
+    await service.exec({ command: "true" });
+    const fragment = backend.startProcessCalls[0]?.completionCallback;
+    expect(fragment).toContain(
+      "curl -sf --connect-timeout 3 -m 5 -X POST https://nadi.example.com/api/compute/completion",
+    );
+    // The generous bound belongs to the OTHER ordering only.
+    expect(fragment).not.toContain("-m 25");
+  });
+
   it("omits the callback when appBaseUrl is not configured", async () => {
     const backend = new FakeComputeBackend();
     const store = createMemoryComputeStore();

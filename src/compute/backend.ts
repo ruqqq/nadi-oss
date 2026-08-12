@@ -221,6 +221,26 @@ export interface ComputeBackend {
     releaseFor(process: BackendProcessReference): string;
   };
   /**
+   * Whether this backend's ONLY observable completion signal is the wrapped
+   * command's own exit — so the completion callback runs *before* completion
+   * can be observed at all, and its latency is added to every command's
+   * OBSERVED runtime.
+   *
+   * Meaningful only alongside `consumesCompletionCallback`. True for
+   * Cloudflare: `waitForProcessExit` settles when the process log stream
+   * closes, which is the wrapper exiting, and the callback sits inside the
+   * wrapper before `exit "$__nadi_rc"`. Absent for sprites, which writes its
+   * rc sentinel BEFORE the callback, so a status poll observes the terminal
+   * no matter how long the callback takes.
+   *
+   * The consequence is a tighter `curl` bound for this backend's fragment
+   * (see `COMPLETION_CALLBACK_CURL_TIMEOUT_SECS` in `thread-service.ts`):
+   * `exec()`'s foreground window is 10s, so a callback allowed 25s here would
+   * make a sub-second command report as `"backgrounded"` whenever the origin
+   * is slow to answer from inside a container.
+   */
+  readonly completionCallbackDelaysCompletion?: boolean;
+  /**
    * One shell command that answers the same question the watcher poll needs
    * (has this process recorded an exit yet?) and, ONLY when it has not,
    * re-asserts `workHold` for it in the same breath. Optional, and

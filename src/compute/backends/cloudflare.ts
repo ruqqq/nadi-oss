@@ -113,6 +113,15 @@ export class CloudflareComputeBackend implements ComputeBackend {
    * push-completion fix reached almost no real threads.
    */
   readonly consumesCompletionCallback = true;
+  /**
+   * `waitForProcessExit` settles on the process LOG STREAM closing — i.e. on
+   * the wrapper exiting — and the callback sits inside that wrapper, before
+   * `exit "$__nadi_rc"`. So unlike sprites (rc sentinel first, callback
+   * second) there is no completion here that is observable while the callback
+   * is still running. See `ComputeBackend.completionCallbackDelaysCompletion`;
+   * this is what buys the fragment its tight `curl` bounds.
+   */
+  readonly completionCallbackDelaysCompletion = true;
   private readonly factory: CloudflareSandboxFactory;
   private readonly bindings: CloudflareBindings;
   private readonly workspaceId: string;
@@ -313,7 +322,7 @@ export class CloudflareComputeBackend implements ComputeBackend {
     // wrapped in, that is the WRAPPER, not the command — the wrapper's inner
     // `timeout` already bounds the command to `input.timeoutMs`, so the SDK
     // needs extra room afterward for the rc capture + the callback's own
-    // `curl` (bounded to 25s by `COMPLETION_CALLBACK_CURL_TIMEOUT_SECS` in
+    // `curl` (bounded to 5s by `COMPLETION_CALLBACK_BLOCKING_CURL_BOUNDS` in
     // `thread-service.ts`) to run before the SDK would otherwise kill the
     // wrapper. Without this margin, a command that consumes its full budget
     // gets its wrapper killed before the callback fires, and delivery
@@ -849,11 +858,15 @@ function withStdin(command: string, stdin: string | undefined): string {
 /**
  * Margin (ms) added to the SDK's `startProcess` `timeoutMs` when a completion
  * callback is wrapped in. `ThreadComputeService`'s `buildCompletionCallback`
- * bounds the callback's own `curl` to 25s (`COMPLETION_CALLBACK_CURL_TIMEOUT_SECS`
- * in `thread-service.ts`) — this covers that plus a few seconds of scheduling
- * slack for the rc write and process shutdown. Without it the SDK could kill
- * the wrapper at the same instant the inner `timeout` kills the command,
- * before the callback gets to run at all.
+ * bounds THIS backend's callback `curl` to 5s with a 3s connect timeout
+ * (`COMPLETION_CALLBACK_BLOCKING_CURL_BOUNDS` in `thread-service.ts`, chosen
+ * because our own exit is the only completion signal here) — this covers that
+ * with room to spare, plus scheduling slack for the rc capture and process
+ * shutdown. Without it the SDK could kill the wrapper at the same instant the
+ * inner `timeout` kills the command, before the callback gets to run at all.
+ * Kept generous rather than retuned down to the new bound: the cost of extra
+ * margin is a later SDK kill on an already-doomed command, and the cost of
+ * too little is the silent delivery loss this whole mechanism removes.
  */
 const COMPLETION_CALLBACK_TIMEOUT_MARGIN_MS = 30_000;
 

@@ -74,8 +74,36 @@ const ACQUIRE_DEADLINE_MS = 25_000;
  * legitimately take up to ~10s to answer. 10s here would then race the
  * server's own budget and lose intermittently; 25s leaves real margin. Do not
  * "tidy" this back down without re-reading that teardown path.
+ *
+ * Applies only to a backend whose completion is observable INDEPENDENTLY of
+ * the callback — sprites, which writes its rc sentinel before the callback
+ * runs. See {@link COMPLETION_CALLBACK_BLOCKING_CURL_BOUNDS} for the other
+ * ordering, and `ComputeBackend.completionCallbackDelaysCompletion` for why
+ * the two cannot share one number.
  */
 const COMPLETION_CALLBACK_CURL_TIMEOUT_SECS = 25;
+
+/**
+ * The `curl` bounds used instead when the callback runs BEFORE completion is
+ * observable at all (`ComputeBackend.completionCallbackDelaysCompletion` —
+ * today Cloudflare, whose completion signal IS the wrapper's exit).
+ *
+ * Tight, and deliberately so: every second the callback spends here is added
+ * to the command's observed runtime, inside `exec()`'s 10s foreground window
+ * ({@link EXEC_FOREGROUND_TIMEOUT_MS}) polled every 500ms. At 25s a
+ * sub-second command would report as `"backgrounded"` whenever the origin is
+ * slow to answer from inside a container. The generous 25s above exists to
+ * cover the server's hold-release teardown, and that teardown does not exist
+ * on this side: a backend with no `workHold` makes `releaseWorkHold` return
+ * immediately.
+ *
+ * `--connect-timeout` separately, not just `-m`: a black-holed origin
+ * otherwise burns the whole `-m` budget on the TCP handshake alone.
+ */
+const COMPLETION_CALLBACK_BLOCKING_CURL_BOUNDS = {
+  connectTimeoutSecs: 3,
+  maxTimeSecs: 5,
+} as const;
 
 /**
  * Extra margin added on top of whatever budget actually bounds a process's
@@ -824,6 +852,33 @@ export class ThreadComputeService {
   }
 
   /**
+   * Whether background work is ADMITTED for this thread at all — the
+   * `BACKGROUND_WORK_ENABLED` deployment flag and its workspace override,
+   * threaded in by `sandboxHostDeps()` as `supportsProcessMonitor` (SubAgent
+   * turns the same dep off for its own reasons; both mean "no watcher will
+   * ever be registered here").
+   *
+   * `buildCompletionCallback` is gated on this so that with background work
+   * OFF the emitted command is BYTE-IDENTICAL to the pre-push one. That is
+   * not cosmetic: with the flag off nothing registers a ledger row or a
+   * watcher, so a callback that did fire would be reporting a completion
+   * `reportProcessCompletion` rejects anyway (`background_work_disabled`) —
+   * and there is no watcher left to correct a mis-report. On a backend where
+   * the callback also DELAYS the only completion signal
+   * (`completionCallbackDelaysCompletion`, i.e. the production default
+   * provider) an ungated callback re-times every command in a deployment that
+   * asked for none of this.
+   *
+   * Defaults to admitted when the dep is absent, exactly as
+   * {@link supportsProcessMonitor} does: direct-construction tests wire
+   * neither, and flipping their default would silently drop the callback from
+   * every one of them.
+   */
+  private backgroundWorkAdmitted(): boolean {
+    return this.supportsProcessMonitor();
+  }
+
+  /**
    * Why `buildCompletionCallback` cannot produce a fragment right now, or
    * `null` when it can. Synchronous — every input is already known without
    * minting a token — so `exec()` can consult it to decide whether a process
@@ -896,6 +951,12 @@ export class ThreadComputeService {
    * for the common "no `appBaseUrl` configured at all" case that changes
    * nothing for `"mock"`/`"fake"`.
    *
+   * Returns `undefined` unconditionally when background work is not admitted
+   * for this thread ({@link backgroundWorkAdmitted}) — the flag-off command
+   * must be byte-identical to the pre-push one. Checked FIRST, before any
+   * origin/secret reasoning, because none of that is relevant to a deployment
+   * that asked for no background work.
+   *
    * The fragment references `$NADI_EXIT_CODE` rather than embedding a value:
    * this method runs BEFORE the process exists, let alone finishes, so only
    * the backend — reading back whatever it uses to track completion (sprites'
@@ -913,6 +974,7 @@ export class ThreadComputeService {
     processId: string,
     timeoutMs: number,
   ): Promise<string | undefined> {
+    if (!this.backgroundWorkAdmitted()) return undefined;
     if (this.completionCallbackUnavailableReason() !== null) return undefined;
     const appBaseUrl = this.deps.appBaseUrl!;
     const betterAuthSecret = this.deps.betterAuthSecret!;
@@ -927,8 +989,13 @@ export class ThreadComputeService {
       exp: this.deps.now() + Math.max(timeoutMs, MAX_WATCH_TIMEOUT_MS) + COMPLETION_TOKEN_MARGIN_MS,
     });
     const origin = appBaseUrl.replace(/\/$/, "");
+    // Two orderings, two budgets — see both constants' docs. Never one number.
+    const bounds = this.deps.backend.completionCallbackDelaysCompletion
+      ? `--connect-timeout ${COMPLETION_CALLBACK_BLOCKING_CURL_BOUNDS.connectTimeoutSecs} ` +
+        `-m ${COMPLETION_CALLBACK_BLOCKING_CURL_BOUNDS.maxTimeSecs}`
+      : `-m ${COMPLETION_CALLBACK_CURL_TIMEOUT_SECS}`;
     return (
-      `curl -sf -m ${COMPLETION_CALLBACK_CURL_TIMEOUT_SECS} -X POST ${origin}/api/compute/completion ` +
+      `curl -sf ${bounds} -X POST ${origin}/api/compute/completion ` +
       `-H 'Authorization: Bearer ${token}' -H 'Content-Type: application/json' ` +
       `-d "{\\"processId\\":\\"${processId}\\",\\"exitCode\\":$NADI_EXIT_CODE}"`
     );
