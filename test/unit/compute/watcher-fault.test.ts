@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { FakeComputeBackend } from "../../../src/compute/backends/fake";
+import { holdIdFor } from "../../../src/compute/backends/sprites";
 import { DEFAULT_COMPUTE_LIMITS } from "../../../src/compute/config";
 import { ComputeError } from "../../../src/compute/errors";
 import { GENERATION_PATH } from "../../../src/compute/generation";
 import { ThreadComputeService } from "../../../src/compute/thread-service";
 import type { ThreadComputeStoreLike } from "../../../src/compute/thread-service";
 import type { EffectiveComputeConfig } from "../../../src/compute/types";
+import { WATCH_ABSOLUTE_TIMEOUT_MS } from "../../../src/compute/watchers";
 import {
   PROCESS_STALE_AFTER_MS,
   UNKNOWN_GENERATION,
@@ -18,6 +20,8 @@ import type {
   BackendProcessReference,
   BackendReference,
   ProcessStatus,
+  StartProcessInput,
+  StartProcessResult,
   StopMode,
 } from "../../../src/compute/backend";
 import { createMemoryComputeStore } from "./helpers/memory-store";
@@ -1227,6 +1231,114 @@ describe("reapProcess — the reaper never blocks on a dead sandbox", () => {
     // already told, so a failed stop must not escape.
     await expect(reaper.reapProcess(processId, { kill: true })).resolves.toBeUndefined();
     expect(store.listWatchers()).toEqual([]);
+  });
+});
+
+/**
+ * A `FakeComputeBackend` that also declares `workHold`, the way
+ * `SpritesComputeBackend` does. `release` records the id it was asked to
+ * release so these tests can assert WHICH row's hold was targeted, without
+ * caring what shell fragment carried it — that shape is covered by
+ * `sprites-work-hold.test.ts`.
+ */
+class FakeBackendWithHold extends FakeComputeBackend {
+  readonly released: string[] = [];
+  readonly workHold = {
+    acquire: (id: string) => `acquire:${id}`,
+    refresh: (id: string) => `refresh:${id}`,
+    release: (id: string): string => {
+      this.released.push(id);
+      return `release:${id}`;
+    },
+  };
+}
+
+/**
+ * Task 2: a hold with no release path leaks an awake, billing sprite on the
+ * first fault — so every path that terminalises a process row must also
+ * release its hold. `holdIdFor` is the same derivation `buildSpritesWrapper`
+ * uses, so a match here proves the RIGHT row's hold was targeted.
+ */
+describe("work-hold release on terminal (Task 2)", () => {
+  it("releases the hold when pollWatcher observes a clean exit", async () => {
+    const backend = new FakeBackendWithHold();
+    const now = { value: 1_000 };
+    const { service } = createService({ backend, now });
+
+    const started = await service.execStart({ command: "sleep 300", label: "build" });
+    await service.execWatch({ processId: started.processId });
+    const listed = await service.execList({ status: "all", limit: 10 });
+    const ref = listed.processes.find((p) => p.id === started.processId)?.backendProcessRef;
+    if (!ref) throw new Error("expected a backend process reference");
+    backend.finishProcess(ref, "exited", 0);
+
+    now.value += CONFIG.monitorPollIntervalMs;
+    await service.runComputeTick();
+
+    expect(backend.released).toContain(holdIdFor(started.processId));
+  });
+
+  it("releases the hold when the watch times out on a still-running process", async () => {
+    const backend = new FakeBackendWithHold();
+    const now = { value: 1_000 };
+    const { service } = createService({ backend, now });
+
+    // The fake never settles a `sleep` command on its own, so this process is
+    // still "running" when the watcher's absolute cap passes.
+    const started = await service.execStart({ command: "sleep 6000", label: "long build" });
+    await service.execWatch({ processId: started.processId });
+
+    now.value += WATCH_ABSOLUTE_TIMEOUT_MS + CONFIG.monitorPollIntervalMs;
+    await service.runComputeTick();
+
+    expect(backend.released).toContain(holdIdFor(started.processId));
+  });
+
+  it("releases the hold on the reaper's fault arm", async () => {
+    const backend = new FakeBackendWithHold();
+    const store = createMemoryComputeStore();
+    const now = { value: 1_000 };
+    const starter = makeServiceOnSharedStore({ backend, store, now });
+    const started = await starter.execStart({ command: "sleep 60", label: "long" });
+    await starter.execWatch({ processId: started.processId });
+    const reaper = makeServiceOnSharedStore({ backend, store, now });
+
+    await reaper.reapProcess(started.processId, { kill: true });
+
+    expect(backend.released).toContain(holdIdFor(started.processId));
+  });
+
+  it("swallows a throwing release — best-effort, never blocks the terminal", async () => {
+    const backend = new FakeBackendWithHold();
+    const originalStartProcess = backend.startProcess.bind(backend);
+    let releaseAttempted = false;
+    type StartProcess = (
+      runtime: BackendReference,
+      input: StartProcessInput,
+    ) => Promise<StartProcessResult>;
+    backend.startProcess = (async (runtime: BackendReference, input: StartProcessInput) => {
+      if (input.command.startsWith("release:")) {
+        releaseAttempted = true;
+        throw new Error("sprite unreachable");
+      }
+      return (originalStartProcess as StartProcess)(runtime, input);
+    }) as typeof backend.startProcess;
+    const now = { value: 1_000 };
+    const { service, ledger } = createService({ backend, now });
+
+    const started = await service.execStart({ command: "sleep 300", label: "build" });
+    await service.execWatch({ processId: started.processId });
+    const listed = await service.execList({ status: "all", limit: 10 });
+    const ref = listed.processes.find((p) => p.id === started.processId)?.backendProcessRef;
+    if (!ref) throw new Error("expected a backend process reference");
+    backend.finishProcess(ref, "exited", 0);
+
+    now.value += CONFIG.monitorPollIntervalMs;
+    await expect(service.runComputeTick()).resolves.not.toThrow();
+
+    expect(releaseAttempted).toBe(true);
+    // The terminal — the caller's actual obligation — must still land.
+    expect(ledger.rows.get(started.processId)?.terminal?.outcome).toBe("exited");
   });
 });
 

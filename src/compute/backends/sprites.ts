@@ -132,7 +132,66 @@ const SIGNALS: Record<StopMode, SpritesSignal> = {
 const SPRITE_SOCK = "/.sprite/api.sock";
 /** Refreshed every 60s by the wrapper: four missed heartbeats of margin. */
 const HOLD_EXPIRY = "5m";
-/** `holdId` is derived from a uuid processId, so it needs no shell quoting. */
+
+/**
+ * The Tasks-API hold name for one backgrounded process. Derived from a uuid
+ * `processId`, so it needs no shell quoting.
+ */
+export function holdIdFor(processId: string): string {
+  return `nadi-work-${processId}`;
+}
+
+/**
+ * Assembles the shell wrapper `startProcess` backgrounds on sprites: acquire
+ * the hold (if any), launch a self-terminating refresher, run the command to
+ * its rc sentinel, then release the hold last.
+ *
+ * Exit 97 is distinct from any command's own status: the caller reads it as
+ * "could not background" and falls back to a synchronous run, rather than
+ * starting work that would sit at a 2% duty cycle and be reported as a
+ * timeout an hour later.
+ *
+ * The refresher is gated on the rc sentinel rather than killed by the parent:
+ * `PUT` is an upsert, so a refresher that outlives a SIGKILLed parent would
+ * recreate the hold after release and pin the VM awake, billing, indefinitely.
+ * The rc file is written by rename, so this loop cannot see it half-written.
+ *
+ * The rc write itself is a write-then-RENAME, not a plain redirect: `> rc`
+ * creates the file before `printf` fills it, so a status poll landing in that
+ * window reads an empty file. `readRcOnce` treats unparsable content as "no
+ * answer", so the empty read is not mistaken for an exit code — but the
+ * rename removes the window entirely, and it is one extra word.
+ */
+export function buildSpritesWrapper(input: {
+  command: string;
+  cwd: string;
+  stdinPath: string;
+  processId: string;
+  timeoutSecs: number;
+  hold?: NonNullable<ComputeBackend["workHold"]>;
+}): string {
+  const { processId, timeoutSecs, hold } = input;
+  const outPath = sentinelPath("out", processId);
+  const errPath = sentinelPath("err", processId);
+  const rcPath = sentinelPath("rc", processId);
+  const holdId = holdIdFor(processId);
+
+  const acquire = hold ? `${hold.acquire(holdId)} || exit 97; ` : "";
+  const refresher = hold
+    ? `( while [ ! -f ${rcPath} ]; do sleep 60; ${hold.refresh(holdId)} || break; done ) & `
+    : "";
+  const release = hold ? `; ${hold.release(holdId)}` : "";
+
+  return (
+    `cd ${shellQuote(input.cwd)} && ` +
+    acquire +
+    refresher +
+    `timeout ${timeoutSecs} bash -c ${shellQuote(input.command)} ` +
+    `< ${input.stdinPath} > ${outPath} 2> ${errPath}; ` +
+    `printf %s "$?" > ${rcPath}.tmp && mv -f ${rcPath}.tmp ${rcPath}` +
+    release
+  );
+}
 
 export class SpritesComputeBackend implements ComputeBackend {
   readonly id = "sprites" as const;
@@ -286,9 +345,6 @@ export class SpritesComputeBackend implements ComputeBackend {
   ): Promise<StartProcessResult> {
     const spriteName = this.runtimeName(runtime);
     const processId = crypto.randomUUID();
-    const outPath = sentinelPath("out", processId);
-    const errPath = sentinelPath("err", processId);
-    const rcPath = sentinelPath("rc", processId);
     let stdinPath = "/dev/null";
     if (input.stdin !== undefined) {
       stdinPath = sentinelPath("in", processId);
@@ -299,17 +355,14 @@ export class SpritesComputeBackend implements ComputeBackend {
     const timeoutSecs = Math.max(1, Math.ceil(input.timeoutMs / 1000));
     // argv form sidesteps every quoting concern except the two values
     // interpolated into the script itself.
-    //
-    // The rc write is a write-then-RENAME, not a plain redirect: `> rc` creates
-    // the file before `printf` fills it, so a status poll landing in that window
-    // reads an empty file. `readRcOnce` treats unparsable content as "no
-    // answer", so the empty read is not mistaken for an exit code — but the
-    // rename removes the window entirely, and it is one extra word.
-    const wrapper =
-      `cd ${shellQuote(input.cwd ?? WORKSPACE_ROOT)} && ` +
-      `timeout ${timeoutSecs} bash -c ${shellQuote(input.command)} ` +
-      `< ${stdinPath} > ${outPath} 2> ${errPath}; ` +
-      `printf %s "$?" > ${rcPath}.tmp && mv -f ${rcPath}.tmp ${rcPath}`;
+    const wrapper = buildSpritesWrapper({
+      command: input.command,
+      cwd: input.cwd ?? WORKSPACE_ROOT,
+      stdinPath,
+      processId,
+      timeoutSecs,
+      ...(this.workHold === undefined ? {} : { hold: this.workHold }),
+    });
     // The env rides in the `env` query param, NOT as `export` lines inside the
     // wrapper. Neither is secret-safe against a server that logs its request
     // line — the wrapper itself is sent as repeated `cmd` params on the same

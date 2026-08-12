@@ -667,6 +667,24 @@ export async function runSpritesSmoke(env: Env): Promise<SpritesSmokeReport> {
       }
       return `file survived hibernate/wake round trip (${back.length} bytes intact, same sprite reused)`;
     });
+
+    // 9. backgrounded work under a hold actually EXECUTES while idle.
+    // The hibernate/wake step above only asserts a FILE survives, which a VM at
+    // a 2% duty cycle also satisfies — that is why this is a separate
+    // assertion, of a PROCESS actually making progress with no traffic keeping
+    // it awake.
+    await timed("9. held background command progresses while idle", async () => {
+      if (!runtime) throw new Error("no runtime acquired");
+      await backend.startProcess(runtime, {
+        command: "for i in $(seq 1 20); do date +%s >> /tmp/smoke_beat; sleep 3; done",
+        timeoutMs: 120_000,
+      });
+      await new Promise<void>((resolve) => setTimeout(resolve, 60_000)); // >> the ~30s hibernation threshold, with no traffic
+      const beats = await backend.readFile(runtime, "/tmp/smoke_beat", 10_000);
+      const count = new TextDecoder().decode(beats.bytes).trim().split("\n").length;
+      if (count < 15) throw new Error(`held command starved: ${count} beats in 60s, expected ~20`);
+      return `${count} beats in 60s idle (unheld baseline is 1)`;
+    });
   } finally {
     // 8. Never leak a sprite — they bill storage forever with no auto-destroy.
     const started = Date.now();

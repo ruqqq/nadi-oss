@@ -21,6 +21,7 @@ import { canAddWatcher, classifyWatcher, nextWakeAt, type WatcherRow } from "./w
 import { recordComputeEvent, type ComputeEvent } from "./observability";
 import { ComputeFileService } from "./file-service";
 import { readGeneration, writeGeneration } from "./generation";
+import { holdIdFor } from "./backends/sprites";
 import type { WorkLedgerSink } from "../agent/work-ledger-store";
 import type { WorkspaceCleanliness } from "./workspace-cleanliness";
 import {
@@ -1313,12 +1314,38 @@ export class ThreadComputeService {
    */
   async reapProcess(processId: string, options: { kill: boolean }): Promise<void> {
     this.deps.store.deleteWatcher(processId);
+    // Best-effort, regardless of `kill`: a faulted row (e.g. `sandbox_reset`)
+    // has no container left to kill but may still carry an orphaned hold from
+    // a prior sprite, and this is the reaper's only pass over it.
+    await this.releaseWorkHold(processId);
     if (!options.kill) return;
     // No ledger work follows the stop: the reaper's caller closed the row first
     // (terminal-first) and already told the model, so a terminalize here would
     // be a no-op against a spent gate. A failed stop is swallowed by the
     // primitive — best-effort by contract, and the watcher is already gone.
     await this.stopProcessDirect(processId, "terminate");
+  }
+
+  /**
+   * Best-effort hold release. Not optional hygiene on sprites: a held sprite
+   * bills CPU and RAM, and `nativeIdleSuspend = true` makes
+   * `resolveIdleDisposition` skip the inferred discards that would otherwise
+   * reclaim it — so a wedged process with no release stays awake and billing.
+   * Swallows everything: the terminal is the caller's obligation, not this.
+   */
+  private async releaseWorkHold(processId: string): Promise<void> {
+    const hold = this.deps.backend.workHold;
+    if (!hold) return;
+    try {
+      const state = this.deps.store.getComputeState();
+      if (state?.status !== "active" || !state.runtimeRef) return;
+      await this.deps.backend.startProcess(state.runtimeRef, {
+        command: hold.release(holdIdFor(processId)),
+        timeoutMs: 10_000,
+      });
+    } catch (error) {
+      log.warn("compute.work_hold_release_failed", { processId, error: String(error) });
+    }
   }
 
   /**
@@ -2418,6 +2445,13 @@ export class ThreadComputeService {
       });
       return false;
     }
+    // Best-effort hold release, once, at the point this poll cycle is known
+    // terminal for THIS row — both classifications land here, and the wrapper's
+    // own in-sprite release (run when the command itself finishes) makes this
+    // redundant for `exited`. For `timeout` the process is still running, but
+    // the wrapper's refresher self-heals within 60s (`PUT` is an upsert), so
+    // the worst case is one missed refresh window, not a stranded process.
+    await this.releaseWorkHold(watcher.processId);
     const title = watcher.label || process.command;
     // Terminal path — one funnel: write the terminal FIRST, then deliver, then
     // tear down. This is a pure local SQL write and must not sit behind
