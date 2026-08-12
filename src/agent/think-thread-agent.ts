@@ -5213,7 +5213,10 @@ export class ThinkThreadAgent extends Think<Env> {
    * build commonly writes its failure there, not to stdout), so the sheet
    * must not assume stdout just because that's the default request.
    */
-  async readBackgroundWorkOutput(processId: string): Promise<{
+  async readBackgroundWorkOutput(
+    processId: string,
+    stream?: "stdout" | "stderr",
+  ): Promise<{
     head: string[];
     tail: string[];
     hiddenLines: number;
@@ -5227,7 +5230,7 @@ export class ThinkThreadAgent extends Think<Env> {
       if (!row || row.kind !== "process") return null;
       const resolved = await resolveComputeService(this.sandboxHostDeps(admission));
       if (!resolved) return null;
-      return await resolved.service.execOutputHeadTail({ processId });
+      return await resolved.service.execOutputHeadTail({ processId, stream });
     } catch {
       return null;
     }

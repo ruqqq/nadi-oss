@@ -239,7 +239,8 @@ import { usePendingSteers } from "./lib/use-pending-steers";
 import { useToolServers } from "./lib/use-tool-servers";
 import { useSubagentEvents } from "./lib/use-subagent-events";
 import { useBackgroundWork } from "./lib/use-background-work";
-import { BackgroundWorkDock } from "./components/chat/BackgroundWorkDock";
+import { BackgroundTasksRow } from "./components/chat/BackgroundTasksRow";
+import { BackgroundTasksSheet } from "./components/chat/BackgroundTasksSheet";
 import { FeedbackDraftCard } from "./components/feedback/FeedbackDraftCard";
 import { FeedbackFallbackForm } from "./components/feedback/FeedbackFallbackForm";
 import { collectFeedbackDiagnostics } from "./lib/feedback-diagnostics";
@@ -4577,7 +4578,13 @@ function ThreadChat({
 
   const subagentRuns = useSubagentEvents(agent);
 
-  const { rows: backgroundWorkRows } = useBackgroundWork(agent, messages, backgroundWorkEnabled);
+  const {
+    rows: backgroundWorkRows,
+    refresh: refreshBackgroundWork,
+    readOutput: readBackgroundWorkOutput,
+    cancel: cancelBackgroundWork,
+    clearFinished: clearFinishedBackgroundWork,
+  } = useBackgroundWork(agent, messages, backgroundWorkEnabled);
 
   const trackThreadEvent = useCallback(
     (event: string, props?: Record<string, unknown>) => {
@@ -5006,6 +5013,7 @@ function ThreadChat({
   // Rename / move / archive / delete + metadata live in the detail sheet now,
   // so the top bar stays uncluttered.
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [backgroundTasksOpen, setBackgroundTasksOpen] = useState(false);
 
   // Show typing dots as the last item for the whole assistant turn, so the
   // "still working" signal persists across tool runs, reasoning, and text.
@@ -5318,8 +5326,22 @@ function ThreadChat({
         {!feedbackMode && <SteeringMessageStrip items={steeringChips} onCancel={cancelSteeringMessage} />}
 
         {!feedbackMode && (
-          <BackgroundWorkDock enabled={backgroundWorkEnabled} rows={backgroundWorkRows} />
+          <BackgroundTasksRow
+            enabled={backgroundWorkEnabled}
+            rows={backgroundWorkRows}
+            onOpen={() => setBackgroundTasksOpen(true)}
+          />
         )}
+
+        <BackgroundTasksSheet
+          open={backgroundTasksOpen}
+          onOpenChange={setBackgroundTasksOpen}
+          rows={backgroundWorkRows}
+          readOutput={readBackgroundWorkOutput}
+          cancel={cancelBackgroundWork}
+          clearFinished={clearFinishedBackgroundWork}
+          onChanged={() => void refreshBackgroundWork()}
+        />
 
         {browserNotificationPrompt && (
           <BrowserNotificationPrompt

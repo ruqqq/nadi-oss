@@ -68,6 +68,7 @@ export {
   Notebook,
   Toolbox,
   DeviceMobile,
+  Terminal,
 } from "@phosphor-icons/react";
 
 /**

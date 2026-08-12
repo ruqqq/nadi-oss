@@ -16,15 +16,60 @@ export type BackgroundWorkReason =
   | "sandbox_reset"
   | "no_liveness";
 
+export type BackgroundWorkOutputStream = "stdout" | "stderr";
+
+/** The closed set `cancelBackgroundWork` returns in `reason` when `ok:false`
+ *  — the client switches on this, never on raw error text. */
+export type BackgroundWorkCancelReason =
+  | "background_work_disabled"
+  | "unknown_id"
+  | "already_terminal"
+  | "sandbox_disabled"
+  | "cancel_failed";
+
 /** One row of the `listBackgroundWork` callable — mirrors the ledger's
  *  `WorkRow` shape (src/agent/work-ledger.ts), minus the fields the dock
- *  never renders (liveness bookkeeping, deadlines, generation). */
+ *  never renders (liveness bookkeeping, deadlines, generation).
+ *
+ * `exitCode` is deliberately NOT optional: `number | null` keeps "the process
+ * told us 0" and "we never got a code" as two distinct, exhaustively-checked
+ * states. An optional field would let `undefined` and `null` collapse into
+ * the same falsy branch, and that branch is exactly where a false "clean
+ * exit" would hide a real failure. */
 export interface BackgroundWorkRow {
   id: string;
   kind: BackgroundWorkKind;
   label: string | null;
   startedAt: number;
-  terminal: { outcome: BackgroundWorkOutcome; reason: BackgroundWorkReason } | null;
+  terminal: {
+    outcome: BackgroundWorkOutcome;
+    reason: BackgroundWorkReason;
+    exitCode: number | null;
+  } | null;
+}
+
+export interface BackgroundWorkOutput {
+  head: string[];
+  tail: string[];
+  hiddenLines: number;
+  truncated: boolean;
+  stream: BackgroundWorkOutputStream;
+}
+
+function isBackgroundWorkRow(value: unknown): value is BackgroundWorkRow {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Record<string, unknown>;
+  if (typeof row.id !== "string") return false;
+  if (row.kind !== "process" && row.kind !== "subagent") return false;
+  if (typeof row.startedAt !== "number") return false;
+  if (row.terminal !== null) {
+    if (typeof row.terminal !== "object") return false;
+    const terminal = row.terminal as Record<string, unknown>;
+    if (typeof terminal.outcome !== "string") return false;
+    if (typeof terminal.reason !== "string") return false;
+    if (typeof terminal.exitCode !== "number" && terminal.exitCode !== null) return false;
+  }
+  return true;
 }
 
 /**
@@ -41,12 +86,26 @@ export interface BackgroundWorkRow {
  * outcome lands within one refetch), one delayed refetch to cover the
  * turn-end sweep racing the client's own refetch, and a steady safety poll so
  * a silently-attached row (no message) still surfaces within one interval.
+ *
+ * Also exposes the three action callables the sheet needs
+ * (`readBackgroundWorkOutput`, `cancelBackgroundWork`,
+ * `clearFinishedBackgroundWork`) so the sheet never has to reach for the raw
+ * socket itself.
  */
 export function useBackgroundWork(
   agent: AgentSocket,
   messages: UIMessage[],
   enabled: boolean,
-): { rows: BackgroundWorkRow[] } {
+): {
+  rows: BackgroundWorkRow[];
+  refresh: () => Promise<void>;
+  readOutput: (
+    processId: string,
+    stream?: BackgroundWorkOutputStream,
+  ) => Promise<BackgroundWorkOutput | null>;
+  cancel: (id: string) => Promise<{ ok: boolean; reason?: BackgroundWorkCancelReason }>;
+  clearFinished: () => Promise<{ cleared: number }>;
+} {
   const [rows, setRows] = useState<BackgroundWorkRow[]>([]);
 
   const agentRef = useRef(agent);
@@ -58,8 +117,8 @@ export function useBackgroundWork(
       setRows([]);
       return;
     }
-    const result = (await agentRef.current.call("listBackgroundWork", [])) as BackgroundWorkRow[];
-    setRows(Array.isArray(result) ? result : []);
+    const result = await agentRef.current.call("listBackgroundWork", []);
+    setRows(Array.isArray(result) ? result.filter(isBackgroundWorkRow) : []);
   };
 
   const lastMessageId = messages.length > 0 ? messages[messages.length - 1]!.id : null;
@@ -83,5 +142,28 @@ export function useBackgroundWork(
     return () => window.clearInterval(id);
   }, [enabled]);
 
-  return { rows };
+  const readOutput = useRef(
+    async (
+      processId: string,
+      stream?: BackgroundWorkOutputStream,
+    ): Promise<BackgroundWorkOutput | null> => {
+      const args = stream ? [processId, stream] : [processId];
+      const result = await agentRef.current.call("readBackgroundWorkOutput", args);
+      return (result as BackgroundWorkOutput | null) ?? null;
+    },
+  ).current;
+
+  const cancel = useRef(
+    async (id: string): Promise<{ ok: boolean; reason?: BackgroundWorkCancelReason }> => {
+      const result = await agentRef.current.call("cancelBackgroundWork", [id]);
+      return result as { ok: boolean; reason?: BackgroundWorkCancelReason };
+    },
+  ).current;
+
+  const clearFinished = useRef(async (): Promise<{ cleared: number }> => {
+    const result = await agentRef.current.call("clearFinishedBackgroundWork", []);
+    return result as { cleared: number };
+  }).current;
+
+  return { rows, refresh: refresh.current, readOutput, cancel, clearFinished };
 }
