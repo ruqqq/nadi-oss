@@ -102,6 +102,9 @@ export interface CloudflareBindings {
 /** Cloudflare Sandbox implementation of the provider-neutral compute contract. */
 export class CloudflareComputeBackend implements ComputeBackend {
   readonly id = "cloudflare" as const;
+  // No `workHold`: this backend runs with `keepAlive: true`, so the container
+  // executes while idle and needs no hold. See `ComputeBackend.workHold` — the
+  // omission is a decision, not an oversight.
   private readonly factory: CloudflareSandboxFactory;
   private readonly bindings: CloudflareBindings;
   private readonly workspaceId: string;

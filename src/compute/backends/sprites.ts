@@ -128,6 +128,12 @@ const SIGNALS: Record<StopMode, SpritesSignal> = {
   kill: "SIGKILL",
 };
 
+/** The sprite's own management socket. Reachable only from inside the sprite. */
+const SPRITE_SOCK = "/.sprite/api.sock";
+/** Refreshed every 60s by the wrapper: four missed heartbeats of margin. */
+const HOLD_EXPIRY = "5m";
+/** `holdId` is derived from a uuid processId, so it needs no shell quoting. */
+
 export class SpritesComputeBackend implements ComputeBackend {
   readonly id = "sprites" as const;
   /**
@@ -136,6 +142,17 @@ export class SpritesComputeBackend implements ComputeBackend {
    * the service's idle timer fires. See `ComputeBackend.nativeIdleSuspend`.
    */
   readonly nativeIdleSuspend = true;
+  /** Documented in `ComputeBackend.workHold`. Verified live 2026-08-12. */
+  readonly workHold = {
+    acquire: (holdId: string): string =>
+      `curl -sf --unix-socket ${SPRITE_SOCK} -H 'Content-Type: application/json' ` +
+      `-X POST http://sprite/v1/tasks -d '{"name":"${holdId}","expire":"${HOLD_EXPIRY}"}'`,
+    refresh: (holdId: string): string =>
+      `curl -sf --unix-socket ${SPRITE_SOCK} -H 'Content-Type: application/json' ` +
+      `-X PUT http://sprite/v1/tasks/${holdId} -d '{"expire":"${HOLD_EXPIRY}"}'`,
+    release: (holdId: string): string =>
+      `curl -sf --unix-socket ${SPRITE_SOCK} -X DELETE http://sprite/v1/tasks/${holdId}`,
+  };
   private readonly client: SpritesClient;
   /**
    * The runtime's environment, carried on EVERY exec.

@@ -143,6 +143,25 @@ export interface ComputeBackend {
    * on a guess, which is how a real user lost work.
    */
   readonly nativeIdleSuspend?: boolean;
+  /**
+   * Shell fragments that pin the runtime awake while background work runs, and
+   * release it afterwards.
+   *
+   * A NEW BACKEND MUST DECIDE THIS. Absent means "this provider executes while
+   * idle", which is not a neutral default: a provider that starves idle work and
+   * omits this will make no progress on every backgrounded command, and will
+   * report the starvation as a `watch_timeout` an hour later. Measured on
+   * sprites.dev 2026-08-12: 2% duty cycle unheld, 99% held.
+   *
+   * Fragments rather than methods because the only place a hold can be taken on
+   * sprites is INSIDE the sandbox — its Tasks API is served on a unix socket the
+   * Worker cannot reach, and the public REST surface has no tasks resource.
+   */
+  readonly workHold?: {
+    acquire(holdId: string): string;
+    refresh(holdId: string): string;
+    release(holdId: string): string;
+  };
   acquire(spec: ComputeSpec, recovery?: BackendReference): Promise<BackendReference>;
   release(runtime: BackendReference, options: ReleaseOptions): Promise<BackendReference | null>;
   destroy(reference: BackendReference): Promise<void>;
