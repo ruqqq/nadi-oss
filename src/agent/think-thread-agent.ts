@@ -163,6 +163,7 @@ import {
   nextSweepAt,
   type CurrentGeneration,
   type WorkKind,
+  type WorkProgress,
   type WorkOutcome,
   type WorkReason,
   type WorkRow,
@@ -2307,9 +2308,20 @@ export class ThinkThreadAgent extends Think<Env> {
    *
    * `stampAlive` is a no-op for an unknown or already-terminal row, so a late
    * or duplicate stamp can never resurrect a closed run.
+   *
+   * `progress` rides along on this same call rather than getting an RPC of its
+   * own — the child already stamps liveness every turn and on a timer, so this
+   * is free. It is the ONLY way the parent learns a child's progress: the SDK's
+   * `reportProgress` persists to the CHILD's storage, so the parent's
+   * `inspectAgentToolRun` can never see it (see `WorkRow.progress`). Optional
+   * so an older child facet mid-deploy still stamps liveness correctly.
    */
-  async stampSubagentAlive(runId: string): Promise<void> {
-    this.workLedger.stampAlive(runId, Date.now());
+  async stampSubagentAlive(runId: string, progress?: WorkProgress): Promise<void> {
+    const at = Date.now();
+    this.workLedger.stampAlive(runId, at);
+    // Trusted like the liveness stamp itself — this comes from the child's own
+    // turn bookkeeping (`beforeTurn`'s step counter), never from model output.
+    if (progress) this.workLedger.stampProgress(runId, progress);
   }
 
   /**
@@ -5177,13 +5189,14 @@ export class ThinkThreadAgent extends Think<Env> {
    *  - `subagentStatus` — the SDK terminal status, without which the UI cannot
    *    tell a completed subagent from a crashed one. See
    *    {@link subagentStatusFromDetail}.
-   *  - `progress` — the child's last `reportProgress` signal, read from the
-   *    SDK's DURABLE child-run row (`cf_agent_tool_child_runs.progress_json`)
-   *    via `inspectAgentToolRun`, NOT from the live event stream. That is the
-   *    whole point: the stream only carries runs whose start a given client
-   *    socket witnessed, so a client that reloads mid-run could never show
-   *    progress for a run already in flight. This survives reload, a second
-   *    client, and DO eviction.
+   *  - `progress` — the child's last progress signal, read from the LEDGER row
+   *    the child stamps over `stampSubagentAlive`, NOT from the live event
+   *    stream. That is the whole point: the stream only carries runs whose
+   *    start a given client socket witnessed, so a client that reloads mid-run
+   *    could never show progress for a run already in flight. This survives a
+   *    reload, a second client, and DO eviction. (It is also NOT read from the
+   *    SDK — see `WorkRow.progress` for why the parent cannot see the child's
+   *    own `reportProgress` state.)
    *
    * Never throws — a throw inside a DO RPC method also fires an unhandled
    * rejection (see `reportProcessCompletion`'s doc). Gated on
@@ -5249,7 +5262,7 @@ export class ThinkThreadAgent extends Think<Env> {
         kind: row.kind,
         label,
         startedAt: row.startedAt,
-        progress: await this.subagentProgress(row),
+        progress: this.subagentProgress(row),
         terminal: row.terminal
           ? {
               outcome: row.terminal.outcome,
@@ -5266,38 +5279,18 @@ export class ThinkThreadAgent extends Think<Env> {
   }
 
   /**
-   * The last progress signal a RUNNING subagent reported, or `null` for
-   * anything else. Read from the SDK's durable child-run row, so it is
-   * available to any client at any time — see `listBackgroundWork`'s doc for
-   * why the live event stream could not serve this.
+   * The last progress signal a RUNNING subagent pushed, or `null` for anything
+   * else. A plain read of the row the child already stamps — see
+   * `WorkRow.progress` for why the parent stores this rather than asking the
+   * SDK, which cannot answer from this side.
    *
    * Only for rows still open: a finished row's stale "working (step 12)" is
-   * noise next to its actual outcome, and skipping terminal rows also keeps
-   * this off the vast majority of a dock poll's rows.
-   *
-   * `inspectAgentToolRun` can reconcile a stale (post-eviction) child row as a
-   * side effect, which is a WRITE on what is otherwise a read path. That is
-   * wanted, not tolerated: it materializes the run's true terminal, which is
-   * the same repair the reaper would otherwise wait to perform. Failures are
-   * swallowed — missing progress is cosmetic, and this must never be the thing
-   * that makes a dock read throw.
+   * noise next to its actual outcome, and its result renders inline in the
+   * transcript anyway.
    */
-  private async subagentProgress(
-    row: WorkRow,
-  ): Promise<{ message: string | null; phase: string | null; at: number } | null> {
+  private subagentProgress(row: WorkRow): WorkProgress | null {
     if (row.kind !== "subagent" || row.terminal !== null) return null;
-    try {
-      const progress = (await this.inspectAgentToolRun(row.id))?.progress;
-      if (!progress) return null;
-      const { message, phase } = progress as { message?: unknown; phase?: unknown };
-      return {
-        message: typeof message === "string" ? message : null,
-        phase: typeof phase === "string" ? phase : null,
-        at: typeof progress.at === "number" ? progress.at : row.lastAliveAt,
-      };
-    } catch {
-      return null;
-    }
+    return row.progress ?? null;
   }
 
   /**

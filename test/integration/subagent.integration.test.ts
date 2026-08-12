@@ -244,6 +244,50 @@ describe("SubAgent", () => {
     expect(calls).toContainEqual(expect.objectContaining({ phase: "working" }));
   });
 
+  /**
+   * The seam that shipped broken: `reportProgress` persists to THIS facet's own
+   * storage, so the dock (which reads the PARENT's ledger) saw nothing and sat
+   * on "Waiting for the first update" forever. The child must therefore PUSH its
+   * progress to the parent, and it does so on the liveness stamp.
+   *
+   * Asserted on the parent-facing call, not on `reportProgress`: the test above
+   * already covers the SDK call, and it passing is exactly what made the gap
+   * invisible.
+   */
+  it("pushes its progress to the parent on the liveness stamp, not only to the SDK", async () => {
+    const stub = env.SUB_AGENT.get(env.SUB_AGENT.idFromName("sub_run_progress_push"));
+    const stamps = await runInSubAgentDo(stub, async (child: SubAgentTestSeam) => {
+      child._testSubagentContext = {
+        parentThreadId: "sub-parent",
+        workspaceId: "ws-sub-parent",
+        agentId: "agent-sub-parent",
+        attachedRuntime: {
+          provider: "daytona",
+          version: 1,
+          payload: { kind: "runtime", sandboxId: "fake_sbx_parent" },
+        },
+      };
+      await child.__unsafe_ensureInitialized();
+      const seen: Array<[string, unknown]> = [];
+      (child as any).reportProgress = async () => {};
+      (child as any).parentAgent = async () => ({
+        stampSubagentAlive: async (runId: string, progress: unknown) => {
+          seen.push([runId, progress]);
+        },
+      });
+      await child.runTurn({ input: "hello" });
+      return seen;
+    });
+    // Asserted on the FIRST stamp of the turn, which is the user-visible
+    // property: no blank window before the dock shows a step. (Reordering the
+    // marker after `startLiveness` does NOT break this today — the stamp reads
+    // the field only after awaiting `parentAgent()` — so this pins the
+    // guarantee, not that ordering.)
+    expect(stamps.length).toBeGreaterThan(0);
+    expect(stamps[0]![1]).toMatchObject({ phase: "working" });
+    expect(stamps[0]![1]).toHaveProperty("at", expect.any(Number));
+  });
+
   it("disables process monitoring (closes H1/H2): SubAgent overrides processMonitorEnabled to false", async () => {
     const stub = env.SUB_AGENT.get(env.SUB_AGENT.idFromName("sub_run_monitor"));
     const enabled = await runInSubAgentDo(stub, async (child: SubAgentTestSeam) => {

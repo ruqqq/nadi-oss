@@ -1,7 +1,7 @@
-import type { WorkKind, WorkRow, WorkTerminal } from "./work-ledger";
+import type { WorkKind, WorkProgress, WorkRow, WorkTerminal } from "./work-ledger";
 
 const WORK_LEDGER_SCHEMA = "agent_work_ledger";
-const WORK_LEDGER_SCHEMA_VERSION = 3;
+const WORK_LEDGER_SCHEMA_VERSION = 4;
 
 /**
  * The surface the compute layer is handed (see `WorkLedgerSink` in
@@ -72,6 +72,9 @@ interface WorkLedgerRow extends Record<string, string | number | null> {
   terminal_exit_code: number | null;
   delivered_at: number | null;
   cleared_at: number | null;
+  progress_message: string | null;
+  progress_phase: string | null;
+  progress_at: number | null;
 }
 
 function toWorkRow(row: WorkLedgerRow): WorkRow {
@@ -103,6 +106,19 @@ function toWorkRow(row: WorkLedgerRow): WorkRow {
     // row that was never cleared must round-trip identically to how it did
     // before this column existed.
     ...(row.cleared_at === null ? {} : { clearedAt: row.cleared_at }),
+    // `progress_at` is the presence test, not the message: a child may report a
+    // `phase` with no `message` (or the reverse), so keying on either text
+    // column would drop a real signal. Omitted rather than null for the same
+    // round-trip reason as `clearedAt` above.
+    ...(row.progress_at === null
+      ? {}
+      : {
+          progress: {
+            message: row.progress_message,
+            phase: row.progress_phase,
+            at: row.progress_at,
+          },
+        }),
   };
 }
 
@@ -169,6 +185,15 @@ export class WorkLedgerStore implements WorkLedgerSink {
       if (!columns.some((column) => column.name === "cleared_at")) {
         this.storage.sql.exec("ALTER TABLE background_work ADD COLUMN cleared_at integer");
       }
+      // v3 -> v4, additive: the last progress signal a subagent's child pushed
+      // (see `WorkRow.progress` for why the parent stores it instead of asking
+      // the SDK). NULL-defaulted with no backfill — NULL is correct for every
+      // row written before this existed, since none of them ever reported one.
+      if (!columns.some((column) => column.name === "progress_at")) {
+        this.storage.sql.exec("ALTER TABLE background_work ADD COLUMN progress_message text");
+        this.storage.sql.exec("ALTER TABLE background_work ADD COLUMN progress_phase text");
+        this.storage.sql.exec("ALTER TABLE background_work ADD COLUMN progress_at integer");
+      }
       this.storage.sql.exec(
         `INSERT INTO work_ledger_schema (name, version) VALUES (?, ?)
          ON CONFLICT(name) DO UPDATE SET version = excluded.version`,
@@ -220,6 +245,31 @@ export class WorkLedgerStore implements WorkLedgerSink {
        WHERE id = ? AND terminal_outcome IS NULL`,
       at,
       id,
+    );
+  }
+
+  /**
+   * Record a subagent's latest progress signal. Same guards as
+   * {@link stampAlive}, for the same reasons: a no-op on an unknown or already
+   * terminal row (a late push must not decorate a closed run), and time only
+   * moves forward, so a stamp that arrives out of order cannot replace a newer
+   * signal with an older one.
+   *
+   * All three columns move together under that one guard — a newer signal with
+   * no `message` must not leave the previous signal's message stranded beside
+   * a fresher `at`.
+   */
+  stampProgress(id: string, progress: WorkProgress): void {
+    this.storage.sql.exec(
+      `UPDATE background_work
+         SET progress_message = ?, progress_phase = ?, progress_at = ?
+       WHERE id = ? AND terminal_outcome IS NULL
+         AND (progress_at IS NULL OR progress_at <= ?)`,
+      progress.message,
+      progress.phase,
+      progress.at,
+      id,
+      progress.at,
     );
   }
 

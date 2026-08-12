@@ -55,6 +55,7 @@ const COMPUTE_CONFIG: EffectiveComputeConfig = {
 type TestableAgent = {
   _turnRuntimeConfig: { backgroundWorkEnabled: boolean } | null;
   listBackgroundWork(): ReturnType<ThinkThreadAgent["listBackgroundWork"]>;
+  stampSubagentAlive: ThinkThreadAgent["stampSubagentAlive"];
   readBackgroundWorkOutput(processId: string): Promise<{
     head: string[];
     tail: string[];
@@ -153,6 +154,64 @@ describe("ThinkThreadAgent.listBackgroundWork", () => {
         subagentStatus: null,
         at: terminalAt,
       });
+    });
+  });
+
+  /**
+   * "Waiting for the first update" forever, at its source. The progress a
+   * subagent reports through the SDK's `reportProgress` persists to the CHILD
+   * facet's own storage, so the parent's `inspectAgentToolRun` — which reads the
+   * parent's copy of that table — can never see it. Progress therefore has to be
+   * PUSHED to the parent, which is what `stampSubagentAlive` now carries.
+   */
+  it("reports a running subagent's pushed progress", async () => {
+    await withAgent(async ({ instance, store }) => {
+      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      store.register(row({ id: "s1", kind: "subagent" }));
+      await instance.stampSubagentAlive("s1", {
+        phase: "working",
+        message: "working (step 3)",
+        at: 4_242,
+      });
+      const rows = await instance.listBackgroundWork();
+      expect(rows[0]!.progress).toEqual({
+        phase: "working",
+        message: "working (step 3)",
+        at: 4_242,
+      });
+    });
+  });
+
+  it("drops progress once the row is terminal, and never reports it for a process", async () => {
+    await withAgent(async ({ instance, store }) => {
+      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      store.register(row({ id: "s1", kind: "subagent" }));
+      await instance.stampSubagentAlive("s1", { phase: "working", message: "step 3", at: 4_242 });
+      store.register(row({ id: "p1", kind: "process" }));
+
+      store.terminalize("s1", {
+        outcome: "exited",
+        reason: "process_exit",
+        at: Date.now(),
+        detail: "completed",
+      });
+      const byId = Object.fromEntries((await instance.listBackgroundWork()).map((r) => [r.id, r]));
+      // A finished run's last step is stale by definition; its result renders
+      // inline in the transcript instead.
+      expect(byId.s1!.progress).toBeNull();
+      expect(byId.p1!.progress).toBeNull();
+    });
+  });
+
+  it("keeps liveness working when a child stamps without progress", async () => {
+    await withAgent(async ({ instance, store }) => {
+      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      store.register(row({ id: "s1", kind: "subagent", lastAliveAt: 1_000 }));
+      // An older child facet mid-deploy sends no progress — the liveness stamp
+      // it exists for must still land, or the reaper would fault a healthy run.
+      await instance.stampSubagentAlive("s1");
+      expect(store.get("s1")!.lastAliveAt).toBeGreaterThan(1_000);
+      expect((await instance.listBackgroundWork())[0]!.progress).toBeNull();
     });
   });
 

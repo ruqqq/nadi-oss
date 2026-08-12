@@ -2,6 +2,7 @@ import { getAgentByName } from "agents";
 import type { TurnConfig, TurnContext } from "@cloudflare/think";
 import { ThinkThreadAgent, type SubagentContext } from "./think-thread-agent";
 import { resolveThreadRuntimeConfigForAgent } from "./thread-agent-config";
+import type { WorkProgress } from "./work-ledger";
 import type { BackendReference } from "../compute/backend";
 import type { UsageSource } from "./usage-recorder";
 
@@ -42,6 +43,17 @@ export class SubAgent extends ThinkThreadAgent {
   private _subagentContext?: SubagentContext;
   private _attachedRuntime?: BackendReference;
   private _turnCount?: number;
+  /**
+   * The progress marker pushed to the parent alongside every liveness stamp.
+   *
+   * This duplicates what `reportProgress` reports, and it has to: the SDK
+   * persists that call's snapshot to THIS facet's own storage, so the parent —
+   * which owns the ledger the dock reads — cannot see it (`inspectAgentToolRun`
+   * on the parent reads the parent's empty copy of that table). `reportProgress`
+   * still drives the live run card via its broadcast; this drives the dock.
+   * Both are fed from the same `_turnCount`, so they cannot disagree.
+   */
+  private _progress?: WorkProgress;
   private _livenessTimer: ReturnType<typeof setInterval> | undefined;
   /** Test seam: inject the parent context so unit tests skip the real parentAgent() facet call. */
   _testSubagentContext?: SubagentContext;
@@ -61,7 +73,7 @@ export class SubAgent extends ThinkThreadAgent {
   private async stampParentAlive(): Promise<void> {
     try {
       const parent = await this.parentAgent(ThinkThreadAgent);
-      await parent.stampSubagentAlive(this.name);
+      await parent.stampSubagentAlive(this.name, this._progress);
     } catch {
       // Best effort: a facet/RPC failure must never break the child's turn.
     }
@@ -237,16 +249,31 @@ export class SubAgent extends ThinkThreadAgent {
     // the attached runtime. Keep the result cached for the synchronous tool
     // composition performed by super.beforeTurn below.
     await this.subagentContext(true);
+    // Turn-counted phase marker so a running run card's status line visibly
+    // advances turn over turn; the streamed transcript carries the
+    // fine-grained detail (drill-in).
+    //
+    // Set BEFORE `startLiveness()`, which stamps the parent immediately — the
+    // stamp is what carries this to the dock. Today either order happens to
+    // work, because `stampParentAlive` reads this field only AFTER awaiting
+    // `parentAgent()`, so a later synchronous assignment still lands first;
+    // this ordering is what stops that from being load-bearing. If that await
+    // ever resolves synchronously (a cached stub), the reversed order would
+    // send the PREVIOUS turn's marker, and none at all on the first turn —
+    // leaving the dock on "Waiting for the first update" until the 30s tick.
+    this._turnCount = (this._turnCount ?? 0) + 1;
+    // One source for both consumers below — `WorkProgress` allows a null
+    // phase/message (a future signal may carry only one), but this one always
+    // has both, and `reportProgress` requires non-null.
+    const phase = "working";
+    const message = `working (step ${this._turnCount})`;
+    this._progress = { phase, message, at: Date.now() };
     // A step is starting: real infrastructure activity, and the start of a
     // stretch (model call + tool execution) that can legitimately be silent for
     // minutes — so hold the row alive for as long as the turn is in flight, not
     // just at this instant. `onChatResponse`/`onChatError` end it.
     this.startLiveness();
-    // Turn-counted phase marker so a running run card's status line visibly
-    // advances turn over turn; the streamed transcript carries the
-    // fine-grained detail (drill-in).
-    this._turnCount = (this._turnCount ?? 0) + 1;
-    await this.reportProgress({ phase: "working", message: `working (step ${this._turnCount})` });
+    await this.reportProgress({ phase, message });
     return super.beforeTurn(ctx);
   }
 

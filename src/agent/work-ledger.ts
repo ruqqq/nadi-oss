@@ -223,6 +223,39 @@ export interface WorkRow {
    * column, not a delete.
    */
   clearedAt?: number | null;
+  /**
+   * Last progress signal a `subagent` row's child reported, or
+   * `undefined`/omitted when it has reported none (and always for a `process`
+   * row, which has real output instead).
+   *
+   * Kept HERE rather than read from the SDK on demand, and the reason is a
+   * storage-locality trap worth stating plainly: the SDK's `reportProgress`
+   * persists to `cf_agent_tool_child_runs.progress_json` on the DO where it is
+   * CALLED — the child facet, which has its own storage. `inspectAgentToolRun`
+   * on the PARENT reads the parent's copy of that table, which the parent never
+   * populates (the parent's own agent-tool bookkeeping lives in a different
+   * table, `cf_agent_tool_runs`). Reading it from the parent therefore always
+   * yields nothing, which is exactly how the dock came to show "Waiting for the
+   * first update" forever.
+   *
+   * So the child pushes instead, on the liveness stamp it already sends the
+   * parent every turn (`stampSubagentAlive`) — no extra RPC, and the dock read
+   * stays a local ledger query rather than a cross-DO wake of every running
+   * child on every 5-second poll.
+   */
+  progress?: WorkProgress | null;
+}
+
+/**
+ * A subagent's self-reported progress. `phase` is a coarse machine-ish marker
+ * and `message` the human line; either may be absent, so a consumer must fall
+ * back rather than assume both.
+ */
+export interface WorkProgress {
+  message: string | null;
+  phase: string | null;
+  /** When the child reported it — NOT when the parent stored it. */
+  at: number;
 }
 
 export type WorkClassification =

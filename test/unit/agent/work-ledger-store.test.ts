@@ -372,6 +372,74 @@ describe("WorkLedgerStore: prune", () => {
 });
 
 /**
+ * `stampProgress` — the receiving end of a subagent child's progress push. The
+ * guards mirror `stampAlive`'s, and for the same reasons.
+ */
+describe("WorkLedgerStore: stampProgress", () => {
+  it("stores a progress signal and round-trips it", async () => {
+    await withStore((store) => {
+      store.register(row({ id: "s1", kind: "subagent" }));
+      store.stampProgress("s1", { phase: "working", message: "step 2", at: 5_000 });
+      expect(store.get("s1")!.progress).toEqual({
+        phase: "working",
+        message: "step 2",
+        at: 5_000,
+      });
+    });
+  });
+
+  it("omits progress entirely for a row that never reported one", async () => {
+    await withStore((store) => {
+      store.register(row({ id: "s1", kind: "subagent" }));
+      expect(store.get("s1")!.progress).toBeUndefined();
+    });
+  });
+
+  it("keeps a phase-only signal, which a message-keyed read would drop", async () => {
+    await withStore((store) => {
+      store.register(row({ id: "s1", kind: "subagent" }));
+      store.stampProgress("s1", { phase: "compiling", message: null, at: 5_000 });
+      expect(store.get("s1")!.progress).toEqual({ phase: "compiling", message: null, at: 5_000 });
+    });
+  });
+
+  it("never moves progress backwards", async () => {
+    await withStore((store) => {
+      store.register(row({ id: "s1", kind: "subagent" }));
+      store.stampProgress("s1", { phase: "working", message: "step 9", at: 9_000 });
+      // A stamp that arrives late (the child's 30s timer racing a newer turn's
+      // stamp) must not replace a newer signal with an older one.
+      store.stampProgress("s1", { phase: "working", message: "step 4", at: 4_000 });
+      expect(store.get("s1")!.progress).toMatchObject({ message: "step 9", at: 9_000 });
+    });
+  });
+
+  it("is a no-op on a terminal row", async () => {
+    await withStore((store) => {
+      store.register(row({ id: "s1", kind: "subagent" }));
+      store.terminalize("s1", {
+        outcome: "exited",
+        reason: "process_exit",
+        at: 8_000,
+        detail: "completed",
+      });
+      store.stampProgress("s1", { phase: "working", message: "step 5", at: 9_000 });
+      // A push racing the terminal must not decorate a closed run.
+      expect(store.get("s1")!.progress).toBeUndefined();
+    });
+  });
+
+  it("is a no-op for an unknown id", async () => {
+    await withStore((store) => {
+      expect(() =>
+        store.stampProgress("nope", { phase: "working", message: "step 1", at: 1_000 }),
+      ).not.toThrow();
+      expect(store.get("nope")).toBeNull();
+    });
+  });
+});
+
+/**
  * `listRecent` — the background-work dock's read path. Deliberately not
  * `listOpen()`: the dock's whole gain over the two views it replaces is
  * showing a TERMINAL outcome.
