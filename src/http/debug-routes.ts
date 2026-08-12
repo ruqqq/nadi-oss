@@ -920,9 +920,11 @@ export async function routeDebug(req: Request, env: Env): Promise<Response | nul
   }
 
   // POST /api/debug/work-healthy {threadId, sleepSeconds?} — the FALSE-FAULT
-  // direction: a healthy process that outlives PROCESS_STALE_AFTER_MS (21s) must
-  // stay `alive` and must never be faulted. Enforcement ships live, so this
-  // matters as much as the reset direction. Same money warning as above.
+  // direction: a healthy process that outlives PROCESS_STALE_AFTER_MS (3x the
+  // watcher poll, so 180s today) must stay `alive` and must never be faulted.
+  // Enforcement ships live, so this matters as much as the reset direction.
+  // `sleepSeconds` is clamped UP to outlive that window, so expect a run of
+  // several minutes regardless of what you pass. Same money warning as above.
   if (url.pathname === "/api/debug/work-healthy" && req.method === "POST") {
     const body = (await req.json().catch(() => ({}))) as {
       threadId?: string;

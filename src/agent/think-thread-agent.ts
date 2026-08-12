@@ -3363,15 +3363,26 @@ export class ThinkThreadAgent extends Think<Env> {
    * The other direction, and it matters as much: a HEALTHY long run must NOT be
    * faulted. Enforcement ships live (there is no dark ship), so a false fault
    * would tell the model its files are gone while the work is fine — and the
-   * reaper's `no_liveness` window (21s) is shorter than plenty of real commands.
+   * reaper's `no_liveness` window (`PROCESS_STALE_AFTER_MS`) is shorter than
+   * plenty of real commands.
    *
    * Runs a process PAST `PROCESS_STALE_AFTER_MS` with the watcher polling
    * normally, then asserts three things the fake cannot: the row is still open
    * after the stale window, the watcher's polls actually STAMPED it (an unstamped
-   * row is faulted at 21s — this is the false-fault mechanism), and the clean
-   * exit closes the row as `process_exit` with no fault message delivered.
+   * row is faulted once `PROCESS_STALE_AFTER_MS` passes — this is the false-fault
+   * mechanism), and the clean exit closes the row as `process_exit` with no fault
+   * message delivered.
    *
-   * ⚠️ Boots a REAL container that costs money. Self-cleans. Never loop it.
+   * The sleep is CLAMPED UP to outlive the stale window, and the bound is
+   * derived from `PROCESS_STALE_AFTER_MS` rather than written out: it was a
+   * literal `25..120`, and widening the watcher poll (which
+   * `PROCESS_STALE_AFTER_MS` is 3x of) moved the window to 180s — past the
+   * clamp's own ceiling, so the process always exited before step 3 could
+   * check the row and the probe silently stopped proving anything.
+   *
+   * ⚠️ Boots a REAL container that costs money, and now runs for over three
+   * minutes because the window it must outlive is that long. Self-cleans.
+   * Never loop it.
    */
   async debugWorkHealthy(sleepSeconds = 30): Promise<{
     provider: string;
@@ -3392,8 +3403,13 @@ export class ThinkThreadAgent extends Think<Env> {
       steps.push({ step: name, ok, detail });
     };
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-    // Must outlive the 21s stale window, or the run proves nothing.
-    const seconds = Math.min(Math.max(Math.round(sleepSeconds), 25), 120);
+    // Must outlive the stale window AND the moment step 3 reads the row
+    // (`PROCESS_STALE_AFTER_MS + 6s`, below), or the run proves nothing —
+    // so both ends of the clamp are derived from that, never from a literal.
+    // The floor is the check point plus slack for start-up and the exit poll;
+    // the ceiling only exists to stop a caller booking an hour of container.
+    const minSeconds = Math.ceil((PROCESS_STALE_AFTER_MS + 6_000) / 1_000) + 15;
+    const seconds = Math.min(Math.max(Math.round(sleepSeconds), minSeconds), minSeconds * 2);
 
     let processId = "";
     let generation: string | null = null;
