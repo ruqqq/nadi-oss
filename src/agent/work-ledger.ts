@@ -5,10 +5,31 @@
  *
  * The enforcement property lives in the caller (the reaper): classification
  * reads the row, never the backend, so a dead sandbox cannot wedge the sweep.
+ *
+ * This module is deliberately dependency-free of anything I/O-adjacent — see
+ * `ProcessStatus` below, duplicated from the store's type rather than
+ * imported. `DEFAULT_MONITOR_POLL_INTERVAL_MS` is the one exception: it comes
+ * from `compute/watchers.ts`, which is equally pure (no imports of its own,
+ * so pulling it in here creates no cycle), and importing it is exactly what
+ * keeps `PROCESS_STALE_AFTER_MS` from drifting off the cadence it is defined
+ * against.
  */
+import { DEFAULT_MONITOR_POLL_INTERVAL_MS } from "../compute/watchers";
 
-/** Silence threshold for a watched process: 3x the 7s watcher poll interval. */
-export const PROCESS_STALE_AFTER_MS = 21_000;
+/**
+ * Silence threshold for a watched process: 3x the watcher poll interval.
+ * Derived, not restated — see this module's doc comment for why the import is
+ * safe, and `DEFAULT_MONITOR_POLL_INTERVAL_MS`'s own doc for why 3x matters
+ * (a poll widened without this moving in lockstep faults every backgrounded
+ * process one poll after it starts).
+ *
+ * Stored per row at registration (`buildProcessWorkRow`), so a change here
+ * only affects NEW rows — existing open rows keep whatever threshold they
+ * were registered with. That is a deliberate, accepted gap: no migration
+ * exists or is needed, since an open row's own `staleAfterMs` is exactly the
+ * value `classifyWork` uses for it (see `WorkRow.staleAfterMs`).
+ */
+export const PROCESS_STALE_AFTER_MS = DEFAULT_MONITOR_POLL_INTERVAL_MS * 3;
 
 /**
  * Silence threshold for a subagent run. A child step can legitimately be a long

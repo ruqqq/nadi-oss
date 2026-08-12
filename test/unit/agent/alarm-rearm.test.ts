@@ -14,6 +14,7 @@ import { DEFAULT_COMPUTE_LIMITS } from "../../../src/compute/config";
 import { ThreadComputeService } from "../../../src/compute/thread-service";
 import type { ThreadComputeStoreLike } from "../../../src/compute/thread-service";
 import type { EffectiveComputeConfig } from "../../../src/compute/types";
+import { DEFAULT_MONITOR_POLL_INTERVAL_MS } from "../../../src/compute/watchers";
 import { createMemoryComputeStore } from "../compute/helpers/memory-store";
 
 /**
@@ -61,7 +62,13 @@ const CONFIG: EffectiveComputeConfig = {
   idleTimeoutMs: 60_000,
   recoveryTtlMs: 5_000,
   maxProcessRuntimeMs: 600_000,
-  monitorPollIntervalMs: 7_000,
+  // Mirrors production (`resolveEffectiveComputeConfig` in compute/config.ts):
+  // the watcher's own registered cadence and the rearm gate's fallback floor
+  // (`DEFAULT_MONITOR_POLL_INTERVAL_MS`, read directly by
+  // `ThinkThreadAgent.runSandboxEviction`) are the SAME value in production.
+  // A hardcoded literal here drifted from that constant once already (see
+  // "floors a watcher whose nextPollAt is already PAST" below).
+  monitorPollIntervalMs: DEFAULT_MONITOR_POLL_INTERVAL_MS,
   limits: DEFAULT_COMPUTE_LIMITS,
   allowedHosts: null,
   editableEnv: {},
@@ -470,18 +477,19 @@ describe("runSandboxEviction re-arm gate", () => {
 
     const started = await service.execStart({ command: "sleep 600", label: "long" });
     await service.execWatch({ processId: started.processId });
-    // nextPollAt = 1_000 + monitorPollIntervalMs = 8_000.
+    // nextPollAt = 1_000 + monitorPollIntervalMs.
 
     scheduleEviction.mockClear();
     failRefresh.value = true;
-    // The write has been failing for a while: nextPollAt (8_000) is now
-    // well BEHIND `now` — nothing ever advanced it.
-    now.value = 40_000;
+    // The write has been failing for a while: nextPollAt is now well BEHIND
+    // `now` — nothing ever advanced it. Must clear nextPollAt
+    // (1_000 + monitorPollIntervalMs) by a wide margin.
+    now.value = 1_000 + CONFIG.monitorPollIntervalMs * 2;
 
     await runSandboxEviction.call(agent);
 
-    // Must NOT re-arm at the past 8_000 (immediate refire, forever, while the
-    // write stays down) — floors to now + one poll interval instead.
+    // Must NOT re-arm at the past nextPollAt (immediate refire, forever, while
+    // the write stays down) — floors to now + one poll interval instead.
     expect(scheduleEviction).toHaveBeenCalledTimes(1);
     expect(scheduleEviction).toHaveBeenCalledWith(now.value + CONFIG.monitorPollIntervalMs);
   });

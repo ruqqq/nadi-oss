@@ -14,7 +14,10 @@ function row(overrides?: Partial<WorkRow>): WorkRow {
     startedAt: 0,
     lastAliveAt: 1_000,
     staleAfterMs: PROCESS_STALE_AFTER_MS,
-    deadlineAt: 100_000,
+    // Comfortably past every default-deadline test's `now` even at the widened
+    // PROCESS_STALE_AFTER_MS (3x a 60s poll, not the old 3x7s) — otherwise the
+    // deadline fires before the staleness path these tests mean to exercise.
+    deadlineAt: 10_000_000,
     generation: "gen-a",
     terminal: null,
     deliveredAt: null,
@@ -222,8 +225,8 @@ describe("nextSweepAt", () => {
 
   it("returns the earliest of every open row's stale and deadline horizons", () => {
     const rows = [
-      row({ id: "a", lastAliveAt: 1_000, deadlineAt: 100_000 }),
-      row({ id: "b", lastAliveAt: 500, deadlineAt: 100_000 }),
+      row({ id: "a", lastAliveAt: 1_000, deadlineAt: 10_000_000 }),
+      row({ id: "b", lastAliveAt: 500, deadlineAt: 10_000_000 }),
     ];
     expect(nextSweepAt(rows)).toBe(500 + PROCESS_STALE_AFTER_MS);
   });
@@ -240,7 +243,7 @@ describe("nextSweepAt", () => {
         deadlineAt: 5,
         terminal: { outcome: "exited", reason: "process_exit", at: 5, detail: "" },
       }),
-      row({ id: "b", lastAliveAt: 1_000, deadlineAt: 100_000 }),
+      row({ id: "b", lastAliveAt: 1_000, deadlineAt: 10_000_000 }),
     ];
     expect(nextSweepAt(rows)).toBe(1_000 + PROCESS_STALE_AFTER_MS);
   });

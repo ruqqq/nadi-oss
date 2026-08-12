@@ -2736,6 +2736,38 @@ export class ThreadComputeService {
     return JSON.stringify(state.runtimeRef) === JSON.stringify(runtime);
   }
 
+  /**
+   * The watcher poll's status read. Uses `ComputeBackend.buildBackstopProbe`
+   * — a single exec that reads the rc sentinel AND re-asserts `workHold` —
+   * when the backend declares one, INSTEAD of `getProcessStatus`, not
+   * alongside it: adding a second call here would double the round-trips
+   * this exact widening (7s poll -> 60s backstop) was meant to justify, and
+   * on sprites every exec risks waking a hibernated VM. Backends without the
+   * capability (no hold to reassert, e.g. Cloudflare, or none of the above,
+   * e.g. tests) fall back to the plain read.
+   *
+   * See `ComputeBackend.buildBackstopProbe`'s doc for the accepted trade:
+   * this cannot tell "still running" from "died without recording an exit"
+   * the way `getProcessStatus`'s session check can, so that case is bounded
+   * by the watcher's absolute timeout instead of being caught sooner.
+   */
+  private async pollProcessStatus(
+    runtime: BackendReference,
+    process: BackendProcessReference,
+  ): Promise<ProcessStatus> {
+    const backend = this.deps.backend;
+    const buildProbe = backend.buildBackstopProbe;
+    if (!buildProbe || !backend.runCommand) {
+      return backend.getProcessStatus(runtime, process);
+    }
+    const result = await backend.runCommand(runtime, {
+      command: buildProbe(process),
+      timeoutMs: 10_000,
+    });
+    const exitCode = parseBackstopRc(result.stdout);
+    return exitCode === undefined ? { status: "running" } : { status: "exited", exitCode };
+  }
+
   private async pollWatcher(
     watcher: WatcherRow,
     runtime: BackendReference,
@@ -2746,7 +2778,7 @@ export class ThreadComputeService {
       this.deps.store.deleteWatcher(watcher.processId);
       return false;
     }
-    const status = await this.deps.backend.getProcessStatus(runtime, process.backendProcessRef);
+    const status = await this.pollProcessStatus(runtime, process.backendProcessRef);
     // Stamp only AFTER a successful read. A failed poll must not stamp — that
     // is exactly what lets the reaper reap a watcher whose backend has gone
     // away, without this error path having to cooperate.
@@ -3159,4 +3191,18 @@ function validateComputePath(value: string): string {
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Parses `ComputeBackend.buildBackstopProbe`'s stdout: the FIRST LINE is the
+ * rc sentinel's raw text. Preserves the same "unparsable means no answer"
+ * contract `readRcOnce` (sprites.ts) applies to its own sentinel reads — an
+ * empty read, a partial write caught mid-flight, or anything that isn't a
+ * bare integer must never be mistaken for exit code 0.
+ */
+function parseBackstopRc(stdout: string): number | undefined {
+  const firstLine = (stdout.split("\n")[0] ?? "").trim();
+  if (!/^-?\d+$/.test(firstLine)) return undefined;
+  const code = Number.parseInt(firstLine, 10);
+  return Number.isSafeInteger(code) ? code : undefined;
 }

@@ -9,8 +9,22 @@
 /** Hard cap on the number of watchers a single thread may register at once. */
 export const MAX_WATCHERS_PER_THREAD = 8;
 
-/** Default poll cadence for watched processes, in milliseconds. */
-export const DEFAULT_MONITOR_POLL_INTERVAL_MS = 7000;
+/**
+ * Poll cadence for watched processes, in milliseconds.
+ *
+ * Was 7s when the poll WAS the delivery mechanism for a background process's
+ * completion. It no longer is: the sandbox wrapper pushes completion straight
+ * to `POST /api/compute/completion` on both remaining providers (sprites,
+ * Cloudflare), so this poll's only job now is to catch a lost callback and to
+ * re-assert a hold the sandbox may have dropped (see `pollWatcher` in
+ * `thread-service.ts`). 60s reflects that demotion.
+ *
+ * `PROCESS_STALE_AFTER_MS` (agent/work-ledger.ts) is DERIVED from this value
+ * (3x), not restated, precisely so the two cannot drift apart again — a
+ * widened poll against the old fixed threshold faulted every backgrounded
+ * process one poll after it started.
+ */
+export const DEFAULT_MONITOR_POLL_INTERVAL_MS = 60_000;
 
 export interface WatcherRow {
   processId: string;

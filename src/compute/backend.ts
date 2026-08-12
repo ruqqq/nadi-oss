@@ -220,6 +220,42 @@ export interface ComputeBackend {
     refreshFor(process: BackendProcessReference): string;
     releaseFor(process: BackendProcessReference): string;
   };
+  /**
+   * One shell command that answers the same question the watcher poll needs
+   * (has this process recorded an exit yet?) and, in the same breath,
+   * re-asserts `workHold` for it. Optional, and meaningful only alongside
+   * `workHold`: a backend with no hold has nothing to reassert, and
+   * `ThreadComputeService.pollWatcher` falls back to plain
+   * `getProcessStatus` when this is absent.
+   *
+   * Exists because a lost hold (its in-sandbox refresher died) is invisible
+   * from the Worker — the Tasks API `workHold` talks to is reachable only
+   * from inside the sandbox — and presents as work that simply never
+   * finishes. The periodic poll is the only thing that can notice and repair
+   * it, and it must not pay for that repair with a second round trip: on
+   * sprites, every exec risks waking a hibernated VM.
+   *
+   * Contract for the returned command's stdout: the FIRST LINE is the rc
+   * sentinel's raw text, exactly as `getProcessStatus`'s own sentinel read
+   * would produce — an integer string means that exit code, and anything
+   * else (empty, partial, absent) means "no answer yet", the same "never
+   * exit code 0" rule `readRcOnce` already applies.
+   *
+   * When this is present, `pollWatcher` uses it INSTEAD of `getProcessStatus`
+   * for the poll's status read, not alongside it, precisely to keep the
+   * common "still running" poll at one exec rather than the two-plus a
+   * separate hold reassertion would cost. The accepted trade: this probe
+   * cannot distinguish "still running" from "died without ever recording an
+   * exit" (no rc, no session check) the way `getProcessStatus` can — an
+   * unparsable first line always reads as `"running"`. A process that dies
+   * that way is still bounded by the watcher's own absolute timeout
+   * (`WATCH_ABSOLUTE_TIMEOUT_MS`), so it is a slower fault, not a silent one.
+   *
+   * `process` is a `BackendProcessReference`, never a caller-built string —
+   * the backend owns the naming scheme for both the hold and its own
+   * sentinel path, same reasoning as `workHold` above.
+   */
+  buildBackstopProbe?(process: BackendProcessReference): string;
   acquire(spec: ComputeSpec, recovery?: BackendReference): Promise<BackendReference>;
   release(runtime: BackendReference, options: ReleaseOptions): Promise<BackendReference | null>;
   destroy(reference: BackendReference): Promise<void>;

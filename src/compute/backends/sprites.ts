@@ -301,6 +301,22 @@ export class SpritesComputeBackend implements ComputeBackend {
       return `curl -sf --unix-socket ${SPRITE_SOCK} -X DELETE http://sprite/v1/tasks/${holdId} >/dev/null 2>&1`;
     },
   };
+
+  /**
+   * Documented in `ComputeBackend.buildBackstopProbe`. One exec, two jobs:
+   * read the rc sentinel (same path `startProcess`/`readRcOnce` use) and
+   * re-assert the hold, so `pollWatcher` never pays for the reassert with a
+   * second round trip.
+   *
+   * `acquireFor` is safe to re-run: it 409s when the task already exists,
+   * which its own `-sf` turns into a non-zero exit that `|| true` swallows
+   * here (the fragment already redirects its own stdout/stderr, so nothing
+   * from the curl leaks into the `cat` output this method's caller parses).
+   */
+  buildBackstopProbe = (process: BackendProcessReference): string => {
+    const rcPath = sentinelPath("rc", this.processPayload(process).processId);
+    return `cat ${rcPath} 2>/dev/null || true; ${this.workHold.acquireFor(process)} || true`;
+  };
   private readonly client: SpritesClient;
   /**
    * The runtime's environment, carried on EVERY exec.
