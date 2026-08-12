@@ -73,7 +73,11 @@ export class FakeComputeBackend implements ComputeBackend {
     recovery: BackendReference | null;
   }> = [];
   readonly destroyCalls: BackendReference[] = [];
-  readonly startProcessCalls: Array<{ command: string; cwd?: string }> = [];
+  readonly startProcessCalls: Array<{
+    command: string;
+    cwd?: string;
+    completionCallback?: string;
+  }> = [];
   readonly runCommandCalls: Array<{ command: string; cwd?: string }> = [];
   readonly writeFileCalls: Array<{ path: string }> = [];
   readonly movePathCalls: Array<{ from: string; to: string }> = [];
@@ -643,6 +647,9 @@ export class FakeComputeBackend implements ComputeBackend {
     this.startProcessCalls.push({
       command: input.command,
       ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+      ...("completionCallback" in input && input.completionCallback !== undefined
+        ? { completionCallback: input.completionCallback }
+        : {}),
     });
     this.processSeq += 1;
     const processId = `fake_proc_${this.processSeq}`;

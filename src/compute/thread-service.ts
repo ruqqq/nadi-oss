@@ -2,6 +2,7 @@ import type {
   BackendProcessReference,
   BackendReference,
   ComputeBackend,
+  ComputeProviderId,
   ComputeSpec,
   ProcessStatus,
   StopMode,
@@ -76,6 +77,51 @@ const ACQUIRE_DEADLINE_MS = 25_000;
  * "tidy" this back down without re-reading that teardown path.
  */
 const COMPLETION_CALLBACK_CURL_TIMEOUT_SECS = 25;
+
+/**
+ * Extra margin added on top of whatever budget actually bounds a process's
+ * completion callback's `exp`, covering the time between the wrapper's rc
+ * write and the callback's own delivery (queueing, a slow `curl`, clock
+ * skew). Not itself a timeout on anything.
+ */
+const COMPLETION_TOKEN_MARGIN_MS = 300_000;
+
+/**
+ * Backend ids that run a process on genuinely separate infrastructure a
+ * completion callback would need to reach over the network — as opposed to
+ * `"mock"`/`"fake"`, which execute entirely in-process and never curl
+ * anywhere, so neither the loopback-origin guard nor the "refuse to
+ * background without a callback" rule (see `shouldRefuseBackgrounding`)
+ * applies to them: refusing would change real test/dev behavior for a
+ * backend that never needed the push mechanism to begin with.
+ */
+const REMOTE_PROVIDER_IDS: ReadonlySet<ComputeProviderId> = new Set([
+  "sprites",
+  "cloudflare",
+  "daytona",
+]);
+
+/**
+ * Hostnames a completion callback fired from INSIDE a remote sandbox can
+ * never reach, even though `APP_BASE_URL` is non-empty for local dev
+ * (`http://localhost:8787`) — a curl from inside a sprite or Cloudflare
+ * container never routes back to the developer's own laptop. An unparsable
+ * origin is treated the same way: it cannot be reached either.
+ */
+function isUnreachableFromASandbox(origin: string): boolean {
+  let hostname: string;
+  try {
+    hostname = new URL(origin).hostname;
+  } catch {
+    return true;
+  }
+  return (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    hostname === "0.0.0.0"
+  );
+}
 
 /**
  * Rejects with `onTimeout()` if `promise` has not settled within `ms`.
@@ -509,7 +555,23 @@ export class ThreadComputeService {
     label?: string | undefined;
   }): Promise<ExecResult> {
     await this.deps.markSandboxDirty?.();
-    if (this.deps.backgroundLongRunningExec === false) {
+    const refuseReason = this.shouldRefuseBackgrounding()
+      ? this.completionCallbackUnavailableReason()
+      : null;
+    if (this.deps.backgroundLongRunningExec === false || refuseReason !== null) {
+      if (refuseReason !== null) {
+        // A callback to nowhere is silent loss, and for a remote provider the
+        // poll/watcher path is not a substitute (see `shouldRefuseBackgrounding`).
+        // Logged exactly HERE, once per exec call that this actually changes
+        // the behavior of — never in `buildCompletionCallback`, which runs for
+        // every process start including ones (mock/fake, execStart) this rule
+        // never applies to.
+        log.warn("compute.background_refused_no_callback", {
+          threadId: this.deps.threadId,
+          provider: this.deps.backend.id,
+          reason: refuseReason,
+        });
+      }
       if (this.deps.backend.waitForProcessExit) {
         return this.runCancellableExecToCompletion(input);
       }
@@ -700,13 +762,63 @@ export class ThreadComputeService {
     return this.ensureRuntime();
   }
 
+  /** Whether this service's backend runs on infrastructure a completion
+   *  callback would need to reach over the network. See `REMOTE_PROVIDER_IDS`. */
+  private isRemoteProvider(): boolean {
+    return REMOTE_PROVIDER_IDS.has(this.deps.backend.id);
+  }
+
+  /**
+   * Why `buildCompletionCallback` cannot produce a fragment right now, or
+   * `null` when it can. Pure and synchronous — every input is already known
+   * without minting a token — so `exec()` can consult it to decide whether a
+   * process may background at all, without paying for a signature it would
+   * throw away.
+   *
+   * The loopback check is scoped to `isRemoteProvider()` deliberately: local
+   * dev sets `APP_BASE_URL` to `http://localhost:8787`, which is non-empty
+   * but unreachable from inside a real sandbox — and equally irrelevant for
+   * `"mock"`/`"fake"`, which never leave this process to begin with.
+   */
+  private completionCallbackUnavailableReason():
+    | "no_base_url"
+    | "no_secret"
+    | "no_thread_id"
+    | "unreachable_base_url"
+    | null {
+    if (!this.deps.appBaseUrl) return "no_base_url";
+    if (!this.deps.betterAuthSecret) return "no_secret";
+    if (!this.deps.threadId) return "no_thread_id";
+    if (this.isRemoteProvider() && isUnreachableFromASandbox(this.deps.appBaseUrl)) {
+      return "unreachable_base_url";
+    }
+    return null;
+  }
+
+  /**
+   * A callback to nowhere is silent loss, and for a REMOTE backend the
+   * poll/watcher path is not a substitute for it (see the module's design
+   * doc) — so a process that cannot carry a completion callback must not be
+   * allowed to background at all; it runs to completion synchronously
+   * instead. Never true for `"mock"`/`"fake"`: those backends never needed a
+   * callback, and forcing them synchronous would change test/dev behavior
+   * that has nothing to do with this mechanism.
+   */
+  private shouldRefuseBackgrounding(): boolean {
+    return this.isRemoteProvider() && this.completionCallbackUnavailableReason() !== null;
+  }
+
   /**
    * A complete shell fragment a backend's wrapper can run to report this
    * process's exit code back to `/api/compute/completion` — see
    * `StartProcessInput.completionCallback`. Returns `undefined` (never
    * throws) when there is nowhere to call back to or nothing to sign with, so
    * the caller degrades to "no callback" rather than failing the process
-   * start.
+   * start. Logging is `exec()`'s job (`shouldRefuseBackgrounding`'s caller) —
+   * this method fires for EVERY process start, including `execStart`/`execRun`
+   * and every direct-construction test, so logging here would be pure noise
+   * for the common "no `appBaseUrl` configured at all" case that changes
+   * nothing for `"mock"`/`"fake"`.
    *
    * The fragment references `$NADI_EXIT_CODE` rather than embedding a value:
    * this method runs BEFORE the process exists, let alone finishes, so only
@@ -714,18 +826,21 @@ export class ThreadComputeService {
    * rc sentinel) — can supply the actual recorded value. See
    * `buildSpritesWrapper`'s doc for the consuming side of that contract.
    *
-   * `exp` is generous (the full watch window plus margin) because the work
-   * may legitimately run that long before the wrapper ever reaches this
-   * fragment.
+   * `exp` covers whichever is larger of the watch window or this PROCESS's
+   * own timeout: `maxProcessRuntimeMs` is configurable up to 24h, and a
+   * token that only covered the (1h05) watch window would expire out from
+   * under a long-running build, turning its eventual completion into a 401 —
+   * the exact silent-loss failure this mechanism exists to remove, just
+   * relocated to the token instead of the callback.
    */
-  private async buildCompletionCallback(processId: string): Promise<string | undefined> {
-    const appBaseUrl = this.deps.appBaseUrl;
-    const betterAuthSecret = this.deps.betterAuthSecret;
-    const threadId = this.deps.threadId;
-    if (!appBaseUrl || !betterAuthSecret || !threadId) {
-      log.warn("compute.no_callback_base_url", { threadId, processId });
-      return undefined;
-    }
+  private async buildCompletionCallback(
+    processId: string,
+    timeoutMs: number,
+  ): Promise<string | undefined> {
+    if (this.completionCallbackUnavailableReason() !== null) return undefined;
+    const appBaseUrl = this.deps.appBaseUrl!;
+    const betterAuthSecret = this.deps.betterAuthSecret!;
+    const threadId = this.deps.threadId!;
     if (!this.completionSecretPromise) {
       this.completionSecretPromise = deriveCompletionSecret(betterAuthSecret);
     }
@@ -733,7 +848,7 @@ export class ThreadComputeService {
     const token = await signCompletionToken(secret, {
       threadId,
       processId,
-      exp: this.deps.now() + MAX_WATCH_TIMEOUT_MS + 300_000,
+      exp: this.deps.now() + Math.max(timeoutMs, MAX_WATCH_TIMEOUT_MS) + COMPLETION_TOKEN_MARGIN_MS,
     });
     const origin = appBaseUrl.replace(/\/$/, "");
     return (
@@ -756,17 +871,18 @@ export class ThreadComputeService {
     // Default to the workspace root so a relative path means the same thing to
     // exec and to read_file; an explicitly-passed cwd is never overridden.
     const cwd = input.cwd ?? WORKSPACE_ROOT;
-    const completionCallback = await this.buildCompletionCallback(processId);
+    const timeoutMs = Math.min(
+      input.timeoutMs ?? this.deps.config.maxProcessRuntimeMs,
+      this.deps.config.maxProcessRuntimeMs,
+    );
+    const completionCallback = await this.buildCompletionCallback(processId, timeoutMs);
     const startInput = {
       command: input.command,
       cwd,
       ...(input.env === undefined ? {} : { env: input.env }),
       ...(input.stdin === undefined ? {} : { stdin: input.stdin }),
       ...(completionCallback === undefined ? {} : { completionCallback }),
-      timeoutMs: Math.min(
-        input.timeoutMs ?? this.deps.config.maxProcessRuntimeMs,
-        this.deps.config.maxProcessRuntimeMs,
-      ),
+      timeoutMs,
     };
     let result;
     try {
