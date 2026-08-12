@@ -169,29 +169,6 @@ export interface ComputeBackend {
    */
   readonly nativeIdleSuspend?: boolean;
   /**
-   * Shell fragments that pin the runtime awake while background work runs, and
-   * release it afterwards.
-   *
-   * A NEW BACKEND MUST DECIDE THIS. Absent means "this provider executes while
-   * idle", which is not a neutral default: a provider that starves idle work and
-   * omits this will make no progress on every backgrounded command, and will
-   * report the starvation as a `watch_timeout` an hour later. Measured on
-   * sprites.dev 2026-08-12: 2% duty cycle unheld, 99% held.
-   *
-   * Fragments rather than methods because the only place a hold can be taken on
-   * sprites is INSIDE the sandbox — its Tasks API is served on a unix socket the
-   * Worker cannot reach, and the public REST surface has no tasks resource.
-   *
-   * Keyed by the `BackendProcessReference` `startProcess` returns, NOT by a
-   * caller-chosen id: the hold name must be derivable from whatever identifies
-   * the process to THIS provider, and only the provider knows what that is (on
-   * sprites it is the same uuid the wrapper's sentinel files are keyed by). A
-   * provider-neutral caller (`ThreadComputeService`) must never compute a
-   * provider-specific hold name itself — that would mean importing a concrete
-   * backend module from the neutral layer, which is exactly the layering
-   * violation this shape avoids.
-   */
-  /**
    * Whether this backend actually assembles `StartProcessInput.completionCallback`
    * into what it runs. Absent means the field is silently ignored, so a missing
    * or unreachable callback origin is NOT a reason to refuse backgrounding here
@@ -215,6 +192,29 @@ export interface ComputeBackend {
    * reachable origin anyway.
    */
   readonly consumesCompletionCallback?: boolean;
+  /**
+   * Shell fragments that pin the runtime awake while background work runs, and
+   * release it afterwards.
+   *
+   * A NEW BACKEND MUST DECIDE THIS. Absent means "this provider executes while
+   * idle", which is not a neutral default: a provider that starves idle work and
+   * omits this will make no progress on every backgrounded command, and will
+   * report the starvation as a `watch_timeout` an hour later. Measured on
+   * sprites.dev 2026-08-12: 2% duty cycle unheld, 99% held.
+   *
+   * Fragments rather than methods because the only place a hold can be taken on
+   * sprites is INSIDE the sandbox — its Tasks API is served on a unix socket the
+   * Worker cannot reach, and the public REST surface has no tasks resource.
+   *
+   * Keyed by the `BackendProcessReference` `startProcess` returns, NOT by a
+   * caller-chosen id: the hold name must be derivable from whatever identifies
+   * the process to THIS provider, and only the provider knows what that is (on
+   * sprites it is the same uuid the wrapper's sentinel files are keyed by). A
+   * provider-neutral caller (`ThreadComputeService`) must never compute a
+   * provider-specific hold name itself — that would mean importing a concrete
+   * backend module from the neutral layer, which is exactly the layering
+   * violation this shape avoids.
+   */
   readonly workHold?: {
     acquireFor(process: BackendProcessReference): string;
     refreshFor(process: BackendProcessReference): string;
