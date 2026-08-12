@@ -18,6 +18,13 @@ export type BackgroundWorkReason =
 
 export type BackgroundWorkOutputStream = "stdout" | "stderr";
 
+/** The SDK terminal status a `subagent` row carries. A subagent's `outcome`
+ *  cannot express this: `error` and `interrupted` both arrive as `"exited"`,
+ *  so this is the ONLY field that separates a completed subagent from a
+ *  crashed one. `null` on every `process` row, and on a subagent row whose
+ *  status the server didn't recognize. */
+export type SubagentTerminalStatus = "completed" | "error" | "aborted" | "interrupted";
+
 /** The closed set `cancelBackgroundWork` returns in `reason` when `ok:false`
  *  — the client switches on this, never on raw error text. */
 export type BackgroundWorkCancelReason =
@@ -41,10 +48,16 @@ export interface BackgroundWorkRow {
   kind: BackgroundWorkKind;
   label: string | null;
   startedAt: number;
+  /** Last `reportProgress` signal of a RUNNING subagent, from the SDK's
+   * durable child-run row — so it is present regardless of when this client
+   * connected. `null` for a process row, a finished row, and a subagent that
+   * hasn't reported yet. */
+  progress: { message: string | null; phase: string | null; at: number } | null;
   terminal: {
     outcome: BackgroundWorkOutcome;
     reason: BackgroundWorkReason;
     exitCode: number | null;
+    subagentStatus: SubagentTerminalStatus | null;
     /** Wall-clock time the ledger recorded this row as terminal
      * (`WorkTerminal.at`) — the sheet derives a finished row's duration from
      * `at - startedAt`, NOT from wall-clock-now, so a reload doesn't reset
@@ -52,6 +65,47 @@ export interface BackgroundWorkRow {
      * sheet". */
     at: number;
   } | null;
+}
+
+const SUBAGENT_TERMINAL_STATUSES: readonly string[] = [
+  "completed",
+  "error",
+  "aborted",
+  "interrupted",
+];
+
+/**
+ * Did this row finish successfully? Kind-aware, and it MUST be: the two kinds
+ * disagree about what an absent exit code means. A process with no code is an
+ * unconfirmed exit (never clean); a subagent NEVER has a code, so the same
+ * test called every finished subagent a failure — the bug this function
+ * exists to prevent recurring. A subagent's success lives in
+ * `subagentStatus`, whose absence is likewise unconfirmed, never clean.
+ *
+ * Shared by both surfaces (the dock summary row and the sheet) so the two can
+ * never drift into disagreeing about whether a task failed.
+ */
+export function isBackgroundWorkClean(row: BackgroundWorkRow): boolean {
+  if (row.terminal === null) return false;
+  if (row.kind === "subagent") return row.terminal.subagentStatus === "completed";
+  return row.terminal.outcome === "exited" && row.terminal.exitCode === 0;
+}
+
+/**
+ * Did this row finish UNsuccessfully? Deliberately not `!isClean`: a row with
+ * no confirmed outcome (a process with no exit code, a subagent with an
+ * unrecognized status) is neither, and calling it a failure would cry wolf on
+ * every degraded status read. Callers with only two buckets must decide which
+ * side "unconfirmed" belongs on themselves.
+ */
+export function isBackgroundWorkFailed(row: BackgroundWorkRow): boolean {
+  if (row.terminal === null) return false;
+  if (row.kind === "subagent") {
+    const status = row.terminal.subagentStatus;
+    return status !== null && status !== "completed";
+  }
+  if (row.terminal.outcome !== "exited") return true; // stopped | timeout | fault
+  return row.terminal.exitCode !== null && row.terminal.exitCode !== 0;
 }
 
 export interface BackgroundWorkOutput {
@@ -73,12 +127,31 @@ export function isBackgroundWorkRow(value: unknown): value is BackgroundWorkRow 
   if (typeof row.id !== "string") return false;
   if (row.kind !== "process" && row.kind !== "subagent") return false;
   if (typeof row.startedAt !== "number") return false;
+  if (row.progress !== null) {
+    if (typeof row.progress !== "object") return false;
+    const progress = row.progress as Record<string, unknown>;
+    if (typeof progress.message !== "string" && progress.message !== null) return false;
+    if (typeof progress.phase !== "string" && progress.phase !== null) return false;
+    if (typeof progress.at !== "number") return false;
+  }
   if (row.terminal !== null) {
     if (typeof row.terminal !== "object") return false;
     const terminal = row.terminal as Record<string, unknown>;
     if (typeof terminal.outcome !== "string") return false;
     if (typeof terminal.reason !== "string") return false;
     if (typeof terminal.exitCode !== "number" && terminal.exitCode !== null) return false;
+    // Rejected rather than coerced to null: a subagent row whose status field
+    // is missing entirely means an OLD server is answering a new client, and
+    // `isBackgroundWorkClean` would read that absence as "not completed" —
+    // silently mislabelling every successful subagent as it did before this
+    // field existed. Dropping the row shows nothing, which is visibly wrong
+    // rather than confidently wrong.
+    if (
+      terminal.subagentStatus !== null &&
+      !SUBAGENT_TERMINAL_STATUSES.includes(terminal.subagentStatus as string)
+    ) {
+      return false;
+    }
     if (typeof terminal.at !== "number") return false;
   }
   return true;

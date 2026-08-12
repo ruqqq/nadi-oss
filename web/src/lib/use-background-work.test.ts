@@ -15,6 +15,7 @@ describe("isBackgroundWorkRow", () => {
     kind: "process",
     label: "make build",
     startedAt: 1_000,
+    progress: null,
     terminal: null,
   };
 
@@ -23,7 +24,14 @@ describe("isBackgroundWorkRow", () => {
     kind: "process",
     label: "make build",
     startedAt: 1_000,
-    terminal: { outcome: "exited", reason: "process_exit", exitCode: 7, at: 8_000 },
+    progress: null,
+    terminal: {
+      outcome: "exited",
+      reason: "process_exit",
+      exitCode: 7,
+      subagentStatus: null,
+      at: 8_000,
+    },
   };
 
   it("accepts a running row", () => {
@@ -51,6 +59,47 @@ describe("isBackgroundWorkRow", () => {
   it("rejects a terminal row with `at` missing entirely", () => {
     const { at: _at, ...terminalWithoutAt } = finishedRow.terminal;
     expect(isBackgroundWorkRow({ ...finishedRow, terminal: terminalWithoutAt })).toBe(false);
+  });
+
+  it("accepts a subagent row carrying its terminal status", () => {
+    expect(
+      isBackgroundWorkRow({
+        ...finishedRow,
+        kind: "subagent",
+        terminal: { ...finishedRow.terminal, exitCode: null, subagentStatus: "completed" },
+      }),
+    ).toBe(true);
+  });
+
+  it("rejects a terminal row with subagentStatus missing entirely", () => {
+    // An OLD server answering a NEW client. `isBackgroundWorkClean` reads an
+    // absent status as "not completed", which is precisely how every finished
+    // subagent came to be labelled a failure — so the row must be dropped
+    // (visibly wrong) rather than admitted (confidently wrong).
+    const { subagentStatus: _s, ...terminalWithoutStatus } = finishedRow.terminal;
+    expect(isBackgroundWorkRow({ ...finishedRow, terminal: terminalWithoutStatus })).toBe(false);
+  });
+
+  it("rejects a terminal row whose subagentStatus is not a known status", () => {
+    expect(
+      isBackgroundWorkRow({
+        ...finishedRow,
+        terminal: { ...finishedRow.terminal, subagentStatus: "finished" },
+      }),
+    ).toBe(false);
+  });
+
+  it("accepts a progress snapshot and rejects a malformed one", () => {
+    expect(
+      isBackgroundWorkRow({
+        ...runningRow,
+        kind: "subagent",
+        progress: { message: "working (step 2)", phase: null, at: 5_000 },
+      }),
+    ).toBe(true);
+    expect(isBackgroundWorkRow({ ...runningRow, progress: { message: "x", phase: null } })).toBe(
+      false,
+    );
   });
 
   it("rejects a row with an unrecognised kind", () => {

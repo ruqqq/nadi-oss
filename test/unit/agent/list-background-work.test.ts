@@ -1,13 +1,8 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import type { ThinkThreadAgent } from "../../../src/agent/think-thread-agent";
 import { WorkLedgerStore } from "../../../src/agent/work-ledger-store";
-import {
-  PROCESS_STALE_AFTER_MS,
-  type WorkKind,
-  type WorkOutcome,
-  type WorkReason,
-  type WorkRow,
-} from "../../../src/agent/work-ledger";
+import { PROCESS_STALE_AFTER_MS, type WorkRow } from "../../../src/agent/work-ledger";
 import { FakeComputeBackend } from "../../../src/compute/backends/fake";
 import { DEFAULT_COMPUTE_LIMITS } from "../../../src/compute/config";
 import { ThreadComputeService } from "../../../src/compute/thread-service";
@@ -51,22 +46,15 @@ const COMPUTE_CONFIG: EffectiveComputeConfig = {
 // typecheck (it exists on the class as a PRIVATE member, and TS refuses to
 // widen a private field via intersection). Same standalone-cast pattern
 // `work-ledger-store.test.ts`'s `SweepAgent` uses for the same reason.
+//
+// The RPC's return type is DERIVED from the real method rather than mirrored by
+// hand. A hand-written copy silently goes stale: this one still described the
+// pre-`subagentStatus` shape, so the tests below type-checked against a row
+// shape the DO had stopped returning — and a field the client depends on could
+// have been dropped from the RPC without a single test noticing.
 type TestableAgent = {
   _turnRuntimeConfig: { backgroundWorkEnabled: boolean } | null;
-  listBackgroundWork(): Promise<
-    Array<{
-      id: string;
-      kind: WorkKind;
-      label: string | null;
-      startedAt: number;
-      terminal: {
-        outcome: WorkOutcome;
-        reason: WorkReason;
-        exitCode: number | null;
-        at: number;
-      } | null;
-    }>
-  >;
+  listBackgroundWork(): ReturnType<ThinkThreadAgent["listBackgroundWork"]>;
   readBackgroundWorkOutput(processId: string): Promise<{
     head: string[];
     tail: string[];
@@ -162,8 +150,66 @@ describe("ThinkThreadAgent.listBackgroundWork", () => {
         outcome: "fault",
         reason: "no_liveness",
         exitCode: null,
+        subagentStatus: null,
         at: terminalAt,
       });
+    });
+  });
+
+  /**
+   * The mirror image of the exit-code bug, for the other kind. A subagent has
+   * NO exit code, and `onAgentToolFinish` maps `completed`, `error` AND
+   * `interrupted` all onto `outcome: "exited"` — so neither field the process
+   * path relies on can tell a successful subagent from a crashed one. Without
+   * `subagentStatus` the client read every finished subagent as a failure
+   * ("1 failed", "Exit unknown"), which is what this proves is fixed.
+   */
+  it("reports the subagent terminal status, which its outcome cannot express", async () => {
+    await withAgent(async ({ instance, store }) => {
+      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      const now = Date.now();
+      for (const [id, detail] of [
+        ["ok", "completed"],
+        ["bad", "error"],
+      ] as const) {
+        store.register(row({ id, kind: "subagent" }));
+        // `detail` is exactly what `onAgentToolFinish` writes: `result.status`.
+        store.terminalize(id, { outcome: "exited", reason: "process_exit", at: now, detail });
+      }
+      const byId = Object.fromEntries((await instance.listBackgroundWork()).map((r) => [r.id, r]));
+      expect(byId.ok!.terminal).toMatchObject({ outcome: "exited", subagentStatus: "completed" });
+      expect(byId.bad!.terminal).toMatchObject({ outcome: "exited", subagentStatus: "error" });
+      // Both indistinguishable on the fields the process path uses:
+      expect(byId.ok!.terminal!.exitCode).toBeNull();
+      expect(byId.bad!.terminal!.exitCode).toBeNull();
+      expect(byId.ok!.terminal!.outcome).toBe(byId.bad!.terminal!.outcome);
+    });
+  });
+
+  it("leaves subagentStatus null for a process row and for an unrecognized status", async () => {
+    await withAgent(async ({ instance, store }) => {
+      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      const now = Date.now();
+      store.register(row({ id: "p1", kind: "process" }));
+      store.terminalize("p1", {
+        outcome: "exited",
+        reason: "process_exit",
+        at: now,
+        detail: "exit code 0",
+        exitCode: 0,
+      });
+      store.register(row({ id: "s1", kind: "subagent" }));
+      // A status this build does not know — a future SDK value. It must read as
+      // unknown, never as success.
+      store.terminalize("s1", {
+        outcome: "exited",
+        reason: "process_exit",
+        at: now,
+        detail: "vanished",
+      });
+      const byId = Object.fromEntries((await instance.listBackgroundWork()).map((r) => [r.id, r]));
+      expect(byId.p1!.terminal!.subagentStatus).toBeNull();
+      expect(byId.s1!.terminal!.subagentStatus).toBeNull();
     });
   });
 

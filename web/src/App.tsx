@@ -75,7 +75,11 @@ import {
 } from "./invites-api";
 import { useDocumentTitle } from "./lib/use-document-title";
 import { DEFAULT_APP_NAME, getBootstrap } from "./bootstrap-api";
-import { purgeCachedBootstrap, readCachedBootstrap, writeCachedBootstrap } from "./lib/bootstrap-cache";
+import {
+  purgeCachedBootstrap,
+  readCachedBootstrap,
+  writeCachedBootstrap,
+} from "./lib/bootstrap-cache";
 import { maybeRenewSession } from "./lib/session-renewal";
 import { isNetworkFailure, type Reachability } from "./lib/offline-state";
 import { resolveRefreshedThreadsPage } from "./lib/thread-refresh";
@@ -107,11 +111,7 @@ import {
   type ReasoningEffort,
   type SettingsProvider,
 } from "./settings-api";
-import {
-  deriveNeedsOnboarding,
-  isOnboardingForced,
-  parseOnboardingStep,
-} from "./lib/onboarding";
+import { deriveNeedsOnboarding, isOnboardingForced, parseOnboardingStep } from "./lib/onboarding";
 import { detectInstallPlatform } from "./lib/install-platform";
 import {
   compactThread as compactThreadApi,
@@ -145,10 +145,7 @@ import {
   type FeedbackDiagnostics,
   type FeedbackDraftView,
 } from "./feedback-api";
-import {
-  historyFetchTargetForThread,
-  isReadOnlyThread,
-} from "./thread-runtime-routing";
+import { historyFetchTargetForThread, isReadOnlyThread } from "./thread-runtime-routing";
 import {
   useRealThreadChat,
   useThreadAgent,
@@ -244,10 +241,7 @@ import { BackgroundTasksSheet } from "./components/chat/BackgroundTasksSheet";
 import { FeedbackDraftCard } from "./components/feedback/FeedbackDraftCard";
 import { FeedbackFallbackForm } from "./components/feedback/FeedbackFallbackForm";
 import { collectFeedbackDiagnostics } from "./lib/feedback-diagnostics";
-import {
-  markFeedbackDraftSubmitted,
-  submittedFeedbackDraftIds,
-} from "./lib/feedback-ui-state";
+import { markFeedbackDraftSubmitted, submittedFeedbackDraftIds } from "./lib/feedback-ui-state";
 import { useOnResume, useAgentConnectionRecovery } from "./lib/use-connection-recovery";
 import { shouldRecoverOnResume } from "./lib/connection-recovery";
 import { useSocketConnected } from "./lib/use-socket-connected";
@@ -266,7 +260,11 @@ import {
   selectNewChatProvider,
   typeNewChatModel,
 } from "./lib/new-chat-model";
-import { availableEffortOptions, reasoningControlsForThreadModel, shouldOfferEffortControl } from "./lib/reasoning-effort";
+import {
+  availableEffortOptions,
+  reasoningControlsForThreadModel,
+  shouldOfferEffortControl,
+} from "./lib/reasoning-effort";
 import { EffortDial } from "./components/model/EffortDial";
 import {
   manualCompactionNoticeForResult,
@@ -276,11 +274,7 @@ import {
   shouldQueueSubmitForThreadState,
   type CompactionNotice,
 } from "./lib/thread-compaction";
-import {
-  applyUserEvent,
-  mergeThreadsExcluding,
-  parseUserEvent,
-} from "./lib/thread-events";
+import { applyUserEvent, mergeThreadsExcluding, parseUserEvent } from "./lib/thread-events";
 import { removeThreadsFromCachedBootstrap } from "./lib/bootstrap-cache";
 import { findInactiveThreadIds } from "./lib/thread-reconciliation";
 import { useThreadQuery } from "./lib/use-thread-query";
@@ -835,7 +829,9 @@ function ThreadRow({
       // Tied to the timer's own constant: a press-in that outran the menu (or
       // finished early and sat still) would be a worse signal than none.
       // Releasing snaps back — only the wait should feel slow.
-      style={touchPrimary ? { transitionDuration: pressing ? `${LONG_PRESS_MS}ms` : "150ms" } : undefined}
+      style={
+        touchPrimary ? { transitionDuration: pressing ? `${LONG_PRESS_MS}ms` : "150ms" } : undefined
+      }
       role="listitem"
       // Long-pressing a row must open its menu, not select the text under the
       // finger or raise the browser's own menu. Pointer users get right-click
@@ -1048,7 +1044,11 @@ function ThreadList({
   });
   const showOlderChatsLink =
     !searching &&
-    hasOlderChats({ threadsNextCursor, threadCount: threads.length, recentLimit: SIDEBAR_RECENT_THREAD_LIMIT });
+    hasOlderChats({
+      threadsNextCursor,
+      threadCount: threads.length,
+      recentLimit: SIDEBAR_RECENT_THREAD_LIMIT,
+    });
 
   return (
     // Only the rows scroll. Search stays pinned above them so it can't be
@@ -1426,7 +1426,12 @@ function ThreadStatusView({
               <Alert variant="destructive">
                 <AlertDescription>{error.message}</AlertDescription>
               </Alert>
-              <Button variant="outline" className="w-full" onClick={onNewThread} disabled={creating}>
+              <Button
+                variant="outline"
+                className="w-full"
+                onClick={onNewThread}
+                disabled={creating}
+              >
                 New chat
               </Button>
             </div>
@@ -1486,7 +1491,9 @@ export function ChatApp({
       pendingArchiveIdsRef.current.delete(id);
       inactiveThreadIdsRef.current.add(id);
     }
-    setThreads((current) => current.filter((thread) => !inactiveThreadIdsRef.current.has(thread.threadId)));
+    setThreads((current) =>
+      current.filter((thread) => !inactiveThreadIdsRef.current.has(thread.threadId)),
+    );
     removeThreadsFromCachedBootstrap(ids);
   }, []);
   useEffect(() => {
@@ -1515,12 +1522,17 @@ export function ChatApp({
   // The cursor from the shared array's own most recent page-one fetch. Only the
   // rail's overflow link reads this — it is what turns "unknowable count" into
   // "there is definitely more" without a COUNT query.
-  const [threadsNextCursor, setThreadsNextCursor] = useState<string | null>(initialThreadsNextCursor);
+  const [threadsNextCursor, setThreadsNextCursor] = useState<string | null>(
+    initialThreadsNextCursor,
+  );
   // A page fetched by a surface OTHER than refreshActiveThreads (currently: the
   // rail's server-backed search) merges in through here — never a replace.
-  const mergeThreadsPage = useCallback((page: ThreadSummary[]) => {
-    setThreads((current) => mergeThreadsExcluding(current, page, excludedThreadIds()));
-  }, [excludedThreadIds]);
+  const mergeThreadsPage = useCallback(
+    (page: ThreadSummary[]) => {
+      setThreads((current) => mergeThreadsExcluding(current, page, excludedThreadIds()));
+    },
+    [excludedThreadIds],
+  );
   const [projects, setProjects] = useState<ProjectSummary[]>(initialProjects);
   const [workbenches, setWorkbenches] = useState<WorkbenchSummary[]>([]);
   const [inviteQuota, setInviteQuota] = useState<InviteQuota | null>(null);
@@ -1586,7 +1598,10 @@ export function ChatApp({
           activeThreadId: activeThreadRef.current?.threadId ?? null,
           preview: event.preview,
         });
-        threadNoticeStateRef.current.set(threadId, threadNoticeState(event.thread) ?? EMPTY_NOTICE_STATE);
+        threadNoticeStateRef.current.set(
+          threadId,
+          threadNoticeState(event.thread) ?? EMPTY_NOTICE_STATE,
+        );
         if (notice) {
           showThreadActivityToast(notice, (id) => openThreadFromNoticeRef.current(id));
         }
@@ -1906,7 +1921,9 @@ export function ChatApp({
   const markThreadOpened = useCallback(
     (thread: ThreadSummary) => {
       if (thread.unreadOutcome) {
-        void markThreadSeen(thread.threadId).then(applyUpdatedThread).catch(() => {});
+        void markThreadSeen(thread.threadId)
+          .then(applyUpdatedThread)
+          .catch(() => {});
       }
       if (thread.recentDismissedAt != null) {
         void setThreadRecentDismissed(thread.threadId, false)
@@ -1941,9 +1958,7 @@ export function ChatApp({
     // degrades gracefully (selecting it hits getThreadOrNull and shows "no
     // longer available") and is an accepted consequence of this design, not
     // an oversight.
-    setThreads((current) =>
-      mergeThreadsExcluding(current, result.threads, excludedThreadIds()),
-    );
+    setThreads((current) => mergeThreadsExcluding(current, result.threads, excludedThreadIds()));
     // Callers only use this return value for synchronous, read-only lookups
     // (e.g. "is the routed thread in the just-fetched page") — never fed back
     // into setThreads — so approximating it from threadsRef here is safe and
@@ -2202,7 +2217,9 @@ export function ChatApp({
           // thread (e.g. from the archived tab) must render read-only without
           // popping it back into the active rail.
           if (listedThread.archivedAt == null) {
-            setThreads((current) => mergeThreadsExcluding(current, [listedThread], excludedThreadIds()));
+            setThreads((current) =>
+              mergeThreadsExcluding(current, [listedThread], excludedThreadIds()),
+            );
           }
           setResolvedActiveThread(listedThread);
           markThreadOpened(listedThread);
@@ -2280,7 +2297,7 @@ export function ChatApp({
         setActiveThread((current) =>
           current && current.threadId === threadId ? updated : current,
         );
-          setThreads((current) => mergeThreadsExcluding(current, [updated], excludedThreadIds()));
+        setThreads((current) => mergeThreadsExcluding(current, [updated], excludedThreadIds()));
       })
       .catch((error: unknown) => {
         setThreadError(error instanceof Error ? error : new Error(String(error)));
@@ -2692,7 +2709,7 @@ export function ChatApp({
         );
         // Moving a chat between projects never removes it from the rail — the
         // rail is unfiltered, so the chat just wears a different badge.
-          setThreads((current) => mergeThreadsExcluding(current, [updated], excludedThreadIds()));
+        setThreads((current) => mergeThreadsExcluding(current, [updated], excludedThreadIds()));
         // A move is filing, not re-provisioning: the chat keeps the sandbox and
         // secrets it already has. Say so, or the badge implies otherwise.
         toast.success(nextProjectId ? "Chat moved" : "Removed from project", {
@@ -2715,9 +2732,7 @@ export function ChatApp({
   const switchWorkbench = useCallback(async (threadId: string, workbenchId: string | null) => {
     try {
       const updated = await switchThreadWorkbench(threadId, workbenchId);
-      setActiveThread((current) =>
-        current && current.threadId === threadId ? updated : current,
-      );
+      setActiveThread((current) => (current && current.threadId === threadId ? updated : current));
       setThreads((current) => mergeThreadsExcluding(current, [updated], excludedThreadIds()));
       toast.success(
         updated.workbenchSwitchPending ? "Switching workbench…" : "Workbench switched",
@@ -2970,7 +2985,8 @@ export function ChatApp({
         if (active) setFeedbackThread(thread);
       })
       .catch((error) => {
-        if (active) setFeedbackThreadError(error instanceof Error ? error : new Error(String(error)));
+        if (active)
+          setFeedbackThreadError(error instanceof Error ? error : new Error(String(error)));
       });
     return () => {
       active = false;
@@ -3061,106 +3077,126 @@ export function ChatApp({
     <MaybeThreadChatProvider value={threadChat}>
       <div className="flex h-dvh flex-col bg-background pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]">
         <div className="flex min-h-0 flex-1">
-        {/* Desktop sidebar */}
-        <aside
-          className="hidden w-72 shrink-0 border-border border-r bg-card wide:flex wide:flex-col"
-          aria-label="Chat navigation"
-        >
-          {rail}
-        </aside>
-
-        {/* Mobile drawer */}
-        <Sheet open={threadPanelOpen} onOpenChange={setThreadPanelOpen}>
-          <SheetContent
-            side="left"
-            showCloseButton={false}
-            // data-rail scopes the drag styles to this sheet; --rail-width keeps the
-            // gesture and the CSS agreeing on how wide "fully open" is.
-            data-rail=""
-            style={{ "--rail-width": `${RAIL_WIDTH_PX}px` } as CSSProperties}
-            // Portalled to <body>, so it sits outside the shell's safe-area
-            // padding and has to clear the notch itself. Padding, not width: the
-            // drag gesture and --rail-width agree on 18rem, and growing the
-            // sheet would desync them.
-            className="w-72 bg-card p-0 pl-[env(safe-area-inset-left)]"
+          {/* Desktop sidebar */}
+          <aside
+            className="hidden w-72 shrink-0 border-border border-r bg-card wide:flex wide:flex-col"
+            aria-label="Chat navigation"
           >
-            <SheetHeader className="sr-only">
-              <SheetTitle>Chats</SheetTitle>
-            </SheetHeader>
             {rail}
-          </SheetContent>
-        </Sheet>
+          </aside>
 
-        <main className="flex min-w-0 flex-1 flex-col">
-          {allChatsActive ? (
-            <AllChatsView
-              threads={threads}
-              onThreadsLoaded={mergeThreadsPage}
-              projects={projects}
-              disabled={navigationDisabled}
-              showArchived={chatsView === "archived"}
-              onShowArchivedChange={showArchivedChats}
-              onSelectThread={openThreadFromCurrentScreen}
-              onArchiveThread={archiveThread}
-              onDeleteThread={deleteThread}
-              onBack={closeAllChats}
-            />
-          ) : panelRoute?.kind === "projects" ? (
-            <ProjectsPanel
-              projects={projects}
-              threads={threads}
-              onThreadsLoaded={mergeThreadsPage}
-              onProjectsChange={setProjects}
-              selectedId={panelRoute.selectedId}
-              onSelect={(id, mode) => selectPanelItem("projects", id, mode)}
-              onBackToList={() => returnToPanelList("projects")}
-              onSelectThread={openThreadFromCurrentScreen}
-              onManageWorkbenches={() => openSettings("workbenches")}
-              closeLabel={panelCloseLabel}
-              onClose={closePanel}
-            />
-          ) : panelRoute?.kind === "automata" ? (
-            <AutomataPanel
-              projects={projects}
-              selectedId={panelRoute.selectedId}
-              onSelect={(id, mode) => selectPanelItem("automata", id, mode)}
-              onBackToList={() => returnToPanelList("automata")}
-              onOpenThread={openAutomatonRunThread}
-              closeLabel={panelCloseLabel}
-              onClose={closePanel}
-            />
-          ) : panelRoute?.kind === "invites" ? (
-            <InvitesPanel
-              onQuotaChange={setInviteQuota}
-              closeLabel={panelCloseLabel}
-              onClose={closePanel}
-            />
-          ) : feedbackActive ? (
-            feedbackThread ? (
-              <ThreadChatConnected
-                thread={feedbackThread}
-                consentWorkspaceId={consentWorkspaceId}
-                backgroundWorkEnabled={false}
-                historyReloadNonce={threadReloadNonce}
-                projects={[]}
-                leading={<BackButtonLike label={panelCloseLabel} onClick={closePanel} />}
-                attachmentAccept="image/png,image/jpeg,image/webp,image/gif"
-                maxFiles={5}
-                composerPlaceholder="Tell Nadi what happened…"
-                feedbackMode
-                onFeedbackSend={submitFeedbackMessage}
-                voiceEnabled={false}
-                onRetryHistory={() => setThreadReloadNonce((n) => n + 1)}
+          {/* Mobile drawer */}
+          <Sheet open={threadPanelOpen} onOpenChange={setThreadPanelOpen}>
+            <SheetContent
+              side="left"
+              showCloseButton={false}
+              // data-rail scopes the drag styles to this sheet; --rail-width keeps the
+              // gesture and the CSS agreeing on how wide "fully open" is.
+              data-rail=""
+              style={{ "--rail-width": `${RAIL_WIDTH_PX}px` } as CSSProperties}
+              // Portalled to <body>, so it sits outside the shell's safe-area
+              // padding and has to clear the notch itself. Padding, not width: the
+              // drag gesture and --rail-width agree on 18rem, and growing the
+              // sheet would desync them.
+              className="w-72 bg-card p-0 pl-[env(safe-area-inset-left)]"
+            >
+              <SheetHeader className="sr-only">
+                <SheetTitle>Chats</SheetTitle>
+              </SheetHeader>
+              {rail}
+            </SheetContent>
+          </Sheet>
+
+          <main className="flex min-w-0 flex-1 flex-col">
+            {allChatsActive ? (
+              <AllChatsView
+                threads={threads}
+                onThreadsLoaded={mergeThreadsPage}
+                projects={projects}
+                disabled={navigationDisabled}
+                showArchived={chatsView === "archived"}
+                onShowArchivedChange={showArchivedChats}
+                onSelectThread={openThreadFromCurrentScreen}
+                onArchiveThread={archiveThread}
+                onDeleteThread={deleteThread}
+                onBack={closeAllChats}
               />
-            ) : (
-              <FeedbackPanel
+            ) : panelRoute?.kind === "projects" ? (
+              <ProjectsPanel
+                projects={projects}
+                threads={threads}
+                onThreadsLoaded={mergeThreadsPage}
+                onProjectsChange={setProjects}
+                selectedId={panelRoute.selectedId}
+                onSelect={(id, mode) => selectPanelItem("projects", id, mode)}
+                onBackToList={() => returnToPanelList("projects")}
+                onSelectThread={openThreadFromCurrentScreen}
+                onManageWorkbenches={() => openSettings("workbenches")}
                 closeLabel={panelCloseLabel}
                 onClose={closePanel}
-                error={feedbackThreadError}
               />
-            )
-          ) : feedbackInboxActive ? (
-            feedbackAdminEnabled ? (
+            ) : panelRoute?.kind === "automata" ? (
+              <AutomataPanel
+                projects={projects}
+                selectedId={panelRoute.selectedId}
+                onSelect={(id, mode) => selectPanelItem("automata", id, mode)}
+                onBackToList={() => returnToPanelList("automata")}
+                onOpenThread={openAutomatonRunThread}
+                closeLabel={panelCloseLabel}
+                onClose={closePanel}
+              />
+            ) : panelRoute?.kind === "invites" ? (
+              <InvitesPanel
+                onQuotaChange={setInviteQuota}
+                closeLabel={panelCloseLabel}
+                onClose={closePanel}
+              />
+            ) : feedbackActive ? (
+              feedbackThread ? (
+                <ThreadChatConnected
+                  thread={feedbackThread}
+                  consentWorkspaceId={consentWorkspaceId}
+                  backgroundWorkEnabled={false}
+                  historyReloadNonce={threadReloadNonce}
+                  projects={[]}
+                  leading={<BackButtonLike label={panelCloseLabel} onClick={closePanel} />}
+                  attachmentAccept="image/png,image/jpeg,image/webp,image/gif"
+                  maxFiles={5}
+                  composerPlaceholder="Tell Nadi what happened…"
+                  feedbackMode
+                  onFeedbackSend={submitFeedbackMessage}
+                  voiceEnabled={false}
+                  onRetryHistory={() => setThreadReloadNonce((n) => n + 1)}
+                />
+              ) : (
+                <FeedbackPanel
+                  closeLabel={panelCloseLabel}
+                  onClose={closePanel}
+                  error={feedbackThreadError}
+                />
+              )
+            ) : feedbackInboxActive ? (
+              feedbackAdminEnabled ? (
+                <Suspense
+                  fallback={
+                    <div className="flex min-h-0 flex-1 items-center justify-center">
+                      <Spinner className="size-6 text-muted-foreground" label="Loading" />
+                    </div>
+                  }
+                >
+                  <FeedbackInbox
+                    selectedId={panelRoute.selectedId}
+                    revision={feedbackInboxRevision}
+                    closeLabel={panelCloseLabel}
+                    onClose={closePanel}
+                    onBackToList={() => returnToPanelList("feedback-inbox")}
+                    onSelect={(id, mode) => selectPanelItem("feedback-inbox", id, mode)}
+                  />
+                </Suspense>
+              ) : null
+            ) : settingsActive ? (
+              // A panel-sized fallback, not FullScreenLoader: this renders beside the
+              // sidebar, so a min-h-dvh box would overflow the shell.
               <Suspense
                 fallback={
                   <div className="flex min-h-0 flex-1 items-center justify-center">
@@ -3168,202 +3204,182 @@ export function ChatApp({
                   </div>
                 }
               >
-                <FeedbackInbox
-                  selectedId={panelRoute.selectedId}
-                  revision={feedbackInboxRevision}
+                <Settings
+                  consentWorkspaceId={consentWorkspaceId}
+                  voiceEnabled={voiceEnabled}
+                  workbenchNetworkAllowlistEnabled={workbenchNetworkAllowlistEnabled}
+                  tab={parseSettingsTab(routePath)}
+                  onTabChange={selectSettingsTab}
+                  routePath={routePath}
+                  onNavigate={navigateSettingsPath}
                   closeLabel={panelCloseLabel}
                   onClose={closePanel}
-                  onBackToList={() => returnToPanelList("feedback-inbox")}
-                  onSelect={(id, mode) => selectPanelItem("feedback-inbox", id, mode)}
                 />
               </Suspense>
-            ) : null
-          ) : settingsActive ? (
-            // A panel-sized fallback, not FullScreenLoader: this renders beside the
-            // sidebar, so a min-h-dvh box would overflow the shell.
-            <Suspense
-              fallback={
-                <div className="flex min-h-0 flex-1 items-center justify-center">
-                  <Spinner className="size-6 text-muted-foreground" label="Loading" />
-                </div>
-              }
-            >
-              <Settings
-                consentWorkspaceId={consentWorkspaceId}
-                voiceEnabled={voiceEnabled}
-                workbenchNetworkAllowlistEnabled={workbenchNetworkAllowlistEnabled}
-                tab={parseSettingsTab(routePath)}
-                onTabChange={selectSettingsTab}
-                routePath={routePath}
-                onNavigate={navigateSettingsPath}
-                closeLabel={panelCloseLabel}
-                onClose={closePanel}
-              />
-            </Suspense>
-          ) : activeThread ? (
-            isReadOnlyThread(activeThread) ? (
-              <LegacyArchiveThread
-                key={activeThread.threadId}
-                thread={activeThread}
-                projects={projects}
-                showReasoning={agentShowReasoning}
+            ) : activeThread ? (
+              isReadOnlyThread(activeThread) ? (
+                <LegacyArchiveThread
+                  key={activeThread.threadId}
+                  thread={activeThread}
+                  projects={projects}
+                  showReasoning={agentShowReasoning}
+                  leading={threadNav}
+                  onDeleteThread={deleteThread}
+                />
+              ) : (
+                // ThreadChat suspends while it loads the thread's message history, so
+                // React would otherwise hold the previous thread on screen for the
+                // whole fetch. ThreadChatConnected owns the Suspense boundary (and
+                // the agent socket, which must be opened outside it — see its doc
+                // comment). Keyed by threadId so each switch is a fresh boundary that
+                // shows the fallback immediately, and so a failed thread doesn't
+                // poison the next one opened.
+                <ThreadChatConnected
+                  key={activeThread.threadId}
+                  onRetryHistory={() => setThreadReloadNonce((n) => n + 1)}
+                  consentWorkspaceId={consentWorkspaceId}
+                  backgroundWorkEnabled={backgroundWorkEnabled}
+                  thread={activeThread}
+                  historyReloadNonce={threadReloadNonce}
+                  projects={projects}
+                  providers={newChatProviders}
+                  showReasoning={agentShowReasoning}
+                  leading={threadNav}
+                  pendingFirstMessage={pendingFirstMessage}
+                  onRetryFirstMessage={retryFirstMessage}
+                  onSettleFirstMessage={settleFirstMessage}
+                  onRename={handleRenameThread}
+                  onReasoningEffortChange={handleThreadReasoningEffort}
+                  onMoveThread={moveThread}
+                  onCreateProjectForThread={createProjectForThread}
+                  onArchiveThread={archiveThread}
+                  onDeleteThread={deleteThread}
+                  workbenches={workbenches}
+                  onSwitchWorkbench={switchWorkbench}
+                  attachmentAccept={activeThreadAttachmentAccept}
+                  voiceEnabled={voiceEnabled}
+                  browserNotificationPrompt={
+                    showBrowserNotificationPrompt
+                      ? {
+                          busy: browserNotificationsBusy,
+                          error: browserNotificationPromptError,
+                          onDismiss: () => {
+                            if (notificationPromptKey) {
+                              setDismissedNotificationPromptKey(notificationPromptKey);
+                            }
+                          },
+                          onEnable: () => enableBrowserNotifications(),
+                        }
+                      : null
+                  }
+                />
+              )
+            ) : pendingThreadCreation && routePath === "/" ? (
+              <PendingNewThreadView
                 leading={threadNav}
-                onDeleteThread={deleteThread}
+                text={pendingThreadCreation.text}
+                files={pendingThreadCreation.files}
+                model={pendingThreadCreation.model}
+              />
+            ) : draft ? (
+              <NewChatView
+                onCreateAndSend={createAndSend}
+                leading={threadNav}
+                creating={creating}
+                error={threadError}
+                seedText={draftText}
+                seedFiles={draftFiles}
+                providers={newChatProviders}
+                anyUsableProvider={newChatAnyUsable}
+                projects={projects}
+                provider={newChatProvider}
+                model={newChatModel}
+                projectId={newChatProjectId}
+                onProviderChange={(nextProvider) => {
+                  const state = selectNewChatProvider(nextProvider, {
+                    providers: newChatProviders,
+                    anyUsableProvider: newChatAnyUsable,
+                    provider: newChatProvider,
+                    model: newChatModel,
+                    modelInputModalities: newChatModelInputModalities,
+                    showReasoning: agentShowReasoning,
+                    reasoningEffort: newChatReasoningEffort,
+                    modelSupportsReasoning: newChatModelSupportsReasoning,
+                    modelReasoningControls: newChatReasoningControls,
+                  });
+                  setNewChatProvider(state.provider);
+                  setNewChatModel(state.model);
+                  setNewChatModelInputModalities(state.modelInputModalities);
+                  setNewChatModelSupportsReasoning(state.modelSupportsReasoning);
+                  setNewChatReasoningControls(state.modelReasoningControls);
+                }}
+                onModelChange={(nextModel) => {
+                  const state = typeNewChatModel(nextModel, {
+                    providers: newChatProviders,
+                    anyUsableProvider: newChatAnyUsable,
+                    provider: newChatProvider,
+                    model: newChatModel,
+                    modelInputModalities: newChatModelInputModalities,
+                    showReasoning: agentShowReasoning,
+                    reasoningEffort: newChatReasoningEffort,
+                    modelSupportsReasoning: newChatModelSupportsReasoning,
+                    modelReasoningControls: newChatReasoningControls,
+                  });
+                  setNewChatModel(state.model);
+                  setNewChatModelInputModalities(state.modelInputModalities);
+                  setNewChatModelSupportsReasoning(state.modelSupportsReasoning);
+                  setNewChatReasoningControls(state.modelReasoningControls);
+                }}
+                onModelSelected={(selectedModel) => {
+                  const state = selectNewChatModelModalities(selectedModel.inputModalities, {
+                    providers: newChatProviders,
+                    anyUsableProvider: newChatAnyUsable,
+                    provider: newChatProvider,
+                    model: newChatModel,
+                    modelInputModalities: newChatModelInputModalities,
+                    showReasoning: agentShowReasoning,
+                    reasoningEffort: newChatReasoningEffort,
+                    modelSupportsReasoning: newChatModelSupportsReasoning,
+                    modelReasoningControls: newChatReasoningControls,
+                  });
+                  setNewChatModelInputModalities(state.modelInputModalities);
+                  const withReasoning = selectNewChatModelReasoning(
+                    selectedModel.reasoning,
+                    state,
+                    selectedModel.reasoningControls,
+                  );
+                  setNewChatModelSupportsReasoning(withReasoning.modelSupportsReasoning);
+                  setNewChatReasoningControls(withReasoning.modelReasoningControls);
+                }}
+                reasoningEffort={newChatReasoningEffort}
+                onReasoningEffortChange={setNewChatReasoningEffort}
+                modelSupportsReasoning={newChatModelSupportsReasoning}
+                modelReasoningControls={newChatReasoningControls}
+                onProjectChange={setNewChatProjectId}
+                onCreateProject={handleCreateProject}
+                workbenchId={newChatWorkbenchId}
+                workbenches={workbenches}
+                onWorkbenchChange={setNewChatWorkbenchId}
+                onManageWorkbenches={() => openSettings("workbenches")}
+                attachmentAccept={newChatAttachmentAccept}
+                modelInputModalities={newChatModelInputModalities}
+                voiceEnabled={voiceEnabled}
+                nudgePrompt={nudgePrompt}
+                onNudgeShown={() => {
+                  if (typeof localStorage !== "undefined") takeAutomatonNudge(localStorage);
+                }}
+                onDismissNudge={() => setNudgePrompt(null)}
               />
             ) : (
-              // ThreadChat suspends while it loads the thread's message history, so
-              // React would otherwise hold the previous thread on screen for the
-              // whole fetch. ThreadChatConnected owns the Suspense boundary (and
-              // the agent socket, which must be opened outside it — see its doc
-              // comment). Keyed by threadId so each switch is a fresh boundary that
-              // shows the fallback immediately, and so a failed thread doesn't
-              // poison the next one opened.
-              <ThreadChatConnected
-                key={activeThread.threadId}
-                onRetryHistory={() => setThreadReloadNonce((n) => n + 1)}
-                consentWorkspaceId={consentWorkspaceId}
-                backgroundWorkEnabled={backgroundWorkEnabled}
-                thread={activeThread}
-                historyReloadNonce={threadReloadNonce}
-                projects={projects}
-                providers={newChatProviders}
-                showReasoning={agentShowReasoning}
+              <ThreadStatusView
+                threadId={routeThreadId}
+                error={threadError}
+                creating={creating}
+                onNewThread={startNewThread}
                 leading={threadNav}
-                pendingFirstMessage={pendingFirstMessage}
-                onRetryFirstMessage={retryFirstMessage}
-                onSettleFirstMessage={settleFirstMessage}
-                onRename={handleRenameThread}
-                onReasoningEffortChange={handleThreadReasoningEffort}
-                onMoveThread={moveThread}
-                onCreateProjectForThread={createProjectForThread}
-                onArchiveThread={archiveThread}
-                onDeleteThread={deleteThread}
-                workbenches={workbenches}
-                onSwitchWorkbench={switchWorkbench}
-                attachmentAccept={activeThreadAttachmentAccept}
-                voiceEnabled={voiceEnabled}
-                browserNotificationPrompt={
-                  showBrowserNotificationPrompt
-                    ? {
-                        busy: browserNotificationsBusy,
-                        error: browserNotificationPromptError,
-                        onDismiss: () => {
-                          if (notificationPromptKey) {
-                            setDismissedNotificationPromptKey(notificationPromptKey);
-                          }
-                        },
-                        onEnable: () => enableBrowserNotifications(),
-                      }
-                    : null
-                }
               />
-            )
-          ) : pendingThreadCreation && routePath === "/" ? (
-            <PendingNewThreadView
-              leading={threadNav}
-              text={pendingThreadCreation.text}
-              files={pendingThreadCreation.files}
-              model={pendingThreadCreation.model}
-            />
-          ) : draft ? (
-            <NewChatView
-              onCreateAndSend={createAndSend}
-              leading={threadNav}
-              creating={creating}
-              error={threadError}
-              seedText={draftText}
-              seedFiles={draftFiles}
-              providers={newChatProviders}
-              anyUsableProvider={newChatAnyUsable}
-              projects={projects}
-              provider={newChatProvider}
-              model={newChatModel}
-              projectId={newChatProjectId}
-              onProviderChange={(nextProvider) => {
-                const state = selectNewChatProvider(nextProvider, {
-                  providers: newChatProviders,
-                  anyUsableProvider: newChatAnyUsable,
-                  provider: newChatProvider,
-                  model: newChatModel,
-                  modelInputModalities: newChatModelInputModalities,
-                  showReasoning: agentShowReasoning,
-                  reasoningEffort: newChatReasoningEffort,
-                  modelSupportsReasoning: newChatModelSupportsReasoning,
-                  modelReasoningControls: newChatReasoningControls,
-                });
-                setNewChatProvider(state.provider);
-                setNewChatModel(state.model);
-                setNewChatModelInputModalities(state.modelInputModalities);
-                setNewChatModelSupportsReasoning(state.modelSupportsReasoning);
-                setNewChatReasoningControls(state.modelReasoningControls);
-              }}
-              onModelChange={(nextModel) => {
-                const state = typeNewChatModel(nextModel, {
-                  providers: newChatProviders,
-                  anyUsableProvider: newChatAnyUsable,
-                  provider: newChatProvider,
-                  model: newChatModel,
-                  modelInputModalities: newChatModelInputModalities,
-                  showReasoning: agentShowReasoning,
-                  reasoningEffort: newChatReasoningEffort,
-                  modelSupportsReasoning: newChatModelSupportsReasoning,
-                  modelReasoningControls: newChatReasoningControls,
-                });
-                setNewChatModel(state.model);
-                setNewChatModelInputModalities(state.modelInputModalities);
-                setNewChatModelSupportsReasoning(state.modelSupportsReasoning);
-                setNewChatReasoningControls(state.modelReasoningControls);
-              }}
-              onModelSelected={(selectedModel) => {
-                const state = selectNewChatModelModalities(selectedModel.inputModalities, {
-                  providers: newChatProviders,
-                  anyUsableProvider: newChatAnyUsable,
-                  provider: newChatProvider,
-                  model: newChatModel,
-                  modelInputModalities: newChatModelInputModalities,
-                  showReasoning: agentShowReasoning,
-                  reasoningEffort: newChatReasoningEffort,
-                  modelSupportsReasoning: newChatModelSupportsReasoning,
-                  modelReasoningControls: newChatReasoningControls,
-                });
-                setNewChatModelInputModalities(state.modelInputModalities);
-                const withReasoning = selectNewChatModelReasoning(
-                  selectedModel.reasoning,
-                  state,
-                  selectedModel.reasoningControls,
-                );
-                setNewChatModelSupportsReasoning(withReasoning.modelSupportsReasoning);
-                setNewChatReasoningControls(withReasoning.modelReasoningControls);
-              }}
-              reasoningEffort={newChatReasoningEffort}
-              onReasoningEffortChange={setNewChatReasoningEffort}
-              modelSupportsReasoning={newChatModelSupportsReasoning}
-              modelReasoningControls={newChatReasoningControls}
-              onProjectChange={setNewChatProjectId}
-              onCreateProject={handleCreateProject}
-              workbenchId={newChatWorkbenchId}
-              workbenches={workbenches}
-              onWorkbenchChange={setNewChatWorkbenchId}
-              onManageWorkbenches={() => openSettings("workbenches")}
-              attachmentAccept={newChatAttachmentAccept}
-              modelInputModalities={newChatModelInputModalities}
-              voiceEnabled={voiceEnabled}
-              nudgePrompt={nudgePrompt}
-              onNudgeShown={() => {
-                if (typeof localStorage !== "undefined") takeAutomatonNudge(localStorage);
-              }}
-              onDismissNudge={() => setNudgePrompt(null)}
-            />
-          ) : (
-            <ThreadStatusView
-              threadId={routeThreadId}
-              error={threadError}
-              creating={creating}
-              onNewThread={startNewThread}
-              leading={threadNav}
-            />
-          )}
-        </main>
+            )}
+          </main>
         </div>
       </div>
     </MaybeThreadChatProvider>
@@ -4075,21 +4091,21 @@ export function NewChatView({
                   />
                 )}
                 <ModelPicker
-                variant="composer"
-                triggerId="new-chat-model"
-                triggerLabel="New chat model"
-                providers={providers.map((entry) => ({
-                  value: entry.provider,
-                  label: entry.displayName,
-                  whitelistModels: entry.whitelistModels ?? null,
-                }))}
-                provider={provider}
-                model={model}
-                placeholder={SETTINGS_PROVIDER_MODEL_PLACEHOLDERS[provider]}
-                disabled={creating}
-                onProviderChange={onProviderChange}
-                onModelChange={onModelChange}
-                onModelSelected={onModelSelected}
+                  variant="composer"
+                  triggerId="new-chat-model"
+                  triggerLabel="New chat model"
+                  providers={providers.map((entry) => ({
+                    value: entry.provider,
+                    label: entry.displayName,
+                    whitelistModels: entry.whitelistModels ?? null,
+                  }))}
+                  provider={provider}
+                  model={model}
+                  placeholder={SETTINGS_PROVIDER_MODEL_PLACEHOLDERS[provider]}
+                  disabled={creating}
+                  onProviderChange={onProviderChange}
+                  onModelChange={onModelChange}
+                  onModelSelected={onModelSelected}
                 />
               </>
             )
@@ -4275,7 +4291,11 @@ function ThreadChatSkeleton({
   /** The optimistic first message, when this skeleton is the history-loading
    *  fallback for a thread the user just created. Keeps the bubble on screen
    *  instead of replacing it with generic placeholder bars. */
-  pendingBubble?: { text: string; files: FileUIPart[]; status: "sending" | "sent" | "failed" } | null;
+  pendingBubble?: {
+    text: string;
+    files: FileUIPart[];
+    status: "sending" | "sent" | "failed";
+  } | null;
   onRetryFirstMessage?: () => void;
 }) {
   return (
@@ -4605,8 +4625,8 @@ function ThreadChat({
 
   const feedbackIdempotencyKeysRef = useRef(new Map<string, string>());
   const composerControlRef = useRef<ComposerHandle | null>(null);
-  const [submittedFeedbackDrafts, setSubmittedFeedbackDrafts] = useState<Set<string>>(
-    () => submittedFeedbackDraftIds(thread.threadId),
+  const [submittedFeedbackDrafts, setSubmittedFeedbackDrafts] = useState<Set<string>>(() =>
+    submittedFeedbackDraftIds(thread.threadId),
   );
   const submitFeedbackDraftFromCard = useCallback(
     async (draft: FeedbackDraftView, diagnostics: FeedbackDiagnostics) => {
@@ -5037,7 +5057,9 @@ function ThreadChat({
           void (agentRef.current.call("setDraft", [""]) as Promise<unknown>).catch(() => {});
         } catch (error) {
           if (error instanceof FeedbackRateLimitError) {
-            toast.error(`You can send more feedback in ${formatDuration(error.retryAfterSeconds)}.`);
+            toast.error(
+              `You can send more feedback in ${formatDuration(error.retryAfterSeconds)}.`,
+            );
           } else {
             setFeedbackFallback({ threadId: thread.threadId, text, files });
             setFeedbackManualDraft(null);
@@ -5091,10 +5113,7 @@ function ThreadChat({
       // support), so a steer carrying files falls through to the queue path,
       // which preserves them.
       const shouldSteer =
-        Boolean(opts?.steer) &&
-        busy &&
-        text.trim().length > 0 &&
-        files.length === 0;
+        Boolean(opts?.steer) && busy && text.trim().length > 0 && files.length === 0;
       if (shouldSteer) {
         const clientMessageId = crypto.randomUUID();
         setSteeringMessages((cur) =>
@@ -5321,9 +5340,13 @@ function ThreadChat({
         )}
         {showOptimisticTyping && <PendingReplyDots />}
 
-        {!feedbackMode && <QueuedMessageStrip items={queuedStripItems} onCancel={cancelQueuedMessage} />}
+        {!feedbackMode && (
+          <QueuedMessageStrip items={queuedStripItems} onCancel={cancelQueuedMessage} />
+        )}
 
-        {!feedbackMode && <SteeringMessageStrip items={steeringChips} onCancel={cancelSteeringMessage} />}
+        {!feedbackMode && (
+          <SteeringMessageStrip items={steeringChips} onCancel={cancelSteeringMessage} />
+        )}
 
         {!feedbackMode && (
           <BackgroundTasksRow
@@ -5341,10 +5364,6 @@ function ThreadChat({
           cancel={cancelBackgroundWork}
           clearFinished={clearFinishedBackgroundWork}
           onChanged={() => void refreshBackgroundWork()}
-          // Reuses the SAME `useSubagentEvents` subscription ChatLog reads
-          // (`subagentRuns` above) rather than calling the hook again — a
-          // second subscription would double the socket's event handlers.
-          liveRunFor={(id) => subagentRuns.runsById[id]}
         />
 
         {browserNotificationPrompt && (
@@ -5427,15 +5446,9 @@ function ThreadChat({
                       triggerId={`thread-effort-${thread.threadId}`}
                       effort={thread.reasoningEffort}
                       options={availableEffortOptions(
-                        reasoningControlsForThreadModel(
-                          providers,
-                          thread.provider,
-                          thread.model,
-                        ),
+                        reasoningControlsForThreadModel(providers, thread.provider, thread.model),
                       )}
-                      onEffortChange={(effort) =>
-                        onReasoningEffortChange(thread.threadId, effort)
-                      }
+                      onEffortChange={(effort) => onReasoningEffortChange(thread.threadId, effort)}
                       disabled={draftSeed === null || sendingFirstMessage}
                     />
                   )}
@@ -5835,23 +5848,26 @@ export default function App({
   // (the cold-start path is covered by bootstrap above). Set the session, then
   // re-run bootstrap so every workspace-derived setting is applied through the
   // same guarded path as startup and resume.
-  const handleSignedIn = useCallback((next: AuthSession) => {
-    setSession(next);
-    if (!next.authenticated) {
+  const handleSignedIn = useCallback(
+    (next: AuthSession) => {
+      setSession(next);
+      if (!next.authenticated) {
+        setConsentWorkspaceId(null);
+        return;
+      }
+      // /signin is a signed-out-only route: ChatApp doesn't know it, and leaving
+      // it in the URL would strand a fresh session on an unknown path. Replace
+      // rather than push so Back doesn't return to the gate.
+      if (window.location.pathname === "/signin") {
+        window.history.replaceState(null, "", "/");
+        setPath("/");
+      }
+      setOnboarding({ status: "loading" });
       setConsentWorkspaceId(null);
-      return;
-    }
-    // /signin is a signed-out-only route: ChatApp doesn't know it, and leaving
-    // it in the URL would strand a fresh session on an unknown path. Replace
-    // rather than push so Back doesn't return to the gate.
-    if (window.location.pathname === "/signin") {
-      window.history.replaceState(null, "", "/");
-      setPath("/");
-    }
-    setOnboarding({ status: "loading" });
-    setConsentWorkspaceId(null);
-    revalidateBootstrap();
-  }, [revalidateBootstrap]);
+      revalidateBootstrap();
+    },
+    [revalidateBootstrap],
+  );
 
   const navigate = useCallback((to: string, mode: "push" | "replace" = "push") => {
     if (window.location.pathname !== to) {
@@ -6033,7 +6049,11 @@ function FeedbackPanel({
           Tell the Nadi feedback agent what happened. It will ask follow-up questions before
           submitting a report.
         </p>
-        {error ? <p className="text-reject text-sm">{error.message}</p> : <Spinner className="mx-auto size-5" />}
+        {error ? (
+          <p className="text-reject text-sm">{error.message}</p>
+        ) : (
+          <Spinner className="mx-auto size-5" />
+        )}
       </div>
     </section>
   );

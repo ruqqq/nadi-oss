@@ -6,15 +6,17 @@ import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Sheet, SheetContent, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
-import type { SubagentRunView } from "@/lib/subagent-runs";
 import { useVisualViewportInset } from "@/lib/use-visual-viewport-inset";
 import { cn } from "@/lib/utils";
-import type {
-  BackgroundWorkCancelReason,
-  BackgroundWorkOutcome,
-  BackgroundWorkOutput,
-  BackgroundWorkOutputStream,
-  BackgroundWorkRow,
+import {
+  type BackgroundWorkCancelReason,
+  type BackgroundWorkOutcome,
+  type BackgroundWorkOutput,
+  type BackgroundWorkOutputStream,
+  type BackgroundWorkRow,
+  isBackgroundWorkClean,
+  isBackgroundWorkFailed,
+  type SubagentTerminalStatus,
 } from "@/lib/use-background-work";
 
 /** Collapse the finished section by default once it's long enough that an
@@ -29,15 +31,18 @@ function isRunning(row: BackgroundWorkRow): boolean {
   return row.terminal === null;
 }
 
-/** Same three-way split `readBackgroundWorkOutput`'s doc and the dock row
- * both use, plus the fourth "unknown" bucket the sheet has room to show:
- * `exitCode === null` is a degraded status read, not a confirmed clean exit,
- * and it must render as neither. */
+/** Same split the dock row uses, plus the fourth "unknown" bucket the sheet
+ * has room to show: an outcome neither predicate confirms is a degraded status
+ * read, not a clean exit, and it must render as neither.
+ *
+ * Both predicates are kind-aware, which is load-bearing: a subagent has no
+ * exit code, so the old `exitCode === 0` test made every completed subagent
+ * render as "unknown" with an "Exit unknown" label, and made the dock count it
+ * as a failure. */
 function toneFor(row: BackgroundWorkRow): Tone {
   if (!row.terminal) return "running";
-  if (row.terminal.outcome !== "exited") return "failed"; // stopped | timeout | fault
-  if (row.terminal.exitCode === null) return "unknown";
-  return row.terminal.exitCode === 0 ? "clean" : "failed";
+  if (isBackgroundWorkClean(row)) return "clean";
+  return isBackgroundWorkFailed(row) ? "failed" : "unknown";
 }
 
 const GLYPH_TONE: Record<Tone, string> = {
@@ -54,8 +59,30 @@ const OUTCOME_LABEL: Record<BackgroundWorkOutcome, string> = {
   fault: "Faulted",
 };
 
+/** A subagent's outcome, in the sheet's own words. Kept apart from
+ * `OUTCOME_LABEL` because the two vocabularies describe different things: a
+ * subagent has no exit code and no `WorkOutcome` worth showing (`error` and
+ * `interrupted` both arrive as `"exited"`), so its status IS its outcome. */
+const SUBAGENT_STATUS_LABEL: Record<SubagentTerminalStatus, string> = {
+  completed: "Completed",
+  error: "Error",
+  aborted: "Cancelled",
+  interrupted: "Interrupted",
+};
+
 function exitText(row: BackgroundWorkRow): { text: string; className: string } | null {
   if (!row.terminal) return null;
+  // A subagent is never described in exit-code terms — it has none. Saying
+  // "Exit unknown" for the NORMAL, successful case (which is what the shared
+  // process path did) reads as a malfunction.
+  if (row.kind === "subagent") {
+    const status = row.terminal.subagentStatus;
+    if (status === null) return { text: "Outcome unknown", className: "text-muted-foreground" };
+    return {
+      text: SUBAGENT_STATUS_LABEL[status],
+      className: status === "completed" ? "text-approve" : "text-reject",
+    };
+  }
   if (row.terminal.outcome !== "exited") {
     return { text: OUTCOME_LABEL[row.terminal.outcome], className: "text-reject" };
   }
@@ -184,14 +211,15 @@ function ProcessOutput({
       }}
     >
       <CollapsibleTrigger className="group flex items-center gap-1 text-muted-foreground text-xs hover:text-foreground">
-        <CaretDown aria-hidden className="size-3 transition-transform group-data-[state=open]:rotate-180" />
+        <CaretDown
+          aria-hidden
+          className="size-3 transition-transform group-data-[state=open]:rotate-180"
+        />
         Output
       </CollapsibleTrigger>
       <CollapsibleContent className="mt-2 space-y-2">
         {status === "loading" && <p className="text-muted-foreground text-xs">Loading output…</p>}
-        {status === "error" && (
-          <p className="text-reject text-xs">Couldn't load output.</p>
-        )}
+        {status === "error" && <p className="text-reject text-xs">Couldn't load output.</p>}
         {/* `null` is a distinct answer from "loaded, but empty": it means
             `readBackgroundWorkOutput` couldn't get output at all (background
             work disabled, the row is no longer a tracked process, the
@@ -237,9 +265,7 @@ function ProcessOutput({
                   <div key={`head-${index}`}>{line}</div>
                 ))}
                 {output.hiddenLines > 0 && (
-                  <div className="text-muted-foreground">
-                    … {output.hiddenLines} lines hidden …
-                  </div>
+                  <div className="text-muted-foreground">… {output.hiddenLines} lines hidden …</div>
                 )}
                 {output.tail.map((line, index) => (
                   <div key={`tail-${index}`}>{line}</div>
@@ -253,11 +279,6 @@ function ProcessOutput({
   );
 }
 
-/** What the sheet needs from the SDK's live run stream. Deliberately the
- *  narrowest slice of `SubagentRunView`: presence of the run tells us the
- *  stream knows about it, and `progress` is the only field rendered. */
-export type SubagentLiveRun = Pick<SubagentRunView, "progress">;
-
 /**
  * Liveness for an in-flight `subagent` row.
  *
@@ -265,31 +286,29 @@ export type SubagentLiveRun = Pick<SubagentRunView, "progress">;
  * subagent's transcript: `readBackgroundWorkOutput` answers only for watched
  * processes, and a subagent has no thread of its own to read. What does exist
  * is `reportProgress` — the child stamps `working (step N)` each step
- * (`src/agent/subagent.ts`) — which reaches us through `useAgentToolEvents`.
- * Calling that "Output" would be worse than showing nothing: a reader seeing
- * "Output — working (step 7)" would reasonably conclude that is all the
- * subagent produced.
+ * (`src/agent/subagent.ts`). Calling that "Output" would be worse than showing
+ * nothing: a reader seeing "Output — working (step 7)" would reasonably
+ * conclude that is all the subagent produced.
  *
- * The three states are distinguished by whether the stream knows the run at
- * all, which is real information rather than a guess: `liveRun === undefined`
- * means this page's socket never saw the run start, i.e. it began before the
- * page loaded (a reload, or a thread opened later). A known run with no
- * message yet simply hasn't reported its first step. Neither renders an empty
- * container — a blank panel here was the bug this replaces.
+ * `row.progress` comes from the ledger read, which sources it from the SDK's
+ * DURABLE child-run row — not from this page's live event stream. That
+ * replaced a third state this component used to need ("progress isn't
+ * available for a run started before this page loaded"), which existed only
+ * because the stream carries just the runs whose start a given socket
+ * witnessed. There is no such limitation on the server, so there is no longer
+ * such a state: any client, at any point in a run's life, sees the same last
+ * reported step.
+ *
+ * Neither remaining state renders an empty container — a blank panel here was
+ * the original bug.
  */
-function SubagentProgress({
-  running,
-  liveRun,
-}: {
-  running: boolean;
-  liveRun: SubagentLiveRun | undefined;
-}) {
-  // A finished subagent's outcome is already carried by the duration and exit
-  // line above, and its result renders inline in the transcript. Showing the
-  // last progress stamp here would be stale by definition.
-  if (!running) return null;
+function SubagentProgress({ row }: { row: BackgroundWorkRow }) {
+  // A finished subagent's outcome is already carried by the duration and
+  // status line above, and its result renders inline in the transcript.
+  // Showing the last progress stamp here would be stale by definition.
+  if (!isRunning(row)) return null;
 
-  const message = liveRun?.progress?.message ?? liveRun?.progress?.phase;
+  const message = row.progress?.message ?? row.progress?.phase;
   if (message) {
     return (
       <p className="text-muted-foreground text-xs">
@@ -298,14 +317,7 @@ function SubagentProgress({
       </p>
     );
   }
-  if (liveRun) {
-    return <p className="text-muted-foreground text-xs">Waiting for the first update…</p>;
-  }
-  return (
-    <p className="text-muted-foreground text-xs">
-      Live progress isn't available for a run started before this page loaded.
-    </p>
-  );
+  return <p className="text-muted-foreground text-xs">Waiting for the first update…</p>;
 }
 
 /** A finished row's duration is `terminal.at - startedAt` — both server
@@ -325,7 +337,6 @@ function TaskRow({
   now,
   readOutput,
   onCancel,
-  liveRunFor,
 }: {
   row: BackgroundWorkRow;
   now: number;
@@ -334,7 +345,6 @@ function TaskRow({
     stream?: BackgroundWorkOutputStream,
   ) => Promise<BackgroundWorkOutput | null>;
   onCancel: (id: string) => Promise<void>;
-  liveRunFor: (id: string) => SubagentLiveRun | undefined;
 }) {
   const tone = toneFor(row);
   const running = isRunning(row);
@@ -372,7 +382,7 @@ function TaskRow({
         // also appears on that inline completion card, so it's the way to
         // correlate the two rather than new information.
         <div className="flex flex-col gap-1 pl-6">
-          <SubagentProgress running={running} liveRun={liveRunFor(row.id)} />
+          <SubagentProgress row={row} />
           <p className="font-mono text-[11px] text-muted-foreground">{row.id}</p>
         </div>
       )}
@@ -427,7 +437,6 @@ export function BackgroundTasksSheet({
   cancel,
   clearFinished,
   onChanged,
-  liveRunFor,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -439,11 +448,6 @@ export function BackgroundTasksSheet({
   cancel: (id: string) => Promise<{ ok: boolean; reason?: BackgroundWorkCancelReason }>;
   clearFinished: () => Promise<{ cleared: number }>;
   onChanged: () => void;
-  /** Looks up the SDK's live run state for a subagent id. `undefined` means
-   *  this page's socket never saw the run start, which is how a run that began
-   *  before the page loaded is told apart from one that simply hasn't reported
-   *  its first step yet. */
-  liveRunFor: (id: string) => SubagentLiveRun | undefined;
 }) {
   const viewport = useVisualViewportInset(open);
   const sheetStyle =
@@ -465,7 +469,9 @@ export function BackgroundTasksSheet({
   const finishedRows = rows.filter((row) => !isRunning(row));
 
   const [runningOpen, setRunningOpen] = useState(true);
-  const [finishedOpen, setFinishedOpen] = useState(finishedRows.length <= FINISHED_COLLAPSE_THRESHOLD);
+  const [finishedOpen, setFinishedOpen] = useState(
+    finishedRows.length <= FINISHED_COLLAPSE_THRESHOLD,
+  );
   // Only auto-collapse once, the first time the list crosses the threshold —
   // an explicit user toggle afterward should stick, not get overridden by
   // the next poll. Seeded from the INITIAL count, not `false`: a sheet that
@@ -486,7 +492,9 @@ export function BackgroundTasksSheet({
   const handleCancel = async (id: string) => {
     const result = await cancel(id);
     if (!result.ok) {
-      toast.error(result.reason ? CANCEL_REASON_MESSAGE[result.reason] : "Couldn't cancel this task.");
+      toast.error(
+        result.reason ? CANCEL_REASON_MESSAGE[result.reason] : "Couldn't cancel this task.",
+      );
     }
     onChanged();
   };
@@ -527,7 +535,12 @@ export function BackgroundTasksSheet({
         <ScrollArea className="min-h-0 flex-auto">
           <div className="flex flex-col gap-1 px-4 py-2">
             {runningRows.length > 0 && (
-              <Section title="Running" count={runningRows.length} open={runningOpen} onOpenChange={setRunningOpen}>
+              <Section
+                title="Running"
+                count={runningRows.length}
+                open={runningOpen}
+                onOpenChange={setRunningOpen}
+              >
                 {runningRows.map((row) => (
                   <TaskRow
                     key={row.id}
@@ -535,13 +548,17 @@ export function BackgroundTasksSheet({
                     now={now}
                     readOutput={readOutput}
                     onCancel={handleCancel}
-                    liveRunFor={liveRunFor}
                   />
                 ))}
               </Section>
             )}
             {finishedRows.length > 0 && (
-              <Section title="Finished" count={finishedRows.length} open={finishedOpen} onOpenChange={setFinishedOpen}>
+              <Section
+                title="Finished"
+                count={finishedRows.length}
+                open={finishedOpen}
+                onOpenChange={setFinishedOpen}
+              >
                 {finishedRows.map((row) => (
                   <TaskRow
                     key={row.id}
@@ -549,7 +566,6 @@ export function BackgroundTasksSheet({
                     now={now}
                     readOutput={readOutput}
                     onCancel={handleCancel}
-                    liveRunFor={liveRunFor}
                   />
                 ))}
               </Section>

@@ -413,6 +413,41 @@ function parseExitCodeFromDetail(detail: string): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+/**
+ * The SDK `AgentToolLifecycleResult.status` values a `subagent` row's terminal
+ * can carry. `onAgentToolFinish` writes `result.status` VERBATIM into
+ * `WorkTerminal.detail`, so for a subagent row the detail string is already
+ * this closed set rather than prose — unlike a `process` row, whose detail is
+ * `"exit code 7"`.
+ *
+ * This exists because a subagent's `WorkOutcome` cannot tell success from
+ * failure on its own: `onAgentToolFinish` maps only `aborted` to `"stopped"`,
+ * so `completed`, `error` AND `interrupted` all land as `"exited"`. A UI toning
+ * a row on `outcome` alone therefore paints a crashed subagent as a clean one.
+ * `exitCode` cannot cover the gap either — a subagent never has one, which is
+ * exactly why the dock read every finished subagent as a FAILURE (an absent
+ * code is an unconfirmed exit for a process, but the normal case for a
+ * subagent).
+ */
+const SUBAGENT_TERMINAL_STATUSES = ["completed", "error", "aborted", "interrupted"] as const;
+export type SubagentTerminalStatus = (typeof SUBAGENT_TERMINAL_STATUSES)[number];
+
+/**
+ * Validate a `subagent` row's `detail` into {@link SubagentTerminalStatus}.
+ *
+ * Validated HERE, server-side, rather than shipping `detail` to the client for
+ * it to interpret: this codebase's rule is that a client switches on a typed
+ * field, never on prose (see `WorkTerminal.exitCode`'s doc, added for the same
+ * reason). `null` for an unrecognized value — a row written by a future SDK
+ * status, or a `process` row's `"exit code 7"` — and the UI must treat that as
+ * "outcome unknown", never as success.
+ */
+function subagentStatusFromDetail(detail: string): SubagentTerminalStatus | null {
+  return (SUBAGENT_TERMINAL_STATUSES as readonly string[]).includes(detail)
+    ? (detail as SubagentTerminalStatus)
+    : null;
+}
+
 function modelMessageId(message: { id?: unknown }): string | null {
   const id = (message as { id?: unknown }).id;
   return typeof id === "string" && id.length > 0 ? id : null;
@@ -5136,6 +5171,20 @@ export class ThinkThreadAgent extends Think<Env> {
    * paid its own `resolveComputeService` — a GitHub token mint plus several D1
    * reads. See the note at the resolve itself.
    *
+   * Two fields exist only for `subagent` rows, and both are `null` on a
+   * `process` row:
+   *
+   *  - `subagentStatus` — the SDK terminal status, without which the UI cannot
+   *    tell a completed subagent from a crashed one. See
+   *    {@link subagentStatusFromDetail}.
+   *  - `progress` — the child's last `reportProgress` signal, read from the
+   *    SDK's DURABLE child-run row (`cf_agent_tool_child_runs.progress_json`)
+   *    via `inspectAgentToolRun`, NOT from the live event stream. That is the
+   *    whole point: the stream only carries runs whose start a given client
+   *    socket witnessed, so a client that reloads mid-run could never show
+   *    progress for a run already in flight. This survives reload, a second
+   *    client, and DO eviction.
+   *
    * Never throws — a throw inside a DO RPC method also fires an unhandled
    * rejection (see `reportProcessCompletion`'s doc). Gated on
    * `backgroundWorkAdmissionEnabled()`, like every other background-work
@@ -5147,10 +5196,12 @@ export class ThinkThreadAgent extends Think<Env> {
       kind: WorkKind;
       label: string | null;
       startedAt: number;
+      progress: { message: string | null; phase: string | null; at: number } | null;
       terminal: {
         outcome: WorkOutcome;
         reason: WorkReason;
         exitCode: number | null;
+        subagentStatus: SubagentTerminalStatus | null;
         at: number;
       } | null;
     }>
@@ -5175,10 +5226,12 @@ export class ThinkThreadAgent extends Think<Env> {
       kind: WorkKind;
       label: string | null;
       startedAt: number;
+      progress: { message: string | null; phase: string | null; at: number } | null;
       terminal: {
         outcome: WorkOutcome;
         reason: WorkReason;
         exitCode: number | null;
+        subagentStatus: SubagentTerminalStatus | null;
         at: number;
       } | null;
     }> = [];
@@ -5196,17 +5249,55 @@ export class ThinkThreadAgent extends Think<Env> {
         kind: row.kind,
         label,
         startedAt: row.startedAt,
+        progress: await this.subagentProgress(row),
         terminal: row.terminal
           ? {
               outcome: row.terminal.outcome,
               reason: row.terminal.reason,
               exitCode: row.terminal.exitCode ?? parseExitCodeFromDetail(row.terminal.detail),
+              subagentStatus:
+                row.kind === "subagent" ? subagentStatusFromDetail(row.terminal.detail) : null,
               at: row.terminal.at,
             }
           : null,
       });
     }
     return out;
+  }
+
+  /**
+   * The last progress signal a RUNNING subagent reported, or `null` for
+   * anything else. Read from the SDK's durable child-run row, so it is
+   * available to any client at any time — see `listBackgroundWork`'s doc for
+   * why the live event stream could not serve this.
+   *
+   * Only for rows still open: a finished row's stale "working (step 12)" is
+   * noise next to its actual outcome, and skipping terminal rows also keeps
+   * this off the vast majority of a dock poll's rows.
+   *
+   * `inspectAgentToolRun` can reconcile a stale (post-eviction) child row as a
+   * side effect, which is a WRITE on what is otherwise a read path. That is
+   * wanted, not tolerated: it materializes the run's true terminal, which is
+   * the same repair the reaper would otherwise wait to perform. Failures are
+   * swallowed — missing progress is cosmetic, and this must never be the thing
+   * that makes a dock read throw.
+   */
+  private async subagentProgress(
+    row: WorkRow,
+  ): Promise<{ message: string | null; phase: string | null; at: number } | null> {
+    if (row.kind !== "subagent" || row.terminal !== null) return null;
+    try {
+      const progress = (await this.inspectAgentToolRun(row.id))?.progress;
+      if (!progress) return null;
+      const { message, phase } = progress as { message?: unknown; phase?: unknown };
+      return {
+        message: typeof message === "string" ? message : null,
+        phase: typeof phase === "string" ? phase : null,
+        at: typeof progress.at === "number" ? progress.at : row.lastAliveAt,
+      };
+    } catch {
+      return null;
+    }
   }
 
   /**

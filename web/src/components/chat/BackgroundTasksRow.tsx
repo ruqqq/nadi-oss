@@ -1,5 +1,5 @@
 import { CaretRight, CheckCircle, Clock, WarningCircle } from "@/icons";
-import type { BackgroundWorkRow } from "@/lib/use-background-work";
+import { type BackgroundWorkRow, isBackgroundWorkClean } from "@/lib/use-background-work";
 
 type IndicatorState = "running" | "failed" | "clean";
 
@@ -7,16 +7,22 @@ function isRunning(row: BackgroundWorkRow): boolean {
   return row.terminal === null;
 }
 
-/** A row counts as "clean" only on a confirmed zero exit. Everything else
- * terminal — a non-zero exit, an unknown exit code, or a non-`exited`
- * outcome (`stopped` | `timeout` | `fault`) — falls into "failed" here. This
- * collapsed summary has only three buckets to work with, and the one thing
- * it must never do is fold an unconfirmed exit into "clean" (see
- * `BackgroundTasksSheet`, which draws the finer "unknown" distinction the
- * dock row has no room for). */
-function isClean(row: BackgroundWorkRow): boolean {
-  return row.terminal !== null && row.terminal.outcome === "exited" && row.terminal.exitCode === 0;
-}
+/** A row counts as "clean" only on a confirmed success, and what confirms one
+ * is KIND-AWARE — the reason this indirection exists. A subagent never has an
+ * exit code, so testing `exitCode === 0` (correct for a process) reported
+ * every successfully finished subagent as a failure. Success for a subagent is
+ * `subagentStatus === "completed"`; see `isBackgroundWorkClean`, shared with
+ * the sheet so the two surfaces cannot drift.
+ *
+ * Everything else terminal falls into "failed" here, INCLUDING an outcome
+ * neither predicate confirms (a process whose exit code never arrived). This
+ * collapsed summary has only three buckets to work with, and the one thing it
+ * must never do is fold an unconfirmed exit into "clean". That is why this is
+ * `!isClean` and not `isBackgroundWorkFailed` — the sheet has room to name an
+ * unconfirmed outcome as its own "unknown" state, and does; the dock row does
+ * not, so it errs toward flagging. The counts also stay exhaustive this way:
+ * running + failed + clean always equals the row count. */
+const isClean = isBackgroundWorkClean;
 
 function isFailed(row: BackgroundWorkRow): boolean {
   return row.terminal !== null && !isClean(row);

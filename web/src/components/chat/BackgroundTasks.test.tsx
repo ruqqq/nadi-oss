@@ -33,6 +33,7 @@ function running(overrides?: Partial<BackgroundWorkRow>): BackgroundWorkRow {
     kind: "process",
     label: "make build",
     startedAt: 1_000,
+    progress: null,
     terminal: null,
     ...overrides,
   };
@@ -44,7 +45,14 @@ function failed(overrides?: Partial<BackgroundWorkRow>): BackgroundWorkRow {
     kind: "process",
     label: "make build",
     startedAt: 1_000,
-    terminal: { outcome: "exited", reason: "process_exit", exitCode: 7, at: 8_000 },
+    progress: null,
+    terminal: {
+      outcome: "exited",
+      reason: "process_exit",
+      exitCode: 7,
+      subagentStatus: null,
+      at: 8_000,
+    },
     ...overrides,
   };
 }
@@ -55,7 +63,14 @@ function clean(overrides?: Partial<BackgroundWorkRow>): BackgroundWorkRow {
     kind: "process",
     label: "make build",
     startedAt: 1_000,
-    terminal: { outcome: "exited", reason: "process_exit", exitCode: 0, at: 8_000 },
+    progress: null,
+    terminal: {
+      outcome: "exited",
+      reason: "process_exit",
+      exitCode: 0,
+      subagentStatus: null,
+      at: 8_000,
+    },
     ...overrides,
   };
 }
@@ -66,7 +81,14 @@ function unknownExit(overrides?: Partial<BackgroundWorkRow>): BackgroundWorkRow 
     kind: "process",
     label: "make build",
     startedAt: 1_000,
-    terminal: { outcome: "exited", reason: "process_exit", exitCode: null, at: 8_000 },
+    progress: null,
+    terminal: {
+      outcome: "exited",
+      reason: "process_exit",
+      exitCode: null,
+      subagentStatus: null,
+      at: 8_000,
+    },
     ...overrides,
   };
 }
@@ -93,7 +115,9 @@ describe("BackgroundTasksRow", () => {
   });
 
   it("renders nothing when disabled", () => {
-    const { container } = render(<BackgroundTasksRow enabled={false} rows={[running()]} onOpen={noop} />);
+    const { container } = render(
+      <BackgroundTasksRow enabled={false} rows={[running()]} onOpen={noop} />,
+    );
     expect(container).toBeEmptyDOMElement();
   });
 
@@ -120,7 +144,6 @@ describe("BackgroundTasksSheet — the three exit-code states", () => {
     cancel: vi.fn(async () => ({ ok: true })),
     clearFinished: vi.fn(async () => ({ cleared: 0 })),
     onChanged: noop,
-    liveRunFor: () => undefined,
   };
 
   it("reads Exit 0 in the clean tone for a zero exit", () => {
@@ -159,7 +182,6 @@ describe("BackgroundTasksSheet — output", () => {
         rows={[failed({ id: "row-d" })]}
         readOutput={readOutput}
         cancel={vi.fn(async () => ({ ok: true }))}
-        liveRunFor={() => undefined}
         clearFinished={vi.fn(async () => ({ cleared: 0 }))}
         onChanged={noop}
       />,
@@ -185,7 +207,6 @@ describe("BackgroundTasksSheet — output", () => {
         rows={[clean({ id: "row-e" })]}
         readOutput={readOutput}
         cancel={vi.fn(async () => ({ ok: true }))}
-        liveRunFor={() => undefined}
         clearFinished={vi.fn(async () => ({ cleared: 0 }))}
         onChanged={noop}
       />,
@@ -206,7 +227,6 @@ describe("BackgroundTasksSheet — output", () => {
         rows={[failed({ id: "row-x" })]}
         readOutput={readOutput}
         cancel={vi.fn(async () => ({ ok: true }))}
-        liveRunFor={() => undefined}
         clearFinished={vi.fn(async () => ({ cleared: 0 }))}
         onChanged={noop}
       />,
@@ -231,7 +251,6 @@ describe("BackgroundTasksSheet — output", () => {
         rows={[clean({ id: "row-y" })]}
         readOutput={readOutput}
         cancel={vi.fn(async () => ({ ok: true }))}
-        liveRunFor={() => undefined}
         clearFinished={vi.fn(async () => ({ cleared: 0 }))}
         onChanged={noop}
       />,
@@ -250,7 +269,6 @@ describe("BackgroundTasksSheet — kind glyph carries state", () => {
         rows={[failed({ id: "row-g" })]}
         readOutput={vi.fn(async () => null)}
         cancel={vi.fn(async () => ({ ok: true }))}
-        liveRunFor={() => undefined}
         clearFinished={vi.fn(async () => ({ cleared: 0 }))}
         onChanged={noop}
       />,
@@ -273,10 +291,21 @@ describe("BackgroundTasksSheet — duration", () => {
         <BackgroundTasksSheet
           open
           onOpenChange={noop}
-          rows={[failed({ id: "row-f", startedAt: 1_000, terminal: { outcome: "exited", reason: "process_exit", exitCode: 7, at: 8_000 } })]}
+          rows={[
+            failed({
+              id: "row-f",
+              startedAt: 1_000,
+              terminal: {
+                outcome: "exited",
+                reason: "process_exit",
+                exitCode: 7,
+                subagentStatus: null,
+                at: 8_000,
+              },
+            }),
+          ]}
           readOutput={vi.fn(async () => null)}
           cancel={vi.fn(async () => ({ ok: true }))}
-          liveRunFor={() => undefined}
           clearFinished={vi.fn(async () => ({ cleared: 0 }))}
           onChanged={noop}
         />,
@@ -297,7 +326,6 @@ describe("BackgroundTasksSheet — sections", () => {
         rows={[running({ id: "r1" }), failed({ id: "f1" })]}
         readOutput={vi.fn(async () => null)}
         cancel={vi.fn(async () => ({ ok: true }))}
-        liveRunFor={() => undefined}
         clearFinished={vi.fn(async () => ({ cleared: 0 }))}
         onChanged={noop}
       />,
@@ -316,7 +344,6 @@ describe("BackgroundTasksSheet — sections", () => {
         rows={[running({ id: "r2" })]}
         readOutput={vi.fn(async () => null)}
         cancel={cancel}
-        liveRunFor={() => undefined}
         clearFinished={vi.fn(async () => ({ cleared: 0 }))}
         onChanged={onChanged}
       />,
@@ -346,20 +373,55 @@ describe("BackgroundTasksSheet — subagent progress", () => {
       kind: "subagent",
       label: "List the 10 largest files",
       startedAt: 1_000,
+      progress: null,
       terminal: null,
       ...overrides,
     };
   }
 
-  it("renders the live progress message, labelled as progress and not output", () => {
-    const row = subagent();
-    render(
-      <BackgroundTasksSheet
-        {...base}
-        rows={[row]}
-        liveRunFor={() => ({ progress: { message: "working (step 7)", phase: "working" } })}
-      />,
-    );
+  /** A subagent's real terminal shape: NO exit code, ever — its outcome lives
+   *  in `subagentStatus`. Reading `exitCode` here is what made every completed
+   *  subagent render "Exit unknown" and count as a dock failure. */
+  function finishedSubagent(
+    status: "completed" | "error" | "aborted" | "interrupted",
+  ): BackgroundWorkRow {
+    return subagent({
+      terminal: {
+        outcome: status === "aborted" ? "stopped" : "exited",
+        reason: status === "aborted" ? "process_stopped" : "process_exit",
+        exitCode: null,
+        subagentStatus: status,
+        at: 8_000,
+      },
+    });
+  }
+
+  it("names a completed subagent's outcome instead of an absent exit code", () => {
+    render(<BackgroundTasksSheet {...base} rows={[finishedSubagent("completed")]} />);
+    expect(screen.getByText("Completed")).toBeInTheDocument();
+    // The bug: a subagent has no exit code, so the process-flavoured label
+    // reported the NORMAL successful case as a malfunction.
+    expect(screen.queryByText(/Exit unknown/)).not.toBeInTheDocument();
+  });
+
+  it("distinguishes a failed subagent from a completed one", () => {
+    render(<BackgroundTasksSheet {...base} rows={[finishedSubagent("error")]} />);
+    expect(screen.getByText("Error")).toBeInTheDocument();
+    // `outcome` alone cannot see this: `error` and `completed` both arrive as
+    // "exited", so toning on the outcome would paint this row as a success.
+    expect(screen.getByTestId("bg-kind-glyph")).toHaveAttribute("data-tone", "failed");
+  });
+
+  it("tones a completed subagent as clean, not unknown", () => {
+    render(<BackgroundTasksSheet {...base} rows={[finishedSubagent("completed")]} />);
+    expect(screen.getByTestId("bg-kind-glyph")).toHaveAttribute("data-tone", "clean");
+  });
+
+  it("renders the progress message, labelled as progress and not output", () => {
+    const row = subagent({
+      progress: { message: "working (step 7)", phase: "working", at: 5_000 },
+    });
+    render(<BackgroundTasksSheet {...base} rows={[row]} />);
     expect(screen.getByText("working (step 7)")).toBeInTheDocument();
     expect(screen.getByText(/Progress/)).toBeInTheDocument();
     // It is liveness, not output — calling it "Output" would imply the run
@@ -367,37 +429,40 @@ describe("BackgroundTasksSheet — subagent progress", () => {
     expect(screen.queryByText(/^Output$/)).not.toBeInTheDocument();
   });
 
-  it("says it is waiting when the run is known but has not reported a step yet", () => {
-    render(
-      <BackgroundTasksSheet {...base} rows={[subagent()]} liveRunFor={() => ({})} />,
-    );
+  it("says it is waiting when a running subagent has not reported a step yet", () => {
+    render(<BackgroundTasksSheet {...base} rows={[subagent()]} />);
     expect(screen.getByText(/Waiting for the first update/)).toBeInTheDocument();
+    // The server reads progress from the SDK's durable child-run row, so there
+    // is no longer a "this page missed the run's start" state to explain away.
     expect(screen.queryByText(/before this page loaded/)).not.toBeInTheDocument();
-  });
-
-  it("explains the reload case when the stream never saw the run start", () => {
-    render(
-      <BackgroundTasksSheet {...base} rows={[subagent()]} liveRunFor={() => undefined} />,
-    );
-    expect(screen.getByText(/before this page loaded/)).toBeInTheDocument();
     // Must NOT borrow the process-flavoured copy, which would be wrong here.
     expect(screen.queryByText(/Output isn't available for this task/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/Waiting for the first update/)).not.toBeInTheDocument();
   });
 
   it("shows no progress line for a finished subagent, stale or otherwise", () => {
-    const done = subagent({
-      terminal: { outcome: "exited", reason: "process_exit", exitCode: 0, at: 8_000 },
-    });
+    const done = finishedSubagent("completed");
     render(
       <BackgroundTasksSheet
         {...base}
-        rows={[done]}
-        liveRunFor={() => ({ progress: { message: "working (step 3)" } })}
+        rows={[{ ...done, progress: { message: "working (step 3)", phase: null, at: 5_000 } }]}
       />,
     );
     expect(screen.queryByText("working (step 3)")).not.toBeInTheDocument();
     expect(screen.queryByText(/Waiting for the first update/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/before this page loaded/)).not.toBeInTheDocument();
+  });
+
+  it("counts a completed subagent as clean in the dock summary, never as failed", () => {
+    // The reported bug, at the surface the user actually saw it: the dock read
+    // "1 failed" for a subagent that had finished successfully.
+    render(<BackgroundTasksRow enabled rows={[finishedSubagent("completed")]} onOpen={noop} />);
+    expect(screen.getByText(/1 clean/)).toBeInTheDocument();
+    expect(screen.queryByText(/failed/)).not.toBeInTheDocument();
+    expect(screen.getByTestId("bg-indicator")).toHaveAttribute("data-state", "clean");
+  });
+
+  it("still counts a crashed subagent as failed in the dock summary", () => {
+    render(<BackgroundTasksRow enabled rows={[finishedSubagent("error")]} onOpen={noop} />);
+    expect(screen.getByText(/1 failed/)).toBeInTheDocument();
+    expect(screen.getByTestId("bg-indicator")).toHaveAttribute("data-state", "failed");
   });
 });
