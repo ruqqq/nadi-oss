@@ -237,10 +237,9 @@ import {
 } from "./lib/steering-messages";
 import { usePendingSteers } from "./lib/use-pending-steers";
 import { useToolServers } from "./lib/use-tool-servers";
-import { useSubagentRuns } from "./lib/use-subagent-runs";
-import { SubagentDock } from "./components/chat/SubagentDock";
-import { useWatcherRuns } from "./lib/use-watcher-runs";
-import { WatcherDock } from "./components/chat/WatcherDock";
+import { useSubagentEvents } from "./lib/use-subagent-events";
+import { useBackgroundWork } from "./lib/use-background-work";
+import { BackgroundWorkDock } from "./components/chat/BackgroundWorkDock";
 import { FeedbackDraftCard } from "./components/feedback/FeedbackDraftCard";
 import { FeedbackFallbackForm } from "./components/feedback/FeedbackFallbackForm";
 import { collectFeedbackDiagnostics } from "./lib/feedback-diagnostics";
@@ -4576,13 +4575,9 @@ function ThreadChat({
   }, [socketConnected]);
   const [historyReloading, setHistoryReloading] = useState(false);
 
-  const subagentRuns = useSubagentRuns(agent, backgroundWorkEnabled);
+  const subagentRuns = useSubagentEvents(agent);
 
-  const { watchers } = useWatcherRuns(
-    agent,
-    messages,
-    backgroundWorkEnabled,
-  );
+  const { rows: backgroundWorkRows } = useBackgroundWork(agent, messages, backgroundWorkEnabled);
 
   const trackThreadEvent = useCallback(
     (event: string, props?: Record<string, unknown>) => {
@@ -5323,14 +5318,8 @@ function ThreadChat({
         {!feedbackMode && <SteeringMessageStrip items={steeringChips} onCancel={cancelSteeringMessage} />}
 
         {!feedbackMode && (
-          <SubagentDock
-            enabled={backgroundWorkEnabled}
-            subagentRuns={subagentRuns}
-            servers={toolServers}
-          />
+          <BackgroundWorkDock enabled={backgroundWorkEnabled} rows={backgroundWorkRows} />
         )}
-
-        {!feedbackMode && <WatcherDock enabled={backgroundWorkEnabled} watchers={watchers} />}
 
         {browserNotificationPrompt && (
           <BrowserNotificationPrompt

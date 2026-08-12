@@ -25,9 +25,9 @@ import { scriptedReply } from "./turns";
 const TICK_MS = 40;
 
 /**
- * Canned RPC replies, so the REAL `useSubagentRuns` / `useWatcherRuns` /
- * `usePendingSteers` / draft persistence keep working against the fake socket.
- * Values are the shapes those callers destructure, not invented ones.
+ * Canned RPC replies, so the REAL `useBackgroundWork` / `usePendingSteers` /
+ * draft persistence keep working against the fake socket. Values are the
+ * shapes those callers destructure, not invented ones.
  */
 const RPC_REPLIES: Record<string, unknown> = {
   listQueuedUserMessages: [],
@@ -38,14 +38,11 @@ const RPC_REPLIES: Record<string, unknown> = {
   submitQueuedUserMessage: [],
   cancelSteer: {},
   cancelQueuedUserMessage: undefined,
-  // Polled on every thread open by the real watcher/steer/subagent hooks. Not
+  // Polled on every thread open by the real steer/background-work hooks. Not
   // in the plan's table, but leaving them unhandled buries the warn channel
   // under noise the mock already knows the answer to.
-  listActiveWatchers: [],
+  listBackgroundWork: [],
   pendingSteerKeys: [],
-  getSubagentRunTimings: {},
-  cancelSubagentRun: undefined,
-  clearFinishedSubagentRuns: undefined,
   // Confirms a pending workbench switch (see `confirm_workbench_switch` in
   // `src/agent/compute-tools.ts`); the mock always wins the commit permit.
   confirm_workbench_switch: { committed: true },
@@ -136,10 +133,7 @@ function expandToFrames(message: UIMessage): Part[][] {
   return frames;
 }
 
-export function useFakeThreadChat(
-  agent: ThreadAgent,
-  initialMessages: UIMessage[],
-): ThreadChatApi {
+export function useFakeThreadChat(agent: ThreadAgent, initialMessages: UIMessage[]): ThreadChatApi {
   const [messages, setMessages] = useState<UIMessage[]>(initialMessages);
   const [status, setStatus] = useState<string>("ready");
   const [isStreaming, setIsStreaming] = useState(false);
@@ -177,10 +171,7 @@ export function useFakeThreadChat(
       setMessages((current) => [...current, userMessage]);
       setStatus("submitted");
 
-      const reply = scriptedReply(
-        turnIndexRef.current,
-        (agent as unknown as { id?: string }).id,
-      );
+      const reply = scriptedReply(turnIndexRef.current, (agent as unknown as { id?: string }).id);
       turnIndexRef.current += 1;
       const replyId = (reply as unknown as { id: string }).id;
       const frames = expandToFrames(reply);

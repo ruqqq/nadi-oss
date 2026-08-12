@@ -163,6 +163,7 @@ import {
   type CurrentGeneration,
   type WorkKind,
   type WorkOutcome,
+  type WorkReason,
   type WorkRow,
   type WorkTerminal,
 } from "./work-ledger";
@@ -5074,6 +5075,64 @@ export class ThinkThreadAgent extends Think<Env> {
   }
 
   /**
+   * One list for the background-work dock. Reads the LEDGER, which already
+   * holds both kinds (`process` and `subagent`) with one outcome vocabulary —
+   * the two views it replaces (`listActiveWatchers` / the subagent event
+   * stream) each derived from a different store, which is why the UI could
+   * never show a terminal outcome for a watched process.
+   *
+   * `label` comes from `workFacts()`, the same helper `deliverWorkTerminal`
+   * uses to name a row in its notification — `WorkRow` itself carries no
+   * label. Resolving compute once (rather than per-row) would be cheaper, but
+   * `workFacts` already tolerates an absent/failed resolve without throwing,
+   * and this list is short-lived and dock-only; not worth a second code path.
+   *
+   * Never throws — a throw inside a DO RPC method also fires an unhandled
+   * rejection (see `reportProcessCompletion`'s doc). Gated on
+   * `backgroundWorkAdmissionEnabled()`, like every other background-work
+   * surface.
+   */
+  async listBackgroundWork(): Promise<
+    Array<{
+      id: string;
+      kind: WorkKind;
+      label: string | null;
+      startedAt: number;
+      terminal: { outcome: WorkOutcome; reason: WorkReason } | null;
+    }>
+  > {
+    if (!(await this.backgroundWorkAdmissionEnabled())) return [];
+    const rows = this.workLedger.listRecent();
+    const out: Array<{
+      id: string;
+      kind: WorkKind;
+      label: string | null;
+      startedAt: number;
+      terminal: { outcome: WorkOutcome; reason: WorkReason } | null;
+    }> = [];
+    for (const row of rows) {
+      let label: string | null = null;
+      try {
+        const facts = await this.workFacts(row.id, row.kind);
+        label = facts.label;
+      } catch {
+        // workFacts already swallows its own failures; this is belt-and-braces
+        // so a dock read can never throw across the RPC boundary.
+      }
+      out.push({
+        id: row.id,
+        kind: row.kind,
+        label,
+        startedAt: row.startedAt,
+        terminal: row.terminal
+          ? { outcome: row.terminal.outcome, reason: row.terminal.reason }
+          : null,
+      });
+    }
+    return out;
+  }
+
+  /**
    * Push completion from a sandbox wrapper (the HTTP half lives in
    * `completion-routes.ts`). Idempotent on the ledger row, NOT on the token:
    * `verifyCompletionToken` is stateless and replayable until `exp`, so
@@ -6350,6 +6409,10 @@ callable()(
 );
 callable()(
   ThinkThreadAgent.prototype.listActiveWatchers,
+  null as unknown as ClassMethodDecoratorContext,
+);
+callable()(
+  ThinkThreadAgent.prototype.listBackgroundWork,
   null as unknown as ClassMethodDecoratorContext,
 );
 callable()(

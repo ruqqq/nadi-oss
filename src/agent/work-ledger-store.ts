@@ -222,6 +222,31 @@ export class WorkLedgerStore implements WorkLedgerSink {
   }
 
   /**
+   * Open rows plus recently-terminal ones, newest first — the dock's read
+   * path. Deliberately NOT `listOpen()`: the dock's whole gain over the two
+   * views it replaces is showing a TERMINAL outcome, and `listOpen()` excludes
+   * exactly those rows by definition.
+   *
+   * "Recent" is keyed on `delivered_at`, not `terminal_at`: a row's delivery
+   * is the moment the model (and so the thread) actually learned the outcome,
+   * which is what the dock should stay in sync with. `within` bounds how far
+   * back a delivered terminal still counts as recent (the dock is a live
+   * status surface, not history — `listAll` covers audit).
+   */
+  listRecent(now = Date.now(), within = 10 * 60_000): WorkRow[] {
+    return this.storage.sql
+      .exec<WorkLedgerRow>(
+        `SELECT * FROM background_work
+         WHERE terminal_outcome IS NULL
+            OR (delivered_at IS NOT NULL AND delivered_at >= ?)
+         ORDER BY started_at DESC`,
+        now - within,
+      )
+      .toArray()
+      .map(toWorkRow);
+  }
+
+  /**
    * Write the terminal. Returns true only for the transition that actually
    * terminalized the row — this is the exactly-once gate the caller uses to
    * decide whether to deliver a notification, so a repeat must return false.
