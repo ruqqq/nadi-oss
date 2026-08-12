@@ -220,16 +220,26 @@ function ProcessOutput({
   );
 }
 
+/** A finished row's duration is `terminal.at - startedAt` — both server
+ * timestamps, never wall-clock-now. The ledger stamps `at` the moment it
+ * terminalizes the row (`WorkTerminal.at`), so this is authoritative and
+ * stable across a reload; deriving it instead from "the moment this client
+ * first saw the row as terminal" would make a finished row's duration
+ * silently change (shrink toward zero) every time the page reloads, which is
+ * worse than a merely stale number — it's a visibly wrong one. */
+function durationFor(row: BackgroundWorkRow, now: number): number {
+  const endedAt = row.terminal ? row.terminal.at : now;
+  return Math.max(0, endedAt - row.startedAt);
+}
+
 function TaskRow({
   row,
   now,
-  frozenAt,
   readOutput,
   onCancel,
 }: {
   row: BackgroundWorkRow;
   now: number;
-  frozenAt: number | undefined;
   readOutput: (
     id: string,
     stream?: BackgroundWorkOutputStream,
@@ -238,8 +248,7 @@ function TaskRow({
 }) {
   const tone = toneFor(row);
   const running = isRunning(row);
-  const endedAt = running ? now : (frozenAt ?? now);
-  const duration = formatDuration(endedAt - row.startedAt);
+  const duration = formatDuration(durationFor(row, now));
   const exit = exitText(row);
   const title = row.kind === "process" ? (row.label ?? row.id) : (row.label ?? "Subagent run");
 
@@ -261,10 +270,19 @@ function TaskRow({
         <span className="font-mono tabular-nums text-muted-foreground">{duration}</span>
         {exit && <span className={cn("font-mono tabular-nums", exit.className)}>{exit.text}</span>}
       </div>
-      {row.kind === "process" && (
+      {row.kind === "process" ? (
         <div className="pl-6">
           <ProcessOutput row={row} readOutput={readOutput} />
         </div>
+      ) : (
+        // No per-kind action here: a subagent run has no transcript of its
+        // own to open. It executes inside THIS thread (a detached agent-tool
+        // run, not a separate thread), and its result already renders inline
+        // in this same transcript via CompletionGroup/SubagentResultNotice —
+        // there is nothing else to navigate to. The id is shown because it
+        // already appears on that inline completion card, so it isn't new
+        // information here, just a way to correlate the two.
+        <p className="pl-6 font-mono text-[11px] text-muted-foreground">{row.id}</p>
       )}
     </div>
   );
@@ -345,19 +363,6 @@ export function BackgroundTasksSheet({
     return () => window.clearInterval(id);
   }, [open]);
 
-  // A finished row's duration freezes at the wall-clock moment THIS client
-  // first observed it terminal — `WorkRow` carries a `startedAt` but no
-  // "finished at" timestamp, so that first-observed moment is the closest
-  // available proxy, and it is captured once and never overwritten.
-  const frozenAtRef = useRef<Map<string, number>>(new Map());
-  useEffect(() => {
-    for (const row of rows) {
-      if (row.terminal && !frozenAtRef.current.has(row.id)) {
-        frozenAtRef.current.set(row.id, Date.now());
-      }
-    }
-  }, [rows]);
-
   const runningRows = rows.filter(isRunning);
   const finishedRows = rows.filter((row) => !isRunning(row));
 
@@ -425,7 +430,6 @@ export function BackgroundTasksSheet({
                     key={row.id}
                     row={row}
                     now={now}
-                    frozenAt={frozenAtRef.current.get(row.id)}
                     readOutput={readOutput}
                     onCancel={handleCancel}
                   />
@@ -439,7 +443,6 @@ export function BackgroundTasksSheet({
                     key={row.id}
                     row={row}
                     now={now}
-                    frozenAt={frozenAtRef.current.get(row.id)}
                     readOutput={readOutput}
                     onCancel={handleCancel}
                   />

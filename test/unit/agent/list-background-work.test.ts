@@ -59,7 +59,12 @@ type TestableAgent = {
       kind: WorkKind;
       label: string | null;
       startedAt: number;
-      terminal: { outcome: WorkOutcome; reason: WorkReason; exitCode: number | null } | null;
+      terminal: {
+        outcome: WorkOutcome;
+        reason: WorkReason;
+        exitCode: number | null;
+        at: number;
+      } | null;
     }>
   >;
   readBackgroundWorkOutput(processId: string): Promise<{
@@ -143,11 +148,12 @@ describe("ThinkThreadAgent.listBackgroundWork", () => {
   it("includes an owed row — terminal with no delivery yet", async () => {
     await withAgent(async ({ instance, store }) => {
       instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
-      store.register(row({ id: "owed", startedAt: Date.now() - 20 * 60_000 }));
+      const terminalAt = Date.now() - 20 * 60_000;
+      store.register(row({ id: "owed", startedAt: terminalAt }));
       store.terminalize("owed", {
         outcome: "fault",
         reason: "no_liveness",
-        at: Date.now() - 20 * 60_000,
+        at: terminalAt,
         detail: "delivery threw",
       });
       const rows = await instance.listBackgroundWork();
@@ -156,6 +162,7 @@ describe("ThinkThreadAgent.listBackgroundWork", () => {
         outcome: "fault",
         reason: "no_liveness",
         exitCode: null,
+        at: terminalAt,
       });
     });
   });

@@ -44,7 +44,7 @@ function failed(overrides?: Partial<BackgroundWorkRow>): BackgroundWorkRow {
     kind: "process",
     label: "make build",
     startedAt: 1_000,
-    terminal: { outcome: "exited", reason: "process_exit", exitCode: 7 },
+    terminal: { outcome: "exited", reason: "process_exit", exitCode: 7, at: 8_000 },
     ...overrides,
   };
 }
@@ -55,7 +55,7 @@ function clean(overrides?: Partial<BackgroundWorkRow>): BackgroundWorkRow {
     kind: "process",
     label: "make build",
     startedAt: 1_000,
-    terminal: { outcome: "exited", reason: "process_exit", exitCode: 0 },
+    terminal: { outcome: "exited", reason: "process_exit", exitCode: 0, at: 8_000 },
     ...overrides,
   };
 }
@@ -66,7 +66,7 @@ function unknownExit(overrides?: Partial<BackgroundWorkRow>): BackgroundWorkRow 
     kind: "process",
     label: "make build",
     startedAt: 1_000,
-    terminal: { outcome: "exited", reason: "process_exit", exitCode: null },
+    terminal: { outcome: "exited", reason: "process_exit", exitCode: null, at: 8_000 },
     ...overrides,
   };
 }
@@ -188,6 +188,32 @@ describe("BackgroundTasksSheet — output", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: /output/i }));
     expect(await screen.findByText("No output yet")).toBeInTheDocument();
+  });
+});
+
+describe("BackgroundTasksSheet — duration", () => {
+  it("derives a finished row's duration from terminal.at, not wall-clock-now", () => {
+    // Date.now() is pinned far past the row's terminal timestamp — if the
+    // sheet computed duration from wall-clock-now (the reload-resets-it bug
+    // this was fixed to avoid) it would render a huge elapsed time instead
+    // of the true `at - startedAt` (8_000 - 1_000 = 7s).
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+    try {
+      render(
+        <BackgroundTasksSheet
+          open
+          onOpenChange={noop}
+          rows={[failed({ id: "row-f", startedAt: 1_000, terminal: { outcome: "exited", reason: "process_exit", exitCode: 7, at: 8_000 } })]}
+          readOutput={vi.fn(async () => null)}
+          cancel={vi.fn(async () => ({ ok: true }))}
+          clearFinished={vi.fn(async () => ({ cleared: 0 }))}
+          onChanged={noop}
+        />,
+      );
+      expect(screen.getByText("0:07")).toBeInTheDocument();
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 });
 

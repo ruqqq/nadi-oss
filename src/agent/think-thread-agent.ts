@@ -5147,7 +5147,12 @@ export class ThinkThreadAgent extends Think<Env> {
       kind: WorkKind;
       label: string | null;
       startedAt: number;
-      terminal: { outcome: WorkOutcome; reason: WorkReason; exitCode: number | null } | null;
+      terminal: {
+        outcome: WorkOutcome;
+        reason: WorkReason;
+        exitCode: number | null;
+        at: number;
+      } | null;
     }>
   > {
     const admission = await this.backgroundWorkAdmissionEnabled();
@@ -5170,7 +5175,12 @@ export class ThinkThreadAgent extends Think<Env> {
       kind: WorkKind;
       label: string | null;
       startedAt: number;
-      terminal: { outcome: WorkOutcome; reason: WorkReason; exitCode: number | null } | null;
+      terminal: {
+        outcome: WorkOutcome;
+        reason: WorkReason;
+        exitCode: number | null;
+        at: number;
+      } | null;
     }> = [];
     for (const row of rows) {
       let label: string | null = null;
@@ -5191,6 +5201,7 @@ export class ThinkThreadAgent extends Think<Env> {
               outcome: row.terminal.outcome,
               reason: row.terminal.reason,
               exitCode: row.terminal.exitCode ?? parseExitCodeFromDetail(row.terminal.detail),
+              at: row.terminal.at,
             }
           : null,
       });

@@ -45,6 +45,12 @@ export interface BackgroundWorkRow {
     outcome: BackgroundWorkOutcome;
     reason: BackgroundWorkReason;
     exitCode: number | null;
+    /** Wall-clock time the ledger recorded this row as terminal
+     * (`WorkTerminal.at`) — the sheet derives a finished row's duration from
+     * `at - startedAt`, NOT from wall-clock-now, so a reload doesn't reset
+     * every finished row's elapsed time to "however long ago I opened the
+     * sheet". */
+    at: number;
   } | null;
 }
 
@@ -68,6 +74,7 @@ function isBackgroundWorkRow(value: unknown): value is BackgroundWorkRow {
     if (typeof terminal.outcome !== "string") return false;
     if (typeof terminal.reason !== "string") return false;
     if (typeof terminal.exitCode !== "number" && terminal.exitCode !== null) return false;
+    if (typeof terminal.at !== "number") return false;
   }
   return true;
 }
