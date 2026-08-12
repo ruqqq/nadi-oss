@@ -313,11 +313,11 @@ export class CloudflareComputeBackend implements ComputeBackend {
     // wrapped in, that is the WRAPPER, not the command — the wrapper's inner
     // `timeout` already bounds the command to `input.timeoutMs`, so the SDK
     // needs extra room afterward for the rc capture + the callback's own
-    // `curl` (bounded to `COMPLETION_CALLBACK_TIMEOUT_MARGIN_MS`'s comment
-    // value) to run before the SDK would otherwise kill the wrapper. Without
-    // this margin, a command that consumes its full budget gets its wrapper
-    // killed before the callback fires, and delivery silently falls back to
-    // the poll.
+    // `curl` (bounded to 25s by `COMPLETION_CALLBACK_CURL_TIMEOUT_SECS` in
+    // `thread-service.ts`) to run before the SDK would otherwise kill the
+    // wrapper. Without this margin, a command that consumes its full budget
+    // gets its wrapper killed before the callback fires, and delivery
+    // silently falls back to the poll.
     const timeoutMs =
       input.completionCallback === undefined
         ? input.timeoutMs
@@ -863,10 +863,17 @@ const COMPLETION_CALLBACK_TIMEOUT_MARGIN_MS = 30_000;
  *
  * Unlike sprites (`buildSpritesWrapper`), Cloudflare captures the process's
  * stdout/stderr as its log stream — the same stream `waitForProcessExit`
- * reads and `readProcessOutput` returns to the model — so the callback's
- * `curl` MUST redirect its own output (`>/dev/null 2>&1`) or HTTP response
- * noise lands in what the model reads as program output. There is no
- * sentinel-file trick to hide behind, as there is on sprites.
+ * reads and `readProcessOutput` returns to the model — so the callback's own
+ * output MUST NOT reach it, or HTTP response noise lands in what the model
+ * reads as program output. There is no sentinel-file trick to hide behind, as
+ * there is on sprites.
+ *
+ * `completionCallback` is an opaque caller-supplied fragment, not necessarily
+ * a single simple command — wrapped in `{ ...; } >/dev/null 2>&1` (a group)
+ * rather than appending the redirect as a bare suffix, so the redirect
+ * applies to the WHOLE fragment. A suffix redirect on a fragment that turns
+ * out to be a pipeline or an `a && b` chain would only silence its last
+ * segment, leaking the rest. Do not simplify this back to a suffix.
  *
  * The inner `timeout` bounds the command to `timeoutMs` itself; the caller is
  * responsible for giving the SDK's own `timeoutMs` extra room on top (see
@@ -890,7 +897,7 @@ function buildCompletionCallbackWrapper(
   return (
     `timeout ${timeoutSecs} bash -c ${shellQuote(command)}; ` +
     `__nadi_rc="$?"; ` +
-    `NADI_EXIT_CODE="$__nadi_rc"; ${completionCallback} >/dev/null 2>&1; ` +
+    `NADI_EXIT_CODE="$__nadi_rc"; { ${completionCallback} ; } >/dev/null 2>&1; ` +
     `exit "$__nadi_rc"`
   );
 }

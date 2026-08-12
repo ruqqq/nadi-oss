@@ -813,10 +813,11 @@ export class ThreadComputeService {
    * `StartProcessInput.completionCallback` into what it runs. Derived from
    * the backend's OWN declared `consumesCompletionCallback` capability
    * (`ComputeBackend`'s doc) rather than a provider-id allow-list: an id list
-   * drifts the moment a provider gains or loses the wrapper (today only
-   * sprites has one; Cloudflare's is a separate, queued task), and self-
-   * corrects nothing when that happens. A list did exactly that once already
-   * in review — see this file's git history.
+   * drifts the moment a provider gains or loses the wrapper (today sprites
+   * and Cloudflare both have one; Daytona does not and is being phased out
+   * over its network-allowlist behavior), and self-corrects nothing when that
+   * happens. A list did exactly that once already in review — see this
+   * file's git history.
    */
   private consumesCompletionCallback(): boolean {
     return this.deps.backend.consumesCompletionCallback === true;
@@ -834,7 +835,11 @@ export class ThreadComputeService {
    * deliberately: local dev sets `APP_BASE_URL` to `http://localhost:8787`,
    * which is non-empty but unreachable from inside a real sandbox — and
    * irrelevant for a backend that never reads the callback at all (today:
-   * `"mock"`/`"fake"`, and `"cloudflare"`/`"daytona"` until they grow one).
+   * `"mock"`/`"fake"`, and `"daytona"`, which is not expected to grow one).
+   * For `"cloudflare"` and `"sprites"` (both consume it) this loopback check
+   * is exactly what makes local dev against a REAL Cloudflare or sprites
+   * container refuse to background — see the ACCEPTED CONSEQUENCE note on
+   * `ComputeBackend.consumesCompletionCallback`.
    */
   private completionCallbackUnavailableReason():
     | "no_base_url"

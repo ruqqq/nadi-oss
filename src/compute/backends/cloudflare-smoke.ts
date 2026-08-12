@@ -193,6 +193,46 @@ export async function runCloudflareComputeSmoke(
       return `post-exit poll OK: status=${status.status} stdout=${JSON.stringify(out.stdout)}`;
     });
 
+    // 4d. A wrapped completion callback: the command's own exit code and
+    // output must win, and the callback's own HTTP noise must not leak into
+    // the captured stream `waitForProcessExit`/`readProcessOutput` return to
+    // the model. The callback target is deliberately NOT expected to
+    // succeed (`https://example.invalid` never resolves) — this step is
+    // about what the WRAPPER does to the command's own status/output, not
+    // about exercising a real `/api/compute/completion` round trip, which
+    // needs a reachable origin this smoke run does not have.
+    await assert(
+      "4d. a wrapped completion callback preserves the command's exit code and output",
+      async () => {
+        const marker = `nadi-cb-${rand}`;
+        const started = await ctx.backend.startProcess(runtime!, {
+          command: `printf '${marker}'; exit 5`,
+          timeoutMs: 30_000,
+          completionCallback: "curl -sf -m 1 -X POST https://example.invalid/completion",
+        });
+        let status: { status: string; exitCode?: number } = {
+          status: started.status,
+          ...(started.exitCode === undefined ? {} : { exitCode: started.exitCode }),
+        };
+        for (let i = 0; i < 150 && status.status === "running"; i += 1) {
+          await sleep(200);
+          status = await ctx.backend.getProcessStatus(runtime!, started.process);
+        }
+        const out = await ctx.backend.readProcessOutput(runtime!, started.process);
+        if (status.exitCode !== 5) {
+          throw new Error(
+            `exitCode=${status.exitCode} expected=5 (the WRAPPER's own status, not the command's, is leaking through)`,
+          );
+        }
+        if ((out.stdout ?? "").trim() !== marker) {
+          throw new Error(
+            `stdout=${JSON.stringify(out.stdout)} expected exactly ${JSON.stringify(marker)} (callback noise likely leaked in)`,
+          );
+        }
+        return `exitCode=5 preserved; stdout=${JSON.stringify(out.stdout)} (no callback noise); stderr=${JSON.stringify(out.stderr)}`;
+      },
+    );
+
     // 5. /workspace exists and is writable (the base image is supposed to ship it).
     await assert("5. /workspace exists and is writable", async () => {
       const probe = `${SMOKE_ROOT}/.writable`;

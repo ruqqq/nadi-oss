@@ -43,9 +43,11 @@ export interface StartProcessInput {
    * `NADI_EXIT_CODE` to that recorded value immediately before running it.
    *
    * Optional, and silently ignorable: a backend with no wrapper to insert a
-   * shell fragment into (Cloudflare, whose `startProcess` hands the command
-   * straight to the SDK) simply never reads this field. Absent whenever the
-   * caller has no base URL to call back to — see `ThreadComputeService`'s
+   * shell fragment into simply never reads this field. Sprites and Cloudflare
+   * both wrap it in (`buildSpritesWrapper`, `buildCompletionCallbackWrapper`);
+   * Daytona does not and is not expected to grow one — it is being phased out
+   * over its network-allowlist behavior. Absent whenever the caller has no
+   * base URL to call back to — see `ThreadComputeService`'s
    * `buildCompletionCallback`.
    */
   completionCallback?: string;
@@ -198,8 +200,19 @@ export interface ComputeBackend {
    * A NEW BACKEND MUST DECIDE THIS. It is the predicate
    * `ThreadComputeService.shouldRefuseBackgrounding` is derived from; a
    * provider-id allow-list drifted the moment a provider gained or lost the
-   * wrapper (sprites has one, Cloudflare and Daytona do not — yet, in
-   * Cloudflare's case).
+   * wrapper. True today for sprites and Cloudflare (both assemble the
+   * fragment into what they run); false for Daytona, which is being phased
+   * out over its network-allowlist behavior and is not expected to grow one.
+   *
+   * ACCEPTED CONSEQUENCE: with this `true`, `shouldRefuseBackgrounding` fires
+   * whenever the caller has no reachable base URL to call back to — which is
+   * exactly local dev's loopback `APP_BASE_URL` against a real Cloudflare
+   * container. Backgrounding is refused there, so a long command runs
+   * synchronously and can hit the exec timeout instead. This is the design
+   * working as intended (no delivery path ⇒ do not pretend to watch), the
+   * ordinary local default is the in-process `mock` provider and is
+   * unaffected, and testing push against real containers locally requires a
+   * reachable origin anyway.
    */
   readonly consumesCompletionCallback?: boolean;
   readonly workHold?: {
