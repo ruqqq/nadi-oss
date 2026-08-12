@@ -534,6 +534,26 @@ export class ThreadComputeService {
     return this.fileServiceInstance;
   }
 
+  /**
+   * Start a process and return immediately without waiting — the explicit
+   * "background it, do not wait" entry point (today reached only from
+   * debug/diagnostic RPCs; see `exec()` for the model-facing implicit
+   * foreground-then-maybe-background flow, which has its OWN refusal check
+   * because it can fall back to running synchronously instead).
+   *
+   * `execStart` has no synchronous fallback to offer — the caller explicitly
+   * asked not to wait, so silently blocking here would violate the contract
+   * just as badly as silently losing the completion would. So when no
+   * completion callback can be delivered for a REMOTE provider
+   * (`shouldRefuseBackgrounding()`), this THROWS instead of starting a process
+   * nothing will ever hear back from — the same "answer or throw" convention
+   * every other failure path on this method already uses (a backend error
+   * from `startAndStoreProcess` propagates the same way). A caller wrapped in
+   * `compute-tools.ts`'s per-tool `try { ... } catch { return toErrorResult(error) }`
+   * surfaces this as `{ ok: false, error: "compute_unavailable", detail: "..." }`
+   * — the existing shape, not a new one — with a `detail` message the model
+   * can act on by running the command in the foreground itself instead.
+   */
   async execStart(input: {
     command: string;
     cwd?: string | undefined;
@@ -543,6 +563,18 @@ export class ThreadComputeService {
     label?: string | undefined;
   }) {
     await this.deps.markSandboxDirty?.();
+    if (this.shouldRefuseBackgrounding()) {
+      log.warn("compute.background_refused_no_callback", {
+        threadId: this.deps.threadId,
+        provider: this.deps.backend.id,
+        reason: this.completionCallbackUnavailableReason(),
+        entryPoint: "execStart",
+      });
+      throw new ComputeError(
+        "compute_unavailable",
+        "background_unavailable_no_callback: background work is unavailable in this deployment; run the command in the foreground instead.",
+      );
+    }
     return this.startAndStoreProcess(input);
   }
 
@@ -570,6 +602,7 @@ export class ThreadComputeService {
           threadId: this.deps.threadId,
           provider: this.deps.backend.id,
           reason: refuseReason,
+          entryPoint: "exec",
         });
       }
       if (this.deps.backend.waitForProcessExit) {
@@ -623,6 +656,12 @@ export class ThreadComputeService {
     await this.deps.markSandboxDirty?.();
     const backend = this.deps.backend;
     if (!backend.runCommand) {
+      // Unreachable today: every real remote provider (sprites, cloudflare,
+      // daytona) implements `runCommand`, so this branch only ever runs for
+      // the in-process mock/fake backends, which `execStart`'s refusal check
+      // never applies to. Left un-special-cased deliberately — if a future
+      // backend without `runCommand` lands here, `execStart` already refuses
+      // correctly on its own; do not duplicate that check.
       const started = await this.execStart(input);
       await this.waitForForegroundOrBackground(
         started.processId,

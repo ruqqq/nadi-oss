@@ -3,6 +3,7 @@ import { FakeComputeBackend } from "../../../src/compute/backends/fake";
 import { createFakeSpritesBackend } from "./helpers/fake-sprites-client";
 import { deriveCompletionSecret, verifyCompletionToken } from "../../../src/compute/completion-token";
 import { DEFAULT_COMPUTE_LIMITS } from "../../../src/compute/config";
+import { ComputeError } from "../../../src/compute/errors";
 import { log } from "../../../src/log";
 import { MAX_WATCH_TIMEOUT_MS, ThreadComputeService } from "../../../src/compute/thread-service";
 import type { EffectiveComputeConfig } from "../../../src/compute/types";
@@ -229,7 +230,7 @@ describe("ThreadComputeService completion callback", () => {
       expect(result.status).not.toBe("backgrounded");
       expect(warnings).toContainEqual([
         "compute.background_refused_no_callback",
-        { threadId: "thread_abc", provider: "sprites", reason: "no_base_url" },
+        { threadId: "thread_abc", provider: "sprites", reason: "no_base_url", entryPoint: "exec" },
       ]);
     } finally {
       log.warn = originalWarn;
@@ -264,7 +265,7 @@ describe("ThreadComputeService completion callback", () => {
       expect(result.status).not.toBe("backgrounded");
       expect(warnings).toContainEqual([
         "compute.background_refused_no_callback",
-        { threadId: "thread_abc", provider: "sprites", reason: "unreachable_base_url" },
+        { threadId: "thread_abc", provider: "sprites", reason: "unreachable_base_url", entryPoint: "exec" },
       ]);
     } finally {
       log.warn = originalWarn;
@@ -333,5 +334,71 @@ describe("ThreadComputeService completion callback", () => {
     const releaseAt = script!.lastIndexOf("-X DELETE");
     expect(rcAt).toBeLessThan(callbackAt);
     expect(callbackAt).toBeLessThan(releaseAt);
+  });
+
+  it("execStart refuses (throws) rather than silently backgrounding a remote provider with no callback", async () => {
+    // `execStart`'s whole contract is "start it and do not wait" — it has no
+    // synchronous fallback to offer, so unlike `exec()` it must make the
+    // refusal OBSERVABLE (a thrown error a caller can catch and act on)
+    // rather than silently starting a process nothing will ever hear back
+    // from.
+    const { backend } = createFakeSpritesBackend();
+    const store = createMemoryComputeStore();
+    const service = new ThreadComputeService({
+      backend,
+      store,
+      config: CONFIG,
+      environmentId: "thread_test",
+      threadId: "thread_abc",
+      env: {},
+      // No appBaseUrl — sprites is a remote provider, so execStart must
+      // refuse rather than start an unwatchable background process.
+      setAlarm: async () => {},
+      now: () => 1_000,
+    });
+
+    await expect(service.execStart({ command: "sleep 60" })).rejects.toThrow(ComputeError);
+    await expect(service.execStart({ command: "sleep 60" })).rejects.toMatchObject({
+      code: "compute_unavailable",
+      message: expect.stringContaining("background_unavailable_no_callback"),
+    });
+  });
+
+  it("execStart still backgrounds normally once a real callback is available", async () => {
+    const { backend } = createFakeSpritesBackend();
+    const store = createMemoryComputeStore();
+    const service = new ThreadComputeService({
+      backend,
+      store,
+      config: CONFIG,
+      environmentId: "thread_test",
+      threadId: "thread_abc",
+      env: {},
+      appBaseUrl: "https://nadi.example.com",
+      betterAuthSecret: SECRET,
+      setAlarm: async () => {},
+      now: () => 1_000,
+    });
+
+    const started = await service.execStart({ command: "sleep 60" });
+    expect(started.status).toBe("running");
+  });
+
+  it("execStart never refuses on the in-process mock/fake backend", async () => {
+    const backend = new FakeComputeBackend();
+    const store = createMemoryComputeStore();
+    const service = new ThreadComputeService({
+      backend,
+      store,
+      config: CONFIG,
+      environmentId: "thread_test",
+      threadId: "thread_abc",
+      env: {},
+      setAlarm: async () => {},
+      now: () => 1_000,
+    });
+
+    const started = await service.execStart({ command: "sleep 60" });
+    expect(started.status).toBe("running");
   });
 });
