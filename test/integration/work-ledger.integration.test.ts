@@ -524,19 +524,38 @@ describe("work ledger (DO integration)", () => {
      * replaces.
      *
      * Both clocks are the same faked `Date`, so silence is measured honestly —
-     * across five sweeps the process is silent for 100s against a 21s threshold,
-     * and stays alive ONLY because each tick genuinely polls it and stamps it.
+     * across the passes below the process is silent for well over four stale
+     * windows, and stays alive ONLY because each tick genuinely polls it and
+     * stamps it.
+     *
+     * EVERY number here is DERIVED from the two real constants, never restated.
+     * It used to advance a literal 20s per pass and expect 5 distinct stamps,
+     * which encoded the old 7s poll: at 60s only 2 stamps land (the watcher is
+     * due every third pass) and the assertion failed. Lowering 5 to 2 would
+     * have retuned the guard until it was green and destroyed it — the count is
+     * "the tick stamped on EVERY pass", so it has to move with the cadence.
      *
      * RED IF: `pollWatcher` stops calling `stampAlive`,
      * `PROCESS_STALE_AFTER_MS` drops below the poll interval, or `classifyWork`
      * faults an in-window row.
      *
-     * NOT red if the tick/sweep order reverts to sweep-first: the advance is 20s
-     * against a 21s window, and under sweep-first the PRIOR tick stamped at the
-     * prior `now`, so the observed silence is always exactly 20s — in window.
-     * Ordering is covered by `alarm-rearm.test.ts`'s late-alarm test instead.
+     * NOT red if the tick/sweep order reverts to sweep-first: the advance is
+     * strictly less than one stale window, and under sweep-first the PRIOR tick
+     * stamped at the prior `now`, so the observed silence is always exactly one
+     * advance — in window. Ordering is covered by `alarm-rearm.test.ts`'s
+     * late-alarm test instead.
      */
     it("is never faulted while the tick keeps stamping it", async () => {
+      // Past the poll so the watcher is genuinely DUE on every pass (that is
+      // what makes it stamp), and inside the stale window so one pass's silence
+      // is in-window under either tick/sweep order. `PROCESS_STALE_AFTER_MS` is
+      // 3x the poll, so 2x sits between the two by construction.
+      const ADVANCE_MS = DEFAULT_MONITOR_POLL_INTERVAL_MS * 2;
+      expect(ADVANCE_MS).toBeGreaterThan(DEFAULT_MONITOR_POLL_INTERVAL_MS);
+      expect(ADVANCE_MS).toBeLessThan(PROCESS_STALE_AFTER_MS);
+      // Enough passes that the total elapsed dwarfs the stale window — the
+      // "far more than the stale window elapsed" assertion at the bottom.
+      const PASSES = Math.ceil((PROCESS_STALE_AFTER_MS * 4) / ADVANCE_MS) + 1;
       const stub = stubFor(THREADS.healthy);
       const result = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
         const testInstance = instance as LedgerTestableAgent;
@@ -548,8 +567,8 @@ describe("work ledger (DO integration)", () => {
           const states: Array<{ terminal: unknown; watchers: number }> = [];
 
           // Never finished on the backend: the process really is still running.
-          for (let index = 0; index < 5; index += 1) {
-            vi.setSystemTime(Date.now() + 20_000);
+          for (let index = 0; index < PASSES; index += 1) {
+            vi.setSystemTime(Date.now() + ADVANCE_MS);
             await instance.runSandboxEviction();
             const row = ledgerOf(instance).get(processId);
             stamps.push(row?.lastAliveAt ?? -1);
@@ -574,8 +593,8 @@ describe("work ledger (DO integration)", () => {
 
       // ANTI-VACUITY: the row was really observed and really re-stamped each pass.
       // A row nothing stamps would repeat one value here and go stale below.
-      expect(result.stamps).toHaveLength(5);
-      expect(new Set(result.stamps).size).toBe(5);
+      expect(result.stamps).toHaveLength(PASSES);
+      expect(new Set(result.stamps).size).toBe(PASSES);
       for (const stamp of result.stamps) expect(stamp).toBeGreaterThan(0);
       // The test is only meaningful if far more than the stale window elapsed.
       expect(result.elapsedMs).toBeGreaterThan(PROCESS_STALE_AFTER_MS * 4);
