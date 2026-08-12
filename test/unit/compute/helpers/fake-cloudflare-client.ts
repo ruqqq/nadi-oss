@@ -103,6 +103,8 @@ export class FakeCloudflareSandbox implements CloudflareSandbox {
   private readonly existsOmitsExists = new Set<string>();
   private readonly existsWrongType = new Map<string, unknown>();
   private processSeq = 0;
+  /** The options `startProcess` was last called with — asserts on the `timeoutMs` the backend hands the SDK. */
+  lastStartOptions: ClientStartProcessOptions | undefined;
 
   /** `backups` is the factory-shared, R2-like store (survives destroy). */
   constructor(private readonly backups: Map<string, BackupSnapshot> = new Map()) {}
@@ -195,6 +197,7 @@ export class FakeCloudflareSandbox implements CloudflareSandbox {
   async startProcess(command: string, options: ClientStartProcessOptions): Promise<ClientProcess> {
     this.alive();
     this.calls.push(`start:${command}`);
+    this.lastStartOptions = options;
     this.processSeq += 1;
     const id = `proc-${this.processSeq}`;
     const isSleep = /^\s*sleep\b/.test(command);

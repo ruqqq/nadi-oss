@@ -262,6 +262,72 @@ describe("CloudflareComputeBackend processes", () => {
   });
 });
 
+describe("CloudflareComputeBackend completion callback wrapping", () => {
+  async function acquired(): Promise<{
+    env: FakeCloudflareEnvironment;
+    runtime: BackendReference;
+  }> {
+    const environment = createFakeCloudflareBackend();
+    const runtime = await environment.backend.acquire(spec());
+    return { env: environment, runtime };
+  }
+
+  it("declares that it consumes the completion callback", () => {
+    const { backend } = createFakeCloudflareBackend();
+    expect(backend.consumesCompletionCallback).toBe(true);
+  });
+
+  it("wraps the command so the callback runs after it, preserving the command's exit code", async () => {
+    const { env, runtime } = await acquired();
+    const sandbox = env.factory.peek(deriveSandboxId("workspace-1", "thread-1"))!;
+
+    await env.backend.startProcess(runtime, {
+      command: "make build",
+      timeoutMs: 600_000,
+      completionCallback: "curl -sf -m 25 -X POST https://app/api/compute/completion",
+    });
+
+    const sent = sandbox.calls.at(-1)!;
+    expect(sent).toContain("make build");
+    // The callback must not pollute captured output, and the command's status must win.
+    expect(sent).toMatch(/__nadi_rc=/);
+    expect(sent).toMatch(/curl .*>\/dev\/null 2>&1/);
+    expect(sent.indexOf("make build")).toBeLessThan(sent.indexOf("curl"));
+    expect(sent.trimEnd()).toMatch(/exit "?\$__nadi_rc"?$/);
+  });
+
+  it("passes the command through untouched when there is no callback", async () => {
+    const { env, runtime } = await acquired();
+    const sandbox = env.factory.peek(deriveSandboxId("workspace-1", "thread-1"))!;
+
+    await env.backend.startProcess(runtime, { command: "make build", timeoutMs: 600_000 });
+
+    expect(sandbox.calls.at(-1)).toBe("start:make build");
+  });
+
+  it("gives the SDK's own timeout extra room beyond the wrapped command's budget", async () => {
+    const { env, runtime } = await acquired();
+    const sandbox = env.factory.peek(deriveSandboxId("workspace-1", "thread-1"))!;
+
+    await env.backend.startProcess(runtime, {
+      command: "make build",
+      timeoutMs: 600_000,
+      completionCallback: "curl -sf -m 25 -X POST https://app/api/compute/completion",
+    });
+
+    expect(sandbox.lastStartOptions?.timeoutMs).toBeGreaterThan(600_000);
+  });
+
+  it("does not add timeout margin when there is no callback", async () => {
+    const { env, runtime } = await acquired();
+    const sandbox = env.factory.peek(deriveSandboxId("workspace-1", "thread-1"))!;
+
+    await env.backend.startProcess(runtime, { command: "make build", timeoutMs: 600_000 });
+
+    expect(sandbox.lastStartOptions?.timeoutMs).toBe(600_000);
+  });
+});
+
 describe("CloudflareComputeBackend.inspectPath", () => {
   it("returns null for a missing path without throwing", async () => {
     const { backend } = createFakeCloudflareBackend();

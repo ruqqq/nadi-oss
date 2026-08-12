@@ -105,6 +105,14 @@ export class CloudflareComputeBackend implements ComputeBackend {
   // No `workHold`: this backend runs with `keepAlive: true`, so the container
   // executes while idle and needs no hold. See `ComputeBackend.workHold` — the
   // omission is a decision, not an oversight.
+  /**
+   * `startProcess` reads `StartProcessInput.completionCallback` and wraps it
+   * around the command (see `buildCompletionCallbackWrapper`). See
+   * `ComputeBackend.consumesCompletionCallback` — Cloudflare is the
+   * production default provider, so leaving this absent would mean the
+   * push-completion fix reached almost no real threads.
+   */
+  readonly consumesCompletionCallback = true;
   private readonly factory: CloudflareSandboxFactory;
   private readonly bindings: CloudflareBindings;
   private readonly workspaceId: string;
@@ -288,12 +296,37 @@ export class CloudflareComputeBackend implements ComputeBackend {
   ): Promise<StartProcessResult> {
     const { sandboxId, profile } = this.runtimePayload(runtime);
     const sandbox = this.sandbox(profile, sandboxId);
-    const command = withStdin(input.command, input.stdin);
+    // Compose stdin INTO the command first, then wrap the result — not the
+    // other way around. Wrapping first would put the rc-capture/callback
+    // tail on the outside of the stdin pipe, so stdin would feed the whole
+    // wrapper (including `timeout ... bash -c`) instead of just the command.
+    const withStdinCommand = withStdin(input.command, input.stdin);
+    const command =
+      input.completionCallback === undefined
+        ? withStdinCommand
+        : buildCompletionCallbackWrapper(
+            withStdinCommand,
+            input.timeoutMs,
+            input.completionCallback,
+          );
+    // The SDK's own `timeoutMs` bounds whatever we hand it. Once a callback is
+    // wrapped in, that is the WRAPPER, not the command — the wrapper's inner
+    // `timeout` already bounds the command to `input.timeoutMs`, so the SDK
+    // needs extra room afterward for the rc capture + the callback's own
+    // `curl` (bounded to `COMPLETION_CALLBACK_TIMEOUT_MARGIN_MS`'s comment
+    // value) to run before the SDK would otherwise kill the wrapper. Without
+    // this margin, a command that consumes its full budget gets its wrapper
+    // killed before the callback fires, and delivery silently falls back to
+    // the poll.
+    const timeoutMs =
+      input.completionCallback === undefined
+        ? input.timeoutMs
+        : input.timeoutMs + COMPLETION_CALLBACK_TIMEOUT_MARGIN_MS;
     const process = await this.guard(() =>
       sandbox.startProcess(command, {
         ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
         ...(input.env !== undefined ? { env: input.env } : {}),
-        timeoutMs: input.timeoutMs,
+        timeoutMs,
         // Keep the process record after exit. The SDK default (autoCleanup:true)
         // deletes it on exit, so a command that finishes before we poll reports
         // as gone -> getProcessStatus throws process_missing and the turn hangs.
@@ -811,6 +844,59 @@ function pairDigest(workspaceId: string, threadId: string): string {
 function withStdin(command: string, stdin: string | undefined): string {
   if (stdin === undefined) return command;
   return `printf %s '${base64FromString(stdin)}' | base64 -d | ${command}`;
+}
+
+/**
+ * Margin (ms) added to the SDK's `startProcess` `timeoutMs` when a completion
+ * callback is wrapped in. `ThreadComputeService`'s `buildCompletionCallback`
+ * bounds the callback's own `curl` to 25s (`COMPLETION_CALLBACK_CURL_TIMEOUT_SECS`
+ * in `thread-service.ts`) — this covers that plus a few seconds of scheduling
+ * slack for the rc write and process shutdown. Without it the SDK could kill
+ * the wrapper at the same instant the inner `timeout` kills the command,
+ * before the callback gets to run at all.
+ */
+const COMPLETION_CALLBACK_TIMEOUT_MARGIN_MS = 30_000;
+
+/**
+ * Wraps `command` so a completion callback fires AFTER it, reporting the
+ * command's own exit code rather than the wrapper's.
+ *
+ * Unlike sprites (`buildSpritesWrapper`), Cloudflare captures the process's
+ * stdout/stderr as its log stream — the same stream `waitForProcessExit`
+ * reads and `readProcessOutput` returns to the model — so the callback's
+ * `curl` MUST redirect its own output (`>/dev/null 2>&1`) or HTTP response
+ * noise lands in what the model reads as program output. There is no
+ * sentinel-file trick to hide behind, as there is on sprites.
+ *
+ * The inner `timeout` bounds the command to `timeoutMs` itself; the caller is
+ * responsible for giving the SDK's own `timeoutMs` extra room on top (see
+ * `COMPLETION_CALLBACK_TIMEOUT_MARGIN_MS`) so the wrapper survives long
+ * enough for the callback to run after a command that used its full budget.
+ *
+ * `NADI_EXIT_CODE` is set as a plain (non-exported) shell assignment in its
+ * OWN statement, not as a `VAR=val` prefix on the callback's command line: a
+ * prefix assignment is applied only after the shell has already expanded
+ * that same command's arguments, so a literal `$NADI_EXIT_CODE` inside
+ * `completionCallback` would still see the OLD value (or none) rather than
+ * the one just assigned. Splitting the assignment onto its own statement
+ * first is what makes the later expansion see it.
+ */
+function buildCompletionCallbackWrapper(
+  command: string,
+  timeoutMs: number,
+  completionCallback: string,
+): string {
+  const timeoutSecs = Math.max(1, Math.ceil(timeoutMs / 1_000));
+  return (
+    `timeout ${timeoutSecs} bash -c ${shellQuote(command)}; ` +
+    `__nadi_rc="$?"; ` +
+    `NADI_EXIT_CODE="$__nadi_rc"; ${completionCallback} >/dev/null 2>&1; ` +
+    `exit "$__nadi_rc"`
+  );
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 function base64FromString(value: string): string {
