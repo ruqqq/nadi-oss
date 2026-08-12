@@ -409,6 +409,28 @@ export class FakeSpritesClient implements SpritesClient {
     if (groups.rctmp !== groups.rcmoved) {
       throw new Error(`wrapper renames ${groups.rcmoved}, but wrote ${groups.rctmp}`);
     }
+    // Same idea, for the OTHER rc write (the acquire-failure `exit 97` path):
+    // it must write-then-rename to the SAME rc path the main run uses.
+    if (groups.exit97tmp !== groups.exit97tmp2 || groups.exit97rc !== groups.rc) {
+      throw new Error(
+        `exit-97 write targets ${groups.exit97rc} via ${groups.exit97tmp}/${groups.exit97tmp2}, expected the main rc path ${rcPath}`,
+      );
+    }
+    // The refresher's self-check and its `while` guard must watch the SAME rc
+    // path as the main run — otherwise it could never observe completion.
+    if (groups.refresherRc !== groups.rc || groups.refresherRc2 !== groups.rc) {
+      throw new Error(`refresher watches ${groups.refresherRc}/${groups.refresherRc2}, not ${rcPath}`);
+    }
+    // The C1 guard: acquire, refresh, and release must all target the SAME
+    // hold id. Captured as three separate groups (not a `\k<name>`
+    // backreference) precisely so a mismatch fails HERE, loudly and
+    // specifically, instead of the regex simply refusing to match and the
+    // wrapper falling through to `runScript`'s much less informative 127.
+    if (groups.holdId !== groups.holdId2 || groups.holdId !== groups.holdId3) {
+      throw new Error(
+        `hold id mismatch across acquire/refresh/release: ${groups.holdId} / ${groups.holdId2} / ${groups.holdId3}`,
+      );
+    }
 
     if (cwd && !sprite.dirs.has(cwd)) {
       // `cd` failed, so the redirections never happened; only the rc file is
@@ -519,9 +541,19 @@ export function createFakeSpritesBackend(env?: Record<string, string>): {
  * The wrapper shape `SpritesComputeBackend.startProcess` builds. `cmd` is greedy
  * so the LAST redirection triple anchors the match — a command containing `> `
  * therefore still parses.
+ *
+ * `SpritesComputeBackend.workHold` is unconditional (never `undefined`), so
+ * every real wrapper carries the acquire/refresher/release apparatus around
+ * the core `timeout ... ; printf ...` shape — there is no hold-less wrapper
+ * to model here. The three `holdId*` groups are captured SEPARATELY (not via
+ * a `\k<name>` backreference) so `runWrapper` can compare them explicitly and
+ * throw a loud, specific error on a mismatch, the same way it already does
+ * for `rctmp`/`rcmoved` — this is the fixture-side guard for exactly the C1
+ * regression class (a release targeting a different hold id than the one the
+ * wrapper acquired).
  */
 const WRAPPER_RE =
-  /^cd (?<cwd>.+?) && timeout (?<secs>\d+) bash -c (?<cmd>.+) < (?<stdin>\S+) > (?<out>\S+) 2> (?<err>\S+); printf %s "\$\?" > (?<rctmp>\S+) && mv -f (?<rcmoved>\S+) (?<rc>\S+)$/;
+  /^cd (?<cwd>.+?) && curl -sf --unix-socket \/\.sprite\/api\.sock -H 'Content-Type: application\/json' -X POST http:\/\/sprite\/v1\/tasks -d '\{"name":"(?<holdId>[^"]+)","expire":"5m"\}' >\/dev\/null 2>&1 \|\| \{ printf %s 97 > (?<exit97tmp>\S+) && mv -f (?<exit97tmp2>\S+) (?<exit97rc>\S+); exit 97; \}; \( while \[ ! -f (?<refresherRc>\S+) \]; do sleep 60; \[ -f (?<refresherRc2>\S+) \] && break; curl -sf --unix-socket \/\.sprite\/api\.sock -H 'Content-Type: application\/json' -X PUT http:\/\/sprite\/v1\/tasks\/(?<holdId2>[^ ]+) -d '\{"expire":"5m"\}' >\/dev\/null 2>&1 \|\| true; done \) & timeout (?<secs>\d+) bash -c (?<cmd>.+) < (?<stdin>\S+) > (?<out>\S+) 2> (?<err>\S+); __nadi_rc="\$\?"; printf %s "\$__nadi_rc" > (?<rctmp>\S+) && mv -f (?<rcmoved>\S+) (?<rc>\S+); curl -sf --unix-socket \/\.sprite\/api\.sock -X DELETE http:\/\/sprite\/v1\/tasks\/(?<holdId3>[^ ]+) >\/dev\/null 2>&1; exit "\$__nadi_rc"$/;
 
 interface InnerResult {
   stdout: string;
