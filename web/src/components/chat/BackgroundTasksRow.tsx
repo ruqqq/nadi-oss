@@ -61,12 +61,15 @@ function Indicator({ state }: { state: IndicatorState }) {
 }
 
 /**
- * Collapsed dock row above the composer — replaces `BackgroundWorkDock`'s
- * per-task chip strip with one summary row (`QueuedMessageStrip` chrome),
- * because the chip strip named every task in the composer's peripheral
- * vision even when nothing needed attention. No task labels here on
- * purpose: the summary answers "does anything need me" at a glance, and the
- * sheet (`BackgroundTasksSheet`) is where a task gets named.
+ * Collapsed dock row above the composer. Replaced the now-deleted
+ * `BackgroundWorkDock`'s per-task chip strip with one summary row
+ * (`QueuedMessageStrip` chrome), because the chip strip named every task in
+ * the composer's peripheral vision even when nothing needed attention. No
+ * PER-TASK labels here on purpose: the state-mix summary answers "does
+ * anything need me" at a glance, and the sheet (`BackgroundTasksSheet`) is
+ * where an individual task gets named. The row itself IS labelled
+ * ("Background tasks"), though — a summary with no name for what it's
+ * summarizing has no accessible name for the button that opens it.
  */
 export function BackgroundTasksRow({
   enabled,
@@ -91,7 +94,15 @@ export function BackgroundTasksRow({
         className="flex w-full min-w-0 items-center gap-2 rounded-md border border-border bg-muted/30 px-2 py-1.5 text-sm transition hover:border-primary/40"
       >
         <Indicator state={state} />
-        <span className="min-w-0 flex-1 truncate text-left text-muted-foreground">{summary}</span>
+        <span className="min-w-0 flex-1 truncate text-left">
+          <span className="font-medium text-foreground">Background tasks</span>
+          {summary && (
+            <>
+              <span className="text-muted-foreground"> · </span>
+              <span className="text-muted-foreground">{summary}</span>
+            </>
+          )}
+        </span>
         <CaretRight aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
       </button>
     </div>

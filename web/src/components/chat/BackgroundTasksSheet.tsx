@@ -67,13 +67,16 @@ function exitText(row: BackgroundWorkRow): { text: string; className: string } |
   };
 }
 
+/** "45s" / "1m 12s" / "2h 3m" — the mock's format, not a clock face. */
 function formatDuration(ms: number): string {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const totalMinutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${minutes}:${pad(seconds)}`;
+  if (totalMinutes < 60) return seconds > 0 ? `${totalMinutes}m ${seconds}s` : `${totalMinutes}m`;
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
 }
 
 const CANCEL_REASON_MESSAGE: Record<BackgroundWorkCancelReason, string> = {
@@ -89,6 +92,8 @@ function KindGlyph({ row, tone }: { row: BackgroundWorkRow; tone: Tone }) {
   return (
     <Icon
       aria-hidden
+      data-testid="bg-kind-glyph"
+      data-tone={tone}
       weight={tone === "running" ? "regular" : "fill"}
       className={cn("size-4 shrink-0", GLYPH_TONE[tone])}
     />
@@ -145,6 +150,13 @@ function ProcessOutput({
   const tone = toneFor(row);
   const defaultStream: BackgroundWorkOutputStream = tone === "failed" ? "stderr" : "stdout";
   const [expanded, setExpanded] = useState(false);
+  // Snapshotting `defaultStream` into state at mount is only correct because
+  // a row's tone (and therefore its default stream) cannot change without
+  // the row moving from the Running section to the Finished section, which
+  // remounts this component under a different `Section` — a row's tone
+  // changing in place, under an unchanged mount, would go stale here. If the
+  // two sections are ever merged into one flat list, this needs to become a
+  // derived value (or reset on tone change) instead of initial state.
   const [stream, setStream] = useState<BackgroundWorkOutputStream>(defaultStream);
   const [status, setStatus] = useState<"idle" | "loading" | "loaded" | "error">("idle");
   const [output, setOutput] = useState<BackgroundWorkOutput | null>(null);
@@ -179,6 +191,15 @@ function ProcessOutput({
         {status === "error" && (
           <p className="text-reject text-xs">Couldn't load output.</p>
         )}
+        {/* `null` is a distinct answer from "loaded, but empty": it means
+            `readBackgroundWorkOutput` couldn't get output at all (background
+            work disabled, the row is no longer a tracked process, the
+            sandbox couldn't be resolved, or a server-side throw) — never
+            fold this into the empty-stream case below, or a genuine failure
+            to fetch reads as "this command printed nothing". */}
+        {status === "loaded" && output === null && (
+          <p className="text-muted-foreground text-xs">Output isn't available for this task.</p>
+        )}
         {status === "loaded" && output && (
           <>
             <div className="flex items-center justify-between">
@@ -200,6 +221,17 @@ function ProcessOutput({
               <p className="text-muted-foreground text-xs">No output yet</p>
             ) : (
               <div className="overflow-x-auto rounded-md bg-muted/50 p-2 font-mono text-xs">
+                {/* `truncated` is a DIFFERENT elision than `hiddenLines`: it
+                    means retention discarded earlier output before it was
+                    ever stored, not that we chose not to show a middle
+                    section we still have. Silently dropping this has bitten
+                    this codebase before, so it gets its own line rather than
+                    being folded into `hiddenLines`. */}
+                {output.truncated && (
+                  <div className="text-muted-foreground italic">
+                    … earlier output is no longer retained …
+                  </div>
+                )}
                 {output.head.map((line, index) => (
                   <div key={`head-${index}`}>{line}</div>
                 ))}
@@ -370,8 +402,13 @@ export function BackgroundTasksSheet({
   const [finishedOpen, setFinishedOpen] = useState(finishedRows.length <= FINISHED_COLLAPSE_THRESHOLD);
   // Only auto-collapse once, the first time the list crosses the threshold —
   // an explicit user toggle afterward should stick, not get overridden by
-  // the next poll.
-  const collapsedOnceRef = useRef(false);
+  // the next poll. Seeded from the INITIAL count, not `false`: a sheet that
+  // mounts already past the threshold has already applied the one-time
+  // collapse via `finishedOpen`'s own initializer above, so the ref must
+  // start `true` too — otherwise the effect below still fires on the next
+  // count change (e.g. the next poll) and force-collapses a section the
+  // user has since reopened.
+  const collapsedOnceRef = useRef(finishedRows.length > FINISHED_COLLAPSE_THRESHOLD);
   useEffect(() => {
     if (collapsedOnceRef.current) return;
     if (finishedRows.length > FINISHED_COLLAPSE_THRESHOLD) {

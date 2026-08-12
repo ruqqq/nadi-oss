@@ -62,7 +62,12 @@ export interface BackgroundWorkOutput {
   stream: BackgroundWorkOutputStream;
 }
 
-function isBackgroundWorkRow(value: unknown): value is BackgroundWorkRow {
+/** Exported for its own test: this is the last line of defence for the bug
+ * this task exists to fix. Loosening `BackgroundWorkRow.terminal.exitCode`
+ * (or `at`) back to optional would break no OTHER test in this codebase —
+ * `use-background-work.ts` otherwise has no test file — so the guard needs
+ * one of its own. */
+export function isBackgroundWorkRow(value: unknown): value is BackgroundWorkRow {
   if (typeof value !== "object" || value === null) return false;
   const row = value as Record<string, unknown>;
   if (typeof row.id !== "string") return false;

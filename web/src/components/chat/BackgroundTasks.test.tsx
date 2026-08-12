@@ -102,11 +102,12 @@ describe("BackgroundTasksRow", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it("opens the sheet on click, and carries no task labels", () => {
+  it("is labelled 'Background tasks' (an accessible name for the button, not just its state), and carries no per-task labels", () => {
     const onOpen = vi.fn();
     render(<BackgroundTasksRow enabled rows={[running()]} onOpen={onOpen} />);
     expect(screen.queryByText("make build")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /running/ }));
+    const button = screen.getByRole("button", { name: /Background tasks/ });
+    fireEvent.click(button);
     expect(onOpen).toHaveBeenCalledTimes(1);
   });
 });
@@ -189,6 +190,69 @@ describe("BackgroundTasksSheet — output", () => {
     fireEvent.click(screen.getByRole("button", { name: /output/i }));
     expect(await screen.findByText("No output yet")).toBeInTheDocument();
   });
+
+  it("shows a distinct 'not available' message — never an empty box — when readOutput resolves null", async () => {
+    // `null` covers: background work disabled, the row is no longer a
+    // tracked process, the sandbox couldn't be resolved, or a server-side
+    // throw. It must read differently from a genuinely empty stream.
+    const readOutput = vi.fn(async () => null);
+    render(
+      <BackgroundTasksSheet
+        open
+        onOpenChange={noop}
+        rows={[failed({ id: "row-x" })]}
+        readOutput={readOutput}
+        cancel={vi.fn(async () => ({ ok: true }))}
+        clearFinished={vi.fn(async () => ({ cleared: 0 }))}
+        onChanged={noop}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /output/i }));
+    expect(await screen.findByText("Output isn't available for this task.")).toBeInTheDocument();
+    expect(screen.queryByText("No output yet")).not.toBeInTheDocument();
+  });
+
+  it("renders a distinct note when retention truncated earlier output", async () => {
+    const readOutput = vi.fn(async () => ({
+      head: ["line one"],
+      tail: [],
+      hiddenLines: 0,
+      truncated: true,
+      stream: "stdout" as const,
+    }));
+    render(
+      <BackgroundTasksSheet
+        open
+        onOpenChange={noop}
+        rows={[clean({ id: "row-y" })]}
+        readOutput={readOutput}
+        cancel={vi.fn(async () => ({ ok: true }))}
+        clearFinished={vi.fn(async () => ({ cleared: 0 }))}
+        onChanged={noop}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /output/i }));
+    expect(await screen.findByText(/no longer retained/i)).toBeInTheDocument();
+  });
+});
+
+describe("BackgroundTasksSheet — kind glyph carries state", () => {
+  it("tones the glyph by the row's state, since there is no separate severity stripe", () => {
+    render(
+      <BackgroundTasksSheet
+        open
+        onOpenChange={noop}
+        rows={[failed({ id: "row-g" })]}
+        readOutput={vi.fn(async () => null)}
+        cancel={vi.fn(async () => ({ ok: true }))}
+        clearFinished={vi.fn(async () => ({ cleared: 0 }))}
+        onChanged={noop}
+      />,
+    );
+    const glyph = screen.getByTestId("bg-kind-glyph");
+    expect(glyph).toHaveAttribute("data-tone", "failed");
+    expect(glyph).toHaveClass("text-reject");
+  });
 });
 
 describe("BackgroundTasksSheet — duration", () => {
@@ -210,7 +274,7 @@ describe("BackgroundTasksSheet — duration", () => {
           onChanged={noop}
         />,
       );
-      expect(screen.getByText("0:07")).toBeInTheDocument();
+      expect(screen.getByText("7s")).toBeInTheDocument();
     } finally {
       nowSpy.mockRestore();
     }
