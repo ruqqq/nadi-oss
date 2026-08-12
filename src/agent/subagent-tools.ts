@@ -17,8 +17,12 @@ const SPAWN_DESCRIPTION = [
   "- If you NEED the subagent's result to continue (e.g. you delegated an",
   "  investigation whose findings you'll act on), do not press ahead on that",
   "  work. Stop and wait: end your turn (or start other INDEPENDENT work), and",
-  "  continue when its completion message arrives. Use `check_subagents` to see",
-  "  whether it has finished yet.",
+  "  continue when its completion message arrives — it is delivered to you",
+  "  automatically, usually within a second or two of the subagent finishing.",
+  "  Do NOT poll `check_subagents` to wait. If you have a specific reason to",
+  "  check anyway, leave at least 60 seconds between checks: the fallback sweep",
+  "  runs on a 60-second cycle, so checking more often cannot reveal anything",
+  "  the automatic message would not already have told you.",
   "- The subagent does NOT see this conversation — give a complete, standalone",
   "  `task`.",
   "",
@@ -32,7 +36,11 @@ const CHECK_DESCRIPTION = [
   "terminal state like completed/error/aborted) and, once finished, a short",
   "result summary. Use it to decide whether to keep waiting for a delegated",
   "result or to proceed — not as a busy-wait loop. A finished subagent's full",
-  "result also arrives on its own as a message.",
+  "result also arrives on its own as a message, usually within a second or two",
+  "of it finishing, so ending your turn is almost always better than checking.",
+  "If you have a specific reason to check anyway, leave at least 60 seconds",
+  "between checks: the fallback sweep runs on a 60-second cycle, so checking",
+  "more often cannot reveal anything new.",
 ].join(" ");
 
 export interface SubagentRunStatus {

@@ -754,7 +754,7 @@ export function buildComputeToolDefs(
     ? ` Preset environment variables are available to every command: ${presetNames.slice(0, 30).join(", ")}${presetNames.length > 30 ? ", …" : ""}.`
     : "";
   const backgroundNote = supportsProcessMonitor
-    ? "If it is still running after 10 seconds, it is backgrounded and the harness attempts to attach a watcher automatically. The returned result indicates whether watching was attached. When watching is true and no independent work remains, end your turn instead of polling; the watcher will notify you when the command finishes."
+    ? "If it is still running after 10 seconds, it is backgrounded and the harness attempts to attach a watcher automatically. The returned result indicates whether watching was attached. When watching is true and no independent work remains, end your turn instead of polling: the command reports its own completion to this thread when it exits, usually within a second or two, and a 60-second sweep is only a fallback for a report that never arrives. Polling therefore cannot tell you anything sooner than being told will."
     : "If it is still running after 10 seconds, it is backgrounded without a watcher in this runtime. Do not busy-poll just to wait; if no independent work remains, report that it is still running/backgrounded and stop. Use exec_output only for one-off current output inspection or truncated previews.";
   const execTimingNote = !backgroundLongRunningExec
     ? attachedRuntime
@@ -904,7 +904,8 @@ export function buildComputeToolDefs(
       },
     }),
     exec_list: tool({
-      description: "List running and recent sandbox processes for this thread.",
+      description:
+        "List running and recent sandbox processes for this thread. Use it for a one-off overview, never in a loop: a completion message is delivered to this thread automatically when a background process finishes, usually within a second or two, so if you have nothing else to do, end your turn instead of listing repeatedly. If you have a specific reason to check anyway, leave at least 60 seconds between checks — the fallback sweep runs on a 60-second cycle, so listing more often cannot reveal anything new.",
       inputSchema: z.object({
         status: z.enum(["running", "exited", "failed", "stopped", "all"]).optional(),
         limit: z.number().int().positive().optional(),
