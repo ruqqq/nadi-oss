@@ -6414,10 +6414,13 @@ callable()(
   ThinkThreadAgent.prototype.listBackgroundWork,
   null as unknown as ClassMethodDecoratorContext,
 );
-callable()(
-  ThinkThreadAgent.prototype.reportProcessCompletion,
-  null as unknown as ClassMethodDecoratorContext,
-);
+// `reportProcessCompletion` is deliberately NOT `callable()`. The HTTP route
+// reaches it through a plain DO stub (`getAgentByName(...).reportProcessCompletion`,
+// completion-routes.ts) — the same way `debugSandboxReset` and its neighbours are
+// called, none of which is decorated either. Registering it would additionally
+// expose it to any session-authorized browser client of this thread, which could
+// then fabricate a process completion; `completion-routes.ts` says the HMAC is
+// the entire gate, and that is only true while this stays unregistered.
 callable()(
   ThinkThreadAgent.prototype.debugThreadKnowledgeTools,
   null as unknown as ClassMethodDecoratorContext,
