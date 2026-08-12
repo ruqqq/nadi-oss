@@ -198,6 +198,34 @@ describe("ThreadComputeService completion callback", () => {
     expect(fragment).not.toContain("-m 25");
   });
 
+  it("carries stdin through the refusal path instead of silently dropping it", async () => {
+    // I7. Sprites has no `waitForProcessExit`, so `exec()`'s
+    // refusal-to-background falls to `runExecToCompletion` -> `execRun` ->
+    // `runCommand`, whose input carried no `stdin`. Reachable on any
+    // sprites deployment whose APP_BASE_URL is loopback or unset — which is
+    // what wrangler.jsonc ships — and a dropped stdin changes what the
+    // command READS, so it is a wrong answer rather than a missing feature.
+    const backend = new FakeComputeBackend();
+    const service = new ThreadComputeService({
+      backend,
+      store: createMemoryComputeStore(),
+      config: CONFIG,
+      environmentId: "thread_test",
+      threadId: "thread_abc",
+      env: {},
+      setAlarm: async () => {},
+      now: () => 1_000,
+      // The other door into the same synchronous path (an attached subagent, or
+      // background work switched off) — no provider misconfiguration needed.
+      backgroundLongRunningExec: false,
+    });
+
+    await service.exec({ command: "cat", stdin: "payload-from-the-model\n" });
+
+    expect(backend.runCommandCalls).toHaveLength(1);
+    expect(backend.runCommandCalls[0]?.stdin).toBe("payload-from-the-model\n");
+  });
+
   it("omits the callback when appBaseUrl is not configured", async () => {
     const backend = new FakeComputeBackend();
     const store = createMemoryComputeStore();

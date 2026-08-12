@@ -78,7 +78,7 @@ export class FakeComputeBackend implements ComputeBackend {
     cwd?: string;
     completionCallback?: string;
   }> = [];
-  readonly runCommandCalls: Array<{ command: string; cwd?: string }> = [];
+  readonly runCommandCalls: Array<{ command: string; cwd?: string; stdin?: string }> = [];
   readonly writeFileCalls: Array<{ path: string }> = [];
   readonly movePathCalls: Array<{ from: string; to: string }> = [];
   readonly deletePathCalls: Array<{ path: string }> = [];
@@ -211,6 +211,7 @@ export class FakeComputeBackend implements ComputeBackend {
     this.runCommandCalls.push({
       command: input.command,
       ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+      ...(input.stdin === undefined ? {} : { stdin: input.stdin }),
     });
     const runtimeId = this.activeRuntimeId(runtime);
     void runtimeId;

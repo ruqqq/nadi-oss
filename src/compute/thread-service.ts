@@ -670,6 +670,7 @@ export class ThreadComputeService {
     command: string;
     cwd?: string | undefined;
     env?: Record<string, string> | undefined;
+    stdin?: string | undefined;
     timeoutMs?: number | undefined;
     label?: string | undefined;
   }): Promise<{
@@ -736,6 +737,11 @@ export class ThreadComputeService {
       command: input.command,
       cwd,
       ...(input.env === undefined ? {} : { env: input.env }),
+      // Carried, never dropped: this is the path `exec()` falls to when it
+      // refuses to background (a sprites deployment whose `APP_BASE_URL` is
+      // loopback or unset — what `wrangler.jsonc` ships — reaches it for every
+      // exec), and a silently dropped stdin changes what the command READS.
+      ...(input.stdin === undefined ? {} : { stdin: input.stdin }),
       timeoutMs,
     });
 
@@ -785,6 +791,7 @@ export class ThreadComputeService {
     command: string;
     cwd?: string | undefined;
     env?: Record<string, string> | undefined;
+    stdin?: string | undefined;
     timeoutMs?: number | undefined;
     label?: string | undefined;
   }): Promise<ExecCompletedResult> {

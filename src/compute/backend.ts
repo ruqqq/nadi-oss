@@ -57,6 +57,15 @@ export interface RunCommandInput {
   command: string;
   cwd?: string;
   env?: Record<string, string>;
+  /**
+   * Fed to the command on stdin, same contract as
+   * `StartProcessInput.stdin`. Present because `exec()`'s
+   * refusal-to-background path routes through `runCommand` on a backend with
+   * no `waitForProcessExit`, and dropping stdin there changes what the command
+   * READS — a silent wrong answer, not a missing feature. A backend
+   * implementing `runCommand` must honour it or not implement `runCommand`.
+   */
+  stdin?: string;
   timeoutMs: number;
 }
 

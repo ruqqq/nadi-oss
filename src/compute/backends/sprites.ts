@@ -436,8 +436,20 @@ export class SpritesComputeBackend implements ComputeBackend {
   async runCommand(runtime: BackendReference, input: RunCommandInput): Promise<RunCommandResult> {
     const spriteName = this.runtimeName(runtime);
     const env = this.execEnv(input.env);
+    // `execCollect` has no stdin channel, so carry it the same way
+    // `buildSpritesWrapper` does: write a sentinel file, then redirect the
+    // whole command into it. Redirecting an INNER `bash -c '<command>'` rather
+    // than appending `< file` to the command text is what makes this correct
+    // for a compound command — a suffix redirect on `a && b` feeds only `b`.
+    let script = input.command;
+    if (input.stdin !== undefined) {
+      const stdinPath = sentinelPath("in", crypto.randomUUID());
+      const encoded = new TextEncoder().encode(input.stdin);
+      await this.client.fsWrite(spriteName, stdinPath, toArrayBuffer(encoded), true);
+      script = `bash -c ${shellQuote(input.command)} < ${stdinPath}; __nadi_rc="$?"; rm -f ${stdinPath}; exit "$__nadi_rc"`;
+    }
     const result = await this.client.execCollect(spriteName, {
-      argv: ["bash", "-c", input.command],
+      argv: ["bash", "-c", script],
       dir: input.cwd ?? WORKSPACE_ROOT,
       ...(env === undefined ? {} : { env }),
       timeoutMs: input.timeoutMs,

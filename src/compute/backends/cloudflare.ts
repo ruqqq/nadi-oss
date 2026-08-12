@@ -284,8 +284,11 @@ export class CloudflareComputeBackend implements ComputeBackend {
   async runCommand(runtime: BackendReference, input: RunCommandInput): Promise<RunCommandResult> {
     const { sandboxId, profile } = this.runtimePayload(runtime);
     const sandbox = this.sandbox(profile, sandboxId);
+    // Same base64 pipe `startProcess` uses (`withStdin`) — the SDK's one-shot
+    // `exec` has no stdin channel either, and a dropped stdin changes what the
+    // command reads.
     const result = await this.guard(() =>
-      sandbox.exec(input.command, {
+      sandbox.exec(withStdin(input.command, input.stdin), {
         ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
         ...(input.env !== undefined ? { env: input.env } : {}),
         timeoutMs: input.timeoutMs,

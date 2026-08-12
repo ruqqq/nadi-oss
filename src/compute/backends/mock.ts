@@ -126,7 +126,10 @@ export class MockComputeBackend implements ComputeBackend {
 
   async runCommand(runtime: BackendReference, input: RunCommandInput): Promise<RunCommandResult> {
     const { sandbox } = this.activeSandbox(runtime);
-    const { state } = this.runFakeProcess(sandbox, input.command, undefined, { foreground: true });
+    // stdin echoed into stdout, exactly as `startProcess` models it here.
+    const { state } = this.runFakeProcess(sandbox, input.command, input.stdin, {
+      foreground: true,
+    });
     return {
       status: state.exitCode === 0 ? "exited" : "failed",
       exitCode: state.exitCode ?? 0,
