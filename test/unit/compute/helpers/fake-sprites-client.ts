@@ -421,6 +421,14 @@ export class FakeSpritesClient implements SpritesClient {
     if (groups.refresherRc !== groups.rc || groups.refresherRc2 !== groups.rc) {
       throw new Error(`refresher watches ${groups.refresherRc}/${groups.refresherRc2}, not ${rcPath}`);
     }
+    // The completion callback, when present, must read back the SAME rc path
+    // the main run just wrote — not a different one, and not a re-read of
+    // `$?`. Only meaningful when the wrapper actually carries a callback
+    // (`groups.cbRc` is `undefined` for the no-callback wrappers most tests
+    // in this file build).
+    if (groups.cbRc !== undefined && groups.cbRc !== groups.rc) {
+      throw new Error(`completion callback reads ${groups.cbRc}, not the recorded rc path ${rcPath}`);
+    }
     // The C1 guard: acquire, refresh, and release must all target the SAME
     // hold id. Captured as three separate groups (not a `\k<name>`
     // backreference) precisely so a mismatch fails HERE, loudly and
@@ -551,9 +559,18 @@ export function createFakeSpritesBackend(env?: Record<string, string>): {
  * for `rctmp`/`rcmoved` — this is the fixture-side guard for exactly the C1
  * regression class (a release targeting a different hold id than the one the
  * wrapper acquired).
+ *
+ * The completion-callback block (`cbRc`/`cbTimeout`/`cbUrl`/`cbToken`/`cbBody`)
+ * is OPTIONAL — most wrappers built in this file's tests carry no
+ * `completionCallback` — and, when present, sits between the rc write and the
+ * release curl, never after it: see `buildSpritesWrapper`'s ordering doc. It
+ * is pinned to the EXACT shape `ThreadComputeService.buildCompletionCallback`
+ * emits (curl flags, header order, JSON key order) rather than loosened to
+ * "any curl call", per the same reasoning as every other fragment here — a
+ * permissive pattern here would stop catching a real wrapper regression.
  */
 const WRAPPER_RE =
-  /^cd (?<cwd>.+?) && curl -sf --unix-socket \/\.sprite\/api\.sock -H 'Content-Type: application\/json' -X POST http:\/\/sprite\/v1\/tasks -d '\{"name":"(?<holdId>[^"]+)","expire":"5m"\}' >\/dev\/null 2>&1 \|\| \{ printf %s 97 > (?<exit97tmp>\S+) && mv -f (?<exit97tmp2>\S+) (?<exit97rc>\S+); exit 97; \}; \( while \[ ! -f (?<refresherRc>\S+) \]; do sleep 60; \[ -f (?<refresherRc2>\S+) \] && break; curl -sf --unix-socket \/\.sprite\/api\.sock -H 'Content-Type: application\/json' -X PUT http:\/\/sprite\/v1\/tasks\/(?<holdId2>[^ ]+) -d '\{"expire":"5m"\}' >\/dev\/null 2>&1 \|\| true; done \) & timeout (?<secs>\d+) bash -c (?<cmd>.+) < (?<stdin>\S+) > (?<out>\S+) 2> (?<err>\S+); __nadi_rc="\$\?"; printf %s "\$__nadi_rc" > (?<rctmp>\S+) && mv -f (?<rcmoved>\S+) (?<rc>\S+); curl -sf --unix-socket \/\.sprite\/api\.sock -X DELETE http:\/\/sprite\/v1\/tasks\/(?<holdId3>[^ ]+) >\/dev\/null 2>&1; exit "\$__nadi_rc"$/;
+  /^cd (?<cwd>.+?) && curl -sf --unix-socket \/\.sprite\/api\.sock -H 'Content-Type: application\/json' -X POST http:\/\/sprite\/v1\/tasks -d '\{"name":"(?<holdId>[^"]+)","expire":"5m"\}' >\/dev\/null 2>&1 \|\| \{ printf %s 97 > (?<exit97tmp>\S+) && mv -f (?<exit97tmp2>\S+) (?<exit97rc>\S+); exit 97; \}; \( while \[ ! -f (?<refresherRc>\S+) \]; do sleep 60; \[ -f (?<refresherRc2>\S+) \] && break; curl -sf --unix-socket \/\.sprite\/api\.sock -H 'Content-Type: application\/json' -X PUT http:\/\/sprite\/v1\/tasks\/(?<holdId2>[^ ]+) -d '\{"expire":"5m"\}' >\/dev\/null 2>&1 \|\| true; done \) & timeout (?<secs>\d+) bash -c (?<cmd>.+) < (?<stdin>\S+) > (?<out>\S+) 2> (?<err>\S+); __nadi_rc="\$\?"; printf %s "\$__nadi_rc" > (?<rctmp>\S+) && mv -f (?<rcmoved>\S+) (?<rc>\S+)(?:; NADI_EXIT_CODE="\$\(cat (?<cbRc>\S+)\)"; curl -sf -m (?<cbTimeout>\d+) -X POST (?<cbUrl>\S+) -H 'Authorization: Bearer (?<cbToken>[^']*)' -H 'Content-Type: application\/json' -d "(?<cbBody>\{\\"processId\\":\\"[^\\]*\\",\\"exitCode\\":\$NADI_EXIT_CODE\})")?; curl -sf --unix-socket \/\.sprite\/api\.sock -X DELETE http:\/\/sprite\/v1\/tasks\/(?<holdId3>[^ ]+) >\/dev\/null 2>&1; exit "\$__nadi_rc"$/;
 
 interface InnerResult {
   stdout: string;

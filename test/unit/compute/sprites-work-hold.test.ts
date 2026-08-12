@@ -124,6 +124,49 @@ describe("sprites workHold", () => {
     expect(wrapper).toContain('__nadi_rc="$?"');
   });
 
+  it("posts the completion after the rc write and before releasing the hold", () => {
+    const wrapper = buildSpritesWrapper({
+      command: "true",
+      cwd: "/workspace",
+      stdinPath: "/dev/null",
+      processId: "abc",
+      timeoutSecs: 600,
+      hold: backend.workHold!,
+      completionCallback:
+        "curl -sf -m 25 -X POST https://app/api/compute/completion " +
+        "-H 'Authorization: Bearer tok' -H 'Content-Type: application/json' " +
+        '-d "{\\"processId\\":\\"abc\\",\\"exitCode\\":$NADI_EXIT_CODE}"',
+    });
+    const rcAt = wrapper.indexOf("mv -f /tmp/.nadi-rc-abc.tmp");
+    const postAt = wrapper.indexOf("/api/compute/completion");
+    const releaseAt = wrapper.indexOf("-X DELETE");
+    expect(rcAt).toBeGreaterThan(-1);
+    expect(postAt).toBeGreaterThan(-1);
+    expect(releaseAt).toBeGreaterThan(-1);
+    expect(rcAt).toBeLessThan(postAt);
+    // Release LAST: delete the hold first and the VM can suspend mid-curl,
+    // losing exactly the completion this design exists to deliver.
+    expect(postAt).toBeLessThan(releaseAt);
+    // Reads back the rc sentinel THIS wrapper just wrote, not a second
+    // observation of `$?` — the callback fragment itself only ever
+    // references `$NADI_EXIT_CODE`, an env var the wrapper sets from the
+    // sentinel immediately before running it.
+    expect(wrapper).toContain('NADI_EXIT_CODE="$(cat /tmp/.nadi-rc-abc)"');
+  });
+
+  it("omits the completion callback entirely when none is supplied", () => {
+    const wrapper = buildSpritesWrapper({
+      command: "true",
+      cwd: "/workspace",
+      stdinPath: "/dev/null",
+      processId: "abc",
+      timeoutSecs: 600,
+      hold: backend.workHold!,
+    });
+    expect(wrapper).not.toContain("NADI_EXIT_CODE");
+    expect(wrapper).not.toContain("/api/compute/completion");
+  });
+
   it("omits every hold fragment when the backend declares no workHold", () => {
     const wrapper = buildSpritesWrapper({
       command: "make build",

@@ -186,6 +186,20 @@ function holdIdFor(processId: string): string {
  * The command's own exit code is captured into `$__nadi_rc` and re-asserted
  * with an explicit `exit` at the end, because the release curl appended after
  * the rc write would otherwise become the wrapper's own exit status.
+ *
+ * `completionCallback`, when present, runs AFTER the rc write and BEFORE the
+ * hold release — never the other way round. Releasing first would let the
+ * sprite hibernate mid-`curl`, losing exactly the completion this mechanism
+ * exists to deliver; the hold is what guarantees the callback actually runs.
+ * `NADI_EXIT_CODE` is set with a plain `;`-separated assignment, NOT a
+ * `VAR=val cmd` prefix: a prefix assignment only exports the variable into
+ * the COMMAND's environment, and does not affect `$NADI_EXIT_CODE` expanding
+ * inside that same command's own argument list (verified live in bash — a
+ * prefix form here silently emitted an empty exit code in the JSON body).
+ * The variable is what lets the fragment (built by `ThreadComputeService`,
+ * which cannot know this sprite's rc path or even this process's exit code in
+ * advance) report the value THIS wrapper just recorded, read back from the
+ * sentinel it just wrote — not a second, possibly different, read of `$?`.
  */
 export function buildSpritesWrapper(input: {
   command: string;
@@ -194,6 +208,7 @@ export function buildSpritesWrapper(input: {
   processId: string;
   timeoutSecs: number;
   hold?: NonNullable<ComputeBackend["workHold"]>;
+  completionCallback?: string;
 }): string {
   const { processId, timeoutSecs, hold } = input;
   const outPath = sentinelPath("out", processId);
@@ -217,6 +232,9 @@ export function buildSpritesWrapper(input: {
       `${hold.refreshFor(placeholderRef)} || true; done ) & `
     : "";
   const release = hold ? `; ${hold.releaseFor(placeholderRef)}` : "";
+  const callback = input.completionCallback
+    ? `; NADI_EXIT_CODE="$(cat ${rcPath})"; ${input.completionCallback}`
+    : "";
 
   return (
     `cd ${shellQuote(input.cwd)} && ` +
@@ -225,6 +243,7 @@ export function buildSpritesWrapper(input: {
     `timeout ${timeoutSecs} bash -c ${shellQuote(input.command)} ` +
     `< ${input.stdinPath} > ${outPath} 2> ${errPath}; ` +
     `__nadi_rc="$?"; printf %s "$__nadi_rc" > ${rcPath}.tmp && mv -f ${rcPath}.tmp ${rcPath}` +
+    callback +
     release +
     `; exit "$__nadi_rc"`
   );
@@ -429,6 +448,9 @@ export class SpritesComputeBackend implements ComputeBackend {
       // which is optional for providers that execute while idle) — no
       // conditional spread needed.
       hold: this.workHold,
+      ...(input.completionCallback === undefined
+        ? {}
+        : { completionCallback: input.completionCallback }),
     });
     // The env rides in the `env` query param, NOT as `export` lines inside the
     // wrapper. Neither is secret-safe against a server that logs its request

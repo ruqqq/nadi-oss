@@ -26,6 +26,29 @@ export interface StartProcessInput {
   env?: Record<string, string>;
   stdin?: string;
   timeoutMs: number;
+  /**
+   * A complete shell fragment, already carrying a signed completion token,
+   * that reports this process's own exit code back to
+   * `POST /api/compute/completion` — the push half of completion delivery
+   * (see `src/compute/completion-token.ts`). Built by `ThreadComputeService`,
+   * which owns the Worker-side secret and base URL; a backend never mints its
+   * own token.
+   *
+   * The fragment references the env var `$NADI_EXIT_CODE` for the exit code
+   * rather than embedding a value itself — the CALLER cannot know the exit
+   * code before the process has run, and a backend that tracks completion via
+   * its own sentinel (sprites' rc file) is the only thing that can supply the
+   * value that was actually recorded, not a second, possibly different,
+   * observation. A backend that consumes this fragment MUST set
+   * `NADI_EXIT_CODE` to that recorded value immediately before running it.
+   *
+   * Optional, and silently ignorable: a backend with no wrapper to insert a
+   * shell fragment into (Cloudflare, whose `startProcess` hands the command
+   * straight to the SDK) simply never reads this field. Absent whenever the
+   * caller has no base URL to call back to — see `ThreadComputeService`'s
+   * `buildCompletionCallback`.
+   */
+  completionCallback?: string;
 }
 
 export interface RunCommandInput {

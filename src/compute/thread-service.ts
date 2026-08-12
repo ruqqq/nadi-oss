@@ -19,6 +19,7 @@ import {
 } from "./output";
 import { canAddWatcher, classifyWatcher, nextWakeAt, type WatcherRow } from "./watchers";
 import { recordComputeEvent, type ComputeEvent } from "./observability";
+import { deriveCompletionSecret, signCompletionToken } from "./completion-token";
 import { ComputeFileService } from "./file-service";
 import { readGeneration, writeGeneration } from "./generation";
 import type { WorkLedgerSink } from "../agent/work-ledger-store";
@@ -64,6 +65,17 @@ const REMINDER_TAIL_MAX_BYTES = 2_048;
  * call is worth doing on its own.
  */
 const ACQUIRE_DEADLINE_MS = 25_000;
+
+/**
+ * The wrapper's OWN curl timeout (`-m`) on its completion callback — NOT the
+ * budget for the process it just ran. `/api/compute/completion`'s teardown
+ * (`reapProcess` -> `releaseWorkHold` -> a `runCommand` with a 10s timeout)
+ * is awaited before the HTTP response returns, so the server side can
+ * legitimately take up to ~10s to answer. 10s here would then race the
+ * server's own budget and lose intermittently; 25s leaves real margin. Do not
+ * "tidy" this back down without re-reading that teardown path.
+ */
+const COMPLETION_CALLBACK_CURL_TIMEOUT_SECS = 25;
 
 /**
  * Rejects with `onTimeout()` if `promise` has not settled within `ms`.
@@ -173,6 +185,23 @@ interface ThreadComputeServiceDeps {
    *  for compute addressing (that's `environmentId`, a workbench identifier). */
   threadId?: string;
   env: Record<string, string>;
+  /**
+   * The origin the sandbox wrapper's own completion callback posts back to
+   * (Worker `Env.APP_BASE_URL`) and the Worker secret that callback's token
+   * is HMAC-signed with (`Env.BETTER_AUTH_SECRET`, via
+   * `deriveCompletionSecret`). Deliberately NOT part of `env` above — that is
+   * the SANDBOX's own exec environment (workbench vars, the minted
+   * `GH_TOKEN`), a completely different scope despite the similarly-named
+   * field.
+   *
+   * Absent `appBaseUrl` means "mint no completion callback for this
+   * process": see `buildCompletionCallback`. A callback aimed at nowhere is
+   * silent loss, so the safe default is no callback at all — the process
+   * still runs and is still tracked by the existing poll/watcher path, it
+   * just never gets the PUSH half of completion delivery.
+   */
+  appBaseUrl?: string;
+  betterAuthSecret?: string;
   setAlarm: (timestamp: number) => Promise<void>;
   clearAlarm?: () => Promise<void>;
   now: () => number;
@@ -256,6 +285,11 @@ export class ThreadComputeService {
   private workspaceRootEnsured = false;
   private fileServiceInstance: ComputeFileService | undefined;
   private armCount = 0;
+  /**
+   * Cached per instance: `deriveCompletionSecret` is a SHA-256 over the
+   * Worker secret, and every process start would otherwise pay it again.
+   */
+  private completionSecretPromise: Promise<string> | undefined;
 
   constructor(private readonly deps: ThreadComputeServiceDeps) {}
 
@@ -666,6 +700,49 @@ export class ThreadComputeService {
     return this.ensureRuntime();
   }
 
+  /**
+   * A complete shell fragment a backend's wrapper can run to report this
+   * process's exit code back to `/api/compute/completion` — see
+   * `StartProcessInput.completionCallback`. Returns `undefined` (never
+   * throws) when there is nowhere to call back to or nothing to sign with, so
+   * the caller degrades to "no callback" rather than failing the process
+   * start.
+   *
+   * The fragment references `$NADI_EXIT_CODE` rather than embedding a value:
+   * this method runs BEFORE the process exists, let alone finishes, so only
+   * the backend — reading back whatever it uses to track completion (sprites'
+   * rc sentinel) — can supply the actual recorded value. See
+   * `buildSpritesWrapper`'s doc for the consuming side of that contract.
+   *
+   * `exp` is generous (the full watch window plus margin) because the work
+   * may legitimately run that long before the wrapper ever reaches this
+   * fragment.
+   */
+  private async buildCompletionCallback(processId: string): Promise<string | undefined> {
+    const appBaseUrl = this.deps.appBaseUrl;
+    const betterAuthSecret = this.deps.betterAuthSecret;
+    const threadId = this.deps.threadId;
+    if (!appBaseUrl || !betterAuthSecret || !threadId) {
+      log.warn("compute.no_callback_base_url", { threadId, processId });
+      return undefined;
+    }
+    if (!this.completionSecretPromise) {
+      this.completionSecretPromise = deriveCompletionSecret(betterAuthSecret);
+    }
+    const secret = await this.completionSecretPromise;
+    const token = await signCompletionToken(secret, {
+      threadId,
+      processId,
+      exp: this.deps.now() + MAX_WATCH_TIMEOUT_MS + 300_000,
+    });
+    const origin = appBaseUrl.replace(/\/$/, "");
+    return (
+      `curl -sf -m ${COMPLETION_CALLBACK_CURL_TIMEOUT_SECS} -X POST ${origin}/api/compute/completion ` +
+      `-H 'Authorization: Bearer ${token}' -H 'Content-Type: application/json' ` +
+      `-d "{\\"processId\\":\\"${processId}\\",\\"exitCode\\":$NADI_EXIT_CODE}"`
+    );
+  }
+
   private async startAndStoreProcess(input: {
     command: string;
     cwd?: string | undefined;
@@ -679,11 +756,13 @@ export class ThreadComputeService {
     // Default to the workspace root so a relative path means the same thing to
     // exec and to read_file; an explicitly-passed cwd is never overridden.
     const cwd = input.cwd ?? WORKSPACE_ROOT;
+    const completionCallback = await this.buildCompletionCallback(processId);
     const startInput = {
       command: input.command,
       cwd,
       ...(input.env === undefined ? {} : { env: input.env }),
       ...(input.stdin === undefined ? {} : { stdin: input.stdin }),
+      ...(completionCallback === undefined ? {} : { completionCallback }),
       timeoutMs: Math.min(
         input.timeoutMs ?? this.deps.config.maxProcessRuntimeMs,
         this.deps.config.maxProcessRuntimeMs,
