@@ -21,7 +21,6 @@ import { canAddWatcher, classifyWatcher, nextWakeAt, type WatcherRow } from "./w
 import { recordComputeEvent, type ComputeEvent } from "./observability";
 import { ComputeFileService } from "./file-service";
 import { readGeneration, writeGeneration } from "./generation";
-import { holdIdFor } from "./backends/sprites";
 import type { WorkLedgerSink } from "../agent/work-ledger-store";
 import type { WorkspaceCleanliness } from "./workspace-cleanliness";
 import {
@@ -1308,22 +1307,33 @@ export class ThreadComputeService {
    * workspace root. `status === "active"` is our bookkeeping, not evidence the
    * container answers: `no_liveness` fires precisely BECAUSE it stopped
    * answering. A hanging mkdir inside `blockConcurrencyWhile` wedges the whole
-   * DO — the exact incident this design exists to fix. The one remaining
-   * backend call is the stop itself, outside `blockConcurrencyWhile`, and the
-   * caller's terminal is already written and delivered before we get here.
+   * DO — the exact incident this design exists to fix. The stop and the hold
+   * release below are the only remaining backend calls, both outside
+   * `blockConcurrencyWhile`, and the caller's terminal is already written and
+   * delivered before we get here.
+   *
+   * The hold release runs LAST, after the kill, not before: on sprites the
+   * refresher keeps running inside the sandbox until it observes the rc
+   * sentinel, so releasing before the signal lands risks the refresher
+   * `PUT`-ing the hold back after our `DELETE` — releasing first would
+   * resurrect exactly the leak this exists to close.
    */
   async reapProcess(processId: string, options: { kill: boolean }): Promise<void> {
     this.deps.store.deleteWatcher(processId);
-    // Best-effort, regardless of `kill`: a faulted row (e.g. `sandbox_reset`)
-    // has no container left to kill but may still carry an orphaned hold from
-    // a prior sprite, and this is the reaper's only pass over it.
-    await this.releaseWorkHold(processId);
-    if (!options.kill) return;
+    if (!options.kill) {
+      // No container to kill (`sandbox_reset`) or the process is meant to
+      // keep running (`watch_timeout`, reaper path) — either way, release is
+      // still this call's job: `terminalizeWork` only reaches here on the
+      // call that itself closed the ledger row, so nothing else will.
+      await this.releaseWorkHold(processId);
+      return;
+    }
     // No ledger work follows the stop: the reaper's caller closed the row first
     // (terminal-first) and already told the model, so a terminalize here would
     // be a no-op against a spent gate. A failed stop is swallowed by the
     // primitive — best-effort by contract, and the watcher is already gone.
     await this.stopProcessDirect(processId, "terminate");
+    await this.releaseWorkHold(processId);
   }
 
   /**
@@ -1332,15 +1342,28 @@ export class ThreadComputeService {
    * `resolveIdleDisposition` skip the inferred discards that would otherwise
    * reclaim it — so a wedged process with no release stays awake and billing.
    * Swallows everything: the terminal is the caller's obligation, not this.
+   *
+   * Looks up the row's OWN `backendProcessRef` — never a locally-derived id —
+   * because only the provider knows what identifies a hold to itself; a
+   * provider-neutral caller computing that id itself is the layering
+   * violation `ComputeBackend.workHold`'s `*For(process)` shape exists to
+   * rule out.
+   *
+   * Uses `runCommand`, not `startProcess`: going through `startProcess` would
+   * wrap this one-shot `DELETE` in `buildSpritesWrapper` again, taking a NEW
+   * hold and spawning another refresher just to run it.
    */
   private async releaseWorkHold(processId: string): Promise<void> {
     const hold = this.deps.backend.workHold;
-    if (!hold) return;
+    const runCommand = this.deps.backend.runCommand;
+    if (!hold || !runCommand) return;
     try {
       const state = this.deps.store.getComputeState();
       if (state?.status !== "active" || !state.runtimeRef) return;
-      await this.deps.backend.startProcess(state.runtimeRef, {
-        command: hold.release(holdIdFor(processId)),
+      const process = this.deps.store.getProcess(processId);
+      if (!process?.backendProcessRef) return;
+      await runCommand(state.runtimeRef, {
+        command: hold.releaseFor(process.backendProcessRef),
         timeoutMs: 10_000,
       });
     } catch (error) {
@@ -2445,13 +2468,6 @@ export class ThreadComputeService {
       });
       return false;
     }
-    // Best-effort hold release, once, at the point this poll cycle is known
-    // terminal for THIS row — both classifications land here, and the wrapper's
-    // own in-sprite release (run when the command itself finishes) makes this
-    // redundant for `exited`. For `timeout` the process is still running, but
-    // the wrapper's refresher self-heals within 60s (`PUT` is an upsert), so
-    // the worst case is one missed refresh window, not a stranded process.
-    await this.releaseWorkHold(watcher.processId);
     const title = watcher.label || process.command;
     // Terminal path — one funnel: write the terminal FIRST, then deliver, then
     // tear down. This is a pure local SQL write and must not sit behind
@@ -2583,6 +2599,21 @@ export class ThreadComputeService {
     // gate, the model has now been told about this work exactly once, by a
     // message built from a live status read.
     this.deps.workLedger?.markDelivered(watcher.processId, now);
+    // Hold release, gated on `closed`: only the call that ACTUALLY closed the
+    // ledger row owns its teardown. When `closed` is false, the reaper's
+    // `terminalizeWork` -> `reapProcess` got there first and already released
+    // (or, for the still-open-but-undelivered rescue case above, will have —
+    // that call's own `reapProcess` ran before this poll's delivery did).
+    // Releasing unconditionally here would double-release: harmless on
+    // sprites (`DELETE` on an already-gone task 404s and is swallowed), but
+    // wrong in principle, since "whoever closes the row owns the teardown" is
+    // the same invariant `reapProcess` already relies on.
+    //
+    // For `timeout` specifically the process may still be running, but the
+    // wrapper's own refresher self-heals within 60s (`PUT` is an upsert), so
+    // the worst case of releasing here is one missed refresh window, not a
+    // stranded process.
+    if (closed) await this.releaseWorkHold(watcher.processId);
     this.deps.store.deleteWatcher(watcher.processId);
     return true;
   }

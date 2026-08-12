@@ -156,11 +156,20 @@ export interface ComputeBackend {
    * Fragments rather than methods because the only place a hold can be taken on
    * sprites is INSIDE the sandbox — its Tasks API is served on a unix socket the
    * Worker cannot reach, and the public REST surface has no tasks resource.
+   *
+   * Keyed by the `BackendProcessReference` `startProcess` returns, NOT by a
+   * caller-chosen id: the hold name must be derivable from whatever identifies
+   * the process to THIS provider, and only the provider knows what that is (on
+   * sprites it is the same uuid the wrapper's sentinel files are keyed by). A
+   * provider-neutral caller (`ThreadComputeService`) must never compute a
+   * provider-specific hold name itself — that would mean importing a concrete
+   * backend module from the neutral layer, which is exactly the layering
+   * violation this shape avoids.
    */
   readonly workHold?: {
-    acquire(holdId: string): string;
-    refresh(holdId: string): string;
-    release(holdId: string): string;
+    acquireFor(process: BackendProcessReference): string;
+    refreshFor(process: BackendProcessReference): string;
+    releaseFor(process: BackendProcessReference): string;
   };
   acquire(spec: ComputeSpec, recovery?: BackendReference): Promise<BackendReference>;
   release(runtime: BackendReference, options: ReleaseOptions): Promise<BackendReference | null>;
