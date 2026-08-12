@@ -121,13 +121,26 @@ function primeCompute(instance: ThinkThreadAgent, backend: FakeComputeBackend): 
   };
 }
 
-/** Start a real backgrounded, watched process; returns its real ledger row id. */
+/**
+ * Start a real backgrounded, watched process; returns its real ledger row id.
+ *
+ * Deliberately does NOT clean up `_testSandboxServiceOverrides` afterward
+ * (unlike `work-ledger.integration.test.ts`'s equivalent, which re-primes
+ * before every later call that needs one). The completion HTTP route resolves
+ * the compute service independently, INSIDE the same live DO instance but
+ * through a call this test does not control — so the fake-backend override
+ * has to still be in place when that happens, or `resolveComputeService`
+ * tries to build a real Daytona backend from the seeded (fake) provider
+ * config and `workFacts`'s `service` silently comes back null, which used to
+ * make the teardown call below a quiet no-op instead of a real assertion
+ * failure.
+ */
 async function startWatchedProcess(threadId: string): Promise<{ processId: string }> {
   const stub = stubFor(threadId);
   return runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
     const testInstance = instance as LedgerTestableAgent;
     await testInstance.__unsafe_ensureInitialized();
-    const cleanup = primeCompute(instance, new FakeComputeBackend());
+    primeCompute(instance, new FakeComputeBackend());
     // Keep the completion's proactive injection sitting in the durable
     // buffer instead of being drained straight into `submitMessages` (which
     // needs a real chat session this test never sets up) — same trick
@@ -135,18 +148,14 @@ async function startWatchedProcess(threadId: string): Promise<{ processId: strin
     (instance as unknown as { _turnQueue?: { isActive: boolean } })._turnQueue = {
       isActive: true,
     };
-    try {
-      const resolved = await testInstance.resolveComputeServiceForTest();
-      if (!resolved) throw new Error("expected compute service");
-      const execResult = (await resolved.service.exec({
-        command: "sleep 300",
-        label: "build",
-      })) as { status: string; processId: string };
-      expect(execResult.status).toBe("backgrounded");
-      return { processId: execResult.processId };
-    } finally {
-      cleanup();
-    }
+    const resolved = await testInstance.resolveComputeServiceForTest();
+    if (!resolved) throw new Error("expected compute service");
+    const execResult = (await resolved.service.exec({
+      command: "sleep 300",
+      label: "build",
+    })) as { status: string; processId: string };
+    expect(execResult.status).toBe("backgrounded");
+    return { processId: execResult.processId };
   });
 }
 
@@ -163,6 +172,61 @@ async function deliveredWatcherMessages(threadId: string) {
     messages: injectionsOf(instance).filter((entry) => entry.kind === "watcher-completion"),
     dedupeKeys: pendingWatcherKeysOf(instance),
   }));
+}
+
+/**
+ * Simulate "the first injection already drained into a turn" without
+ * standing up a real chat session: peek + delete, the same two steps
+ * `_kickInjectionTurn` performs after `submitMessages` succeeds. This is
+ * what makes a SECOND completion's dedupe key a genuinely fresh enqueue
+ * attempt in the test, matching production — where the buffer does not sit
+ * around holding the first entry the way `_turnQueue.isActive = true` makes
+ * it do here for inspection.
+ */
+async function drainInjectionBuffer(threadId: string): Promise<void> {
+  const stub = stubFor(threadId);
+  await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
+    const buffer = (
+      instance as unknown as {
+        injectionBuffer(): {
+          peekAll(): Array<{ seq: number }>;
+          deleteDrained(seqs: number[]): void;
+        };
+      }
+    ).injectionBuffer();
+    buffer.deleteDrained(buffer.peekAll().map((entry) => entry.seq));
+  });
+}
+
+/** The compute layer's own view: is the process still watched, and what does
+ * the store say its status/exit code are. This is what `exec_watch_list`,
+ * `execOutput`, and the WatcherDock all read — independent of the ledger and
+ * the injection buffer, which is why it needs its own assertions. */
+async function computeStateOf(
+  threadId: string,
+  processId: string,
+): Promise<{ watched: boolean; status: string | undefined; exitCode: number | null | undefined }> {
+  const stub = stubFor(threadId);
+  return runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
+    const testInstance = instance as LedgerTestableAgent;
+    // Reads only (`listActiveWatchersView`, `execList`) — the fake backend is
+    // never actually called, but `resolveComputeService` still needs an
+    // override to avoid constructing a real Daytona backend, mirroring
+    // `startWatchedProcess`.
+    const cleanup = primeCompute(instance, new FakeComputeBackend());
+    try {
+      const resolved = await testInstance.resolveComputeServiceForTest();
+      if (!resolved) throw new Error("expected compute service");
+      const watched = resolved.service
+        .listActiveWatchersView()
+        .some((watcher) => watcher.processId === processId);
+      const { processes } = await resolved.service.execList({ status: "all" });
+      const process = processes.find((p) => p.id === processId);
+      return { watched, status: process?.status, exitCode: process?.exitCode };
+    } finally {
+      cleanup();
+    }
+  });
 }
 
 function postCompletion(token: string, body: unknown) {
@@ -195,6 +259,16 @@ describe("routeCompletion (DO integration)", () => {
     expect(first.status).toBe(200);
     expect(await first.json()).toEqual({ accepted: true });
 
+    // Drain the buffer the way a real turn would: the first entry's dedupe
+    // key disappears, so the SECOND post's `already_terminal` collapse has to
+    // come from the LEDGER, not from the injection buffer's own dedupe-by-key
+    // suppression still holding the first (undrained) entry. Without this
+    // step, `_turnQueue.isActive = true` (set so the test can inspect the
+    // buffer at all) would let the buffer's own key-collision check quietly
+    // do the collapsing work instead of the ledger guard this test claims to
+    // cover — see `drainInjectionBuffer`'s doc comment.
+    await drainInjectionBuffer(threadId);
+
     // Replay is a no-op, not a second delivery: the row is already terminal.
     const second = await postCompletion(token, { processId, exitCode: 0 });
     expect(second.status).toBe(200);
@@ -204,10 +278,69 @@ describe("routeCompletion (DO integration)", () => {
     expect(row?.terminal).not.toBeNull();
     expect(row?.terminal?.outcome).toBe("exited");
 
+    // Only the first post's message ever reached the buffer — it was drained
+    // above, so a buffer with anything in it now means the ledger guard
+    // failed to collapse the replay.
     const delivered = await deliveredWatcherMessages(threadId);
-    expect(delivered.messages).toHaveLength(1);
-    expect(delivered.dedupeKeys).toEqual([`watcher:${processId}:exited`]);
-    expect(delivered.messages[0]?.text).toContain("exited with code 0");
+    expect(delivered.messages).toHaveLength(0);
+    expect(delivered.dedupeKeys).toEqual([]);
+
+    // The compute layer's own bookkeeping must agree with what the model was
+    // told: no longer watched, and the store's process row shows the real
+    // exit, not whatever it last observed before the push arrived.
+    const computeState = await computeStateOf(threadId, processId);
+    expect(computeState.watched).toBe(false);
+    expect(computeState.status).toBe("exited");
+    expect(computeState.exitCode).toBe(0);
+  });
+
+  it("reports a non-zero exit as \"exited\" with the code intact", async () => {
+    const threadId = "thr-completion-nonzero";
+    await seedThread(threadId);
+    const { processId } = await startWatchedProcess(threadId);
+
+    const secret = await deriveCompletionSecret(env.BETTER_AUTH_SECRET);
+    const token = await signCompletionToken(secret, {
+      threadId,
+      processId,
+      exp: Date.now() + 600_000,
+    });
+
+    const res = await postCompletion(token, { processId, exitCode: 17 });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ accepted: true });
+
+    const row = await ledgerRow(threadId, processId);
+    // "exited" regardless of the code — there is no "failed" outcome.
+    expect(row?.terminal?.outcome).toBe("exited");
+
+    const delivered = await deliveredWatcherMessages(threadId);
+    expect(delivered.messages[0]?.text).toContain("exited with code 17");
+
+    const computeState = await computeStateOf(threadId, processId);
+    expect(computeState.status).toBe("exited");
+    expect(computeState.exitCode).toBe(17);
+  });
+
+  it("rejects a non-integer exit code", async () => {
+    const threadId = "thr-completion-badexitcode";
+    await seedThread(threadId);
+    const { processId } = await startWatchedProcess(threadId);
+
+    const secret = await deriveCompletionSecret(env.BETTER_AUTH_SECRET);
+    const token = await signCompletionToken(secret, {
+      threadId,
+      processId,
+      exp: Date.now() + 600_000,
+    });
+
+    for (const exitCode of [1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const res = await postCompletion(token, { processId, exitCode });
+      expect(res.status).toBe(400);
+    }
+
+    const row = await ledgerRow(threadId, processId);
+    expect(row?.terminal).toBeNull();
   });
 
   it("rejects a token minted for another thread or process", async () => {

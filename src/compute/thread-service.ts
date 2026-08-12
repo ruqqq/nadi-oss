@@ -1337,6 +1337,32 @@ export class ThreadComputeService {
   }
 
   /**
+   * Record a process exit the compute layer never polled — the sandbox
+   * wrapper pushed it straight to `reportProcessCompletion` (see
+   * `think-thread-agent.ts`), so there is no `getProcessStatus` read to react
+   * to the way `pollWatcher` has. Without this, the store keeps whatever it
+   * last observed (typically `status:"running"`, `exitCode:null`) even after
+   * the model has been told the process exited, so `execOutput`,
+   * `exec_watch_list`, and the WatcherDock would all disagree with the card
+   * the model just received.
+   *
+   * Mirrors `pollWatcher`'s exited branch on LOCAL bookkeeping only: stamp
+   * the process row (`updateTerminalProcess`, same call the poll path makes
+   * right after its backend read) then tear down exactly as a clean exit
+   * does — `reapProcess(processId, { kill: false })`. `kill: false` because
+   * there is nothing to kill: the wrapper is reporting a process that has
+   * already exited on its own, not asking to stop one.
+   *
+   * Caller's job, not this method's: the work-ledger terminal and the model
+   * notification. This only brings the compute layer's own view into
+   * agreement with them.
+   */
+  async recordPushedExit(processId: string, exitCode: number): Promise<void> {
+    this.updateTerminalProcess(processId, { status: "exited", exitCode });
+    await this.reapProcess(processId, { kill: false });
+  }
+
+  /**
    * Best-effort hold release. Not optional hygiene on sprites: a held sprite
    * bills CPU and RAM, and `nativeIdleSuspend = true` makes
    * `resolveIdleDisposition` skip the inferred discards that would otherwise

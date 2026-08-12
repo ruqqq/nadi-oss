@@ -29,10 +29,15 @@ export async function routeCompletion(req: Request, env: Env): Promise<Response 
   const body = (await req.json().catch(() => null)) as
     | { processId?: string; exitCode?: number }
     | null;
-  if (!body || typeof body.processId !== "string" || typeof body.exitCode !== "number") {
+  const processId = body?.processId;
+  const exitCode = body?.exitCode;
+  // `Number.isInteger`, not `typeof === "number"`: the exit code lands
+  // verbatim in the terminal's detail and in the model-facing sentence, and
+  // `NaN`/`Infinity`/a float are not exit codes a real process can produce.
+  if (typeof processId !== "string" || typeof exitCode !== "number" || !Number.isInteger(exitCode)) {
     return Response.json({ error: "bad_request" }, { status: 400 });
   }
-  if (body.processId !== claims.processId) {
+  if (processId !== claims.processId) {
     return Response.json({ error: "process_mismatch" }, { status: 403 });
   }
 
@@ -42,9 +47,6 @@ export async function routeCompletion(req: Request, env: Env): Promise<Response 
     env.THINK_THREAD_AGENT,
     claims.threadId,
   )) as unknown as CompletionThreadStub;
-  const result = await agent.reportProcessCompletion({
-    processId: body.processId,
-    exitCode: body.exitCode,
-  });
+  const result = await agent.reportProcessCompletion({ processId, exitCode });
   return Response.json(result);
 }

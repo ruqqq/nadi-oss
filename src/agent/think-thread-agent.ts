@@ -5149,6 +5149,22 @@ export class ThinkThreadAgent extends Think<Env> {
       // Ownership is DECLARED by stamping `delivered_at`, never inferred from
       // `reason` — that conflation previously caused a re-delivered reminder.
       this.workLedger.markDelivered(input.processId, now);
+
+      // Teardown LAST and best-effort, same as `terminalizeWork`: the ledger
+      // terminal and the model notification are both already durable, so a
+      // failure here must cost stale compute-layer bookkeeping, never the
+      // notification. Without this, the compute store keeps reporting the
+      // process as running/watched (`execOutput`, `exec_watch_list`, the
+      // WatcherDock) even though the model was just told it exited.
+      try {
+        await facts.service?.recordPushedExit(input.processId, input.exitCode);
+      } catch (error) {
+        log.warn("think_thread.report_process_completion_teardown_failed", {
+          threadId: this.name,
+          processId: input.processId,
+          error: String(error),
+        });
+      }
       return { accepted: true };
     } catch (error) {
       log.warn("think_thread.report_process_completion_failed", {
