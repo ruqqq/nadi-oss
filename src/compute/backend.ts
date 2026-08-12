@@ -189,6 +189,19 @@ export interface ComputeBackend {
    * backend module from the neutral layer, which is exactly the layering
    * violation this shape avoids.
    */
+  /**
+   * Whether this backend actually assembles `StartProcessInput.completionCallback`
+   * into what it runs. Absent means the field is silently ignored, so a missing
+   * or unreachable callback origin is NOT a reason to refuse backgrounding here
+   * — completion comes from the poll, as it always has.
+   *
+   * A NEW BACKEND MUST DECIDE THIS. It is the predicate
+   * `ThreadComputeService.shouldRefuseBackgrounding` is derived from; a
+   * provider-id allow-list drifted the moment a provider gained or lost the
+   * wrapper (sprites has one, Cloudflare and Daytona do not — yet, in
+   * Cloudflare's case).
+   */
+  readonly consumesCompletionCallback?: boolean;
   readonly workHold?: {
     acquireFor(process: BackendProcessReference): string;
     refreshFor(process: BackendProcessReference): string;

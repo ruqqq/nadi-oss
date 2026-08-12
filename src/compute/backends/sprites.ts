@@ -258,6 +258,12 @@ export class SpritesComputeBackend implements ComputeBackend {
    */
   readonly nativeIdleSuspend = true;
   /**
+   * `buildSpritesWrapper` reads `StartProcessInput.completionCallback` and
+   * assembles it into the wrapper (see its doc). See
+   * `ComputeBackend.consumesCompletionCallback`.
+   */
+  readonly consumesCompletionCallback = true;
+  /**
    * Documented in `ComputeBackend.workHold`. Verified live 2026-08-12.
    *
    * Keyed by `BackendProcessReference`, never a raw id: `this.processPayload`

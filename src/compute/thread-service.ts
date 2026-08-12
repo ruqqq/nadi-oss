@@ -2,7 +2,6 @@ import type {
   BackendProcessReference,
   BackendReference,
   ComputeBackend,
-  ComputeProviderId,
   ComputeSpec,
   ProcessStatus,
   StopMode,
@@ -87,40 +86,46 @@ const COMPLETION_CALLBACK_CURL_TIMEOUT_SECS = 25;
 const COMPLETION_TOKEN_MARGIN_MS = 300_000;
 
 /**
- * Backend ids that run a process on genuinely separate infrastructure a
- * completion callback would need to reach over the network — as opposed to
- * `"mock"`/`"fake"`, which execute entirely in-process and never curl
- * anywhere, so neither the loopback-origin guard nor the "refuse to
- * background without a callback" rule (see `shouldRefuseBackgrounding`)
- * applies to them: refusing would change real test/dev behavior for a
- * backend that never needed the push mechanism to begin with.
- */
-const REMOTE_PROVIDER_IDS: ReadonlySet<ComputeProviderId> = new Set([
-  "sprites",
-  "cloudflare",
-  "daytona",
-]);
-
-/**
  * Hostnames a completion callback fired from INSIDE a remote sandbox can
  * never reach, even though `APP_BASE_URL` is non-empty for local dev
- * (`http://localhost:8787`) — a curl from inside a sprite or Cloudflare
- * container never routes back to the developer's own laptop. An unparsable
- * origin is treated the same way: it cannot be reached either.
+ * (`http://localhost:8787`) — a curl from inside a sprite container never
+ * routes back to the developer's own laptop.
+ *
+ * FAILS OPEN on an unparsable origin: `APP_BASE_URL` is also better-auth's
+ * `baseURL` (`src/auth/options.ts`), so a genuinely malformed value already
+ * breaks the deployment elsewhere, louder, and treating "could not tell" as
+ * "unreachable" would silently disable backgrounding for a typo that has
+ * nothing to do with sandboxes at all. The caller logs the parse failure
+ * separately so it is not silent either way.
+ *
+ * Checks BOTH the bracketed and bare spellings of the IPv6 loopback:
+ * `new URL("http://[::1]:8787").hostname` is `"[::1]"`, brackets included —
+ * a bare `"::1"` comparison alone never matches a real URL's hostname.
  */
 function isUnreachableFromASandbox(origin: string): boolean {
   let hostname: string;
   try {
     hostname = new URL(origin).hostname;
   } catch {
-    return true;
+    return false;
   }
   return (
     hostname === "localhost" ||
     hostname === "127.0.0.1" ||
     hostname === "::1" ||
+    hostname === "[::1]" ||
     hostname === "0.0.0.0"
   );
+}
+
+/** Whether `value` parses as a URL at all — see `isUnreachableFromASandbox`'s fail-open doc. */
+function isParseableUrl(value: string): boolean {
+  try {
+    new URL(value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -336,6 +341,8 @@ export class ThreadComputeService {
    * Worker secret, and every process start would otherwise pay it again.
    */
   private completionSecretPromise: Promise<string> | undefined;
+  /** Guards `compute.app_base_url_unparsable` to at most once per instance. */
+  private loggedUnparsableAppBaseUrl = false;
 
   constructor(private readonly deps: ThreadComputeServiceDeps) {}
 
@@ -801,23 +808,33 @@ export class ThreadComputeService {
     return this.ensureRuntime();
   }
 
-  /** Whether this service's backend runs on infrastructure a completion
-   *  callback would need to reach over the network. See `REMOTE_PROVIDER_IDS`. */
-  private isRemoteProvider(): boolean {
-    return REMOTE_PROVIDER_IDS.has(this.deps.backend.id);
+  /**
+   * Whether this service's backend actually reads
+   * `StartProcessInput.completionCallback` into what it runs. Derived from
+   * the backend's OWN declared `consumesCompletionCallback` capability
+   * (`ComputeBackend`'s doc) rather than a provider-id allow-list: an id list
+   * drifts the moment a provider gains or loses the wrapper (today only
+   * sprites has one; Cloudflare's is a separate, queued task), and self-
+   * corrects nothing when that happens. A list did exactly that once already
+   * in review — see this file's git history.
+   */
+  private consumesCompletionCallback(): boolean {
+    return this.deps.backend.consumesCompletionCallback === true;
   }
 
   /**
    * Why `buildCompletionCallback` cannot produce a fragment right now, or
-   * `null` when it can. Pure and synchronous — every input is already known
-   * without minting a token — so `exec()` can consult it to decide whether a
-   * process may background at all, without paying for a signature it would
-   * throw away.
+   * `null` when it can. Synchronous — every input is already known without
+   * minting a token — so `exec()` can consult it to decide whether a process
+   * may background at all, without paying for a signature it would throw
+   * away. The one side effect (a log line) fires at most once per instance;
+   * see `loggedUnparsableAppBaseUrl`.
    *
-   * The loopback check is scoped to `isRemoteProvider()` deliberately: local
-   * dev sets `APP_BASE_URL` to `http://localhost:8787`, which is non-empty
-   * but unreachable from inside a real sandbox — and equally irrelevant for
-   * `"mock"`/`"fake"`, which never leave this process to begin with.
+   * The loopback check is scoped to `consumesCompletionCallback()`
+   * deliberately: local dev sets `APP_BASE_URL` to `http://localhost:8787`,
+   * which is non-empty but unreachable from inside a real sandbox — and
+   * irrelevant for a backend that never reads the callback at all (today:
+   * `"mock"`/`"fake"`, and `"cloudflare"`/`"daytona"` until they grow one).
    */
   private completionCallbackUnavailableReason():
     | "no_base_url"
@@ -828,23 +845,38 @@ export class ThreadComputeService {
     if (!this.deps.appBaseUrl) return "no_base_url";
     if (!this.deps.betterAuthSecret) return "no_secret";
     if (!this.deps.threadId) return "no_thread_id";
-    if (this.isRemoteProvider() && isUnreachableFromASandbox(this.deps.appBaseUrl)) {
-      return "unreachable_base_url";
+    if (!this.consumesCompletionCallback()) return null;
+    if (!isParseableUrl(this.deps.appBaseUrl)) {
+      // Fails OPEN, not closed: `APP_BASE_URL` is also better-auth's own
+      // `baseURL` (`src/auth/options.ts`), so a genuinely malformed value
+      // already breaks the deployment elsewhere, louder — treating "could
+      // not tell" as "unreachable" here would just silently disable
+      // backgrounding on top of that, for a typo unrelated to sandboxes.
+      if (!this.loggedUnparsableAppBaseUrl) {
+        this.loggedUnparsableAppBaseUrl = true;
+        log.warn("compute.app_base_url_unparsable", {
+          threadId: this.deps.threadId,
+          appBaseUrl: this.deps.appBaseUrl,
+        });
+      }
+      return null;
     }
+    if (isUnreachableFromASandbox(this.deps.appBaseUrl)) return "unreachable_base_url";
     return null;
   }
 
   /**
-   * A callback to nowhere is silent loss, and for a REMOTE backend the
-   * poll/watcher path is not a substitute for it (see the module's design
-   * doc) — so a process that cannot carry a completion callback must not be
-   * allowed to background at all; it runs to completion synchronously
-   * instead. Never true for `"mock"`/`"fake"`: those backends never needed a
-   * callback, and forcing them synchronous would change test/dev behavior
-   * that has nothing to do with this mechanism.
+   * A callback to nowhere is silent loss, and for a backend that actually
+   * consumes the callback the poll/watcher path is not a substitute for it
+   * (see the module's design doc) — so a process that cannot carry a
+   * completion callback must not be allowed to background at all; it runs to
+   * completion synchronously instead. Never true for a backend that never
+   * reads `completionCallback` in the first place (`consumesCompletionCallback()`
+   * false): forcing THAT backend synchronous would change test/dev/Cloudflare
+   * behavior that has nothing to do with this mechanism.
    */
   private shouldRefuseBackgrounding(): boolean {
-    return this.isRemoteProvider() && this.completionCallbackUnavailableReason() !== null;
+    return this.consumesCompletionCallback() && this.completionCallbackUnavailableReason() !== null;
   }
 
   /**

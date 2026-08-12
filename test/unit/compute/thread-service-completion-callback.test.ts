@@ -223,10 +223,13 @@ describe("ThreadComputeService completion callback", () => {
       });
 
       const result = await service.exec({ command: "true" });
-      // Ran to completion synchronously rather than "backgrounded" — the
-      // command is trivial so it would have completed either way; the
-      // load-bearing assertion is the warning below plus the equivalent
-      // real-suspension case in the sibling loopback test.
+      // `true` completes so fast it would resolve to "exited" via the
+      // NORMAL background-eligible path too (sprites' own settle-quickly
+      // poll never even observes "running") — so this assertion alone would
+      // pass with the guard removed. It stays as a cheap smoke check; the
+      // guard's actual teeth are the warning below and, for a command that
+      // genuinely WOULD have backgrounded, the dedicated test further down
+      // ("...carries a REAL exit code and output").
       expect(result.status).not.toBe("backgrounded");
       expect(warnings).toContainEqual([
         "compute.background_refused_no_callback",
@@ -262,10 +265,70 @@ describe("ThreadComputeService completion callback", () => {
       });
 
       const result = await service.exec({ command: "true" });
+      // See the sibling "no reachable callback" test's comment: `true` alone
+      // would not catch a removed guard. The "genuinely WOULD have
+      // backgrounded" case further down covers both reasons through the
+      // same code path (`shouldRefuseBackgrounding`), so it is not repeated
+      // here per-reason.
       expect(result.status).not.toBe("backgrounded");
       expect(warnings).toContainEqual([
         "compute.background_refused_no_callback",
         { threadId: "thread_abc", provider: "sprites", reason: "unreachable_base_url", entryPoint: "exec" },
+      ]);
+    } finally {
+      log.warn = originalWarn;
+    }
+  });
+
+  it("refuses a command that genuinely would have backgrounded, and the synchronous fallback carries a REAL exit code and output", async () => {
+    const { backend } = createFakeSpritesBackend();
+    const store = createMemoryComputeStore();
+    const now = { value: 1_000 };
+    const warnings: Array<[string, Record<string, unknown> | undefined]> = [];
+    const originalWarn = log.warn;
+    log.warn = (event, fields) => {
+      warnings.push([event, fields]);
+    };
+    try {
+      const service = new ThreadComputeService({
+        backend,
+        store,
+        config: CONFIG,
+        environmentId: "thread_test",
+        threadId: "thread_abc",
+        env: {},
+        // No appBaseUrl — refusal active.
+        setAlarm: async () => {},
+        now: () => now.value,
+        execForegroundTimeoutMs: 1,
+        execForegroundPollIntervalMs: 1,
+        sleep: async (ms) => void (now.value += ms),
+      });
+
+      // `sleep` only ever "backgrounds" through the WRAPPER path
+      // (`SpritesComputeBackend.startProcess` / `FakeSpritesClient.runWrapper`,
+      // which special-cases it as a session with no rc file — see the "does
+      // NOT refuse..." test above, which proves exactly that for the
+      // mock/fake backend). WITHOUT the refusal this command would come back
+      // `running` and then `backgrounded`, exactly like that sibling test.
+      // WITH the refusal, `exec()` takes the synchronous `runCommand` path
+      // instead, which never builds a wrapper at all — and `FakeSpritesClient`'s
+      // plain-script interpreter, like the Cloudflare fake's equivalent
+      // `exec`, does not model `sleep` outside the wrapper. So the REAL,
+      // distinguishing proof that this genuinely ran through the synchronous
+      // fallback (not a stub returning a fabricated success) is exit 127
+      // with a "command not found" stderr — a broken guard would instead
+      // return `status: "backgrounded"` with no such output at all.
+      const result = await service.exec({ command: "sleep 5 && echo done" });
+
+      expect(result.status).toBe("exited");
+      if (result.status === "exited") {
+        expect(result.exitCode).toBe(127);
+        expect(result.stderrPreview).toContain("sleep");
+      }
+      expect(warnings).toContainEqual([
+        "compute.background_refused_no_callback",
+        { threadId: "thread_abc", provider: "sprites", reason: "no_base_url", entryPoint: "exec" },
       ]);
     } finally {
       log.warn = originalWarn;
