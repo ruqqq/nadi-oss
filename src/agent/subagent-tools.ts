@@ -132,8 +132,8 @@ export function formatSubagentCompletion(args: {
 }
 
 /**
- * First line, quote-stripped, clipped — a display name, never the brief.
- * `spawn_subagent`'s `label` is optional, and its absence used to mean "use
+ * Whitespace-collapsed to one line, quote-stripped, clipped — a display name,
+ * never the brief. `spawn_subagent`'s `label` is optional, and its absence used to mean "use
  * the entire task text" (`input.label ?? input.task` at the `display.name`
  * call site), which broke both the dialog title and the client's completion
  * regex (a brief may contain double quotes — the observed one contained

@@ -8,6 +8,28 @@ import {
   type WorkReason,
   type WorkRow,
 } from "../../../src/agent/work-ledger";
+import { FakeComputeBackend } from "../../../src/compute/backends/fake";
+import { DEFAULT_COMPUTE_LIMITS } from "../../../src/compute/config";
+import { ThreadComputeService } from "../../../src/compute/thread-service";
+import type { EffectiveComputeConfig } from "../../../src/compute/types";
+import { createMemoryComputeStore } from "../../unit/compute/helpers/memory-store";
+
+const COMPUTE_CONFIG: EffectiveComputeConfig = {
+  provider: "fake",
+  providerConfig: { kind: "cloudflare" },
+  resourceProfile: "small",
+  idleTimeoutMs: 1_000,
+  recoveryTtlMs: 5_000,
+  maxProcessRuntimeMs: 10_000,
+  monitorPollIntervalMs: 100,
+  limits: DEFAULT_COMPUTE_LIMITS,
+  allowedHosts: null,
+  editableEnv: {},
+  agentEditableEnv: {},
+  secretEnvNames: [],
+  environmentEditableEnv: {},
+  environmentSecretEnvNames: [],
+};
 
 /**
  * `listBackgroundWork` — the background-work dock's one RPC over the ledger.
@@ -175,6 +197,63 @@ describe("ThinkThreadAgent.listBackgroundWork", () => {
     });
   });
 
+  /**
+   * The reviewer's concern verified end-to-end: our production incident data
+   * shows a poll-closed (backstop) terminal wrote `detail: "process exited"`
+   * — NO code in the string — unlike the push path's `"exit code 0"`. So the
+   * fallback-parse alone would return `null` here; the only thing that can
+   * make this survive is `pollWatcher` actually carrying the provider's
+   * `status.exitCode` into `terminalize`'s structured field. This drives the
+   * REAL `pollWatcher` (via `ThreadComputeService.runComputeTick`, wired to
+   * this DO's own `WorkLedgerStore` — the same storage `listBackgroundWork`
+   * reads) against a process that exits 7, and asserts the code survives all
+   * the way through the RPC.
+   */
+  it("a non-zero exit closed by the POLL path (not the push callback) still reports its exit code through listBackgroundWork", async () => {
+    await withAgent(async ({ instance, store }) => {
+      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+
+      const backend = new FakeComputeBackend();
+      // Real wall-clock time, not an arbitrary small number: `listRecent()`
+      // (called with no args by `listBackgroundWork`) windows "recent" off
+      // `Date.now()`, so a `delivered_at` stamped from a toy clock would fall
+      // outside that window and the row would vanish from the RPC for a
+      // reason that has nothing to do with the exit-code plumbing this test
+      // is actually proving.
+      const now = { value: Date.now() };
+      const service = new ThreadComputeService({
+        backend,
+        store: createMemoryComputeStore(),
+        config: COMPUTE_CONFIG,
+        environmentId: "thread_test",
+        env: {},
+        setAlarm: async () => {},
+        now: () => now.value,
+        supportsProcessMonitor: true,
+        // The SAME storage `instance.listBackgroundWork()` reads — this is
+        // what proves the poll path's write is visible to the RPC, not just
+        // to a private test double.
+        workLedger: store,
+      });
+
+      const started = await service.execStart({ command: "sleep 300", label: "build" });
+      await service.execWatch({ processId: started.processId });
+      const listed = await service.execList({ status: "all", limit: 10 });
+      const ref = listed.processes.find((p) => p.id === started.processId)?.backendProcessRef;
+      if (!ref) throw new Error("expected a backend process reference");
+      // Non-zero exit, closed by the poll — never touches
+      // `reportProcessCompletion`'s push path at all.
+      backend.finishProcess(ref, "exited", 7);
+
+      now.value += COMPUTE_CONFIG.monitorPollIntervalMs;
+      await service.runComputeTick();
+
+      const rows = await instance.listBackgroundWork();
+      const found = rows.find((r) => r.id === started.processId);
+      expect(found?.terminal).toMatchObject({ outcome: "exited", exitCode: 7 });
+    });
+  });
+
   it("reports a null exit code for a fault, which has none", async () => {
     await withAgent(async ({ instance, store }) => {
       instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
@@ -286,12 +365,22 @@ describe("ThinkThreadAgent.cancelBackgroundWork", () => {
     });
   });
 
-  it("returns ok:false for an open process row when no compute service resolves", async () => {
+  it("returns ok:false with a closed-set reason for an open process row this DO cannot actually cancel", async () => {
     await withAgent(async ({ instance, store }) => {
       instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
       store.register(row({ id: "p1", kind: "process" }));
-      const result = await instance.cancelBackgroundWork("p1");
-      expect(result.ok).toBe(false);
+      // Discriminating on the exact reason, not just `ok === false` — a test
+      // asserting only the latter would keep passing even if the process
+      // branch were deleted outright. This bare test DO has no real sandbox
+      // wired to "p1" specifically, so either `resolveComputeService` finds
+      // nothing (`sandbox_disabled`) or it resolves and `execStop` itself
+      // then fails to find the process (`cancel_failed`) — both are valid,
+      // CLOSED-set outcomes; raw error text (`String(error)`) must never leak
+      // through here.
+      expect(await instance.cancelBackgroundWork("p1")).toEqual({
+        ok: false,
+        reason: expect.stringMatching(/^(sandbox_disabled|cancel_failed)$/),
+      });
     });
   });
 });

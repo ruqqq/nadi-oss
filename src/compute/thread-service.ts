@@ -1312,32 +1312,74 @@ export class ThreadComputeService {
    * actual slicing from the one locally-loaded chunk set, and it is the thing
    * that guarantees `hiddenLines` is a real count rather than a silently
    * dropped middle.
+   *
+   * Falls back to stderr when the requested stream (stdout, unless the caller
+   * asks otherwise) is empty — same fallback `buildOutputTail` already uses
+   * for the watcher-completion message. Without it, a command that writes its
+   * failure to stderr (the common case for a failed build) reports
+   * `{head:[],tail:[],hiddenLines:0}`, which reads as "no output" for exactly
+   * the row a user opened the sheet to investigate. `stream` on the result
+   * says which one was actually returned, so the caller can label it rather
+   * than silently implying stdout.
+   *
+   * `headLines`/`tailLines` are clamped to `limits.tailMaxLines`, the same cap
+   * `execOutput` enforces on its own line count — this is model-tool-shaped
+   * today, but the callable wrapping this is browser-reachable, so an
+   * unclamped caller-supplied count must not reach here unbounded.
    */
   async execOutputHeadTail(input: {
     processId: string;
     stream?: "stdout" | "stderr" | undefined;
     headLines?: number | undefined;
     tailLines?: number | undefined;
-  }): Promise<{ head: string[]; tail: string[]; hiddenLines: number; truncated: boolean }> {
+  }): Promise<{
+    head: string[];
+    tail: string[];
+    hiddenLines: number;
+    truncated: boolean;
+    stream: "stdout" | "stderr";
+  }> {
     const process = this.deps.store.getProcess(input.processId);
     if (!process) throw new Error("sandbox_process_not_found");
     await this.refreshProcessStatusBestEffort(input.processId);
     if ((this.deps.store.getProcess(input.processId) ?? process).status === "running") {
       await this.refreshProcessOutput(input.processId);
     }
-    const stream = input.stream === "stderr" ? "stderr" : "stdout";
-    const chunks = this.deps.store.listOutputChunks(input.processId, stream);
-    const sliced = headTailOutputChunks(chunks, {
-      stream,
-      headLines: input.headLines ?? 20,
-      tailLines: input.tailLines ?? 20,
-    });
+    const maxLines = this.deps.config.limits.tailMaxLines;
+    const headLines = Math.min(input.headLines ?? 20, maxLines);
+    const tailLines = Math.min(input.tailLines ?? 20, maxLines);
+    const requestedStream = input.stream === "stderr" ? "stderr" : "stdout";
+    const slice = (stream: "stdout" | "stderr") =>
+      headTailOutputChunks(this.deps.store.listOutputChunks(input.processId, stream), {
+        stream,
+        headLines,
+        tailLines,
+      });
+    let stream: "stdout" | "stderr" = requestedStream;
+    let sliced = slice(stream);
+    // Only fall back when the caller did not ask for stderr explicitly AND
+    // the requested stream came back genuinely empty (no head, no tail, no
+    // elision) — a stream with content but that content all elided still
+    // reports `head`/`tail` (empty is impossible while `hiddenLines` > 0 for
+    // headLines/tailLines >= 1), so this cannot mask a real stdout tail.
+    if (
+      requestedStream === "stdout" &&
+      sliced.head.length === 0 &&
+      sliced.tail.length === 0 &&
+      sliced.hiddenLines === 0
+    ) {
+      const stderrSlice = slice("stderr");
+      if (stderrSlice.head.length > 0 || stderrSlice.tail.length > 0) {
+        stream = "stderr";
+        sliced = stderrSlice;
+      }
+    }
     const fresh = this.deps.store.getProcess(input.processId) ?? process;
     // `outputTruncated` is a DIFFERENT elision than `hiddenLines`: it means
     // retention already dropped earlier output before it was even stored, so
     // it can be true even when `hiddenLines` is 0 (everything that WAS stored
     // fit in head+tail).
-    return { ...sliced, truncated: fresh.outputTruncated };
+    return { ...sliced, truncated: fresh.outputTruncated, stream };
   }
 
   /**

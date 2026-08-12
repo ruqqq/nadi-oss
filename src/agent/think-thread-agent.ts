@@ -5207,12 +5207,18 @@ export class ThinkThreadAgent extends Think<Env> {
    * `listBackgroundWork`'s doc for why a throw inside a DO RPC method is
    * doubly costly (it also fires an unhandled rejection that fails the caller
    * even when its own assertions pass).
+   *
+   * `stream` says which stream the slice actually came from:
+   * `execOutputHeadTail` falls back to stderr when stdout is empty (a failed
+   * build commonly writes its failure there, not to stdout), so the sheet
+   * must not assume stdout just because that's the default request.
    */
   async readBackgroundWorkOutput(processId: string): Promise<{
     head: string[];
     tail: string[];
     hiddenLines: number;
     truncated: boolean;
+    stream: "stdout" | "stderr";
   } | null> {
     try {
       const admission = await this.backgroundWorkAdmissionEnabled();
@@ -5234,6 +5240,25 @@ export class ThinkThreadAgent extends Think<Env> {
    * close, here invoked directly for a user-driven one. Returns a result
    * object rather than throwing, same reasoning as every other work-ledger
    * RPC: a throw inside a DO RPC method also fires an unhandled rejection.
+   *
+   * `reason` is a CLOSED set the client switches on
+   * (`"background_work_disabled" | "unknown_id" | "already_terminal" |
+   * "sandbox_disabled" | "cancel_failed"`) — never raw error text. A provider
+   * error from `execStop` -> `ensureRuntime` can carry sandbox ids, workspace
+   * paths, or raw HTTP response text, none of which belongs on a browser
+   * client; the detail goes to `log.warn` instead, same pattern as
+   * `deliverWorkTerminal`'s teardown failure a few methods up.
+   *
+   * The subagent branch returns `{ok:true}` once `cancelSubagentRun` resolves
+   * without throwing, but `cancelAgentTool` is DOCUMENTED to no-op silently
+   * for a run id the SDK's own store has already forgotten — so `ok:true`
+   * here means "the cancel call completed", not "a live run was actually
+   * torn down". That gap is accepted: distinguishing the two would mean
+   * reading SDK-internal run state (`_readAgentToolRun`, the same escape
+   * hatch `workFacts` uses for a label) from a path that otherwise never
+   * touches it, for a case — an open ledger row whose SDK run has vanished
+   * out from under it — that should not occur while the row itself is
+   * un-terminal.
    */
   async cancelBackgroundWork(id: string): Promise<{ ok: boolean; reason?: string }> {
     try {
@@ -5251,7 +5276,12 @@ export class ThinkThreadAgent extends Think<Env> {
       await resolved.service.execStop({ processId: id });
       return { ok: true };
     } catch (error) {
-      return { ok: false, reason: String(error) };
+      log.warn("think_thread.cancel_background_work_failed", {
+        threadId: this.name,
+        id,
+        error: String(error),
+      });
+      return { ok: false, reason: "cancel_failed" };
     }
   }
 

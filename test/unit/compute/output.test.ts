@@ -151,5 +151,33 @@ describe("sandbox output helpers", () => {
       });
       expect(result).toEqual({ head: ["err"], tail: [], hiddenLines: 0 });
     });
+
+    it("boundary: exactly headLines + tailLines fits with no overlap and no hidden lines", () => {
+      // 40 lines, headLines:20 + tailLines:20 = 40 exactly — every line must
+      // appear ONCE, split cleanly between head and tail, nothing hidden.
+      const result = headTailOutputChunks(manyLines(40), {
+        stream: "stdout",
+        headLines: 20,
+        tailLines: 20,
+      });
+      expect(result.head).toEqual(Array.from({ length: 20 }, (_, i) => `line ${i + 1}`));
+      expect(result.tail).toEqual(Array.from({ length: 20 }, (_, i) => `line ${21 + i}`));
+      expect(result.hiddenLines).toBe(0);
+      expect(result.head.length + result.tail.length).toBe(40);
+    });
+
+    it("boundary: one line past headLines + tailLines hides exactly one line", () => {
+      // 41 lines: one line over the fits-cleanly boundary must hide exactly
+      // one — the off-by-one case right at the edge of the "everything fits"
+      // branch.
+      const result = headTailOutputChunks(manyLines(41), {
+        stream: "stdout",
+        headLines: 20,
+        tailLines: 20,
+      });
+      expect(result.head).toEqual(Array.from({ length: 20 }, (_, i) => `line ${i + 1}`));
+      expect(result.tail).toEqual(Array.from({ length: 20 }, (_, i) => `line ${22 + i}`));
+      expect(result.hiddenLines).toBe(1);
+    });
   });
 });
