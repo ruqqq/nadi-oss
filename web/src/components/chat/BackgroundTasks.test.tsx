@@ -120,6 +120,7 @@ describe("BackgroundTasksSheet — the three exit-code states", () => {
     cancel: vi.fn(async () => ({ ok: true })),
     clearFinished: vi.fn(async () => ({ cleared: 0 })),
     onChanged: noop,
+    liveRunFor: () => undefined,
   };
 
   it("reads Exit 0 in the clean tone for a zero exit", () => {
@@ -158,6 +159,7 @@ describe("BackgroundTasksSheet — output", () => {
         rows={[failed({ id: "row-d" })]}
         readOutput={readOutput}
         cancel={vi.fn(async () => ({ ok: true }))}
+        liveRunFor={() => undefined}
         clearFinished={vi.fn(async () => ({ cleared: 0 }))}
         onChanged={noop}
       />,
@@ -183,6 +185,7 @@ describe("BackgroundTasksSheet — output", () => {
         rows={[clean({ id: "row-e" })]}
         readOutput={readOutput}
         cancel={vi.fn(async () => ({ ok: true }))}
+        liveRunFor={() => undefined}
         clearFinished={vi.fn(async () => ({ cleared: 0 }))}
         onChanged={noop}
       />,
@@ -203,6 +206,7 @@ describe("BackgroundTasksSheet — output", () => {
         rows={[failed({ id: "row-x" })]}
         readOutput={readOutput}
         cancel={vi.fn(async () => ({ ok: true }))}
+        liveRunFor={() => undefined}
         clearFinished={vi.fn(async () => ({ cleared: 0 }))}
         onChanged={noop}
       />,
@@ -227,6 +231,7 @@ describe("BackgroundTasksSheet — output", () => {
         rows={[clean({ id: "row-y" })]}
         readOutput={readOutput}
         cancel={vi.fn(async () => ({ ok: true }))}
+        liveRunFor={() => undefined}
         clearFinished={vi.fn(async () => ({ cleared: 0 }))}
         onChanged={noop}
       />,
@@ -245,6 +250,7 @@ describe("BackgroundTasksSheet — kind glyph carries state", () => {
         rows={[failed({ id: "row-g" })]}
         readOutput={vi.fn(async () => null)}
         cancel={vi.fn(async () => ({ ok: true }))}
+        liveRunFor={() => undefined}
         clearFinished={vi.fn(async () => ({ cleared: 0 }))}
         onChanged={noop}
       />,
@@ -270,6 +276,7 @@ describe("BackgroundTasksSheet — duration", () => {
           rows={[failed({ id: "row-f", startedAt: 1_000, terminal: { outcome: "exited", reason: "process_exit", exitCode: 7, at: 8_000 } })]}
           readOutput={vi.fn(async () => null)}
           cancel={vi.fn(async () => ({ ok: true }))}
+          liveRunFor={() => undefined}
           clearFinished={vi.fn(async () => ({ cleared: 0 }))}
           onChanged={noop}
         />,
@@ -290,6 +297,7 @@ describe("BackgroundTasksSheet — sections", () => {
         rows={[running({ id: "r1" }), failed({ id: "f1" })]}
         readOutput={vi.fn(async () => null)}
         cancel={vi.fn(async () => ({ ok: true }))}
+        liveRunFor={() => undefined}
         clearFinished={vi.fn(async () => ({ cleared: 0 }))}
         onChanged={noop}
       />,
@@ -308,6 +316,7 @@ describe("BackgroundTasksSheet — sections", () => {
         rows={[running({ id: "r2" })]}
         readOutput={vi.fn(async () => null)}
         cancel={cancel}
+        liveRunFor={() => undefined}
         clearFinished={vi.fn(async () => ({ cleared: 0 }))}
         onChanged={onChanged}
       />,
@@ -317,5 +326,78 @@ describe("BackgroundTasksSheet — sections", () => {
     });
     expect(cancel).toHaveBeenCalledWith("r2");
     await waitFor(() => expect(onChanged).toHaveBeenCalled());
+  });
+});
+
+describe("BackgroundTasksSheet — subagent progress", () => {
+  const base = {
+    open: true,
+    onOpenChange: noop,
+    readOutput: vi.fn(async () => null),
+    cancel: vi.fn(async () => ({ ok: true })),
+    clearFinished: vi.fn(async () => ({ cleared: 0 })),
+    onChanged: noop,
+  };
+
+  function subagent(overrides?: Partial<BackgroundWorkRow>): BackgroundWorkRow {
+    seq += 1;
+    return {
+      id: `sub_${seq}`,
+      kind: "subagent",
+      label: "List the 10 largest files",
+      startedAt: 1_000,
+      terminal: null,
+      ...overrides,
+    };
+  }
+
+  it("renders the live progress message, labelled as progress and not output", () => {
+    const row = subagent();
+    render(
+      <BackgroundTasksSheet
+        {...base}
+        rows={[row]}
+        liveRunFor={() => ({ progress: { message: "working (step 7)", phase: "working" } })}
+      />,
+    );
+    expect(screen.getByText("working (step 7)")).toBeInTheDocument();
+    expect(screen.getByText(/Progress/)).toBeInTheDocument();
+    // It is liveness, not output — calling it "Output" would imply the run
+    // produced nothing else.
+    expect(screen.queryByText(/^Output$/)).not.toBeInTheDocument();
+  });
+
+  it("says it is waiting when the run is known but has not reported a step yet", () => {
+    render(
+      <BackgroundTasksSheet {...base} rows={[subagent()]} liveRunFor={() => ({})} />,
+    );
+    expect(screen.getByText(/Waiting for the first update/)).toBeInTheDocument();
+    expect(screen.queryByText(/before this page loaded/)).not.toBeInTheDocument();
+  });
+
+  it("explains the reload case when the stream never saw the run start", () => {
+    render(
+      <BackgroundTasksSheet {...base} rows={[subagent()]} liveRunFor={() => undefined} />,
+    );
+    expect(screen.getByText(/before this page loaded/)).toBeInTheDocument();
+    // Must NOT borrow the process-flavoured copy, which would be wrong here.
+    expect(screen.queryByText(/Output isn't available for this task/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Waiting for the first update/)).not.toBeInTheDocument();
+  });
+
+  it("shows no progress line for a finished subagent, stale or otherwise", () => {
+    const done = subagent({
+      terminal: { outcome: "exited", reason: "process_exit", exitCode: 0, at: 8_000 },
+    });
+    render(
+      <BackgroundTasksSheet
+        {...base}
+        rows={[done]}
+        liveRunFor={() => ({ progress: { message: "working (step 3)" } })}
+      />,
+    );
+    expect(screen.queryByText("working (step 3)")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Waiting for the first update/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/before this page loaded/)).not.toBeInTheDocument();
   });
 });

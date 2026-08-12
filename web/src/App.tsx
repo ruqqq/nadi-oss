@@ -5341,6 +5341,10 @@ function ThreadChat({
           cancel={cancelBackgroundWork}
           clearFinished={clearFinishedBackgroundWork}
           onChanged={() => void refreshBackgroundWork()}
+          // Reuses the SAME `useSubagentEvents` subscription ChatLog reads
+          // (`subagentRuns` above) rather than calling the hook again — a
+          // second subscription would double the socket's event handlers.
+          liveRunFor={(id) => subagentRuns.runsById[id]}
         />
 
         {browserNotificationPrompt && (

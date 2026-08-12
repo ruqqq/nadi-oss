@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Sheet, SheetContent, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import type { SubagentRunView } from "@/lib/subagent-runs";
 import { useVisualViewportInset } from "@/lib/use-visual-viewport-inset";
 import { cn } from "@/lib/utils";
 import type {
@@ -252,6 +253,61 @@ function ProcessOutput({
   );
 }
 
+/** What the sheet needs from the SDK's live run stream. Deliberately the
+ *  narrowest slice of `SubagentRunView`: presence of the run tells us the
+ *  stream knows about it, and `progress` is the only field rendered. */
+export type SubagentLiveRun = Pick<SubagentRunView, "progress">;
+
+/**
+ * Liveness for an in-flight `subagent` row.
+ *
+ * This is PROGRESS, not output, and the label says so. There is no path to a
+ * subagent's transcript: `readBackgroundWorkOutput` answers only for watched
+ * processes, and a subagent has no thread of its own to read. What does exist
+ * is `reportProgress` — the child stamps `working (step N)` each step
+ * (`src/agent/subagent.ts`) — which reaches us through `useAgentToolEvents`.
+ * Calling that "Output" would be worse than showing nothing: a reader seeing
+ * "Output — working (step 7)" would reasonably conclude that is all the
+ * subagent produced.
+ *
+ * The three states are distinguished by whether the stream knows the run at
+ * all, which is real information rather than a guess: `liveRun === undefined`
+ * means this page's socket never saw the run start, i.e. it began before the
+ * page loaded (a reload, or a thread opened later). A known run with no
+ * message yet simply hasn't reported its first step. Neither renders an empty
+ * container — a blank panel here was the bug this replaces.
+ */
+function SubagentProgress({
+  running,
+  liveRun,
+}: {
+  running: boolean;
+  liveRun: SubagentLiveRun | undefined;
+}) {
+  // A finished subagent's outcome is already carried by the duration and exit
+  // line above, and its result renders inline in the transcript. Showing the
+  // last progress stamp here would be stale by definition.
+  if (!running) return null;
+
+  const message = liveRun?.progress?.message ?? liveRun?.progress?.phase;
+  if (message) {
+    return (
+      <p className="text-muted-foreground text-xs">
+        <span className="text-faint">Progress · </span>
+        {message}
+      </p>
+    );
+  }
+  if (liveRun) {
+    return <p className="text-muted-foreground text-xs">Waiting for the first update…</p>;
+  }
+  return (
+    <p className="text-muted-foreground text-xs">
+      Live progress isn't available for a run started before this page loaded.
+    </p>
+  );
+}
+
 /** A finished row's duration is `terminal.at - startedAt` — both server
  * timestamps, never wall-clock-now. The ledger stamps `at` the moment it
  * terminalizes the row (`WorkTerminal.at`), so this is authoritative and
@@ -269,6 +325,7 @@ function TaskRow({
   now,
   readOutput,
   onCancel,
+  liveRunFor,
 }: {
   row: BackgroundWorkRow;
   now: number;
@@ -277,6 +334,7 @@ function TaskRow({
     stream?: BackgroundWorkOutputStream,
   ) => Promise<BackgroundWorkOutput | null>;
   onCancel: (id: string) => Promise<void>;
+  liveRunFor: (id: string) => SubagentLiveRun | undefined;
 }) {
   const tone = toneFor(row);
   const running = isRunning(row);
@@ -307,14 +365,16 @@ function TaskRow({
           <ProcessOutput row={row} readOutput={readOutput} />
         </div>
       ) : (
-        // No per-kind action here: a subagent run has no transcript of its
-        // own to open. It executes inside THIS thread (a detached agent-tool
-        // run, not a separate thread), and its result already renders inline
-        // in this same transcript via CompletionGroup/SubagentResultNotice —
-        // there is nothing else to navigate to. The id is shown because it
-        // already appears on that inline completion card, so it isn't new
-        // information here, just a way to correlate the two.
-        <p className="pl-6 font-mono text-[11px] text-muted-foreground">{row.id}</p>
+        // Still no navigation for a subagent row: it has no transcript of its
+        // own to open (a detached agent-tool run inside THIS thread, whose
+        // result already renders inline via CompletionGroup). What it does get
+        // is live PROGRESS — see `SubagentProgress`. The id stays because it
+        // also appears on that inline completion card, so it's the way to
+        // correlate the two rather than new information.
+        <div className="flex flex-col gap-1 pl-6">
+          <SubagentProgress running={running} liveRun={liveRunFor(row.id)} />
+          <p className="font-mono text-[11px] text-muted-foreground">{row.id}</p>
+        </div>
       )}
     </div>
   );
@@ -367,6 +427,7 @@ export function BackgroundTasksSheet({
   cancel,
   clearFinished,
   onChanged,
+  liveRunFor,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -378,6 +439,11 @@ export function BackgroundTasksSheet({
   cancel: (id: string) => Promise<{ ok: boolean; reason?: BackgroundWorkCancelReason }>;
   clearFinished: () => Promise<{ cleared: number }>;
   onChanged: () => void;
+  /** Looks up the SDK's live run state for a subagent id. `undefined` means
+   *  this page's socket never saw the run start, which is how a run that began
+   *  before the page loaded is told apart from one that simply hasn't reported
+   *  its first step yet. */
+  liveRunFor: (id: string) => SubagentLiveRun | undefined;
 }) {
   const viewport = useVisualViewportInset(open);
   const sheetStyle =
@@ -469,6 +535,7 @@ export function BackgroundTasksSheet({
                     now={now}
                     readOutput={readOutput}
                     onCancel={handleCancel}
+                    liveRunFor={liveRunFor}
                   />
                 ))}
               </Section>
@@ -482,6 +549,7 @@ export function BackgroundTasksSheet({
                     now={now}
                     readOutput={readOutput}
                     onCancel={handleCancel}
+                    liveRunFor={liveRunFor}
                   />
                 ))}
               </Section>
