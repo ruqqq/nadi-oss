@@ -91,7 +91,7 @@ export function classifyWatcher(input: {
  * underlying scheduler is cancel-then-set on one stored id, so any second
  * caller arming its own alarm silently cancels this one. A later horizon
  * folded in here can only be ignored; armed separately it would DELAY the
- * watcher poll it overwrote (a healthy 7s cadence became 21s that way — the
+ * watcher poll it overwrote (a healthy cadence became 3x that way — the
  * reason `workHorizon` is a parameter rather than a second `setAlarm` call).
  *
  * `workHorizon` stays a plain number so this module keeps no dependency on the

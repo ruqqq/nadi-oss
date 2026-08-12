@@ -161,7 +161,7 @@ describe("ThreadComputeService completion callback", () => {
     // And the difference is EXACTLY the callback: strip it from the admitted
     // script and the two scripts are the same bytes.
     const withoutCallback = normalize(on.script).replace(
-      /; NADI_EXIT_CODE="\$\(cat [^)]+\)"; curl [^;]+/,
+      /; NADI_EXIT_CODE="\$\(cat [^)]+\)"; \{ curl .+? ; \} >\/dev\/null 2>&1/,
       "",
     );
     expect(withoutCallback).toBe(normalize(off.script));

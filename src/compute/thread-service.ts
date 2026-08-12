@@ -1515,7 +1515,8 @@ export class ThreadComputeService {
       // Both branches close the row. The success branch inherits `execStop`'s
       // funnel: a stop settles the process and drops its watcher, so the row
       // must close here or the reaper faults settled work. The FAILURE branch
-      // closes it too — an open row left behind gets faulted `no_liveness` ~21s
+      // closes it too — an open row left behind gets faulted `no_liveness` one
+      // `PROCESS_STALE_AFTER_MS` (3x the watcher poll, 180s today)
       // later, which tells the model a process the USER cancelled "showed no
       // liveness signal". `stopped` either way: the user asked for a stop, and
       // reporting it as `exited` would have the model read a truncated output
@@ -1607,7 +1608,8 @@ export class ThreadComputeService {
     // Delete, don't terminalize. Unwatching is "stop telling me about this" —
     // the process keeps running, so no terminal is true and there is nothing
     // honest to deliver. An open row here would go unstamped (nothing polls an
-    // unwatched process) and the reaper would fault it `no_liveness` ~21s
+    // unwatched process) and the reaper would fault it `no_liveness` one
+    // `PROCESS_STALE_AFTER_MS`
     // later, reporting a live process as torn down.
     this.deps.workLedger?.deleteRow(input.processId);
     return { ok: true as const, unwatched: existed };
@@ -1688,15 +1690,24 @@ export class ThreadComputeService {
    * to the way `pollWatcher` has. Without this, the store keeps whatever it
    * last observed (typically `status:"running"`, `exitCode:null`) even after
    * the model has been told the process exited, so `execOutput`,
-   * `exec_watch_list`, and the WatcherDock would all disagree with the card
+   * `exec_watch_list`, and the background-work dock would all disagree with the card
    * the model just received.
    *
-   * Mirrors `pollWatcher`'s exited branch on LOCAL bookkeeping only: stamp
-   * the process row (`updateTerminalProcess`, same call the poll path makes
-   * right after its backend read) then tear down exactly as a clean exit
-   * does — `reapProcess(processId, { kill: false })`. `kill: false` because
-   * there is nothing to kill: the wrapper is reporting a process that has
-   * already exited on its own, not asking to stop one.
+   * Mirrors `pollWatcher`'s exited branch: stamp the process row
+   * (`updateTerminalProcess`, same call the poll path makes right after its
+   * backend read) then tear down exactly as a clean exit does —
+   * `reapProcess(processId, { kill: false })`. `kill: false` because there is
+   * nothing to kill: the wrapper is reporting a process that has already
+   * exited on its own, not asking to stop one.
+   *
+   * NOT local-only, and the caller must budget for that: `reapProcess` ->
+   * `releaseWorkHold` issues a REAL backend `runCommand` (bounded to 10s) and
+   * this method awaits it. Since the only caller is
+   * `reportProcessCompletion`, reached from the `/api/compute/completion`
+   * route, that backend round-trip sits inside the HTTP handler and the
+   * sandbox's own `curl` waits on it — which is why that `curl`'s timeout is
+   * budgeted against this teardown (see
+   * {@link COMPLETION_CALLBACK_CURL_TIMEOUT_SECS}) rather than being tight.
    *
    * Caller's job, not this method's: the work-ledger terminal and the model
    * notification. This only brings the compute layer's own view into
@@ -2897,7 +2908,8 @@ export class ThreadComputeService {
     // anything that can throw: `refreshProcessOutput` re-throws non-
     // runtime-missing backend errors and `deliverSystemReminder` can throw
     // too, and `pollWatcher` stops stamping the row either way — so a row left
-    // open behind a throw is reaped ~21s later as a false `no_liveness` fault.
+    // open behind a throw is reaped one `PROCESS_STALE_AFTER_MS` later as a
+    // false `no_liveness` fault.
     // Delivery failure cannot suppress the terminal, because the terminal is
     // already written. The `terminalize` itself notifies nobody; the reminder
     // below is this path's notification, and `markDelivered` after it is what

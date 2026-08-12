@@ -571,10 +571,13 @@ export function createFakeSpritesBackend(env?: Record<string, string>): {
  * is pinned to the EXACT shape `ThreadComputeService.buildCompletionCallback`
  * emits (curl flags, header order, JSON key order) rather than loosened to
  * "any curl call", per the same reasoning as every other fragment here — a
- * permissive pattern here would stop catching a real wrapper regression.
+ * permissive pattern here would stop catching a real wrapper regression. That
+ * includes the `{ ...; } >/dev/null 2>&1` GROUP around it: every fragment in a
+ * detached session redirects, and the group (rather than a suffix) is what
+ * makes the redirect cover a multi-segment fragment.
  */
 const WRAPPER_RE =
-  /^cd (?<cwd>.+?) && curl -sf --unix-socket \/\.sprite\/api\.sock -H 'Content-Type: application\/json' -X POST http:\/\/sprite\/v1\/tasks -d '\{"name":"(?<holdId>[^"]+)","expire":"5m"\}' >\/dev\/null 2>&1 \|\| \{ printf %s 97 > (?<exit97tmp>\S+) && mv -f (?<exit97tmp2>\S+) (?<exit97rc>\S+); exit 97; \}; \( while \[ ! -f (?<refresherRc>\S+) \]; do sleep 60; \[ -f (?<refresherRc2>\S+) \] && break; curl -sf --unix-socket \/\.sprite\/api\.sock -H 'Content-Type: application\/json' -X PUT http:\/\/sprite\/v1\/tasks\/(?<holdId2>[^ ]+) -d '\{"expire":"5m"\}' >\/dev\/null 2>&1 \|\| true; done \) & timeout (?<secs>\d+) bash -c (?<cmd>.+) < (?<stdin>\S+) > (?<out>\S+) 2> (?<err>\S+); __nadi_rc="\$\?"; printf %s "\$__nadi_rc" > (?<rctmp>\S+) && mv -f (?<rcmoved>\S+) (?<rc>\S+)(?:; NADI_EXIT_CODE="\$\(cat (?<cbRc>\S+)\)"; curl -sf -m (?<cbTimeout>\d+) -X POST (?<cbUrl>\S+) -H 'Authorization: Bearer (?<cbToken>[^']*)' -H 'Content-Type: application\/json' -d "(?<cbBody>\{\\"processId\\":\\"[^\\]*\\",\\"exitCode\\":\$NADI_EXIT_CODE\})")?; curl -sf --unix-socket \/\.sprite\/api\.sock -X DELETE http:\/\/sprite\/v1\/tasks\/(?<holdId3>[^ ]+) >\/dev\/null 2>&1; exit "\$__nadi_rc"$/;
+  /^cd (?<cwd>.+?) && curl -sf --unix-socket \/\.sprite\/api\.sock -H 'Content-Type: application\/json' -X POST http:\/\/sprite\/v1\/tasks -d '\{"name":"(?<holdId>[^"]+)","expire":"5m"\}' >\/dev\/null 2>&1 \|\| \{ printf %s 97 > (?<exit97tmp>\S+) && mv -f (?<exit97tmp2>\S+) (?<exit97rc>\S+); exit 97; \}; \( while \[ ! -f (?<refresherRc>\S+) \]; do sleep 60; \[ -f (?<refresherRc2>\S+) \] && break; curl -sf --unix-socket \/\.sprite\/api\.sock -H 'Content-Type: application\/json' -X PUT http:\/\/sprite\/v1\/tasks\/(?<holdId2>[^ ]+) -d '\{"expire":"5m"\}' >\/dev\/null 2>&1 \|\| true; done \) & timeout (?<secs>\d+) bash -c (?<cmd>.+) < (?<stdin>\S+) > (?<out>\S+) 2> (?<err>\S+); __nadi_rc="\$\?"; printf %s "\$__nadi_rc" > (?<rctmp>\S+) && mv -f (?<rcmoved>\S+) (?<rc>\S+)(?:; NADI_EXIT_CODE="\$\(cat (?<cbRc>\S+)\)"; \{ curl -sf -m (?<cbTimeout>\d+) -X POST (?<cbUrl>\S+) -H 'Authorization: Bearer (?<cbToken>[^']*)' -H 'Content-Type: application\/json' -d "(?<cbBody>\{\\"processId\\":\\"[^\\]*\\",\\"exitCode\\":\$NADI_EXIT_CODE\})" ; \} >\/dev\/null 2>&1)?; curl -sf --unix-socket \/\.sprite\/api\.sock -X DELETE http:\/\/sprite\/v1\/tasks\/(?<holdId3>[^ ]+) >\/dev\/null 2>&1; exit "\$__nadi_rc"$/;
 
 interface InnerResult {
   stdout: string;

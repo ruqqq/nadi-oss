@@ -4467,9 +4467,10 @@ export class ThinkThreadAgent extends Think<Env> {
    * The tick polls processes and stamps `lastAliveAt`; the sweep classifies
    * rows against those stamps. Sweeping first classifies staleness from the
    * PREVIOUS tick's stamps, one line before the tick would refresh them. The
-   * poll interval is 7s but `PROCESS_STALE_AFTER_MS` is 21s, so an alarm >=14s
-   * late — or >=14s spent inside `resolveComputeService` (a GitHub token mint
-   * plus several D1 reads) — would fault a HEALTHY, still-running process as
+   * `PROCESS_STALE_AFTER_MS` is 3x the poll interval, so an alarm two poll
+   * intervals late — or that long spent inside `resolveComputeService` (a GitHub
+   * token mint plus several D1 reads) — would fault a HEALTHY, still-running
+   * process as
    * `no_liveness`. The reaper must never false-positive: a false fault is worse
    * than the hang this project exists to fix.
    *
@@ -4551,7 +4552,7 @@ export class ThinkThreadAgent extends Think<Env> {
     // thread's one arm site and min-folds the ledger horizon, so when it armed
     // there is nothing to add: `scheduleComputeEviction` is cancel-then-set on
     // a single schedule id, so arming here would CANCEL the tick's (nearer)
-    // alarm and stretch a 7s watcher poll to the ledger's 21s horizon.
+    // alarm and stretch the watcher poll out to the ledger's later horizon.
     // When nothing armed — compute disabled or unresolved, the tick threw
     // (e.g. an unguarded D1 quota write), or the tick exited without arming
     // (state `acquiring`/`releasing`/`discarding` falls through `releaseIfIdle`
@@ -5079,9 +5080,11 @@ export class ThinkThreadAgent extends Think<Env> {
    *
    * `label` comes from `workFacts()`, the same helper `deliverWorkTerminal`
    * uses to name a row in its notification — `WorkRow` itself carries no
-   * label. Resolving compute once (rather than per-row) would be cheaper, but
-   * `workFacts` already tolerates an absent/failed resolve without throwing,
-   * and this list is short-lived and dock-only; not worth a second code path.
+   * label. Compute is resolved ONCE for the whole list and passed in, not
+   * per-row: `workFacts` takes a `resolvedService` for exactly this reason.
+   * Per-row, every `process` row on every 5s dock poll (per connected client)
+   * paid its own `resolveComputeService` — a GitHub token mint plus several D1
+   * reads. See the note at the resolve itself.
    *
    * Never throws — a throw inside a DO RPC method also fires an unhandled
    * rejection (see `reportProcessCompletion`'s doc). Gated on
@@ -5237,7 +5240,7 @@ export class ThinkThreadAgent extends Think<Env> {
       // failure here must cost stale compute-layer bookkeeping, never the
       // notification. Without this, the compute store keeps reporting the
       // process as running/watched (`execOutput`, `exec_watch_list`, the
-      // WatcherDock) even though the model was just told it exited.
+      // background-work dock) even though the model was just told it exited.
       try {
         await facts.service?.recordPushedExit(input.processId, input.exitCode);
       } catch (error) {

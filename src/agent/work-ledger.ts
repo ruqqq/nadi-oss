@@ -54,7 +54,8 @@ export const SUBAGENT_DEADLINE_MS = 45 * 60_000;
 /**
  * How long a delivered terminal row is kept. This is a CORRECTNESS floor, not
  * a tuning knob: a pruned id that is later re-registered comes back as a
- * fresh OPEN row and gets faulted `no_liveness` ~21s later — a false fault on
+ * fresh OPEN row and gets faulted `no_liveness` one stale window later — a
+ * false fault on
  * work that already ended cleanly. 24h comfortably exceeds every live horizon
  * (the 1h watcher deadline, the 45min subagent deadline), so nothing live can
  * reach a pruned id. The rows are also the only dataset for auditing

@@ -160,20 +160,31 @@ function holdIdFor(processId: string): string {
  * rather than two independent derivations that could drift (see
  * `sprites-work-hold.test.ts`'s "same hold id" regression test).
  *
- * Exit 97 is distinct from any command's own status: the caller reads it as
- * "could not background" — a real terminal delivered to the model, not a
- * synchronous fallback (there is none) — and it is written to the rc
- * sentinel with the same write-then-rename as every other exit, so a status
- * poll observes it exactly like any other completed process.
+ * Exit 97 marks "the hold could not be taken, so the command never ran". No
+ * code anywhere reads the VALUE 97 — do not add a caller that depends on it
+ * without saying so here. What makes the refusal observable is that it is
+ * written to the rc sentinel with the same write-then-rename as every other
+ * exit, so a status poll delivers it as an ordinary completed process (with a
+ * confusing exit code) rather than the process hanging. There is deliberately
+ * no synchronous fallback.
+ *
+ * The refusal path exits BEFORE the callback, so nothing pushes it: its
+ * terminal now waits for the 60s backstop poll, where it used to wait 7s. An
+ * earlier version of this comment, and of the design spec, said "the poll AND
+ * the callback report a real terminal" — the callback half was never true on
+ * this path.
  *
  * The refresher is gated on the rc sentinel rather than killed by the parent:
  * `PUT` is an upsert, so a refresher that outlives a SIGKILLed parent would
  * recreate the hold after release and pin the VM awake, billing, indefinitely.
  * It re-checks the sentinel BEFORE each refresh (not just at the top of the
- * loop) so a clean finish cannot land a `PUT` after the `DELETE` that just
- * ran — without that check, sleep(60) elapsing between the release and the
- * refresher's wake would resurrect the hold for up to 5 more minutes past
- * completion. One failed refresh is treated as transient (`|| true`), not
+ * loop) so a clean finish is very unlikely to land a `PUT` after the `DELETE`
+ * that just ran — without that check, sleep(60) elapsing between the release
+ * and the refresher's wake would resurrect the hold for up to 5 more minutes
+ * past completion. "Unlikely", not "cannot": the re-test and the `PUT` are two
+ * statements, so a `DELETE` landing between them still resurrects the hold.
+ * The window is milliseconds wide once per completion, against a 5-minute
+ * expiry that lapses on its own, which is why it is not worth closing. One failed refresh is treated as transient (`|| true`), not
  * fatal (`|| break`): killing the refresher on a single dropped `curl` would
  * let the hold lapse while the command is still running.
  *
@@ -232,8 +243,17 @@ export function buildSpritesWrapper(input: {
       `${hold.refreshFor(placeholderRef)} || true; done ) & `
     : "";
   const release = hold ? `; ${hold.releaseFor(placeholderRef)}` : "";
+  // `{ ...; } >/dev/null 2>&1` for the same reason every hold fragment carries
+  // it (see `workHold`'s doc): these run in the DETACHED SESSION, whose
+  // stdout/stderr peer socket is closed right after `session_info`, so an
+  // unredirected write can fail the curl. Harmless for the callback in
+  // practice — the response has already been received by then — but there is no
+  // reason for this to be the one fragment that differs, and Cloudflare's
+  // wrapper groups it the same way. A GROUP, not a suffix redirect: the
+  // fragment is caller-supplied and may be a pipeline or an `a && b` chain, of
+  // which a suffix would silence only the last segment.
   const callback = input.completionCallback
-    ? `; NADI_EXIT_CODE="$(cat ${rcPath})"; ${input.completionCallback}`
+    ? `; NADI_EXIT_CODE="$(cat ${rcPath})"; { ${input.completionCallback} ; } >/dev/null 2>&1`
     : "";
 
   return (

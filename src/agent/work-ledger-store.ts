@@ -18,7 +18,8 @@ export interface WorkLedgerSink {
    * Close a row at the moment the work actually settles. The compute layer is
    * the only thing that ever observes a real process exit/stop, so without
    * this the reaper is the sole closer and would re-report every cleanly
-   * exited process as a `no_liveness` fault ~21s later. Returns the
+   * exited process as a `no_liveness` fault one `PROCESS_STALE_AFTER_MS`
+   * later. Returns the
    * exactly-once gate (see {@link WorkLedgerStore.terminalize}).
    */
   terminalize(id: string, terminal: WorkTerminal): boolean;

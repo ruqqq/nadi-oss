@@ -113,7 +113,8 @@ don't invent parallel styling.
 
 - **Responsive surfaces**: bottom `Sheet` on mobile
   (`useMediaQuery("(max-width: 640px)")`), anchored Popover / right `Sheet` /
-  `Dialog` on desktop — see `ProjectPicker`, `ThreadDetailsSheet`, `WatcherChip`.
+  `Dialog` on desktop — see `ProjectPicker`, `ThreadDetailsSheet`,
+  `AddRepositoryPicker` (`web/src/settings/WorkbenchRepositories.tsx`).
   Mobile bottom sheets add `pb-[env(safe-area-inset-bottom)]` and lift above the
   keyboard via `useVisualViewportInset`.
 - **Master-detail panels** collapse to a drill-down below `lg` via a

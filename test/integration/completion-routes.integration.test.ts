@@ -198,7 +198,7 @@ async function drainInjectionBuffer(threadId: string): Promise<void> {
 
 /** The compute layer's own view: is the process still watched, and what does
  * the store say its status/exit code are. This is what `exec_watch_list`,
- * `execOutput`, and the WatcherDock all read — independent of the ledger and
+ * `execOutput`, and the background-work dock all read — independent of the ledger and
  * the injection buffer, which is why it needs its own assertions. */
 async function computeStateOf(
   threadId: string,
