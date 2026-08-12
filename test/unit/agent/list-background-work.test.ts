@@ -37,9 +37,17 @@ type TestableAgent = {
       kind: WorkKind;
       label: string | null;
       startedAt: number;
-      terminal: { outcome: WorkOutcome; reason: WorkReason } | null;
+      terminal: { outcome: WorkOutcome; reason: WorkReason; exitCode: number | null } | null;
     }>
   >;
+  readBackgroundWorkOutput(processId: string): Promise<{
+    head: string[];
+    tail: string[];
+    hiddenLines: number;
+    truncated: boolean;
+  } | null>;
+  cancelBackgroundWork(id: string): Promise<{ ok: boolean; reason?: string }>;
+  clearFinishedBackgroundWork(): Promise<{ cleared: number }>;
 };
 
 function row(overrides?: Partial<WorkRow>): WorkRow {
@@ -122,7 +130,63 @@ describe("ThinkThreadAgent.listBackgroundWork", () => {
       });
       const rows = await instance.listBackgroundWork();
       expect(rows.map((r) => r.id)).toEqual(["owed"]);
-      expect(rows[0]?.terminal).toEqual({ outcome: "fault", reason: "no_liveness" });
+      expect(rows[0]?.terminal).toEqual({
+        outcome: "fault",
+        reason: "no_liveness",
+        exitCode: null,
+      });
+    });
+  });
+
+  /**
+   * The green-✓-on-exit-7 bug at its source: `outcome` alone cannot tone a
+   * chip on failure ("exited" covers every exit code identically), so the
+   * dock needs the code itself.
+   */
+  it("reports the exit code so the client can tone on failure", async () => {
+    await withAgent(async ({ instance, store }) => {
+      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      store.register(row({ id: "p1", kind: "process" }));
+      store.terminalize("p1", {
+        outcome: "exited",
+        reason: "process_exit",
+        at: Date.now(),
+        detail: "exit code 7",
+        exitCode: 7,
+      });
+      const rows = await instance.listBackgroundWork();
+      expect(rows[0]!.terminal).toMatchObject({ outcome: "exited", exitCode: 7 });
+    });
+  });
+
+  it("falls back to parsing `detail` for a row terminalized before the structured exitCode field existed", async () => {
+    await withAgent(async ({ instance, store }) => {
+      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      store.register(row({ id: "p1", kind: "process" }));
+      // No `exitCode` on this terminal — the legacy shape.
+      store.terminalize("p1", {
+        outcome: "exited",
+        reason: "process_exit",
+        at: Date.now(),
+        detail: "exit code 7",
+      });
+      const rows = await instance.listBackgroundWork();
+      expect(rows[0]!.terminal).toMatchObject({ outcome: "exited", exitCode: 7 });
+    });
+  });
+
+  it("reports a null exit code for a fault, which has none", async () => {
+    await withAgent(async ({ instance, store }) => {
+      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      store.register(row({ id: "p1", kind: "process" }));
+      store.terminalize("p1", {
+        outcome: "fault",
+        reason: "no_liveness",
+        at: Date.now(),
+        detail: "delivery threw",
+      });
+      const rows = await instance.listBackgroundWork();
+      expect(rows[0]!.terminal).toMatchObject({ outcome: "fault", exitCode: null });
     });
   });
 
@@ -137,6 +201,153 @@ describe("ThinkThreadAgent.listBackgroundWork", () => {
       const rows = await instance.listBackgroundWork();
       expect(rows.find((r) => r.id === "p1")?.label).toBe("p1");
       expect(rows.find((r) => r.id === "s1")?.label).toBe("s1");
+    });
+  });
+});
+
+describe("ThinkThreadAgent.readBackgroundWorkOutput", () => {
+  it("returns null when background work is disabled", async () => {
+    await withAgent(async ({ instance, store }) => {
+      store.register(row({ id: "p1", kind: "process" }));
+      instance._turnRuntimeConfig = { backgroundWorkEnabled: false };
+      expect(await instance.readBackgroundWorkOutput("p1")).toBeNull();
+    });
+  });
+
+  it("returns null for a subagent id — a subagent has no process output", async () => {
+    await withAgent(async ({ instance, store }) => {
+      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      store.register(row({ id: "s1", kind: "subagent" }));
+      expect(await instance.readBackgroundWorkOutput("s1")).toBeNull();
+    });
+  });
+
+  it("returns null for an unknown id, never throws", async () => {
+    await withAgent(async ({ instance }) => {
+      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      await expect(instance.readBackgroundWorkOutput("nope")).resolves.toBeNull();
+    });
+  });
+
+  it("returns null for a process id when no compute service resolves (no sandbox wired up in this DO)", async () => {
+    await withAgent(async ({ instance, store }) => {
+      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      store.register(row({ id: "p1", kind: "process" }));
+      await expect(instance.readBackgroundWorkOutput("p1")).resolves.toBeNull();
+    });
+  });
+});
+
+describe("ThinkThreadAgent.cancelBackgroundWork", () => {
+  it("returns ok:false when background work is disabled", async () => {
+    await withAgent(async ({ instance, store }) => {
+      store.register(row({ id: "p1", kind: "process" }));
+      instance._turnRuntimeConfig = { backgroundWorkEnabled: false };
+      expect(await instance.cancelBackgroundWork("p1")).toEqual({
+        ok: false,
+        reason: "background_work_disabled",
+      });
+    });
+  });
+
+  it("returns ok:false for an unknown id, never throws", async () => {
+    await withAgent(async ({ instance }) => {
+      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      expect(await instance.cancelBackgroundWork("nope")).toEqual({
+        ok: false,
+        reason: "unknown_id",
+      });
+    });
+  });
+
+  it("returns ok:false for a row that is already terminal", async () => {
+    await withAgent(async ({ instance, store }) => {
+      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      store.register(row({ id: "p1", kind: "process" }));
+      store.terminalize("p1", {
+        outcome: "exited",
+        reason: "process_exit",
+        at: Date.now(),
+        detail: "exit code 0",
+        exitCode: 0,
+      });
+      expect(await instance.cancelBackgroundWork("p1")).toEqual({
+        ok: false,
+        reason: "already_terminal",
+      });
+    });
+  });
+
+  it("cancels an open subagent row via cancelSubagentRun (idempotent, no-op for an unknown run)", async () => {
+    await withAgent(async ({ instance, store }) => {
+      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      store.register(row({ id: "s1", kind: "subagent" }));
+      expect(await instance.cancelBackgroundWork("s1")).toEqual({ ok: true });
+    });
+  });
+
+  it("returns ok:false for an open process row when no compute service resolves", async () => {
+    await withAgent(async ({ instance, store }) => {
+      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      store.register(row({ id: "p1", kind: "process" }));
+      const result = await instance.cancelBackgroundWork("p1");
+      expect(result.ok).toBe(false);
+    });
+  });
+});
+
+describe("ThinkThreadAgent.clearFinishedBackgroundWork", () => {
+  it("returns cleared:0 when background work is disabled", async () => {
+    await withAgent(async ({ instance }) => {
+      instance._turnRuntimeConfig = { backgroundWorkEnabled: false };
+      expect(await instance.clearFinishedBackgroundWork()).toEqual({ cleared: 0 });
+    });
+  });
+
+  /**
+   * Non-destructive by construction: the row must survive as a row (just
+   * excluded from `listRecent`), because deleting it would reintroduce the
+   * false `no_liveness` fault `WORK_ROW_RETENTION_MS` exists to prevent (a
+   * pruned id, re-registered later, comes back as a fresh OPEN row).
+   */
+  it("marks delivered terminal rows so listBackgroundWork stops returning them, without deleting them", async () => {
+    await withAgent(async ({ instance, store }) => {
+      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      store.register(row({ id: "p1", kind: "process" }));
+      store.terminalize("p1", {
+        outcome: "exited",
+        reason: "process_exit",
+        at: Date.now(),
+        detail: "exit code 0",
+        exitCode: 0,
+      });
+      store.markDelivered("p1", Date.now());
+
+      expect(await instance.clearFinishedBackgroundWork()).toEqual({ cleared: 1 });
+      expect(await instance.listBackgroundWork()).toEqual([]);
+      // Still a real row in the store — cleared, not deleted.
+      expect(store.get("p1")).not.toBeNull();
+
+      // A repeat call finds nothing left to clear.
+      expect(await instance.clearFinishedBackgroundWork()).toEqual({ cleared: 0 });
+    });
+  });
+
+  it("leaves an open row and an owed (undelivered terminal) row alone", async () => {
+    await withAgent(async ({ instance, store }) => {
+      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      store.register(row({ id: "open", kind: "process" }));
+      store.register(row({ id: "owed", kind: "process" }));
+      store.terminalize("owed", {
+        outcome: "fault",
+        reason: "no_liveness",
+        at: Date.now(),
+        detail: "delivery threw",
+      });
+
+      expect(await instance.clearFinishedBackgroundWork()).toEqual({ cleared: 0 });
+      const rows = await instance.listBackgroundWork();
+      expect(rows.map((r) => r.id).sort()).toEqual(["open", "owed"]);
     });
   });
 });

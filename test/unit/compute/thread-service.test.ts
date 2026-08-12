@@ -659,6 +659,68 @@ describe("ThreadComputeService output retention signal", () => {
   });
 });
 
+describe("ThreadComputeService.execOutputHeadTail", () => {
+  it("reports head, tail, and an exact hidden-line count for a long stream", async () => {
+    const { service, store, now } = createService();
+    const started = await service.execStart({ command: "sleep 300", label: "build" });
+    for (let i = 1; i <= 50; i += 1) {
+      store.appendOutput({
+        processId: started.processId,
+        stream: "stdout",
+        text: `line ${i}\n`,
+        now: now.value,
+      });
+    }
+
+    const result = await service.execOutputHeadTail({ processId: started.processId });
+
+    expect(result.head).toEqual(Array.from({ length: 20 }, (_, i) => `line ${i + 1}`));
+    expect(result.tail).toEqual(Array.from({ length: 20 }, (_, i) => `line ${31 + i}`));
+    // 50 total - 20 head - 20 tail = 10, and this must be reported, never
+    // just dropped: a silent gap between head and tail is a repeat offender
+    // in this codebase (see `hiddenLines`'s doc).
+    expect(result.hiddenLines).toBe(10);
+    expect(result.truncated).toBe(false);
+  });
+
+  it("returns everything with no hidden lines for a short stream", async () => {
+    const { service, store, now } = createService();
+    const started = await service.execStart({ command: "sleep 300" });
+    store.appendOutput({
+      processId: started.processId,
+      stream: "stdout",
+      text: "hi\n",
+      now: now.value,
+    });
+
+    const result = await service.execOutputHeadTail({ processId: started.processId });
+    expect(result).toEqual({ head: ["hi"], tail: [], hiddenLines: 0, truncated: false });
+  });
+
+  it("surfaces retention truncation independently of hiddenLines", async () => {
+    const { service, store, now } = createService();
+    const started = await service.execStart({ command: "yes" });
+    store.appendOutput({
+      processId: started.processId,
+      stream: "stdout",
+      text: "kept\n",
+      now: now.value,
+    });
+    store.updateProcess(started.processId, { outputTruncated: true });
+
+    const result = await service.execOutputHeadTail({ processId: started.processId });
+    expect(result.hiddenLines).toBe(0);
+    expect(result.truncated).toBe(true);
+  });
+
+  it("throws for an unknown process id", async () => {
+    const { service } = createService();
+    await expect(service.execOutputHeadTail({ processId: "nope" })).rejects.toThrow(
+      "sandbox_process_not_found",
+    );
+  });
+});
+
 describe("ThreadComputeService stopAllRunningProcesses", () => {
   // The UI stop button aborts the model turn, but anything the model launched
   // kept running in the container until it exited or hit maxProcessRuntimeMs.

@@ -15,8 +15,54 @@ export interface OutputChunkView {
 }
 
 /** Splits chunk text into newline-terminated (or trailing partial) lines. */
-function splitLines(text: string): string[] {
+export function splitLines(text: string): string[] {
   return text.split(/(?<=\n)/g).filter(Boolean);
+}
+
+export interface HeadTailOutputInput {
+  stream: "stdout" | "stderr";
+  headLines: number;
+  tailLines: number;
+}
+
+export interface HeadTailOutputResult {
+  head: string[];
+  tail: string[];
+  /** Lines elided between `head` and `tail` — always reported, never dropped
+   *  silently. Zero when the whole stream fits in `head` + `tail`. */
+  hiddenLines: number;
+}
+
+/**
+ * Head+tail slice with an explicit elision count, for the background-work
+ * sheet ("… N lines hidden …"). Operates on already-loaded chunks — the
+ * caller pays for freshness ONCE (its own provider round-trip, if any) and
+ * this only slices locally, so building both a head and a tail view never
+ * costs a second fetch.
+ *
+ * Each returned line has its trailing newline stripped — these are meant for
+ * line-by-line display, not for re-assembling the original text.
+ */
+export function headTailOutputChunks(
+  chunks: OutputChunkView[],
+  input: HeadTailOutputInput,
+): HeadTailOutputResult {
+  const lines = chunks
+    .filter((c) => c.stream === input.stream)
+    .flatMap((c) => splitLines(c.text))
+    .map((line) => line.replace(/\n$/, ""));
+  if (lines.length <= input.headLines + input.tailLines) {
+    return {
+      head: lines.slice(0, input.headLines),
+      tail: lines.slice(input.headLines),
+      hiddenLines: 0,
+    };
+  }
+  return {
+    head: lines.slice(0, input.headLines),
+    tail: lines.slice(lines.length - input.tailLines),
+    hiddenLines: lines.length - input.headLines - input.tailLines,
+  };
 }
 
 export interface TailOutputInput {

@@ -13,6 +13,7 @@ import { ComputeError } from "./errors";
 import { log } from "../log";
 import {
   grepOutputChunks,
+  headTailOutputChunks,
   readOutputChunks,
   tailOutputChunks,
   type OutputChunkView,
@@ -1297,6 +1298,46 @@ export class ThreadComputeService {
         : {}),
       ...this.withRetention(tail, input.processId),
     };
+  }
+
+  /**
+   * Head+tail slice for the background-work sheet ("… N lines hidden …").
+   * Pays the SAME freshness cost `execOutput` does — one status refresh, plus
+   * one output refresh only while the process is still running — and NEVER a
+   * second one: building a head view and a tail view from two separate calls
+   * (`execOutput` for the tail, `execOutputRead` for the head, say) would
+   * double the sandbox/GitHub-token cost per sheet-open for no extra
+   * freshness, since both would refresh from the same already-current
+   * backend state. `headTailOutputChunks` (pure, in `output.ts`) does the
+   * actual slicing from the one locally-loaded chunk set, and it is the thing
+   * that guarantees `hiddenLines` is a real count rather than a silently
+   * dropped middle.
+   */
+  async execOutputHeadTail(input: {
+    processId: string;
+    stream?: "stdout" | "stderr" | undefined;
+    headLines?: number | undefined;
+    tailLines?: number | undefined;
+  }): Promise<{ head: string[]; tail: string[]; hiddenLines: number; truncated: boolean }> {
+    const process = this.deps.store.getProcess(input.processId);
+    if (!process) throw new Error("sandbox_process_not_found");
+    await this.refreshProcessStatusBestEffort(input.processId);
+    if ((this.deps.store.getProcess(input.processId) ?? process).status === "running") {
+      await this.refreshProcessOutput(input.processId);
+    }
+    const stream = input.stream === "stderr" ? "stderr" : "stdout";
+    const chunks = this.deps.store.listOutputChunks(input.processId, stream);
+    const sliced = headTailOutputChunks(chunks, {
+      stream,
+      headLines: input.headLines ?? 20,
+      tailLines: input.tailLines ?? 20,
+    });
+    const fresh = this.deps.store.getProcess(input.processId) ?? process;
+    // `outputTruncated` is a DIFFERENT elision than `hiddenLines`: it means
+    // retention already dropped earlier output before it was even stored, so
+    // it can be true even when `hiddenLines` is 0 (everything that WAS stored
+    // fit in head+tail).
+    return { ...sliced, truncated: fresh.outputTruncated };
   }
 
   /**
@@ -2922,7 +2963,13 @@ export class ThreadComputeService {
     const closed = this.deps.workLedger?.terminalize(
       watcher.processId,
       classification === "exited"
-        ? { outcome: "exited", reason: "process_exit", at: now, detail: "process exited" }
+        ? {
+            outcome: "exited",
+            reason: "process_exit",
+            at: now,
+            detail: "process exited",
+            exitCode: status.exitCode ?? null,
+          }
         : { outcome: "timeout", reason: "watch_timeout", at: now, detail: "watch timeout" },
     );
     // Somebody else closed this row AND already told the model about it — the

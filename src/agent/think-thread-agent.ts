@@ -140,6 +140,7 @@ import {
 } from "./compute-tools";
 import {
   createSubagentTools,
+  deriveRunLabel,
   formatSubagentCompletion,
   unwrapStoredInputPreview,
   type SubagentRunStatus,
@@ -393,6 +394,23 @@ function modelMessageText(message: ModelMessage): string {
     })
     .filter(Boolean)
     .join("\n");
+}
+
+/**
+ * Fallback for terminal rows written before `WorkTerminal.exitCode` existed:
+ * `reportProcessCompletion`'s `detail` string (`"exit code 7"`) is the only
+ * place the code survives on those rows. This is the ONE place in the
+ * codebase that ever parses it back out of prose — `listBackgroundWork` is
+ * the sole caller, and every write going forward stamps the structured field
+ * directly (`reportProcessCompletion`, `pollWatcher`) instead of relying on
+ * this. Returns `null` for anything that doesn't match, same as "no exit code
+ * known" for a fault/timeout/stop.
+ */
+function parseExitCodeFromDetail(detail: string): number | null {
+  const match = /^exit code (-?\d+)$/.exec(detail);
+  if (!match?.[1]) return null;
+  const parsed = Number(match[1]);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function modelMessageId(message: { id?: unknown }): string | null {
@@ -2220,7 +2238,7 @@ export class ThinkThreadAgent extends Think<Env> {
       const result = await this.runAgentTool(SubAgent, {
         input: input.task,
         runId,
-        display: { name: input.label ?? input.task },
+        display: { name: deriveRunLabel(input.task, input.label) },
         // Bind the run to the spawning tool call so useAgentToolEvents places it
         // in runsByToolCallId (the web run card correlates on this). Without it
         // the detached run is "unbound" and no card renders.
@@ -5129,7 +5147,7 @@ export class ThinkThreadAgent extends Think<Env> {
       kind: WorkKind;
       label: string | null;
       startedAt: number;
-      terminal: { outcome: WorkOutcome; reason: WorkReason } | null;
+      terminal: { outcome: WorkOutcome; reason: WorkReason; exitCode: number | null } | null;
     }>
   > {
     const admission = await this.backgroundWorkAdmissionEnabled();
@@ -5152,7 +5170,7 @@ export class ThinkThreadAgent extends Think<Env> {
       kind: WorkKind;
       label: string | null;
       startedAt: number;
-      terminal: { outcome: WorkOutcome; reason: WorkReason } | null;
+      terminal: { outcome: WorkOutcome; reason: WorkReason; exitCode: number | null } | null;
     }> = [];
     for (const row of rows) {
       let label: string | null = null;
@@ -5169,11 +5187,90 @@ export class ThinkThreadAgent extends Think<Env> {
         label,
         startedAt: row.startedAt,
         terminal: row.terminal
-          ? { outcome: row.terminal.outcome, reason: row.terminal.reason }
+          ? {
+              outcome: row.terminal.outcome,
+              reason: row.terminal.reason,
+              exitCode: row.terminal.exitCode ?? parseExitCodeFromDetail(row.terminal.detail),
+            }
           : null,
       });
     }
     return out;
+  }
+
+  /**
+   * Head+tail output for one row in the background-work sheet — the sheet's
+   * "… N lines hidden …" elision. `null` for anything that is not a watched
+   * `process` row: a `subagent` id has no process output at all (returning
+   * `null` there is a legitimate answer, not a failure), and so does an
+   * unknown/stale id or admission being off. Never throws — see
+   * `listBackgroundWork`'s doc for why a throw inside a DO RPC method is
+   * doubly costly (it also fires an unhandled rejection that fails the caller
+   * even when its own assertions pass).
+   */
+  async readBackgroundWorkOutput(processId: string): Promise<{
+    head: string[];
+    tail: string[];
+    hiddenLines: number;
+    truncated: boolean;
+  } | null> {
+    try {
+      const admission = await this.backgroundWorkAdmissionEnabled();
+      if (!admission) return null;
+      const row = this.workLedger.get(processId);
+      if (!row || row.kind !== "process") return null;
+      const resolved = await resolveComputeService(this.sandboxHostDeps(admission));
+      if (!resolved) return null;
+      return await resolved.service.execOutputHeadTail({ processId });
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Cancel one row from the background-work sheet, dispatching by `kind`:
+   * `cancelSubagentRun` for a subagent, `execStop` for a process — the same
+   * two teardown paths `terminalizeWork` already uses for a REAPER-driven
+   * close, here invoked directly for a user-driven one. Returns a result
+   * object rather than throwing, same reasoning as every other work-ledger
+   * RPC: a throw inside a DO RPC method also fires an unhandled rejection.
+   */
+  async cancelBackgroundWork(id: string): Promise<{ ok: boolean; reason?: string }> {
+    try {
+      const admission = await this.backgroundWorkAdmissionEnabled();
+      if (!admission) return { ok: false, reason: "background_work_disabled" };
+      const row = this.workLedger.get(id);
+      if (!row) return { ok: false, reason: "unknown_id" };
+      if (row.terminal) return { ok: false, reason: "already_terminal" };
+      if (row.kind === "subagent") {
+        await this.cancelSubagentRun(id);
+        return { ok: true };
+      }
+      const resolved = await resolveComputeService(this.sandboxHostDeps(admission));
+      if (!resolved) return { ok: false, reason: "sandbox_disabled" };
+      await resolved.service.execStop({ processId: id });
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, reason: String(error) };
+    }
+  }
+
+  /**
+   * "Clear finished" for the sheet. Delegates straight to
+   * `WorkLedgerStore.clearFinished` — see that method's doc for why this
+   * marks rows rather than deleting them: `WORK_ROW_RETENTION_MS` is a
+   * correctness floor, and deleting on "clear" would reintroduce the exact
+   * false `no_liveness` fault it exists to prevent (a pruned id, re-registered
+   * later, comes back as a fresh open row).
+   */
+  async clearFinishedBackgroundWork(): Promise<{ cleared: number }> {
+    try {
+      const admission = await this.backgroundWorkAdmissionEnabled();
+      if (!admission) return { cleared: 0 };
+      return { cleared: this.workLedger.clearFinished(Date.now()) };
+    } catch {
+      return { cleared: 0 };
+    }
   }
 
   /**
@@ -5233,6 +5330,7 @@ export class ThinkThreadAgent extends Think<Env> {
         reason: "process_exit",
         at: now,
         detail: `exit code ${input.exitCode}`,
+        exitCode: input.exitCode,
       };
       if (!this.workLedger.terminalize(input.processId, terminal)) {
         // Lost a race with another writer (e.g. the backstop poll) that
@@ -6463,6 +6561,18 @@ callable()(
 );
 callable()(
   ThinkThreadAgent.prototype.listBackgroundWork,
+  null as unknown as ClassMethodDecoratorContext,
+);
+callable()(
+  ThinkThreadAgent.prototype.readBackgroundWorkOutput,
+  null as unknown as ClassMethodDecoratorContext,
+);
+callable()(
+  ThinkThreadAgent.prototype.cancelBackgroundWork,
+  null as unknown as ClassMethodDecoratorContext,
+);
+callable()(
+  ThinkThreadAgent.prototype.clearFinishedBackgroundWork,
   null as unknown as ClassMethodDecoratorContext,
 );
 // `reportProcessCompletion` is deliberately NOT `callable()`. The HTTP route

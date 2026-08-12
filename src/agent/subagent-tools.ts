@@ -58,7 +58,15 @@ export function createSubagentTools(deps: {
       description: SPAWN_DESCRIPTION,
       inputSchema: z.object({
         task: z.string().min(1).describe("Self-contained instruction for the subagent."),
-        label: z.string().optional().describe("Short human label for this run."),
+        label: z
+          .string()
+          .optional()
+          .describe(
+            "Short human-readable label for this run (a few words) — shown to the user " +
+              "as the run's name in the dock and its completion card. Without one, a name " +
+              "is derived from the task text, which is worse: it can run long and, if the " +
+              "task text contains double quotes, break the client's completion rendering.",
+          ),
       }),
       execute: async ({ task, label }, { toolCallId }) => {
         const result = await deps.spawn({ task, ...(label ? { label } : {}), toolCallId });
@@ -105,10 +113,35 @@ export function formatSubagentCompletion(args: {
   summary?: string;
   error?: string;
 }): string {
-  const name = args.label ? `"${args.label}"` : "(unlabeled)";
+  // Strip `"` before wrapping: this string is later parsed back out by the
+  // client's `SUBAGENT_COMPLETION_RE` (web/src/lib/subagent-runs.ts), which
+  // looks for a closing `"`. A label containing one — historically the whole
+  // task brief, via the `?? input.task` fallback this sanitizes independently
+  // of — broke that capture and the completion rendered as a raw bubble
+  // instead of a result card. Defense in depth: `deriveRunLabel` already
+  // strips quotes at the source for NEW runs, but this also covers a run
+  // registered before that fix, or any other caller that hands this an
+  // unsanitized label.
+  const cleanLabel = args.label?.replaceAll('"', "").trim();
+  const name = cleanLabel ? `"${cleanLabel}"` : "(unlabeled)";
   const head = `Subagent ${name} finished: ${args.status}. [${args.runId}]`;
   const MAX = 4000;
   const body = args.error ? `Error: ${args.error}` : (args.summary ?? "(no summary returned)");
   const clipped = body.length > MAX ? `${body.slice(0, MAX)}\n…[truncated]` : body;
   return `<system-reminder>\n${head}\n${clipped}\n</system-reminder>`;
+}
+
+/**
+ * First line, quote-stripped, clipped — a display name, never the brief.
+ * `spawn_subagent`'s `label` is optional, and its absence used to mean "use
+ * the entire task text" (`input.label ?? input.task` at the `display.name`
+ * call site), which broke both the dialog title and the client's completion
+ * regex (a brief may contain double quotes — the observed one contained
+ * `the project "Markdump"`). Prefer passing a real `label`: a human-chosen
+ * name beats this derivation, which is a fallback, not a feature.
+ */
+export function deriveRunLabel(task: string, label?: string): string {
+  const source = (label ?? task).replace(/\s+/g, " ").trim();
+  const cleaned = source.replaceAll('"', "").trim();
+  return cleaned.length > 60 ? `${cleaned.slice(0, 59)}…` : cleaned || "Subagent run";
 }
