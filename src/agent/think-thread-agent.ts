@@ -5159,6 +5159,19 @@ export class ThinkThreadAgent extends Think<Env> {
         return { accepted: true, reason: "already_terminal" };
       }
 
+      // Resolved BEFORE `terminalize`, and that ordering is the whole point:
+      // `workFacts` is a full `resolveComputeService` (a GitHub token mint plus
+      // several D1 reads) and this path ALWAYS races a live watcher by
+      // construction. With the resolve after the terminalize, a `pollWatcher`
+      // landing in the gap saw `closed === false` and `isDelivered() === false`
+      // — closed but not yet claimed — and delivered a SECOND card for the same
+      // process; the injection buffer's dedupe key only suppresses an entry
+      // that is still pending. The sweep avoids the identical race with its
+      // `hasWatcher` skip; the push path has no analogue, so it closes the
+      // window by leaving no `await` at all between terminalize, deliver and
+      // stamp. Do not move this back down.
+      const facts = await this.workFacts(input.processId, "process");
+
       const now = Date.now();
       // "exited" regardless of the code: a non-zero status is still a clean
       // exit, and `WorkOutcome` has no "failed" member. The code itself is
@@ -5182,7 +5195,8 @@ export class ThinkThreadAgent extends Think<Env> {
       // collapses onto the same queued entry instead of appending a second
       // one, and a mid-turn arrival still STEERS into the running turn's next
       // step rather than queuing behind it.
-      const facts = await this.workFacts(input.processId, "process");
+      //
+      // `facts` was resolved above the `terminalize` deliberately — see there.
       this.deliverInjection({
         dedupeKey: `watcher:${input.processId}:${outcome}`,
         kind: "watcher-completion",
