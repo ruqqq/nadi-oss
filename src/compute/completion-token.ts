@@ -1,10 +1,16 @@
+import { base64UrlToBytes, bytesToBase64Url } from "../encoding";
+
 /**
- * A completion token authorises exactly one statement: "process P in thread T
- * ended". It rides in the wrapped command line, so the model can read it with
- * `ps` or from shell history — which is accepted, because the worst forgery it
- * enables is lying about its own process's exit code, something the model can
- * already do in prose. It must therefore never widen: no workspace scope, no
- * other thread, no other assertion.
+ * Authorises exactly ONE statement: "process P in thread T ended". Scoped to a
+ * single (threadId, processId) pair, with no workspace scope and no other
+ * capability, because it rides in the wrapped command line where the model can
+ * read it via `ps` — the worst forgery available is lying about its own
+ * process's exit code, which it can already do in prose.
+ *
+ * NOT single-use: verification is stateless, so the token is replayable until
+ * `exp`. Replay is harmless because the consuming route is idempotent — the
+ * ledger row goes terminal once and a second report is collapsed, not
+ * re-delivered. Do not rely on this module for at-most-once.
  */
 const COMPLETION_CONTEXT = "nadi-compute-completion-v1";
 
@@ -15,21 +21,6 @@ export interface CompletionTokenPayload {
 }
 
 const encoder = new TextEncoder();
-
-function bytesToBase64Url(bytes: Uint8Array): string {
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
-}
-
-function base64UrlToBytes(value: string): Uint8Array<ArrayBuffer> {
-  const base64 = value.replaceAll("-", "+").replaceAll("_", "/").replace(/=+$/, "");
-  const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
-  const binary = atob(padded);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes;
-}
 
 async function hmacKey(secret: string): Promise<CryptoKey> {
   return crypto.subtle.importKey(
