@@ -1316,9 +1316,9 @@ describe("work-hold release on terminal (Task 2)", () => {
     // Released exactly once: `pollWatcher` releases only when IT closed the
     // ledger row (`closed === true`), never as a second, redundant release
     // behind a reaper that got there first.
-    expect(backend.released.filter((id) => id === `nadi-work-${backendProcessId(ref)}`)).toHaveLength(
-      1,
-    );
+    expect(
+      backend.released.filter((id) => id === `nadi-work-${backendProcessId(ref)}`),
+    ).toHaveLength(1);
   });
 
   it("releases the hold on the reaper's fault arm", async () => {

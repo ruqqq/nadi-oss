@@ -32,9 +32,7 @@ function ledgerOf(instance: ThinkThreadAgent): WorkLedgerStore {
   return (instance as unknown as { workLedger: WorkLedgerStore }).workLedger;
 }
 
-function injectionsOf(
-  instance: ThinkThreadAgent,
-): Array<{ kind: string; text: string }> {
+function injectionsOf(instance: ThinkThreadAgent): Array<{ kind: string; text: string }> {
   return (
     instance as unknown as {
       injectionBuffer(): {
@@ -294,7 +292,7 @@ describe("routeCompletion (DO integration)", () => {
     expect(computeState.exitCode).toBe(0);
   });
 
-  it("reports a non-zero exit as \"exited\" with the code intact", async () => {
+  it('reports a non-zero exit as "exited" with the code intact', async () => {
     const threadId = "thr-completion-nonzero";
     await seedThread(threadId);
     const { processId } = await startWatchedProcess(threadId);

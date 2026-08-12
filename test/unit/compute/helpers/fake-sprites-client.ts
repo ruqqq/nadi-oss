@@ -419,7 +419,9 @@ export class FakeSpritesClient implements SpritesClient {
     // The refresher's self-check and its `while` guard must watch the SAME rc
     // path as the main run — otherwise it could never observe completion.
     if (groups.refresherRc !== groups.rc || groups.refresherRc2 !== groups.rc) {
-      throw new Error(`refresher watches ${groups.refresherRc}/${groups.refresherRc2}, not ${rcPath}`);
+      throw new Error(
+        `refresher watches ${groups.refresherRc}/${groups.refresherRc2}, not ${rcPath}`,
+      );
     }
     // The completion callback, when present, must read back the SAME rc path
     // the main run just wrote — not a different one, and not a re-read of
@@ -427,7 +429,9 @@ export class FakeSpritesClient implements SpritesClient {
     // (`groups.cbRc` is `undefined` for the no-callback wrappers most tests
     // in this file build).
     if (groups.cbRc !== undefined && groups.cbRc !== groups.rc) {
-      throw new Error(`completion callback reads ${groups.cbRc}, not the recorded rc path ${rcPath}`);
+      throw new Error(
+        `completion callback reads ${groups.cbRc}, not the recorded rc path ${rcPath}`,
+      );
     }
     // The C1 guard: acquire, refresh, and release must all target the SAME
     // hold id. Captured as three separate groups (not a `\k<name>`

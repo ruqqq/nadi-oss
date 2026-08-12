@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { FakeComputeBackend } from "../../../src/compute/backends/fake";
 import { createFakeSpritesBackend } from "./helpers/fake-sprites-client";
-import { deriveCompletionSecret, verifyCompletionToken } from "../../../src/compute/completion-token";
+import {
+  deriveCompletionSecret,
+  verifyCompletionToken,
+} from "../../../src/compute/completion-token";
 import { DEFAULT_COMPUTE_LIMITS } from "../../../src/compute/config";
 import { ComputeError } from "../../../src/compute/errors";
 import { log } from "../../../src/log";
@@ -62,7 +65,9 @@ describe("ThreadComputeService completion callback", () => {
     // route's own ~10s teardown budget (Task 4's review finding) — regressing
     // this back to a tight timeout is exactly the kind of "tidy-up" the
     // source comment warns against.
-    expect(fragment).toContain("curl -sf -m 25 -X POST https://nadi.example.com/api/compute/completion");
+    expect(fragment).toContain(
+      "curl -sf -m 25 -X POST https://nadi.example.com/api/compute/completion",
+    );
     // Origin is normalised (trailing slash stripped) rather than doubled.
     expect(fragment).not.toContain("com//api");
 
@@ -273,7 +278,12 @@ describe("ThreadComputeService completion callback", () => {
       expect(result.status).not.toBe("backgrounded");
       expect(warnings).toContainEqual([
         "compute.background_refused_no_callback",
-        { threadId: "thread_abc", provider: "sprites", reason: "unreachable_base_url", entryPoint: "exec" },
+        {
+          threadId: "thread_abc",
+          provider: "sprites",
+          reason: "unreachable_base_url",
+          entryPoint: "exec",
+        },
       ]);
     } finally {
       log.warn = originalWarn;

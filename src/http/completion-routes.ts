@@ -26,15 +26,20 @@ export async function routeCompletion(req: Request, env: Env): Promise<Response 
   const claims = await verifyCompletionToken(secret, token, Date.now());
   if (!claims) return Response.json({ error: "invalid_token" }, { status: 401 });
 
-  const body = (await req.json().catch(() => null)) as
-    | { processId?: string; exitCode?: number }
-    | null;
+  const body = (await req.json().catch(() => null)) as {
+    processId?: string;
+    exitCode?: number;
+  } | null;
   const processId = body?.processId;
   const exitCode = body?.exitCode;
   // `Number.isInteger`, not `typeof === "number"`: the exit code lands
   // verbatim in the terminal's detail and in the model-facing sentence, and
   // `NaN`/`Infinity`/a float are not exit codes a real process can produce.
-  if (typeof processId !== "string" || typeof exitCode !== "number" || !Number.isInteger(exitCode)) {
+  if (
+    typeof processId !== "string" ||
+    typeof exitCode !== "number" ||
+    !Number.isInteger(exitCode)
+  ) {
     return Response.json({ error: "bad_request" }, { status: 400 });
   }
   if (processId !== claims.processId) {

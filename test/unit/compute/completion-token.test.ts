@@ -23,7 +23,11 @@ describe("completion token", () => {
   it("rejects a tampered payload, a foreign secret, and an expired token", async () => {
     const secret = await deriveCompletionSecret("auth-secret");
     const other = await deriveCompletionSecret("different");
-    const token = await signCompletionToken(secret, { threadId: "t1", processId: "p1", exp: 5_000 });
+    const token = await signCompletionToken(secret, {
+      threadId: "t1",
+      processId: "p1",
+      exp: 5_000,
+    });
     expect(await verifyCompletionToken(other, token, 1_000)).toBeNull();
     expect(await verifyCompletionToken(secret, token, 6_000)).toBeNull();
     const [body, sig] = token.split(".");
