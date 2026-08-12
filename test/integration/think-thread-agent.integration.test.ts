@@ -1182,6 +1182,68 @@ describe("ThinkThreadAgent spike", () => {
     }
   });
 
+  // The MIRROR of the test above, and the shape a real rollout uses: deployment
+  // flag off, one workspace opted in. `backgroundWorkAdmissionEnabled` used to
+  // short-circuit on the deployment flag BEFORE reading workspace state, so every
+  // OUT-OF-TURN consumer was refused while the in-turn path happily backgrounded
+  // work. Observed in production (2026-08-12): the dock's `listBackgroundWork`
+  // returned [] so it never rendered, and `reportProcessCompletion` rejected every
+  // pushed callback as `background_work_disabled` — completions silently fell back
+  // to the 60s backstop poll, which made the push look like it worked.
+  it("honours a workspace opt-in when the deployment flag is off", async () => {
+    const previous = featureEnv.BACKGROUND_WORK_ENABLED;
+    featureEnv.BACKGROUND_WORK_ENABLED = "";
+    const workspaceId = "workspace-think-exec-background";
+    const stub = env.THINK_THREAD_AGENT.get(
+      env.THINK_THREAD_AGENT.idFromName("think-exec-background"),
+    );
+
+    try {
+      const admission = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
+        const testInstance = instance as SandboxServiceTestableAgent & {
+          backgroundWorkAdmissionForTest(): Promise<boolean>;
+        };
+        await instance.resolveRuntimeConfigForThink();
+        await drizzle(env.REGISTRY_DB, { schema })
+          .update(schema.workspaces)
+          .set({ flagsJson: '{"backgroundWork":true}' })
+          .where(eq(schema.workspaces.id, workspaceId));
+        return testInstance.backgroundWorkAdmissionForTest();
+      });
+      expect(admission).toBe(true);
+    } finally {
+      await drizzle(env.REGISTRY_DB, { schema })
+        .update(schema.workspaces)
+        .set({ flagsJson: "{}" })
+        .where(eq(schema.workspaces.id, workspaceId));
+      featureEnv.BACKGROUND_WORK_ENABLED = previous;
+    }
+  });
+
+  // The guard for what the removed short-circuit used to provide for free. An
+  // unregistered thread cannot resolve a runtime config — `resolveRuntimeConfig
+  // ForThink` throws `thread_agent_not_registered` — and admission must still
+  // answer `false` rather than propagate that throw. A throw here is worse than a
+  // wrong answer: in a DO RPC it also fires an unhandled rejection.
+  it("fails closed, without throwing, when the thread has no registered agent", async () => {
+    const previous = featureEnv.BACKGROUND_WORK_ENABLED;
+    featureEnv.BACKGROUND_WORK_ENABLED = "true";
+    const stub = env.THINK_THREAD_AGENT.get(
+      env.THINK_THREAD_AGENT.idFromName("think-admission-unregistered"),
+    );
+    try {
+      const admission = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
+        const testInstance = instance as unknown as {
+          backgroundWorkAdmissionForTest(): Promise<boolean>;
+        };
+        return testInstance.backgroundWorkAdmissionForTest();
+      });
+      expect(admission).toBe(false);
+    } finally {
+      featureEnv.BACKGROUND_WORK_ENABLED = previous;
+    }
+  });
+
   // The whole point of the auto-naming rework: the title must land WITHOUT the
   // model calling any tool. beforeTurn hands the naming to waitUntil, so this
   // drives the real hook on a real DO and asserts the D1 row afterwards. The

@@ -2065,14 +2065,46 @@ export class ThinkThreadAgent extends Think<Env> {
    * deliberately pinned so every tool has the same capability surface.
    */
   private async backgroundWorkAdmissionEnabled(): Promise<boolean> {
-    // The deployment flag is the outer fail-closed gate. Check it before
-    // resolving workspace state so disabled direct RPCs neither provision nor
-    // require a registered thread.
-    if (!backgroundWorkEnabled(this.env)) return false;
     if (this._turnRuntimeConfig) return this._turnRuntimeConfig.backgroundWorkEnabled;
     this._runtimeConfig.invalidate();
-    return (await this.resolveRuntimeConfigForThink()).backgroundWorkEnabled;
+    try {
+      return (await this.resolveRuntimeConfigForThink()).backgroundWorkEnabled;
+    } catch {
+      // Fail closed. This `catch` is what the removed deployment-flag
+      // short-circuit used to provide for free: an unregistered thread cannot
+      // resolve a runtime config (`thread_agent_not_registered`), and admission
+      // must answer `false` rather than propagate. A throw here would be worse
+      // than a wrong answer — inside a DO RPC it also fires an unhandled
+      // rejection, which fails the suite even when assertions pass.
+      return false;
+    }
   }
+
+  /**
+   * WHY THERE IS NO `if (!backgroundWorkEnabled(this.env)) return false` HERE.
+   *
+   * There used to be, as an "outer fail-closed gate" ahead of the workspace
+   * read. It made the deployment flag override a workspace OPT-IN, which is
+   * backwards: `resolveWorkspaceBackgroundWork` treats an explicit workspace
+   * `true` as authoritative precisely so a single workspace can be enabled
+   * against an off deployment — the only way to pilot this feature.
+   *
+   * The two resolutions then disagreed. In-turn code
+   * (`processMonitorEnabled`/`subagentSpawnEnabled`) reads
+   * `_turnRuntimeConfig.backgroundWorkEnabled`, which honours the override, so
+   * work was backgrounded and watched normally. Out-of-turn callers came through
+   * here and were refused. Observed live on 2026-08-12 with the deployment flag
+   * off and one workspace opted in: `listBackgroundWork` returned `[]` so the
+   * dock never rendered at all, and `reportProcessCompletion` rejected every
+   * pushed callback as `background_work_disabled` — so completion silently came
+   * from the 60s backstop poll instead, which made the push path look like it
+   * worked when it had never run.
+   *
+   * The cost of removing it is one uncached workspace resolution per
+   * out-of-turn admission check on deployments where the feature is off. That is
+   * the price of the override meaning what it says; do not reinstate the
+   * short-circuit to save it.
+   */
 
   /**
    * Serialize a lease mutation so concurrent spawns can't lose an update: the
