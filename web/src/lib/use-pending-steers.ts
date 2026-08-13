@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAgent } from "agents/react";
 
-// Same untyped-overload cast used by use-watcher-runs.ts / use-subagent-runs.ts.
+// Same untyped-overload cast used by use-background-work.ts.
 type AgentSocket = ReturnType<typeof useAgent<unknown>> & {
   call(method: string, args: unknown[]): Promise<unknown>;
 };

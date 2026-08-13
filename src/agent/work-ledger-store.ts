@@ -18,7 +18,8 @@ export interface WorkLedgerSink {
    * Close a row at the moment the work actually settles. The compute layer is
    * the only thing that ever observes a real process exit/stop, so without
    * this the reaper is the sole closer and would re-report every cleanly
-   * exited process as a `no_liveness` fault ~21s later. Returns the
+   * exited process as a `no_liveness` fault one `PROCESS_STALE_AFTER_MS`
+   * later. Returns the
    * exactly-once gate (see {@link WorkLedgerStore.terminalize}).
    */
   terminalize(id: string, terminal: WorkTerminal): boolean;
@@ -217,6 +218,40 @@ export class WorkLedgerStore implements WorkLedgerSink {
   listAll(): WorkRow[] {
     return this.storage.sql
       .exec<WorkLedgerRow>("SELECT * FROM background_work")
+      .toArray()
+      .map(toWorkRow);
+  }
+
+  /**
+   * Open rows plus recently-terminal ones, newest first — the dock's read
+   * path. Deliberately NOT `listOpen()`: the dock's whole gain over the two
+   * views it replaces is showing a TERMINAL outcome, and `listOpen()` excludes
+   * exactly those rows by definition.
+   *
+   * "Recent" is keyed on `delivered_at`, not `terminal_at`: a row's delivery
+   * is the moment the model (and so the thread) actually learned the outcome,
+   * which is what the dock should stay in sync with. `within` bounds how far
+   * back a delivered terminal still counts as recent (the dock is a live
+   * status surface, not history — `listAll` covers audit).
+   *
+   * A THIRD branch, `delivered_at IS NULL` on a terminal row, is not an edge
+   * case — it is `listUndelivered()`'s exact set: "delivery owed and
+   * retryable" (see that method's doc, and `WORK_DELIVERY_RETRY_MS`). Without
+   * it, the moment a delivery throws is exactly the moment a row disappears
+   * from the dock until the sweep retries — the moment a status surface is
+   * most useful. An owed row has no age to bound: it stays visible until
+   * delivered (then it ages out on the `within` window like any other).
+   */
+  listRecent(now = Date.now(), within = 10 * 60_000): WorkRow[] {
+    return this.storage.sql
+      .exec<WorkLedgerRow>(
+        `SELECT * FROM background_work
+         WHERE terminal_outcome IS NULL
+            OR delivered_at IS NULL
+            OR delivered_at >= ?
+         ORDER BY started_at DESC`,
+        now - within,
+      )
       .toArray()
       .map(toWorkRow);
   }

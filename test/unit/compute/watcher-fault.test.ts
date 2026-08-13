@@ -6,6 +6,7 @@ import { GENERATION_PATH } from "../../../src/compute/generation";
 import { ThreadComputeService } from "../../../src/compute/thread-service";
 import type { ThreadComputeStoreLike } from "../../../src/compute/thread-service";
 import type { EffectiveComputeConfig } from "../../../src/compute/types";
+import { WATCH_ABSOLUTE_TIMEOUT_MS } from "../../../src/compute/watchers";
 import {
   PROCESS_STALE_AFTER_MS,
   UNKNOWN_GENERATION,
@@ -1227,6 +1228,175 @@ describe("reapProcess — the reaper never blocks on a dead sandbox", () => {
     // already told, so a failed stop must not escape.
     await expect(reaper.reapProcess(processId, { kill: true })).resolves.toBeUndefined();
     expect(store.listWatchers()).toEqual([]);
+  });
+});
+
+/**
+ * A `FakeComputeBackend` that also declares `workHold`, the way
+ * `SpritesComputeBackend` does. `releaseFor` records the id it derived from
+ * the REFERENCE's own `processId` — the backend's internal id, never the
+ * ledger row's id — so these tests can catch exactly the round-1 defect:
+ * `thread-service` computing a hold id itself from the wrong id space
+ * instead of asking the reference what it is.
+ */
+class FakeBackendWithHold extends FakeComputeBackend {
+  readonly released: string[] = [];
+  readonly workHold = {
+    acquireFor: (process: BackendProcessReference) => `acquire:${this.holdIdOf(process)}`,
+    refreshFor: (process: BackendProcessReference) => `refresh:${this.holdIdOf(process)}`,
+    releaseFor: (process: BackendProcessReference): string => {
+      const id = this.holdIdOf(process);
+      this.released.push(id);
+      return `release:${id}`;
+    },
+  };
+
+  private holdIdOf(process: BackendProcessReference): string {
+    const payload = process.payload as { processId?: unknown };
+    if (typeof payload.processId !== "string") {
+      throw new Error("fake_process_reference_invalid");
+    }
+    return `nadi-work-${payload.processId}`;
+  }
+}
+
+/** The backend's OWN process id off a stored reference — never the ledger row's `processId`. */
+function backendProcessId(ref: BackendProcessReference): string {
+  const payload = ref.payload as { processId?: unknown };
+  if (typeof payload.processId !== "string") throw new Error("expected a processId on payload");
+  return payload.processId;
+}
+
+/**
+ * Task 2: a hold with no release path leaks an awake, billing sprite on the
+ * first fault — so every path that terminalises a process row must also
+ * release its hold.
+ */
+describe("work-hold release on terminal (Task 2)", () => {
+  it("releases the hold when pollWatcher observes a clean exit", async () => {
+    const backend = new FakeBackendWithHold();
+    const now = { value: 1_000 };
+    const { service } = createService({ backend, now });
+
+    const started = await service.execStart({ command: "sleep 300", label: "build" });
+    await service.execWatch({ processId: started.processId });
+    const listed = await service.execList({ status: "all", limit: 10 });
+    const ref = listed.processes.find((p) => p.id === started.processId)?.backendProcessRef;
+    if (!ref) throw new Error("expected a backend process reference");
+    backend.finishProcess(ref, "exited", 0);
+
+    now.value += CONFIG.monitorPollIntervalMs;
+    await service.runComputeTick();
+
+    // The fake's own process id is a DIFFERENT string from the ledger row's
+    // id (`fake_proc_N` vs the store's own `id`) — exactly like sprites'
+    // `crypto.randomUUID()` processId vs thread-service's `proc_<uuid>` row
+    // id. This is the discriminator round 1 was missing.
+    expect(started.processId).not.toBe(backendProcessId(ref));
+    expect(backend.released).toContain(`nadi-work-${backendProcessId(ref)}`);
+  });
+
+  it("releases the hold when the watch times out on a still-running process", async () => {
+    const backend = new FakeBackendWithHold();
+    const now = { value: 1_000 };
+    const { service } = createService({ backend, now });
+
+    // The fake never settles a `sleep` command on its own, so this process is
+    // still "running" when the watcher's absolute cap passes.
+    const started = await service.execStart({ command: "sleep 6000", label: "long build" });
+    await service.execWatch({ processId: started.processId });
+    const listed = await service.execList({ status: "all", limit: 10 });
+    const ref = listed.processes.find((p) => p.id === started.processId)?.backendProcessRef;
+    if (!ref) throw new Error("expected a backend process reference");
+
+    now.value += WATCH_ABSOLUTE_TIMEOUT_MS + CONFIG.monitorPollIntervalMs;
+    await service.runComputeTick();
+
+    expect(backend.released).toContain(`nadi-work-${backendProcessId(ref)}`);
+    // Released exactly once: `pollWatcher` releases only when IT closed the
+    // ledger row (`closed === true`), never as a second, redundant release
+    // behind a reaper that got there first.
+    expect(
+      backend.released.filter((id) => id === `nadi-work-${backendProcessId(ref)}`),
+    ).toHaveLength(1);
+  });
+
+  it("releases the hold on the reaper's fault arm", async () => {
+    const backend = new FakeBackendWithHold();
+    const store = createMemoryComputeStore();
+    const now = { value: 1_000 };
+    const starter = makeServiceOnSharedStore({ backend, store, now });
+    const started = await starter.execStart({ command: "sleep 60", label: "long" });
+    await starter.execWatch({ processId: started.processId });
+    const ref = store.getProcess(started.processId)?.backendProcessRef;
+    if (!ref) throw new Error("expected a backend process reference");
+    const reaper = makeServiceOnSharedStore({ backend, store, now });
+
+    await reaper.reapProcess(started.processId, { kill: true });
+
+    expect(backend.released).toContain(`nadi-work-${backendProcessId(ref)}`);
+  });
+
+  it("releases AFTER the kill, not before, on the reaper's fault arm", async () => {
+    // If the refresher survived the kill signal it could `PUT` the hold back
+    // after a release that ran too early. Recording call ORDER (not just
+    // occurrence) proves the fix holds the line, not just that both calls
+    // eventually happen.
+    const backend = new FakeBackendWithHold();
+    const store = createMemoryComputeStore();
+    const now = { value: 1_000 };
+    const starter = makeServiceOnSharedStore({ backend, store, now });
+    const started = await starter.execStart({ command: "sleep 60", label: "long" });
+    await starter.execWatch({ processId: started.processId });
+    const reaper = makeServiceOnSharedStore({ backend, store, now });
+
+    const order: string[] = [];
+    const originalStopProcess = backend.stopProcess.bind(backend);
+    backend.stopProcess = (async (...args: Parameters<typeof backend.stopProcess>) => {
+      order.push("stop");
+      return (originalStopProcess as typeof backend.stopProcess)(...args);
+    }) as typeof backend.stopProcess;
+    const originalRunCommand = backend.runCommand.bind(backend);
+    backend.runCommand = (async (...args: Parameters<typeof backend.runCommand>) => {
+      order.push("release");
+      return originalRunCommand(...args);
+    }) as typeof backend.runCommand;
+
+    await reaper.reapProcess(started.processId, { kill: true });
+
+    expect(order).toEqual(["stop", "release"]);
+  });
+
+  it("swallows a throwing release — best-effort, never blocks the terminal", async () => {
+    const backend = new FakeBackendWithHold();
+    const originalRunCommand = backend.runCommand.bind(backend);
+    let releaseAttempted = false;
+    backend.runCommand = (async (
+      ...args: Parameters<typeof backend.runCommand>
+    ): ReturnType<typeof backend.runCommand> => {
+      const [, input] = args;
+      if (input.command.startsWith("release:")) {
+        releaseAttempted = true;
+        throw new Error("sprite unreachable");
+      }
+      return originalRunCommand(...args);
+    }) as typeof backend.runCommand;
+    const now = { value: 1_000 };
+    const { service, ledger } = createService({ backend, now });
+
+    const started = await service.execStart({ command: "sleep 300", label: "build" });
+    await service.execWatch({ processId: started.processId });
+    const listed = await service.execList({ status: "all", limit: 10 });
+    const ref = listed.processes.find((p) => p.id === started.processId)?.backendProcessRef;
+    if (!ref) throw new Error("expected a backend process reference");
+    backend.finishProcess(ref, "exited", 0);
+
+    now.value += CONFIG.monitorPollIntervalMs;
+    await expect(service.runComputeTick()).resolves.not.toThrow();
+
+    expect(releaseAttempted).toBe(true);
+    // The terminal — the caller's actual obligation — must still land.
+    expect(ledger.rows.get(started.processId)?.terminal?.outcome).toBe("exited");
   });
 });
 

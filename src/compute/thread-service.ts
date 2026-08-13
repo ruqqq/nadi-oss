@@ -19,6 +19,7 @@ import {
 } from "./output";
 import { canAddWatcher, classifyWatcher, nextWakeAt, type WatcherRow } from "./watchers";
 import { recordComputeEvent, type ComputeEvent } from "./observability";
+import { deriveCompletionSecret, signCompletionToken } from "./completion-token";
 import { ComputeFileService } from "./file-service";
 import { readGeneration, writeGeneration } from "./generation";
 import type { WorkLedgerSink } from "../agent/work-ledger-store";
@@ -64,6 +65,96 @@ const REMINDER_TAIL_MAX_BYTES = 2_048;
  * call is worth doing on its own.
  */
 const ACQUIRE_DEADLINE_MS = 25_000;
+
+/**
+ * The wrapper's OWN curl timeout (`-m`) on its completion callback — NOT the
+ * budget for the process it just ran. `/api/compute/completion`'s teardown
+ * (`reapProcess` -> `releaseWorkHold` -> a `runCommand` with a 10s timeout)
+ * is awaited before the HTTP response returns, so the server side can
+ * legitimately take up to ~10s to answer. 10s here would then race the
+ * server's own budget and lose intermittently; 25s leaves real margin. Do not
+ * "tidy" this back down without re-reading that teardown path.
+ *
+ * Applies only to a backend whose completion is observable INDEPENDENTLY of
+ * the callback — sprites, which writes its rc sentinel before the callback
+ * runs. See {@link COMPLETION_CALLBACK_BLOCKING_CURL_BOUNDS} for the other
+ * ordering, and `ComputeBackend.completionCallbackDelaysCompletion` for why
+ * the two cannot share one number.
+ */
+const COMPLETION_CALLBACK_CURL_TIMEOUT_SECS = 25;
+
+/**
+ * The `curl` bounds used instead when the callback runs BEFORE completion is
+ * observable at all (`ComputeBackend.completionCallbackDelaysCompletion` —
+ * today Cloudflare, whose completion signal IS the wrapper's exit).
+ *
+ * Tight, and deliberately so: every second the callback spends here is added
+ * to the command's observed runtime, inside `exec()`'s 10s foreground window
+ * ({@link EXEC_FOREGROUND_TIMEOUT_MS}) polled every 500ms. At 25s a
+ * sub-second command would report as `"backgrounded"` whenever the origin is
+ * slow to answer from inside a container. The generous 25s above exists to
+ * cover the server's hold-release teardown, and that teardown does not exist
+ * on this side: a backend with no `workHold` makes `releaseWorkHold` return
+ * immediately.
+ *
+ * `--connect-timeout` separately, not just `-m`: a black-holed origin
+ * otherwise burns the whole `-m` budget on the TCP handshake alone.
+ */
+const COMPLETION_CALLBACK_BLOCKING_CURL_BOUNDS = {
+  connectTimeoutSecs: 3,
+  maxTimeSecs: 5,
+} as const;
+
+/**
+ * Extra margin added on top of whatever budget actually bounds a process's
+ * completion callback's `exp`, covering the time between the wrapper's rc
+ * write and the callback's own delivery (queueing, a slow `curl`, clock
+ * skew). Not itself a timeout on anything.
+ */
+const COMPLETION_TOKEN_MARGIN_MS = 300_000;
+
+/**
+ * Hostnames a completion callback fired from INSIDE a remote sandbox can
+ * never reach, even though `APP_BASE_URL` is non-empty for local dev
+ * (`http://localhost:8787`) — a curl from inside a sprite container never
+ * routes back to the developer's own laptop.
+ *
+ * FAILS OPEN on an unparsable origin: `APP_BASE_URL` is also better-auth's
+ * `baseURL` (`src/auth/options.ts`), so a genuinely malformed value already
+ * breaks the deployment elsewhere, louder, and treating "could not tell" as
+ * "unreachable" would silently disable backgrounding for a typo that has
+ * nothing to do with sandboxes at all. The caller logs the parse failure
+ * separately so it is not silent either way.
+ *
+ * Checks BOTH the bracketed and bare spellings of the IPv6 loopback:
+ * `new URL("http://[::1]:8787").hostname` is `"[::1]"`, brackets included —
+ * a bare `"::1"` comparison alone never matches a real URL's hostname.
+ */
+function isUnreachableFromASandbox(origin: string): boolean {
+  let hostname: string;
+  try {
+    hostname = new URL(origin).hostname;
+  } catch {
+    return false;
+  }
+  return (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    hostname === "[::1]" ||
+    hostname === "0.0.0.0"
+  );
+}
+
+/** Whether `value` parses as a URL at all — see `isUnreachableFromASandbox`'s fail-open doc. */
+function isParseableUrl(value: string): boolean {
+  try {
+    new URL(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Rejects with `onTimeout()` if `promise` has not settled within `ms`.
@@ -173,6 +264,23 @@ interface ThreadComputeServiceDeps {
    *  for compute addressing (that's `environmentId`, a workbench identifier). */
   threadId?: string;
   env: Record<string, string>;
+  /**
+   * The origin the sandbox wrapper's own completion callback posts back to
+   * (Worker `Env.APP_BASE_URL`) and the Worker secret that callback's token
+   * is HMAC-signed with (`Env.BETTER_AUTH_SECRET`, via
+   * `deriveCompletionSecret`). Deliberately NOT part of `env` above — that is
+   * the SANDBOX's own exec environment (workbench vars, the minted
+   * `GH_TOKEN`), a completely different scope despite the similarly-named
+   * field.
+   *
+   * Absent `appBaseUrl` means "mint no completion callback for this
+   * process": see `buildCompletionCallback`. A callback aimed at nowhere is
+   * silent loss, so the safe default is no callback at all — the process
+   * still runs and is still tracked by the existing poll/watcher path, it
+   * just never gets the PUSH half of completion delivery.
+   */
+  appBaseUrl?: string;
+  betterAuthSecret?: string;
   setAlarm: (timestamp: number) => Promise<void>;
   clearAlarm?: () => Promise<void>;
   now: () => number;
@@ -256,6 +364,13 @@ export class ThreadComputeService {
   private workspaceRootEnsured = false;
   private fileServiceInstance: ComputeFileService | undefined;
   private armCount = 0;
+  /**
+   * Cached per instance: `deriveCompletionSecret` is a SHA-256 over the
+   * Worker secret, and every process start would otherwise pay it again.
+   */
+  private completionSecretPromise: Promise<string> | undefined;
+  /** Guards `compute.app_base_url_unparsable` to at most once per instance. */
+  private loggedUnparsableAppBaseUrl = false;
 
   constructor(private readonly deps: ThreadComputeServiceDeps) {}
 
@@ -454,6 +569,26 @@ export class ThreadComputeService {
     return this.fileServiceInstance;
   }
 
+  /**
+   * Start a process and return immediately without waiting — the explicit
+   * "background it, do not wait" entry point (today reached only from
+   * debug/diagnostic RPCs; see `exec()` for the model-facing implicit
+   * foreground-then-maybe-background flow, which has its OWN refusal check
+   * because it can fall back to running synchronously instead).
+   *
+   * `execStart` has no synchronous fallback to offer — the caller explicitly
+   * asked not to wait, so silently blocking here would violate the contract
+   * just as badly as silently losing the completion would. So when no
+   * completion callback can be delivered for a REMOTE provider
+   * (`shouldRefuseBackgrounding()`), this THROWS instead of starting a process
+   * nothing will ever hear back from — the same "answer or throw" convention
+   * every other failure path on this method already uses (a backend error
+   * from `startAndStoreProcess` propagates the same way). A caller wrapped in
+   * `compute-tools.ts`'s per-tool `try { ... } catch { return toErrorResult(error) }`
+   * surfaces this as `{ ok: false, error: "compute_unavailable", detail: "..." }`
+   * — the existing shape, not a new one — with a `detail` message the model
+   * can act on by running the command in the foreground itself instead.
+   */
   async execStart(input: {
     command: string;
     cwd?: string | undefined;
@@ -463,6 +598,18 @@ export class ThreadComputeService {
     label?: string | undefined;
   }) {
     await this.deps.markSandboxDirty?.();
+    if (this.shouldRefuseBackgrounding()) {
+      log.warn("compute.background_refused_no_callback", {
+        threadId: this.deps.threadId,
+        provider: this.deps.backend.id,
+        reason: this.completionCallbackUnavailableReason(),
+        entryPoint: "execStart",
+      });
+      throw new ComputeError(
+        "compute_unavailable",
+        "background_unavailable_no_callback: background work is unavailable in this deployment; run the command in the foreground instead.",
+      );
+    }
     return this.startAndStoreProcess(input);
   }
 
@@ -475,7 +622,24 @@ export class ThreadComputeService {
     label?: string | undefined;
   }): Promise<ExecResult> {
     await this.deps.markSandboxDirty?.();
-    if (this.deps.backgroundLongRunningExec === false) {
+    const refuseReason = this.shouldRefuseBackgrounding()
+      ? this.completionCallbackUnavailableReason()
+      : null;
+    if (this.deps.backgroundLongRunningExec === false || refuseReason !== null) {
+      if (refuseReason !== null) {
+        // A callback to nowhere is silent loss, and for a remote provider the
+        // poll/watcher path is not a substitute (see `shouldRefuseBackgrounding`).
+        // Logged exactly HERE, once per exec call that this actually changes
+        // the behavior of — never in `buildCompletionCallback`, which runs for
+        // every process start including ones (mock/fake, execStart) this rule
+        // never applies to.
+        log.warn("compute.background_refused_no_callback", {
+          threadId: this.deps.threadId,
+          provider: this.deps.backend.id,
+          reason: refuseReason,
+          entryPoint: "exec",
+        });
+      }
       if (this.deps.backend.waitForProcessExit) {
         return this.runCancellableExecToCompletion(input);
       }
@@ -506,6 +670,7 @@ export class ThreadComputeService {
     command: string;
     cwd?: string | undefined;
     env?: Record<string, string> | undefined;
+    stdin?: string | undefined;
     timeoutMs?: number | undefined;
     label?: string | undefined;
   }): Promise<{
@@ -527,6 +692,12 @@ export class ThreadComputeService {
     await this.deps.markSandboxDirty?.();
     const backend = this.deps.backend;
     if (!backend.runCommand) {
+      // Unreachable today: every real remote provider (sprites, cloudflare,
+      // daytona) implements `runCommand`, so this branch only ever runs for
+      // the in-process mock/fake backends, which `execStart`'s refusal check
+      // never applies to. Left un-special-cased deliberately — if a future
+      // backend without `runCommand` lands here, `execStart` already refuses
+      // correctly on its own; do not duplicate that check.
       const started = await this.execStart(input);
       await this.waitForForegroundOrBackground(
         started.processId,
@@ -566,6 +737,11 @@ export class ThreadComputeService {
       command: input.command,
       cwd,
       ...(input.env === undefined ? {} : { env: input.env }),
+      // Carried, never dropped: this is the path `exec()` falls to when it
+      // refuses to background (a sprites deployment whose `APP_BASE_URL` is
+      // loopback or unset — what `wrangler.jsonc` ships — reaches it for every
+      // exec), and a silently dropped stdin changes what the command READS.
+      ...(input.stdin === undefined ? {} : { stdin: input.stdin }),
       timeoutMs,
     });
 
@@ -615,6 +791,7 @@ export class ThreadComputeService {
     command: string;
     cwd?: string | undefined;
     env?: Record<string, string> | undefined;
+    stdin?: string | undefined;
     timeoutMs?: number | undefined;
     label?: string | undefined;
   }): Promise<ExecCompletedResult> {
@@ -666,6 +843,171 @@ export class ThreadComputeService {
     return this.ensureRuntime();
   }
 
+  /**
+   * Whether this service's backend actually reads
+   * `StartProcessInput.completionCallback` into what it runs. Derived from
+   * the backend's OWN declared `consumesCompletionCallback` capability
+   * (`ComputeBackend`'s doc) rather than a provider-id allow-list: an id list
+   * drifts the moment a provider gains or loses the wrapper (today sprites
+   * and Cloudflare both have one; Daytona does not and is being phased out
+   * over its network-allowlist behavior), and self-corrects nothing when that
+   * happens. A list did exactly that once already in review — see this
+   * file's git history.
+   */
+  private consumesCompletionCallback(): boolean {
+    return this.deps.backend.consumesCompletionCallback === true;
+  }
+
+  /**
+   * Whether background work is ADMITTED for this thread at all — the
+   * `BACKGROUND_WORK_ENABLED` deployment flag and its workspace override,
+   * threaded in by `sandboxHostDeps()` as `supportsProcessMonitor` (SubAgent
+   * turns the same dep off for its own reasons; both mean "no watcher will
+   * ever be registered here").
+   *
+   * `buildCompletionCallback` is gated on this so that with background work
+   * OFF the emitted command is BYTE-IDENTICAL to the pre-push one. That is
+   * not cosmetic: with the flag off nothing registers a ledger row or a
+   * watcher, so a callback that did fire would be reporting a completion
+   * `reportProcessCompletion` rejects anyway (`background_work_disabled`) —
+   * and there is no watcher left to correct a mis-report. On a backend where
+   * the callback also DELAYS the only completion signal
+   * (`completionCallbackDelaysCompletion`, i.e. the production default
+   * provider) an ungated callback re-times every command in a deployment that
+   * asked for none of this.
+   *
+   * Defaults to admitted when the dep is absent, exactly as
+   * {@link supportsProcessMonitor} does: direct-construction tests wire
+   * neither, and flipping their default would silently drop the callback from
+   * every one of them.
+   */
+  private backgroundWorkAdmitted(): boolean {
+    return this.supportsProcessMonitor();
+  }
+
+  /**
+   * Why `buildCompletionCallback` cannot produce a fragment right now, or
+   * `null` when it can. Synchronous — every input is already known without
+   * minting a token — so `exec()` can consult it to decide whether a process
+   * may background at all, without paying for a signature it would throw
+   * away. The one side effect (a log line) fires at most once per instance;
+   * see `loggedUnparsableAppBaseUrl`.
+   *
+   * The loopback check is scoped to `consumesCompletionCallback()`
+   * deliberately: local dev sets `APP_BASE_URL` to `http://localhost:8787`,
+   * which is non-empty but unreachable from inside a real sandbox — and
+   * irrelevant for a backend that never reads the callback at all (today:
+   * `"mock"`/`"fake"`, and `"daytona"`, which is not expected to grow one).
+   * For `"cloudflare"` and `"sprites"` (both consume it) this loopback check
+   * is exactly what makes local dev against a REAL Cloudflare or sprites
+   * container refuse to background — see the ACCEPTED CONSEQUENCE note on
+   * `ComputeBackend.consumesCompletionCallback`.
+   */
+  private completionCallbackUnavailableReason():
+    | "no_base_url"
+    | "no_secret"
+    | "no_thread_id"
+    | "unreachable_base_url"
+    | null {
+    if (!this.deps.appBaseUrl) return "no_base_url";
+    if (!this.deps.betterAuthSecret) return "no_secret";
+    if (!this.deps.threadId) return "no_thread_id";
+    if (!this.consumesCompletionCallback()) return null;
+    if (!isParseableUrl(this.deps.appBaseUrl)) {
+      // Fails OPEN, not closed: `APP_BASE_URL` is also better-auth's own
+      // `baseURL` (`src/auth/options.ts`), so a genuinely malformed value
+      // already breaks the deployment elsewhere, louder — treating "could
+      // not tell" as "unreachable" here would just silently disable
+      // backgrounding on top of that, for a typo unrelated to sandboxes.
+      if (!this.loggedUnparsableAppBaseUrl) {
+        this.loggedUnparsableAppBaseUrl = true;
+        log.warn("compute.app_base_url_unparsable", {
+          threadId: this.deps.threadId,
+          appBaseUrl: this.deps.appBaseUrl,
+        });
+      }
+      return null;
+    }
+    if (isUnreachableFromASandbox(this.deps.appBaseUrl)) return "unreachable_base_url";
+    return null;
+  }
+
+  /**
+   * A callback to nowhere is silent loss, and for a backend that actually
+   * consumes the callback the poll/watcher path is not a substitute for it
+   * (see the module's design doc) — so a process that cannot carry a
+   * completion callback must not be allowed to background at all; it runs to
+   * completion synchronously instead. Never true for a backend that never
+   * reads `completionCallback` in the first place (`consumesCompletionCallback()`
+   * false): forcing THAT backend synchronous would change test/dev/Cloudflare
+   * behavior that has nothing to do with this mechanism.
+   */
+  private shouldRefuseBackgrounding(): boolean {
+    return this.consumesCompletionCallback() && this.completionCallbackUnavailableReason() !== null;
+  }
+
+  /**
+   * A complete shell fragment a backend's wrapper can run to report this
+   * process's exit code back to `/api/compute/completion` — see
+   * `StartProcessInput.completionCallback`. Returns `undefined` (never
+   * throws) when there is nowhere to call back to or nothing to sign with, so
+   * the caller degrades to "no callback" rather than failing the process
+   * start. Logging is `exec()`'s job (`shouldRefuseBackgrounding`'s caller) —
+   * this method fires for EVERY process start, including `execStart`/`execRun`
+   * and every direct-construction test, so logging here would be pure noise
+   * for the common "no `appBaseUrl` configured at all" case that changes
+   * nothing for `"mock"`/`"fake"`.
+   *
+   * Returns `undefined` unconditionally when background work is not admitted
+   * for this thread ({@link backgroundWorkAdmitted}) — the flag-off command
+   * must be byte-identical to the pre-push one. Checked FIRST, before any
+   * origin/secret reasoning, because none of that is relevant to a deployment
+   * that asked for no background work.
+   *
+   * The fragment references `$NADI_EXIT_CODE` rather than embedding a value:
+   * this method runs BEFORE the process exists, let alone finishes, so only
+   * the backend — reading back whatever it uses to track completion (sprites'
+   * rc sentinel) — can supply the actual recorded value. See
+   * `buildSpritesWrapper`'s doc for the consuming side of that contract.
+   *
+   * `exp` covers whichever is larger of the watch window or this PROCESS's
+   * own timeout: `maxProcessRuntimeMs` is configurable up to 24h, and a
+   * token that only covered the (1h05) watch window would expire out from
+   * under a long-running build, turning its eventual completion into a 401 —
+   * the exact silent-loss failure this mechanism exists to remove, just
+   * relocated to the token instead of the callback.
+   */
+  private async buildCompletionCallback(
+    processId: string,
+    timeoutMs: number,
+  ): Promise<string | undefined> {
+    if (!this.backgroundWorkAdmitted()) return undefined;
+    if (this.completionCallbackUnavailableReason() !== null) return undefined;
+    const appBaseUrl = this.deps.appBaseUrl!;
+    const betterAuthSecret = this.deps.betterAuthSecret!;
+    const threadId = this.deps.threadId!;
+    if (!this.completionSecretPromise) {
+      this.completionSecretPromise = deriveCompletionSecret(betterAuthSecret);
+    }
+    const secret = await this.completionSecretPromise;
+    const token = await signCompletionToken(secret, {
+      threadId,
+      processId,
+      exp: this.deps.now() + Math.max(timeoutMs, MAX_WATCH_TIMEOUT_MS) + COMPLETION_TOKEN_MARGIN_MS,
+    });
+    const origin = appBaseUrl.replace(/\/$/, "");
+    // Two orderings, two budgets — see both constants' docs. Never one number.
+    const bounds = this.deps.backend.completionCallbackDelaysCompletion
+      ? `--connect-timeout ${COMPLETION_CALLBACK_BLOCKING_CURL_BOUNDS.connectTimeoutSecs} ` +
+        `-m ${COMPLETION_CALLBACK_BLOCKING_CURL_BOUNDS.maxTimeSecs}`
+      : `-m ${COMPLETION_CALLBACK_CURL_TIMEOUT_SECS}`;
+    return (
+      `curl -sf ${bounds} -X POST ${origin}/api/compute/completion ` +
+      `-H 'Authorization: Bearer ${token}' -H 'Content-Type: application/json' ` +
+      `-d "{\\"processId\\":\\"${processId}\\",\\"exitCode\\":$NADI_EXIT_CODE}"`
+    );
+  }
+
   private async startAndStoreProcess(input: {
     command: string;
     cwd?: string | undefined;
@@ -679,15 +1021,18 @@ export class ThreadComputeService {
     // Default to the workspace root so a relative path means the same thing to
     // exec and to read_file; an explicitly-passed cwd is never overridden.
     const cwd = input.cwd ?? WORKSPACE_ROOT;
+    const timeoutMs = Math.min(
+      input.timeoutMs ?? this.deps.config.maxProcessRuntimeMs,
+      this.deps.config.maxProcessRuntimeMs,
+    );
+    const completionCallback = await this.buildCompletionCallback(processId, timeoutMs);
     const startInput = {
       command: input.command,
       cwd,
       ...(input.env === undefined ? {} : { env: input.env }),
       ...(input.stdin === undefined ? {} : { stdin: input.stdin }),
-      timeoutMs: Math.min(
-        input.timeoutMs ?? this.deps.config.maxProcessRuntimeMs,
-        this.deps.config.maxProcessRuntimeMs,
-      ),
+      ...(completionCallback === undefined ? {} : { completionCallback }),
+      timeoutMs,
     };
     let result;
     try {
@@ -1170,7 +1515,8 @@ export class ThreadComputeService {
       // Both branches close the row. The success branch inherits `execStop`'s
       // funnel: a stop settles the process and drops its watcher, so the row
       // must close here or the reaper faults settled work. The FAILURE branch
-      // closes it too — an open row left behind gets faulted `no_liveness` ~21s
+      // closes it too — an open row left behind gets faulted `no_liveness` one
+      // `PROCESS_STALE_AFTER_MS` (3x the watcher poll, 180s today)
       // later, which tells the model a process the USER cancelled "showed no
       // liveness signal". `stopped` either way: the user asked for a stop, and
       // reporting it as `exited` would have the model read a truncated output
@@ -1262,7 +1608,8 @@ export class ThreadComputeService {
     // Delete, don't terminalize. Unwatching is "stop telling me about this" —
     // the process keeps running, so no terminal is true and there is nothing
     // honest to deliver. An open row here would go unstamped (nothing polls an
-    // unwatched process) and the reaper would fault it `no_liveness` ~21s
+    // unwatched process) and the reaper would fault it `no_liveness` one
+    // `PROCESS_STALE_AFTER_MS`
     // later, reporting a live process as torn down.
     this.deps.workLedger?.deleteRow(input.processId);
     return { ok: true as const, unwatched: existed };
@@ -1307,18 +1654,103 @@ export class ThreadComputeService {
    * workspace root. `status === "active"` is our bookkeeping, not evidence the
    * container answers: `no_liveness` fires precisely BECAUSE it stopped
    * answering. A hanging mkdir inside `blockConcurrencyWhile` wedges the whole
-   * DO — the exact incident this design exists to fix. The one remaining
-   * backend call is the stop itself, outside `blockConcurrencyWhile`, and the
-   * caller's terminal is already written and delivered before we get here.
+   * DO — the exact incident this design exists to fix. The stop and the hold
+   * release below are the only remaining backend calls, both outside
+   * `blockConcurrencyWhile`, and the caller's terminal is already written and
+   * delivered before we get here.
+   *
+   * The hold release runs LAST, after the kill, not before: on sprites the
+   * refresher keeps running inside the sandbox until it observes the rc
+   * sentinel, so releasing before the signal lands risks the refresher
+   * `PUT`-ing the hold back after our `DELETE` — releasing first would
+   * resurrect exactly the leak this exists to close.
    */
   async reapProcess(processId: string, options: { kill: boolean }): Promise<void> {
     this.deps.store.deleteWatcher(processId);
-    if (!options.kill) return;
+    if (!options.kill) {
+      // No container to kill (`sandbox_reset`) or the process is meant to
+      // keep running (`watch_timeout`, reaper path) — either way, release is
+      // still this call's job: `terminalizeWork` only reaches here on the
+      // call that itself closed the ledger row, so nothing else will.
+      await this.releaseWorkHold(processId);
+      return;
+    }
     // No ledger work follows the stop: the reaper's caller closed the row first
     // (terminal-first) and already told the model, so a terminalize here would
     // be a no-op against a spent gate. A failed stop is swallowed by the
     // primitive — best-effort by contract, and the watcher is already gone.
     await this.stopProcessDirect(processId, "terminate");
+    await this.releaseWorkHold(processId);
+  }
+
+  /**
+   * Record a process exit the compute layer never polled — the sandbox
+   * wrapper pushed it straight to `reportProcessCompletion` (see
+   * `think-thread-agent.ts`), so there is no `getProcessStatus` read to react
+   * to the way `pollWatcher` has. Without this, the store keeps whatever it
+   * last observed (typically `status:"running"`, `exitCode:null`) even after
+   * the model has been told the process exited, so `execOutput`,
+   * `exec_watch_list`, and the background-work dock would all disagree with the card
+   * the model just received.
+   *
+   * Mirrors `pollWatcher`'s exited branch: stamp the process row
+   * (`updateTerminalProcess`, same call the poll path makes right after its
+   * backend read) then tear down exactly as a clean exit does —
+   * `reapProcess(processId, { kill: false })`. `kill: false` because there is
+   * nothing to kill: the wrapper is reporting a process that has already
+   * exited on its own, not asking to stop one.
+   *
+   * NOT local-only, and the caller must budget for that: `reapProcess` ->
+   * `releaseWorkHold` issues a REAL backend `runCommand` (bounded to 10s) and
+   * this method awaits it. Since the only caller is
+   * `reportProcessCompletion`, reached from the `/api/compute/completion`
+   * route, that backend round-trip sits inside the HTTP handler and the
+   * sandbox's own `curl` waits on it — which is why that `curl`'s timeout is
+   * budgeted against this teardown (see
+   * {@link COMPLETION_CALLBACK_CURL_TIMEOUT_SECS}) rather than being tight.
+   *
+   * Caller's job, not this method's: the work-ledger terminal and the model
+   * notification. This only brings the compute layer's own view into
+   * agreement with them.
+   */
+  async recordPushedExit(processId: string, exitCode: number): Promise<void> {
+    this.updateTerminalProcess(processId, { status: "exited", exitCode });
+    await this.reapProcess(processId, { kill: false });
+  }
+
+  /**
+   * Best-effort hold release. Not optional hygiene on sprites: a held sprite
+   * bills CPU and RAM, and `nativeIdleSuspend = true` makes
+   * `resolveIdleDisposition` skip the inferred discards that would otherwise
+   * reclaim it — so a wedged process with no release stays awake and billing.
+   * Swallows everything: the terminal is the caller's obligation, not this.
+   *
+   * Looks up the row's OWN `backendProcessRef` — never a locally-derived id —
+   * because only the provider knows what identifies a hold to itself; a
+   * provider-neutral caller computing that id itself is the layering
+   * violation `ComputeBackend.workHold`'s `*For(process)` shape exists to
+   * rule out.
+   *
+   * Uses `runCommand`, not `startProcess`: going through `startProcess` would
+   * wrap this one-shot `DELETE` in `buildSpritesWrapper` again, taking a NEW
+   * hold and spawning another refresher just to run it.
+   */
+  private async releaseWorkHold(processId: string): Promise<void> {
+    const hold = this.deps.backend.workHold;
+    const runCommand = this.deps.backend.runCommand;
+    if (!hold || !runCommand) return;
+    try {
+      const state = this.deps.store.getComputeState();
+      if (state?.status !== "active" || !state.runtimeRef) return;
+      const process = this.deps.store.getProcess(processId);
+      if (!process?.backendProcessRef) return;
+      await runCommand(state.runtimeRef, {
+        command: hold.releaseFor(process.backendProcessRef),
+        timeoutMs: 10_000,
+      });
+    } catch (error) {
+      log.warn("compute.work_hold_release_failed", { processId, error: String(error) });
+    }
   }
 
   /**
@@ -2389,6 +2821,58 @@ export class ThreadComputeService {
     return JSON.stringify(state.runtimeRef) === JSON.stringify(runtime);
   }
 
+  /**
+   * The watcher poll's status read. When the backend declares
+   * `ComputeBackend.buildBackstopProbe`, runs it FIRST: one exec that either
+   * reports a recorded exit or (only when there is none) re-asserts
+   * `workHold` in the same breath. If it reports an exit, that answer is
+   * authoritative and `getProcessStatus` is skipped entirely.
+   *
+   * If it does NOT report an exit, this still falls back to
+   * `getProcessStatus` — deliberately, on every such poll, not just once.
+   * `getProcessStatus` is NOT an exec on sprites (it is `fsRead` +
+   * `listSessions`, two control-plane reads with no shell involved), so this
+   * fallback costs no exec and risks no VM wake; skipping it would mean
+   * `classifyWatcher` never sees `"failed"` again for a process that died
+   * without recording an exit, so the model would be told (falsely) that a
+   * process which died up to an hour ago "is still running" once the
+   * watcher's absolute timeout finally fires. The one exec this widening
+   * exists to save is the hold reassert, not this read — see
+   * `ComputeBackend.buildBackstopProbe`'s doc.
+   *
+   * Backends without the capability (no hold to reassert, e.g. Cloudflare,
+   * or none of the above, e.g. tests) just call `getProcessStatus` directly.
+   */
+  private async pollProcessStatus(
+    runtime: BackendReference,
+    process: BackendProcessReference,
+  ): Promise<ProcessStatus> {
+    const backend = this.deps.backend;
+    const buildProbe = backend.buildBackstopProbe;
+    if (!buildProbe || !backend.runCommand) {
+      return backend.getProcessStatus(runtime, process);
+    }
+    const result = await backend.runCommand(runtime, {
+      command: buildProbe(process),
+      // Bounded generously: a hibernated sprite's wake plus this exec can
+      // exceed a tighter budget, but a timeout here degrades safely — the
+      // poll just falls through to `getProcessStatus` below, and a process
+      // that is genuinely wedged is still caught by the reaper's own
+      // `no_liveness` fault (PROCESS_STALE_AFTER_MS, now 180s) if polls keep
+      // failing to stamp liveness.
+      timeoutMs: 10_000,
+    });
+    const exitCode = parseBackstopRc(result.stdout);
+    if (exitCode !== undefined) return { status: "exited", exitCode };
+    // No rc yet: fall back to the session-backed read so a process that died
+    // without ever recording an exit is still detected as `"failed"`, not
+    // silently `"running"` for an hour. A thrown `runCommand` (exec failure,
+    // timeout) propagates past this method uncaught, same as a thrown
+    // `getProcessStatus` always has — the sweep loop that calls `pollWatcher`
+    // already treats a poll failure as "do not stamp, retry next poll".
+    return backend.getProcessStatus(runtime, process);
+  }
+
   private async pollWatcher(
     watcher: WatcherRow,
     runtime: BackendReference,
@@ -2399,7 +2883,7 @@ export class ThreadComputeService {
       this.deps.store.deleteWatcher(watcher.processId);
       return false;
     }
-    const status = await this.deps.backend.getProcessStatus(runtime, process.backendProcessRef);
+    const status = await this.pollProcessStatus(runtime, process.backendProcessRef);
     // Stamp only AFTER a successful read. A failed poll must not stamp — that
     // is exactly what lets the reaper reap a watcher whose backend has gone
     // away, without this error path having to cooperate.
@@ -2424,7 +2908,8 @@ export class ThreadComputeService {
     // anything that can throw: `refreshProcessOutput` re-throws non-
     // runtime-missing backend errors and `deliverSystemReminder` can throw
     // too, and `pollWatcher` stops stamping the row either way — so a row left
-    // open behind a throw is reaped ~21s later as a false `no_liveness` fault.
+    // open behind a throw is reaped one `PROCESS_STALE_AFTER_MS` later as a
+    // false `no_liveness` fault.
     // Delivery failure cannot suppress the terminal, because the terminal is
     // already written. The `terminalize` itself notifies nobody; the reminder
     // below is this path's notification, and `markDelivered` after it is what
@@ -2549,6 +3034,21 @@ export class ThreadComputeService {
     // gate, the model has now been told about this work exactly once, by a
     // message built from a live status read.
     this.deps.workLedger?.markDelivered(watcher.processId, now);
+    // Hold release, gated on `closed`: only the call that ACTUALLY closed the
+    // ledger row owns its teardown. When `closed` is false, the reaper's
+    // `terminalizeWork` -> `reapProcess` got there first and already released
+    // (or, for the still-open-but-undelivered rescue case above, will have —
+    // that call's own `reapProcess` ran before this poll's delivery did).
+    // Releasing unconditionally here would double-release: harmless on
+    // sprites (`DELETE` on an already-gone task 404s and is swallowed), but
+    // wrong in principle, since "whoever closes the row owns the teardown" is
+    // the same invariant `reapProcess` already relies on.
+    //
+    // For `timeout` specifically the process may still be running, but the
+    // wrapper's own refresher self-heals within 60s (`PUT` is an upsert), so
+    // the worst case of releasing here is one missed refresh window, not a
+    // stranded process.
+    if (closed) await this.releaseWorkHold(watcher.processId);
     this.deps.store.deleteWatcher(watcher.processId);
     return true;
   }
@@ -2797,4 +3297,30 @@ function validateComputePath(value: string): string {
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Parses `ComputeBackend.buildBackstopProbe`'s stdout for a `nadi-rc:<n>`
+ * MARKED line, scanning from the end. Never the first line, and never a bare
+ * unmarked number: sprites' fast-path replay can merge stderr onto the same
+ * stream ahead of a command's real output (the same live hazard `parseStat`,
+ * a few hundred lines down, exists to survive), so a warning line landing
+ * before the marker must not shift which line this reads. Scanning backward
+ * from the end also means a stray line that merged in AFTER the marker
+ * cannot mask it either.
+ *
+ * Preserves the same "unparsable means no answer" contract `readRcOnce`
+ * (sprites.ts) applies to its own sentinel reads: no marker line, an empty
+ * read, or anything that isn't a bare integer after the marker must never be
+ * mistaken for exit code 0.
+ */
+function parseBackstopRc(stdout: string): number | undefined {
+  const lines = stdout.split("\n");
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const match = /^nadi-rc:(-?\d+)$/.exec((lines[i] ?? "").trim());
+    if (!match) continue;
+    const code = Number.parseInt(match[1] ?? "", 10);
+    return Number.isSafeInteger(code) ? code : undefined;
+  }
+  return undefined;
 }

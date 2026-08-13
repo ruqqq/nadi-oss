@@ -128,6 +128,147 @@ const SIGNALS: Record<StopMode, SpritesSignal> = {
   kill: "SIGKILL",
 };
 
+/** The sprite's own management socket. Reachable only from inside the sprite. */
+const SPRITE_SOCK = "/.sprite/api.sock";
+/** Refreshed every 60s by the wrapper: four missed heartbeats of margin. */
+const HOLD_EXPIRY = "5m";
+
+/**
+ * The Tasks-API hold name for one backgrounded process. Derived from the
+ * sprites-internal `processId` (the same uuid the sentinel files are keyed
+ * by), so it needs no shell quoting. Internal to this file — the public
+ * `workHold` field is keyed by `BackendProcessReference`, not a raw string;
+ * see `ComputeBackend.workHold`'s doc for why a provider-neutral caller must
+ * never compute this itself.
+ */
+function holdIdFor(processId: string): string {
+  return `nadi-work-${processId}`;
+}
+
+/**
+ * Assembles the shell wrapper `startProcess` backgrounds on sprites: acquire
+ * the hold (if any), launch a self-terminating refresher, run the command to
+ * its rc sentinel, then release the hold last.
+ *
+ * Called before the process has a session id — `execDetached` only returns
+ * one once the wrapper is already launched — so the hold fragments are built
+ * against a PLACEHOLDER `BackendProcessReference` carrying the real
+ * `processId` and throwaway values for the fields `holdIdFor` never reads.
+ * That is what makes the id embedded here and the one `releaseWorkHold`
+ * derives later from the REAL reference identical by construction: both go
+ * through the same `workHold.*For` methods, keying on the same `processId`,
+ * rather than two independent derivations that could drift (see
+ * `sprites-work-hold.test.ts`'s "same hold id" regression test).
+ *
+ * Exit 97 marks "the hold could not be taken, so the command never ran". No
+ * code anywhere reads the VALUE 97 — do not add a caller that depends on it
+ * without saying so here. What makes the refusal observable is that it is
+ * written to the rc sentinel with the same write-then-rename as every other
+ * exit, so a status poll delivers it as an ordinary completed process (with a
+ * confusing exit code) rather than the process hanging. There is deliberately
+ * no synchronous fallback.
+ *
+ * The refusal path exits BEFORE the callback, so nothing pushes it: its
+ * terminal now waits for the 60s backstop poll, where it used to wait 7s. An
+ * earlier version of this comment, and of the design spec, said "the poll AND
+ * the callback report a real terminal" — the callback half was never true on
+ * this path.
+ *
+ * The refresher is gated on the rc sentinel rather than killed by the parent:
+ * `PUT` is an upsert, so a refresher that outlives a SIGKILLed parent would
+ * recreate the hold after release and pin the VM awake, billing, indefinitely.
+ * It re-checks the sentinel BEFORE each refresh (not just at the top of the
+ * loop) so a clean finish is very unlikely to land a `PUT` after the `DELETE`
+ * that just ran — without that check, sleep(60) elapsing between the release
+ * and the refresher's wake would resurrect the hold for up to 5 more minutes
+ * past completion. "Unlikely", not "cannot": the re-test and the `PUT` are two
+ * statements, so a `DELETE` landing between them still resurrects the hold.
+ * The window is milliseconds wide once per completion, against a 5-minute
+ * expiry that lapses on its own, which is why it is not worth closing. One failed refresh is treated as transient (`|| true`), not
+ * fatal (`|| break`): killing the refresher on a single dropped `curl` would
+ * let the hold lapse while the command is still running.
+ *
+ * The rc write itself is a write-then-RENAME, not a plain redirect: `> rc`
+ * creates the file before `printf` fills it, so a status poll landing in that
+ * window reads an empty file. `readRcOnce` treats unparsable content as "no
+ * answer", so the empty read is not mistaken for an exit code — but the
+ * rename removes the window entirely, and it is one extra word.
+ *
+ * The command's own exit code is captured into `$__nadi_rc` and re-asserted
+ * with an explicit `exit` at the end, because the release curl appended after
+ * the rc write would otherwise become the wrapper's own exit status.
+ *
+ * `completionCallback`, when present, runs AFTER the rc write and BEFORE the
+ * hold release — never the other way round. Releasing first would let the
+ * sprite hibernate mid-`curl`, losing exactly the completion this mechanism
+ * exists to deliver; the hold is what guarantees the callback actually runs.
+ * `NADI_EXIT_CODE` is set with a plain `;`-separated assignment, NOT a
+ * `VAR=val cmd` prefix: a prefix assignment only exports the variable into
+ * the COMMAND's environment, and does not affect `$NADI_EXIT_CODE` expanding
+ * inside that same command's own argument list (verified live in bash — a
+ * prefix form here silently emitted an empty exit code in the JSON body).
+ * The variable is what lets the fragment (built by `ThreadComputeService`,
+ * which cannot know this sprite's rc path or even this process's exit code in
+ * advance) report the value THIS wrapper just recorded, read back from the
+ * sentinel it just wrote — not a second, possibly different, read of `$?`.
+ */
+export function buildSpritesWrapper(input: {
+  command: string;
+  cwd: string;
+  stdinPath: string;
+  processId: string;
+  timeoutSecs: number;
+  hold?: NonNullable<ComputeBackend["workHold"]>;
+  completionCallback?: string;
+}): string {
+  const { processId, timeoutSecs, hold } = input;
+  const outPath = sentinelPath("out", processId);
+  const errPath = sentinelPath("err", processId);
+  const rcPath = sentinelPath("rc", processId);
+  // See this function's doc: throwaway values for every field `holdIdFor`
+  // does not read. `spritesReferenceSchema`'s `min(1)` constraints are why
+  // these are non-empty rather than "".
+  const placeholderRef: BackendProcessReference = {
+    provider: "sprites",
+    version: 1,
+    payload: { kind: "process", spriteName: "pending", processId, sessionId: "pending" },
+  };
+
+  const acquire = hold
+    ? `${hold.acquireFor(placeholderRef)} || ` +
+      `{ printf %s 97 > ${rcPath}.tmp && mv -f ${rcPath}.tmp ${rcPath}; exit 97; }; `
+    : "";
+  const refresher = hold
+    ? `( while [ ! -f ${rcPath} ]; do sleep 60; [ -f ${rcPath} ] && break; ` +
+      `${hold.refreshFor(placeholderRef)} || true; done ) & `
+    : "";
+  const release = hold ? `; ${hold.releaseFor(placeholderRef)}` : "";
+  // `{ ...; } >/dev/null 2>&1` for the same reason every hold fragment carries
+  // it (see `workHold`'s doc): these run in the DETACHED SESSION, whose
+  // stdout/stderr peer socket is closed right after `session_info`, so an
+  // unredirected write can fail the curl. Harmless for the callback in
+  // practice — the response has already been received by then — but there is no
+  // reason for this to be the one fragment that differs, and Cloudflare's
+  // wrapper groups it the same way. A GROUP, not a suffix redirect: the
+  // fragment is caller-supplied and may be a pipeline or an `a && b` chain, of
+  // which a suffix would silence only the last segment.
+  const callback = input.completionCallback
+    ? `; NADI_EXIT_CODE="$(cat ${rcPath})"; { ${input.completionCallback} ; } >/dev/null 2>&1`
+    : "";
+
+  return (
+    `cd ${shellQuote(input.cwd)} && ` +
+    acquire +
+    refresher +
+    `timeout ${timeoutSecs} bash -c ${shellQuote(input.command)} ` +
+    `< ${input.stdinPath} > ${outPath} 2> ${errPath}; ` +
+    `__nadi_rc="$?"; printf %s "$__nadi_rc" > ${rcPath}.tmp && mv -f ${rcPath}.tmp ${rcPath}` +
+    callback +
+    release +
+    `; exit "$__nadi_rc"`
+  );
+}
+
 export class SpritesComputeBackend implements ComputeBackend {
   readonly id = "sprites" as const;
   /**
@@ -136,6 +277,77 @@ export class SpritesComputeBackend implements ComputeBackend {
    * the service's idle timer fires. See `ComputeBackend.nativeIdleSuspend`.
    */
   readonly nativeIdleSuspend = true;
+  /**
+   * `buildSpritesWrapper` reads `StartProcessInput.completionCallback` and
+   * assembles it into the wrapper (see its doc). See
+   * `ComputeBackend.consumesCompletionCallback`.
+   */
+  readonly consumesCompletionCallback = true;
+  /**
+   * Documented in `ComputeBackend.workHold`. Verified live 2026-08-12.
+   *
+   * Keyed by `BackendProcessReference`, never a raw id: `this.processPayload`
+   * extracts the SAME `processId` `startProcess` used for the sentinel files
+   * (and, via the placeholder reference, for the wrapper's own hold
+   * fragments — see `buildSpritesWrapper`), so a caller holding the
+   * reference `startProcess` returned can never target a different sprite's
+   * hold than the one that process actually took.
+   *
+   * `>/dev/null 2>&1` on every fragment: unlike the command itself, these
+   * curls inherit the DETACHED SESSION's own stdout/stderr, whose peer socket
+   * is closed right after `session_info` — so an unredirected write error
+   * would make `curl -sf` exit non-zero, and on the acquire path that means
+   * `|| { ...; exit 97; }` fires and the command never runs at all.
+   */
+  readonly workHold = {
+    acquireFor: (process: BackendProcessReference): string => {
+      const holdId = holdIdFor(this.processPayload(process).processId);
+      return (
+        `curl -sf --unix-socket ${SPRITE_SOCK} -H 'Content-Type: application/json' ` +
+        `-X POST http://sprite/v1/tasks -d '{"name":"${holdId}","expire":"${HOLD_EXPIRY}"}' ` +
+        `>/dev/null 2>&1`
+      );
+    },
+    refreshFor: (process: BackendProcessReference): string => {
+      const holdId = holdIdFor(this.processPayload(process).processId);
+      return (
+        `curl -sf --unix-socket ${SPRITE_SOCK} -H 'Content-Type: application/json' ` +
+        `-X PUT http://sprite/v1/tasks/${holdId} -d '{"expire":"${HOLD_EXPIRY}"}' ` +
+        `>/dev/null 2>&1`
+      );
+    },
+    releaseFor: (process: BackendProcessReference): string => {
+      const holdId = holdIdFor(this.processPayload(process).processId);
+      return `curl -sf --unix-socket ${SPRITE_SOCK} -X DELETE http://sprite/v1/tasks/${holdId} >/dev/null 2>&1`;
+    },
+  };
+
+  /**
+   * Documented in `ComputeBackend.buildBackstopProbe`. One exec, branching on
+   * whether the rc sentinel exists: if it does, report it (marked, so the
+   * caller can never confuse it with warning text a fast-path replay merged
+   * ahead of it — see `parseStat`'s doc for the same live hazard); if it does
+   * NOT, the process may still need the sandbox awake, so re-assert the hold
+   * in the SAME exec instead of reading in a way that costs a second one.
+   *
+   * The branch matters: reporting the rc when found does NOT also reassert —
+   * a process that already exited already released its own hold (see
+   * `buildSpritesWrapper`), and reasserting anyway would recreate a
+   * 5-minute hold on a finished process that nothing will ever release
+   * again, billing an idle VM awake for no reason.
+   *
+   * `acquireFor` is safe to re-run: it 409s when the task already exists,
+   * which its own `-sf` turns into a non-zero exit that `|| true` swallows
+   * here (the fragment already redirects its own stdout/stderr, so nothing
+   * from the curl can land on the stream this method's caller parses).
+   */
+  buildBackstopProbe = (process: BackendProcessReference): string => {
+    const rcPath = sentinelPath("rc", this.processPayload(process).processId);
+    return (
+      `if [ -f ${rcPath} ]; then printf 'nadi-rc:%s\\n' "$(cat ${rcPath} 2>/dev/null)"; ` +
+      `else ${this.workHold.acquireFor(process)} || true; fi`
+    );
+  };
   private readonly client: SpritesClient;
   /**
    * The runtime's environment, carried on EVERY exec.
@@ -244,8 +456,20 @@ export class SpritesComputeBackend implements ComputeBackend {
   async runCommand(runtime: BackendReference, input: RunCommandInput): Promise<RunCommandResult> {
     const spriteName = this.runtimeName(runtime);
     const env = this.execEnv(input.env);
+    // `execCollect` has no stdin channel, so carry it the same way
+    // `buildSpritesWrapper` does: write a sentinel file, then redirect the
+    // whole command into it. Redirecting an INNER `bash -c '<command>'` rather
+    // than appending `< file` to the command text is what makes this correct
+    // for a compound command — a suffix redirect on `a && b` feeds only `b`.
+    let script = input.command;
+    if (input.stdin !== undefined) {
+      const stdinPath = sentinelPath("in", crypto.randomUUID());
+      const encoded = new TextEncoder().encode(input.stdin);
+      await this.client.fsWrite(spriteName, stdinPath, toArrayBuffer(encoded), true);
+      script = `bash -c ${shellQuote(input.command)} < ${stdinPath}; __nadi_rc="$?"; rm -f ${stdinPath}; exit "$__nadi_rc"`;
+    }
     const result = await this.client.execCollect(spriteName, {
-      argv: ["bash", "-c", input.command],
+      argv: ["bash", "-c", script],
       dir: input.cwd ?? WORKSPACE_ROOT,
       ...(env === undefined ? {} : { env }),
       timeoutMs: input.timeoutMs,
@@ -269,9 +493,6 @@ export class SpritesComputeBackend implements ComputeBackend {
   ): Promise<StartProcessResult> {
     const spriteName = this.runtimeName(runtime);
     const processId = crypto.randomUUID();
-    const outPath = sentinelPath("out", processId);
-    const errPath = sentinelPath("err", processId);
-    const rcPath = sentinelPath("rc", processId);
     let stdinPath = "/dev/null";
     if (input.stdin !== undefined) {
       stdinPath = sentinelPath("in", processId);
@@ -282,17 +503,20 @@ export class SpritesComputeBackend implements ComputeBackend {
     const timeoutSecs = Math.max(1, Math.ceil(input.timeoutMs / 1000));
     // argv form sidesteps every quoting concern except the two values
     // interpolated into the script itself.
-    //
-    // The rc write is a write-then-RENAME, not a plain redirect: `> rc` creates
-    // the file before `printf` fills it, so a status poll landing in that window
-    // reads an empty file. `readRcOnce` treats unparsable content as "no
-    // answer", so the empty read is not mistaken for an exit code — but the
-    // rename removes the window entirely, and it is one extra word.
-    const wrapper =
-      `cd ${shellQuote(input.cwd ?? WORKSPACE_ROOT)} && ` +
-      `timeout ${timeoutSecs} bash -c ${shellQuote(input.command)} ` +
-      `< ${stdinPath} > ${outPath} 2> ${errPath}; ` +
-      `printf %s "$?" > ${rcPath}.tmp && mv -f ${rcPath}.tmp ${rcPath}`;
+    const wrapper = buildSpritesWrapper({
+      command: input.command,
+      cwd: input.cwd ?? WORKSPACE_ROOT,
+      stdinPath,
+      processId,
+      timeoutSecs,
+      // Always defined on this backend (unlike the interface it satisfies,
+      // which is optional for providers that execute while idle) — no
+      // conditional spread needed.
+      hold: this.workHold,
+      ...(input.completionCallback === undefined
+        ? {}
+        : { completionCallback: input.completionCallback }),
+    });
     // The env rides in the `env` query param, NOT as `export` lines inside the
     // wrapper. Neither is secret-safe against a server that logs its request
     // line — the wrapper itself is sent as repeated `cmd` params on the same

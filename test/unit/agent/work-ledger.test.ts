@@ -6,6 +6,19 @@ import {
   nextSweepAt,
   type WorkRow,
 } from "../../../src/agent/work-ledger";
+import { DEFAULT_MONITOR_POLL_INTERVAL_MS } from "../../../src/compute/watchers";
+
+describe("PROCESS_STALE_AFTER_MS", () => {
+  // Tautological today by construction, and that is the point: this is the
+  // guard that FAILS the moment someone re-inlines a literal (21_000, or a
+  // literal matching whatever DEFAULT_MONITOR_POLL_INTERVAL_MS happens to be
+  // today) instead of deriving it, letting the two drift apart again the way
+  // they did once already (see compute/watchers.ts's doc on
+  // DEFAULT_MONITOR_POLL_INTERVAL_MS).
+  it("stays 3x the watcher poll interval", () => {
+    expect(PROCESS_STALE_AFTER_MS).toBe(DEFAULT_MONITOR_POLL_INTERVAL_MS * 3);
+  });
+});
 
 function row(overrides?: Partial<WorkRow>): WorkRow {
   return {
@@ -14,7 +27,10 @@ function row(overrides?: Partial<WorkRow>): WorkRow {
     startedAt: 0,
     lastAliveAt: 1_000,
     staleAfterMs: PROCESS_STALE_AFTER_MS,
-    deadlineAt: 100_000,
+    // Comfortably past every default-deadline test's `now` even at the widened
+    // PROCESS_STALE_AFTER_MS (3x a 60s poll, not the old 3x7s) — otherwise the
+    // deadline fires before the staleness path these tests mean to exercise.
+    deadlineAt: 10_000_000,
     generation: "gen-a",
     terminal: null,
     deliveredAt: null,
@@ -222,8 +238,8 @@ describe("nextSweepAt", () => {
 
   it("returns the earliest of every open row's stale and deadline horizons", () => {
     const rows = [
-      row({ id: "a", lastAliveAt: 1_000, deadlineAt: 100_000 }),
-      row({ id: "b", lastAliveAt: 500, deadlineAt: 100_000 }),
+      row({ id: "a", lastAliveAt: 1_000, deadlineAt: 10_000_000 }),
+      row({ id: "b", lastAliveAt: 500, deadlineAt: 10_000_000 }),
     ];
     expect(nextSweepAt(rows)).toBe(500 + PROCESS_STALE_AFTER_MS);
   });
@@ -240,7 +256,7 @@ describe("nextSweepAt", () => {
         deadlineAt: 5,
         terminal: { outcome: "exited", reason: "process_exit", at: 5, detail: "" },
       }),
-      row({ id: "b", lastAliveAt: 1_000, deadlineAt: 100_000 }),
+      row({ id: "b", lastAliveAt: 1_000, deadlineAt: 10_000_000 }),
     ];
     expect(nextSweepAt(rows)).toBe(1_000 + PROCESS_STALE_AFTER_MS);
   });

@@ -459,6 +459,10 @@ export async function resolveComputeService(deps: ComputeToolHostDeps): Promise<
     environmentId,
     threadId: deps.threadId,
     env: effectiveEnv,
+    // The Worker's own origin/secret (NOT `effectiveEnv` above, the sandbox's
+    // exec environment) — see `ThreadComputeServiceDeps.appBaseUrl`'s doc.
+    appBaseUrl: deps.env.APP_BASE_URL,
+    betterAuthSecret: deps.env.BETTER_AUTH_SECRET,
     setAlarm: (timestamp) => deps.scheduleEviction(timestamp),
     clearAlarm: () => deps.cancelEviction(),
     now,

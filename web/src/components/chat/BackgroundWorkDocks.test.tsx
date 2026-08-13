@@ -1,46 +1,62 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import type { SubagentRunsState } from "@/lib/use-subagent-runs";
-import { SubagentDock } from "./SubagentDock";
-import { WatcherDock } from "./WatcherDock";
+import { afterEach, describe, expect, it } from "vitest";
+import { BackgroundWorkDock } from "./BackgroundWorkDock";
 
 afterEach(cleanup);
 
-const subagentRuns: SubagentRunsState = {
-  runsById: { sub_1: { runId: "sub_1", status: "running" } },
-  runs: [{ runId: "sub_1", status: "running" }],
-  runningCount: 1,
-  finishedCount: 0,
-  firstSeen: new Map([["sub_1", 1]]),
-  timings: {},
-  cancelRun: vi.fn(),
-  clearFinished: vi.fn(),
-  hasFinished: false,
-};
-
-describe("background-work docks", () => {
-  it("hides a populated watcher dock while disabled", () => {
+describe("BackgroundWorkDock", () => {
+  it("renders process and subagent rows in one dock with their outcomes", () => {
     render(
-      <WatcherDock
-        enabled={false}
-        watchers={[
+      <BackgroundWorkDock
+        enabled
+        rows={[
           {
-            processId: "proc_1",
-            label: "build",
-            command: "pnpm build",
-            createdAt: 1,
-            deadlineAt: 10_000,
+            id: "p1",
+            kind: "process",
+            label: "make build",
+            startedAt: 1_000,
+            terminal: { outcome: "exited", reason: "process_exit" },
+          },
+          {
+            id: "s1",
+            kind: "subagent",
+            label: "review the diff",
+            startedAt: 2_000,
+            terminal: null,
           },
         ]}
       />,
     );
-    expect(screen.queryByText("Watching")).not.toBeInTheDocument();
+    expect(screen.getByText("make build")).toBeInTheDocument();
+    expect(screen.getByText("review the diff")).toBeInTheDocument();
+    // Terminal outcomes are the thing neither old dock (WatcherDock,
+    // SubagentDock) could show for the other kind.
+    expect(screen.getByTestId("bg-p1")).toHaveAttribute("data-outcome", "exited");
+    expect(screen.getByTestId("bg-s1")).toHaveAttribute("data-outcome", "running");
   });
 
-  it("hides populated subagent controls while disabled", () => {
-    render(<SubagentDock enabled={false} subagentRuns={subagentRuns} servers={[]} />);
-    expect(screen.queryByText("Subagents")).not.toBeInTheDocument();
+  it("renders nothing when background work is disabled", () => {
+    const { container } = render(
+      <BackgroundWorkDock
+        enabled={false}
+        rows={[
+          {
+            id: "p1",
+            kind: "process",
+            label: "make build",
+            startedAt: 1_000,
+            terminal: { outcome: "exited", reason: "process_exit" },
+          },
+        ]}
+      />,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("renders nothing when there are no rows", () => {
+    const { container } = render(<BackgroundWorkDock enabled rows={[]} />);
+    expect(container).toBeEmptyDOMElement();
   });
 });

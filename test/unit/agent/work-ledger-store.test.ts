@@ -371,6 +371,103 @@ describe("WorkLedgerStore: prune", () => {
   });
 });
 
+/**
+ * `listRecent` — the background-work dock's read path. Deliberately not
+ * `listOpen()`: the dock's whole gain over the two views it replaces is
+ * showing a TERMINAL outcome.
+ */
+describe("WorkLedgerStore: listRecent", () => {
+  it("includes open rows", async () => {
+    await withStore((store) => {
+      store.register(row({ id: "open1" }));
+      expect(store.listRecent().map((r) => r.id)).toEqual(["open1"]);
+    });
+  });
+
+  it("includes a terminal row delivered inside the window", async () => {
+    await withStore((store) => {
+      const now = Date.now();
+      store.register(row({ id: "done", startedAt: now - 1_000 }));
+      store.terminalize("done", {
+        outcome: "exited",
+        reason: "process_exit",
+        at: now - 1_000,
+        detail: "code 0",
+      });
+      store.markDelivered("done", now - 1_000);
+      expect(store.listRecent(now).map((r) => r.id)).toEqual(["done"]);
+    });
+  });
+
+  it("excludes a terminal row delivered outside the window", async () => {
+    await withStore((store) => {
+      const now = Date.now();
+      store.register(row({ id: "old", startedAt: now - 20 * 60_000 }));
+      store.terminalize("old", {
+        outcome: "exited",
+        reason: "process_exit",
+        at: now - 20 * 60_000,
+        detail: "code 0",
+      });
+      store.markDelivered("old", now - 20 * 60_000);
+      expect(store.listRecent(now).map((r) => r.id)).toEqual([]);
+    });
+  });
+
+  /**
+   * The window keys on `deliveredAt`, not `startedAt` or the terminal time: a
+   * row started and terminalized long ago but delivered just now (a retried
+   * delivery landing late) must still count as recent.
+   */
+  it("keys the window on deliveredAt, not startedAt or the terminal time", async () => {
+    await withStore((store) => {
+      const now = Date.now();
+      const longAgo = now - 20 * 60_000;
+      store.register(row({ id: "late", startedAt: longAgo }));
+      store.terminalize("late", {
+        outcome: "fault",
+        reason: "no_liveness",
+        at: longAgo,
+        detail: "stale",
+      });
+      // Delivered just now, well after both startedAt and the terminal time.
+      store.markDelivered("late", now);
+      expect(store.listRecent(now).map((r) => r.id)).toEqual(["late"]);
+    });
+  });
+
+  /**
+   * I1: a row that is terminal with `delivered_at IS NULL` is not a
+   * hypothetical — it is `listUndelivered()`'s exact set, the state the
+   * `terminalize`/`markDelivered` split exists to model (delivery owed and
+   * retryable, see `WORK_DELIVERY_RETRY_MS`). Precisely when a delivery
+   * throws, this is the row a status dock most needs to keep showing.
+   */
+  it("includes an owed row — terminal with delivered_at still NULL", async () => {
+    await withStore((store) => {
+      const now = Date.now();
+      store.register(row({ id: "owed", startedAt: now - 20 * 60_000 }));
+      store.terminalize("owed", {
+        outcome: "fault",
+        reason: "no_liveness",
+        at: now - 20 * 60_000,
+        detail: "delivery threw",
+      });
+      // No markDelivered call: the delivery attempt threw, exactly like
+      // `deliverWorkTerminal` when `deliverInjection` fails.
+      expect(store.listRecent(now).map((r) => r.id)).toEqual(["owed"]);
+    });
+  });
+
+  it("orders newest-started first", async () => {
+    await withStore((store) => {
+      store.register(row({ id: "older", startedAt: 100 }));
+      store.register(row({ id: "newer", startedAt: 200 }));
+      expect(store.listRecent().map((r) => r.id)).toEqual(["newer", "older"]);
+    });
+  });
+});
+
 describe("runWorkLedgerSweep (the reaper closes rows)", () => {
   /**
    * REGRESSION (C3): the dark ship left `terminalize` with ZERO call sites, so

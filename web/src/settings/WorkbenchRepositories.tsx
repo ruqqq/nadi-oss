@@ -267,7 +267,7 @@ type PickerState =
 
 /**
  * "Add a repository" affordance: an anchored Popover on desktop, a bottom
- * Sheet on mobile (mirrors ProjectPicker / WatcherChip). Lists every active
+ * Sheet on mobile (mirrors ProjectPicker). Lists every active
  * GitHub App installation's repositories merged together, plus a persistent
  * footer action to add a non-GitHub repo by URL.
  */

@@ -24,7 +24,7 @@ import { cn } from "@/lib/utils";
 import { CaretDown } from "@/icons";
 import { MessageRow } from "./MessageRow";
 import { CompletionGroup } from "./CompletionGroup";
-import type { SubagentRunsState } from "@/lib/use-subagent-runs";
+import type { SubagentRunView } from "@/lib/subagent-runs";
 import { TypingDots } from "./TypingDots";
 import { assistantHasPainted, withRenderableContent } from "@/lib/message-state";
 
@@ -146,8 +146,10 @@ export function ChatLog({
   /** Suppress the empty state while a first-message bubble renders below the log:
    *  the thread has no persisted messages yet, but it is not "empty" to the user. */
   hasPendingBubble?: boolean;
-  /** Live subagent run state; absent for the read-only archive view (no socket). */
-  subagentRuns?: SubagentRunsState;
+  /** Live subagent run state (SDK event stream), keyed by run id; absent for
+   *  the read-only archive view (no socket). Only `runsById` is needed here —
+   *  see `useSubagentEvents`. */
+  subagentRuns?: { runsById: Record<string, SubagentRunView> };
   onFeedbackDraftSubmit?: (
     draft: FeedbackDraftView,
     diagnostics: FeedbackDiagnostics,

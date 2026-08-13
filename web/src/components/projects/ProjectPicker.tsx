@@ -11,7 +11,7 @@ import { ProjectCommand } from "./ProjectCommand";
 /**
  * Composer project picker: a searchable combobox with inline, name-only
  * quick-add. Opens as an anchored Popover on desktop and a bottom Sheet on
- * mobile (mirrors the WatcherChip surface convention).
+ * mobile (the shared responsive-surface convention; see AGENTS.md).
  *
  * The parent owns project state; this component reports a selection via
  * onValueChange and a quick-add via onCreateProject (which creates the

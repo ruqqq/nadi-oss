@@ -1,40 +1,4 @@
 import type { UIMessage } from "ai";
-import { formatElapsed } from "./subagent-runs";
-
-/** One active exec_watch watcher, as returned by the `listActiveWatchers` callable. */
-export type ActiveWatcher = {
-  processId: string;
-  label: string | null;
-  command: string;
-  createdAt: number;
-  deadlineAt: number;
-  outputTail?: string;
-};
-
-/** Display model for a single watcher row/chip. */
-export type WatcherCardModel = {
-  /** Human label, falling back to the command. */
-  title: string;
-  /** The command (shown as the row/detail subtitle). */
-  subtitle: string;
-  /** Process id truncated for compact display. */
-  shortId: string;
-  /** Elapsed since the watcher was created (client-side clock). */
-  elapsedLabel: string;
-  /** Time remaining until the watch deadline, or a passed marker. */
-  expectedLabel: string;
-};
-
-export function watcherCardModel(w: ActiveWatcher, ctx: { nowMs: number }): WatcherCardModel {
-  const remaining = w.deadlineAt - ctx.nowMs;
-  return {
-    title: w.label && w.label.length > 0 ? w.label : w.command,
-    subtitle: w.command,
-    shortId: w.processId.slice(0, 8),
-    elapsedLabel: formatElapsed(Math.max(0, ctx.nowMs - w.createdAt)),
-    expectedLabel: remaining > 0 ? `~${formatElapsed(remaining)} left` : "deadline passed",
-  };
-}
 
 // --- Watcher completion (transcript card) -----------------------------------
 // Mirrors src/agent/system-reminder.ts: a watched process that exits (or times

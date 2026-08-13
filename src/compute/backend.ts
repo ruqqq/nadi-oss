@@ -26,12 +26,46 @@ export interface StartProcessInput {
   env?: Record<string, string>;
   stdin?: string;
   timeoutMs: number;
+  /**
+   * A complete shell fragment, already carrying a signed completion token,
+   * that reports this process's own exit code back to
+   * `POST /api/compute/completion` — the push half of completion delivery
+   * (see `src/compute/completion-token.ts`). Built by `ThreadComputeService`,
+   * which owns the Worker-side secret and base URL; a backend never mints its
+   * own token.
+   *
+   * The fragment references the env var `$NADI_EXIT_CODE` for the exit code
+   * rather than embedding a value itself — the CALLER cannot know the exit
+   * code before the process has run, and a backend that tracks completion via
+   * its own sentinel (sprites' rc file) is the only thing that can supply the
+   * value that was actually recorded, not a second, possibly different,
+   * observation. A backend that consumes this fragment MUST set
+   * `NADI_EXIT_CODE` to that recorded value immediately before running it.
+   *
+   * Optional, and silently ignorable: a backend with no wrapper to insert a
+   * shell fragment into simply never reads this field. Sprites and Cloudflare
+   * both wrap it in (`buildSpritesWrapper`, `buildCompletionCallbackWrapper`);
+   * Daytona does not and is not expected to grow one — it is being phased out
+   * over its network-allowlist behavior. Absent whenever the caller has no
+   * base URL to call back to — see `ThreadComputeService`'s
+   * `buildCompletionCallback`.
+   */
+  completionCallback?: string;
 }
 
 export interface RunCommandInput {
   command: string;
   cwd?: string;
   env?: Record<string, string>;
+  /**
+   * Fed to the command on stdin, same contract as
+   * `StartProcessInput.stdin`. Present because `exec()`'s
+   * refusal-to-background path routes through `runCommand` on a backend with
+   * no `waitForProcessExit`, and dropping stdin there changes what the command
+   * READS — a silent wrong answer, not a missing feature. A backend
+   * implementing `runCommand` must honour it or not implement `runCommand`.
+   */
+  stdin?: string;
   timeoutMs: number;
 }
 
@@ -143,6 +177,115 @@ export interface ComputeBackend {
    * on a guess, which is how a real user lost work.
    */
   readonly nativeIdleSuspend?: boolean;
+  /**
+   * Whether this backend actually assembles `StartProcessInput.completionCallback`
+   * into what it runs. Absent means the field is silently ignored, so a missing
+   * or unreachable callback origin is NOT a reason to refuse backgrounding here
+   * — completion comes from the poll, as it always has.
+   *
+   * A NEW BACKEND MUST DECIDE THIS. It is the predicate
+   * `ThreadComputeService.shouldRefuseBackgrounding` is derived from; a
+   * provider-id allow-list drifted the moment a provider gained or lost the
+   * wrapper. True today for sprites and Cloudflare (both assemble the
+   * fragment into what they run); false for Daytona, which is being phased
+   * out over its network-allowlist behavior and is not expected to grow one.
+   *
+   * ACCEPTED CONSEQUENCE: with this `true`, `shouldRefuseBackgrounding` fires
+   * whenever the caller has no reachable base URL to call back to — which is
+   * exactly local dev's loopback `APP_BASE_URL` against a real Cloudflare
+   * container. Backgrounding is refused there, so a long command runs
+   * synchronously and can hit the exec timeout instead. This is the design
+   * working as intended (no delivery path ⇒ do not pretend to watch), the
+   * ordinary local default is the in-process `mock` provider and is
+   * unaffected, and testing push against real containers locally requires a
+   * reachable origin anyway.
+   */
+  readonly consumesCompletionCallback?: boolean;
+  /**
+   * Shell fragments that pin the runtime awake while background work runs, and
+   * release it afterwards.
+   *
+   * A NEW BACKEND MUST DECIDE THIS. Absent means "this provider executes while
+   * idle", which is not a neutral default: a provider that starves idle work and
+   * omits this will make no progress on every backgrounded command, and will
+   * report the starvation as a `watch_timeout` an hour later. Measured on
+   * sprites.dev 2026-08-12: 2% duty cycle unheld, 99% held.
+   *
+   * Fragments rather than methods because the only place a hold can be taken on
+   * sprites is INSIDE the sandbox — its Tasks API is served on a unix socket the
+   * Worker cannot reach, and the public REST surface has no tasks resource.
+   *
+   * Keyed by the `BackendProcessReference` `startProcess` returns, NOT by a
+   * caller-chosen id: the hold name must be derivable from whatever identifies
+   * the process to THIS provider, and only the provider knows what that is (on
+   * sprites it is the same uuid the wrapper's sentinel files are keyed by). A
+   * provider-neutral caller (`ThreadComputeService`) must never compute a
+   * provider-specific hold name itself — that would mean importing a concrete
+   * backend module from the neutral layer, which is exactly the layering
+   * violation this shape avoids.
+   */
+  readonly workHold?: {
+    acquireFor(process: BackendProcessReference): string;
+    refreshFor(process: BackendProcessReference): string;
+    releaseFor(process: BackendProcessReference): string;
+  };
+  /**
+   * Whether this backend's ONLY observable completion signal is the wrapped
+   * command's own exit — so the completion callback runs *before* completion
+   * can be observed at all, and its latency is added to every command's
+   * OBSERVED runtime.
+   *
+   * Meaningful only alongside `consumesCompletionCallback`. True for
+   * Cloudflare: `waitForProcessExit` settles when the process log stream
+   * closes, which is the wrapper exiting, and the callback sits inside the
+   * wrapper before `exit "$__nadi_rc"`. Absent for sprites, which writes its
+   * rc sentinel BEFORE the callback, so a status poll observes the terminal
+   * no matter how long the callback takes.
+   *
+   * The consequence is a tighter `curl` bound for this backend's fragment
+   * (see `COMPLETION_CALLBACK_CURL_TIMEOUT_SECS` in `thread-service.ts`):
+   * `exec()`'s foreground window is 10s, so a callback allowed 25s here would
+   * make a sub-second command report as `"backgrounded"` whenever the origin
+   * is slow to answer from inside a container.
+   */
+  readonly completionCallbackDelaysCompletion?: boolean;
+  /**
+   * One shell command that answers the same question the watcher poll needs
+   * (has this process recorded an exit yet?) and, ONLY when it has not,
+   * re-asserts `workHold` for it in the same breath. Optional, and
+   * meaningful only alongside `workHold`: a backend with no hold has nothing
+   * to reassert, and `ThreadComputeService.pollProcessStatus` falls back to
+   * plain `getProcessStatus` when this is absent.
+   *
+   * Exists because a lost hold (its in-sandbox refresher died) is invisible
+   * from the Worker — the Tasks API `workHold` talks to is reachable only
+   * from inside the sandbox — and presents as work that simply never
+   * finishes. The periodic poll is the only thing that can notice and repair
+   * it, and it must not pay for that repair with a SECOND EXEC: on sprites,
+   * an exec risks waking a hibernated VM, and the reassert is only ever
+   * needed on the branch where the process might still be running anyway.
+   *
+   * Re-asserting is conditional on there being no rc yet, not unconditional:
+   * a process that already exited already released its own hold (see
+   * `buildSpritesWrapper`), and re-creating a 5-minute hold on a finished,
+   * abandoned process bills a VM awake for no reason — repeatedly, once per
+   * poll, for as long as nothing else ever releases it.
+   *
+   * Contract for the returned command's stdout: it either contains a marked
+   * line `nadi-rc:<n>` (an integer, being that exit code) when the rc
+   * sentinel was found, or it does not — never a bare, unmarked number that
+   * could be confused with warning text a provider's fast-path replay may
+   * have merged onto the same stream ahead of the intended output (see
+   * `parseStat` in sprites.ts for the same hazard). Absence of the marker
+   * means "no answer yet", the same "never exit code 0" rule `readRcOnce`
+   * already applies — `pollProcessStatus` falls back to `getProcessStatus`
+   * in that case, which is exactly the branch where the acquire above ran.
+   *
+   * `process` is a `BackendProcessReference`, never a caller-built string —
+   * the backend owns the naming scheme for both the hold and its own
+   * sentinel path, same reasoning as `workHold` above.
+   */
+  buildBackstopProbe?(process: BackendProcessReference): string;
   acquire(spec: ComputeSpec, recovery?: BackendReference): Promise<BackendReference>;
   release(runtime: BackendReference, options: ReleaseOptions): Promise<BackendReference | null>;
   destroy(reference: BackendReference): Promise<void>;

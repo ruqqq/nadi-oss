@@ -667,6 +667,64 @@ export async function runSpritesSmoke(env: Env): Promise<SpritesSmokeReport> {
       }
       return `file survived hibernate/wake round trip (${back.length} bytes intact, same sprite reused)`;
     });
+
+    // 9. backgrounded work under a hold actually EXECUTES while idle, AND the
+    // hold is actually gone once the command finishes.
+    //
+    // The hibernate/wake step above only asserts a FILE survives, which a VM at
+    // a 2% duty cycle also satisfies — that is why the progress half of this is
+    // a separate assertion, of a PROCESS actually making progress with no
+    // traffic keeping it awake. The release half exists because round 1 of
+    // this feature shipped a hold that was NEVER actually releasable (it
+    // targeted a hold id that never existed) and a refresher that could
+    // resurrect a released hold for up to 5 minutes after completion — a live
+    // duty-cycle measurement alone cannot see either defect, since both leave
+    // the HELD run itself indistinguishable from a correctly-released one.
+    await timed(
+      "9. held background command progresses while idle, and releases its hold",
+      async () => {
+        if (!runtime) throw new Error("no runtime acquired");
+        if (!backend.workHold) throw new Error("backend declares no workHold");
+        const started = await backend.startProcess(runtime, {
+          command: "for i in $(seq 1 20); do date +%s >> /tmp/smoke_beat; sleep 3; done",
+          timeoutMs: 120_000,
+        });
+        await new Promise<void>((resolve) => setTimeout(resolve, 60_000)); // >> the ~30s hibernation threshold, with no traffic
+        const beats = await backend.readFile(runtime, "/tmp/smoke_beat", 10_000);
+        const count = new TextDecoder().decode(beats.bytes).trim().split("\n").length;
+        if (count < 15)
+          throw new Error(`held command starved: ${count} beats in 60s, expected ~20`);
+
+        // The loop is ~60s of work total; let the last iteration and the
+        // wrapper's own rc-write + release land.
+        let status = await backend.getProcessStatus(runtime, started.process);
+        for (let attempt = 0; attempt < 15 && status.status === "running"; attempt += 1) {
+          await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
+          status = await backend.getProcessStatus(runtime, started.process);
+        }
+        if (status.status !== "exited") {
+          throw new Error(
+            `command did not settle in time to check the hold: status=${status.status}`,
+          );
+        }
+
+        // The wrapper releases its own hold right after the rc write. A SECOND
+        // `DELETE` on an already-gone Tasks-API entry 404s, so `curl -sf` exits
+        // non-zero — a ZERO exit here means the hold is STILL there, i.e. the
+        // release never ran (or the refresher resurrected it).
+        const releaseAgain = await backend.runCommand(runtime, {
+          command: backend.workHold.releaseFor(started.process),
+          timeoutMs: 10_000,
+        });
+        if (releaseAgain.exitCode === 0) {
+          throw new Error("hold still present after the command completed — release did not run");
+        }
+        return (
+          `${count} beats in 60s idle (unheld baseline is 1); ` +
+          `hold confirmed released after completion (second DELETE exit ${releaseAgain.exitCode})`
+        );
+      },
+    );
   } finally {
     // 8. Never leak a sprite — they bill storage forever with no auto-destroy.
     const started = Date.now();

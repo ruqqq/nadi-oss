@@ -2,12 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { UIMessage } from "ai";
 import {
   SUBAGENT_NOTIFY_SOURCE,
-  effectiveRunTiming,
-  formatElapsed,
   isSubagentCompletionMessage,
   parseSubagentCompletion,
-  runDurationLabel,
-  subagentCardModel,
   subagentCardTitle,
   subagentResultModel,
   subagentTone,
@@ -111,72 +107,8 @@ describe("subagentCardTitle", () => {
   });
 });
 
-describe("formatElapsed", () => {
-  it("formats seconds and minutes", () => {
-    expect(formatElapsed(4200)).toBe("4s");
-    expect(formatElapsed(65_000)).toBe("1m 5s");
-    expect(formatElapsed(-10)).toBe("0s");
-  });
-});
-
-describe("subagentCardModel", () => {
-  it("derives status, progress line, and elapsed", () => {
-    const model = subagentCardModel(
-      run({ status: "running", progress: { message: "sleeping" }, display: { name: "Sleep" } }),
-      { firstSeenMs: 1000, nowMs: 6000 },
-    );
-    expect(model).toMatchObject({
-      title: "Sleep",
-      tone: "running",
-      isRunning: true,
-      progressLine: "sleeping",
-      elapsedLabel: "5s",
-    });
-  });
-  it("uses phase when message is absent and omits elapsed without a first-seen", () => {
-    const model = subagentCardModel(run({ progress: { phase: "working" } }), { nowMs: 6000 });
-    expect(model.progressLine).toBe("working");
-    expect(model.elapsedLabel).toBeUndefined();
-  });
-});
-
-describe("runDurationLabel", () => {
-  it("uses server startedAt for a running run (survives refresh)", () => {
-    expect(runDurationLabel({ startedAt: 1_000, nowMs: 61_000 })).toBe(formatElapsed(60_000));
-  });
-  it("freezes at finishedAt for a terminal run", () => {
-    expect(runDurationLabel({ startedAt: 1_000, finishedAt: 31_000, nowMs: 999_999 })).toBe(
-      formatElapsed(30_000),
-    );
-  });
-  it("is undefined without a start timestamp", () => {
-    expect(runDurationLabel({ nowMs: 5_000 })).toBeUndefined();
-  });
-});
-
 describe("interrupted run rendering", () => {
-  it("renders a distinct statusLabel from a clean completed run, surfacing reason/childStillRunning", () => {
-    const interrupted = subagentCardModel(
-      run({
-        status: "interrupted",
-        reason: "budget-exceeded",
-        childStillRunning: true,
-        display: { name: "Repo scan" },
-      }),
-      { nowMs: 6000 },
-    );
-    const completed = subagentCardModel(
-      run({ status: "completed", display: { name: "Repo scan" } }),
-      {
-        nowMs: 6000,
-      },
-    );
-    expect(interrupted.statusLabel).not.toBe(completed.statusLabel);
-    expect(interrupted.statusLabel).toContain("budget-exceeded");
-    expect(interrupted.statusLabel.toLowerCase()).toContain("still running");
-  });
-
-  it("subagentResultModel also surfaces reason on an interrupted joined run", () => {
+  it("subagentResultModel surfaces reason on an interrupted joined run", () => {
     const model = subagentResultModel(completion({ runId: "sub_1", status: "interrupted" }), {
       sub_1: run({ status: "interrupted", reason: "no-progress", childStillRunning: false }),
     });
@@ -209,28 +141,5 @@ describe("subagentResultModel", () => {
   it("degrades gracefully on an unknown parsed status with no joined run", () => {
     const model = subagentResultModel(completion({ status: "mystery", runId: "gone" }), {});
     expect(model.tone).toBe("success");
-  });
-});
-
-describe("effectiveRunTiming", () => {
-  it("prefers the server finishedAt over the client terminal fallback", () => {
-    const t = effectiveRunTiming({ startedAt: 1000, finishedAt: 5000 }, 9000);
-    expect(t).toEqual({ startedAt: 1000, finishedAt: 5000 });
-  });
-
-  it("falls back to the client terminal timestamp when finishedAt is missing", () => {
-    const t = effectiveRunTiming({ startedAt: 1000 }, 4000);
-    expect(t).toEqual({ startedAt: 1000, finishedAt: 4000 });
-    // The fallback is what stops runDurationLabel from tracking the live clock.
-    expect(runDurationLabel({ ...t, nowMs: 99999 })).toBe(runDurationLabel({ ...t, nowMs: 4000 }));
-  });
-
-  it("emits no finishedAt when neither source has one (still running)", () => {
-    expect(effectiveRunTiming({ startedAt: 1000 }, undefined)).toEqual({ startedAt: 1000 });
-  });
-
-  it("tolerates undefined server timing", () => {
-    expect(effectiveRunTiming(undefined, 4000)).toEqual({ finishedAt: 4000 });
-    expect(effectiveRunTiming(undefined, undefined)).toEqual({});
   });
 });

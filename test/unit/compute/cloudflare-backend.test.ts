@@ -262,6 +262,125 @@ describe("CloudflareComputeBackend processes", () => {
   });
 });
 
+describe("CloudflareComputeBackend completion callback wrapping", () => {
+  async function acquired(): Promise<{
+    env: FakeCloudflareEnvironment;
+    runtime: BackendReference;
+  }> {
+    const environment = createFakeCloudflareBackend();
+    const runtime = await environment.backend.acquire(spec());
+    return { env: environment, runtime };
+  }
+
+  it("declares that it consumes the completion callback", () => {
+    const { backend } = createFakeCloudflareBackend();
+    expect(backend.consumesCompletionCallback).toBe(true);
+  });
+
+  it("declares that the callback DELAYS its only completion signal", () => {
+    // `waitForProcessExit` settles on the log stream closing — the wrapper
+    // exiting — and the callback runs inside that wrapper. Dropping this
+    // declaration silently restores the generous 25s curl bound, which lands
+    // inside `exec()`'s 10s foreground window.
+    const { backend } = createFakeCloudflareBackend();
+    expect(backend.completionCallbackDelaysCompletion).toBe(true);
+  });
+
+  it("wraps the command so the callback runs after it, preserving the command's exit code", async () => {
+    const { env, runtime } = await acquired();
+    const sandbox = env.factory.peek(deriveSandboxId("workspace-1", "thread-1"))!;
+
+    await env.backend.startProcess(runtime, {
+      command: "make build",
+      timeoutMs: 600_000,
+      completionCallback: "curl -sf -m 25 -X POST https://app/api/compute/completion",
+    });
+
+    const sent = sandbox.calls.at(-1)!;
+    expect(sent).toContain("make build");
+    // The callback must not pollute captured output, and the command's status must win.
+    expect(sent).toMatch(/__nadi_rc=/);
+    expect(sent).toMatch(/curl .*>\/dev\/null 2>&1/);
+    expect(sent.indexOf("make build")).toBeLessThan(sent.indexOf("curl"));
+    expect(sent.trimEnd()).toMatch(/exit "?\$__nadi_rc"?$/);
+  });
+
+  it("passes the command through untouched when there is no callback", async () => {
+    const { env, runtime } = await acquired();
+    const sandbox = env.factory.peek(deriveSandboxId("workspace-1", "thread-1"))!;
+
+    await env.backend.startProcess(runtime, { command: "make build", timeoutMs: 600_000 });
+
+    expect(sandbox.calls.at(-1)).toBe("start:make build");
+  });
+
+  it("gives the SDK's own timeout extra room beyond the wrapped command's budget", async () => {
+    const { env, runtime } = await acquired();
+    const sandbox = env.factory.peek(deriveSandboxId("workspace-1", "thread-1"))!;
+
+    await env.backend.startProcess(runtime, {
+      command: "make build",
+      timeoutMs: 600_000,
+      completionCallback: "curl -sf -m 25 -X POST https://app/api/compute/completion",
+    });
+
+    expect(sandbox.lastStartOptions?.timeoutMs).toBeGreaterThan(600_000);
+  });
+
+  it("does not add timeout margin when there is no callback", async () => {
+    const { env, runtime } = await acquired();
+    const sandbox = env.factory.peek(deriveSandboxId("workspace-1", "thread-1"))!;
+
+    await env.backend.startProcess(runtime, { command: "make build", timeoutMs: 600_000 });
+
+    expect(sandbox.lastStartOptions?.timeoutMs).toBe(600_000);
+  });
+
+  // Pins the composition order: `withStdin` must run BEFORE the callback
+  // wrap, so the stdin pipe ends up INSIDE the quoted `bash -c` argument
+  // (feeding the command) rather than outside it (feeding the wrapper as a
+  // whole, which would starve the command and hand stdin to the callback
+  // instead). Both this and the inner `timeout` (asserted elsewhere via the
+  // timeout-margin tests) currently pass even if inverted without this
+  // assertion.
+  it("keeps the stdin pipe inside the quoted bash -c argument, not outside the wrapper", async () => {
+    const { env, runtime } = await acquired();
+    const sandbox = env.factory.peek(deriveSandboxId("workspace-1", "thread-1"))!;
+
+    await env.backend.startProcess(runtime, {
+      command: "make build",
+      stdin: "hello stdin",
+      timeoutMs: 600_000,
+      completionCallback: "curl -sf -m 25 -X POST https://app/api/compute/completion",
+    });
+
+    const sent = sandbox.calls.at(-1)!;
+    const bashCIndex = sent.indexOf("bash -c");
+    const base64Index = sent.indexOf("base64 -d");
+    const rcCaptureIndex = sent.indexOf("__nadi_rc=");
+    expect(bashCIndex).toBeGreaterThan(-1);
+    expect(base64Index).toBeGreaterThan(bashCIndex);
+    expect(rcCaptureIndex).toBeGreaterThan(base64Index);
+  });
+
+  // Pins the wrapper's own-output redirect to a GROUP around the whole
+  // fragment, not a bare suffix — a suffix would only silence the fragment's
+  // last segment if it were ever a pipeline or an `a && b` chain.
+  it("redirects the callback fragment as a group so a multi-part fragment is fully silenced", async () => {
+    const { env, runtime } = await acquired();
+    const sandbox = env.factory.peek(deriveSandboxId("workspace-1", "thread-1"))!;
+
+    await env.backend.startProcess(runtime, {
+      command: "make build",
+      timeoutMs: 600_000,
+      completionCallback: "echo one && echo two",
+    });
+
+    const sent = sandbox.calls.at(-1)!;
+    expect(sent).toContain("{ echo one && echo two ; } >/dev/null 2>&1");
+  });
+});
+
 describe("CloudflareComputeBackend.inspectPath", () => {
   it("returns null for a missing path without throwing", async () => {
     const { backend } = createFakeCloudflareBackend();

@@ -162,6 +162,8 @@ import {
   nextSweepAt,
   type CurrentGeneration,
   type WorkKind,
+  type WorkOutcome,
+  type WorkReason,
   type WorkRow,
   type WorkTerminal,
 } from "./work-ledger";
@@ -2063,14 +2065,46 @@ export class ThinkThreadAgent extends Think<Env> {
    * deliberately pinned so every tool has the same capability surface.
    */
   private async backgroundWorkAdmissionEnabled(): Promise<boolean> {
-    // The deployment flag is the outer fail-closed gate. Check it before
-    // resolving workspace state so disabled direct RPCs neither provision nor
-    // require a registered thread.
-    if (!backgroundWorkEnabled(this.env)) return false;
     if (this._turnRuntimeConfig) return this._turnRuntimeConfig.backgroundWorkEnabled;
     this._runtimeConfig.invalidate();
-    return (await this.resolveRuntimeConfigForThink()).backgroundWorkEnabled;
+    try {
+      return (await this.resolveRuntimeConfigForThink()).backgroundWorkEnabled;
+    } catch {
+      // Fail closed. This `catch` is what the removed deployment-flag
+      // short-circuit used to provide for free: an unregistered thread cannot
+      // resolve a runtime config (`thread_agent_not_registered`), and admission
+      // must answer `false` rather than propagate. A throw here would be worse
+      // than a wrong answer — inside a DO RPC it also fires an unhandled
+      // rejection, which fails the suite even when assertions pass.
+      return false;
+    }
   }
+
+  /**
+   * WHY THERE IS NO `if (!backgroundWorkEnabled(this.env)) return false` HERE.
+   *
+   * There used to be, as an "outer fail-closed gate" ahead of the workspace
+   * read. It made the deployment flag override a workspace OPT-IN, which is
+   * backwards: `resolveWorkspaceBackgroundWork` treats an explicit workspace
+   * `true` as authoritative precisely so a single workspace can be enabled
+   * against an off deployment — the only way to pilot this feature.
+   *
+   * The two resolutions then disagreed. In-turn code
+   * (`processMonitorEnabled`/`subagentSpawnEnabled`) reads
+   * `_turnRuntimeConfig.backgroundWorkEnabled`, which honours the override, so
+   * work was backgrounded and watched normally. Out-of-turn callers came through
+   * here and were refused. Observed live on 2026-08-12 with the deployment flag
+   * off and one workspace opted in: `listBackgroundWork` returned `[]` so the
+   * dock never rendered at all, and `reportProcessCompletion` rejected every
+   * pushed callback as `background_work_disabled` — so completion silently came
+   * from the 60s backstop poll instead, which made the push path look like it
+   * worked when it had never run.
+   *
+   * The cost of removing it is one uncached workspace resolution per
+   * out-of-turn admission check on deployments where the feature is off. That is
+   * the price of the override meaning what it says; do not reinstate the
+   * short-circuit to save it.
+   */
 
   /**
    * Serialize a lease mutation so concurrent spawns can't lose an update: the
@@ -2332,15 +2366,6 @@ export class ThinkThreadAgent extends Think<Env> {
    */
   async cancelSubagentRun(runId: string): Promise<void> {
     await this.cancelAgentTool(runId);
-  }
-
-  /**
-   * Clear terminal subagent runs (completed / error / aborted) from the run
-   * ledger — the "clear finished" affordance. Never touches running or
-   * soft-interrupted runs. Callable over the authorized client socket.
-   */
-  async clearFinishedSubagentRuns(): Promise<void> {
-    await this.clearAgentToolRuns({ status: ["completed", "error", "aborted"] });
   }
 
   // ---------------------------------------------------------------------------
@@ -3370,15 +3395,26 @@ export class ThinkThreadAgent extends Think<Env> {
    * The other direction, and it matters as much: a HEALTHY long run must NOT be
    * faulted. Enforcement ships live (there is no dark ship), so a false fault
    * would tell the model its files are gone while the work is fine — and the
-   * reaper's `no_liveness` window (21s) is shorter than plenty of real commands.
+   * reaper's `no_liveness` window (`PROCESS_STALE_AFTER_MS`) is shorter than
+   * plenty of real commands.
    *
    * Runs a process PAST `PROCESS_STALE_AFTER_MS` with the watcher polling
    * normally, then asserts three things the fake cannot: the row is still open
    * after the stale window, the watcher's polls actually STAMPED it (an unstamped
-   * row is faulted at 21s — this is the false-fault mechanism), and the clean
-   * exit closes the row as `process_exit` with no fault message delivered.
+   * row is faulted once `PROCESS_STALE_AFTER_MS` passes — this is the false-fault
+   * mechanism), and the clean exit closes the row as `process_exit` with no fault
+   * message delivered.
    *
-   * ⚠️ Boots a REAL container that costs money. Self-cleans. Never loop it.
+   * The sleep is CLAMPED UP to outlive the stale window, and the bound is
+   * derived from `PROCESS_STALE_AFTER_MS` rather than written out: it was a
+   * literal `25..120`, and widening the watcher poll (which
+   * `PROCESS_STALE_AFTER_MS` is 3x of) moved the window to 180s — past the
+   * clamp's own ceiling, so the process always exited before step 3 could
+   * check the row and the probe silently stopped proving anything.
+   *
+   * ⚠️ Boots a REAL container that costs money, and now runs for over three
+   * minutes because the window it must outlive is that long. Self-cleans.
+   * Never loop it.
    */
   async debugWorkHealthy(sleepSeconds = 30): Promise<{
     provider: string;
@@ -3399,8 +3435,13 @@ export class ThinkThreadAgent extends Think<Env> {
       steps.push({ step: name, ok, detail });
     };
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-    // Must outlive the 21s stale window, or the run proves nothing.
-    const seconds = Math.min(Math.max(Math.round(sleepSeconds), 25), 120);
+    // Must outlive the stale window AND the moment step 3 reads the row
+    // (`PROCESS_STALE_AFTER_MS + 6s`, below), or the run proves nothing —
+    // so both ends of the clamp are derived from that, never from a literal.
+    // The floor is the check point plus slack for start-up and the exit poll;
+    // the ceiling only exists to stop a caller booking an hour of container.
+    const minSeconds = Math.ceil((PROCESS_STALE_AFTER_MS + 6_000) / 1_000) + 15;
+    const seconds = Math.min(Math.max(Math.round(sleepSeconds), minSeconds), minSeconds * 2);
 
     let processId = "";
     let generation: string | null = null;
@@ -3833,17 +3874,6 @@ export class ThinkThreadAgent extends Think<Env> {
         { startedAt: row.startedAt, ...(row.terminal ? { finishedAt: row.terminal.at } : {}) },
       ]),
     );
-  }
-
-  /**
-   * Server-persisted run timing for the web run cards (accurate after a
-   * refresh, unlike a client-only first-seen map). Callable over the
-   * authorized client socket.
-   */
-  async getSubagentRunTimings(): Promise<
-    Record<string, { startedAt: number; finishedAt?: number }>
-  > {
-    return this.subagentRunTimings();
   }
 
   /**
@@ -4469,9 +4499,10 @@ export class ThinkThreadAgent extends Think<Env> {
    * The tick polls processes and stamps `lastAliveAt`; the sweep classifies
    * rows against those stamps. Sweeping first classifies staleness from the
    * PREVIOUS tick's stamps, one line before the tick would refresh them. The
-   * poll interval is 7s but `PROCESS_STALE_AFTER_MS` is 21s, so an alarm >=14s
-   * late — or >=14s spent inside `resolveComputeService` (a GitHub token mint
-   * plus several D1 reads) — would fault a HEALTHY, still-running process as
+   * `PROCESS_STALE_AFTER_MS` is 3x the poll interval, so an alarm two poll
+   * intervals late — or that long spent inside `resolveComputeService` (a GitHub
+   * token mint plus several D1 reads) — would fault a HEALTHY, still-running
+   * process as
    * `no_liveness`. The reaper must never false-positive: a false fault is worse
    * than the hang this project exists to fix.
    *
@@ -4553,7 +4584,7 @@ export class ThinkThreadAgent extends Think<Env> {
     // thread's one arm site and min-folds the ledger horizon, so when it armed
     // there is nothing to add: `scheduleComputeEviction` is cancel-then-set on
     // a single schedule id, so arming here would CANCEL the tick's (nearer)
-    // alarm and stretch a 7s watcher poll to the ledger's 21s horizon.
+    // alarm and stretch the watcher poll out to the ledger's later horizon.
     // When nothing armed — compute disabled or unresolved, the tick threw
     // (e.g. an unguarded D1 quota write), or the tick exited without arming
     // (state `acquiring`/`releasing`/`discarding` falls through `releaseIfIdle`
@@ -5070,6 +5101,196 @@ export class ThinkThreadAgent extends Think<Env> {
     const resolved = await resolveComputeService(this.sandboxHostDeps());
     if (!resolved) return [];
     return resolved.service.listActiveWatchersView();
+  }
+
+  /**
+   * One list for the background-work dock. Reads the LEDGER, which already
+   * holds both kinds (`process` and `subagent`) with one outcome vocabulary —
+   * the two views it replaces (`listActiveWatchers` / the subagent event
+   * stream) each derived from a different store, which is why the UI could
+   * never show a terminal outcome for a watched process.
+   *
+   * `label` comes from `workFacts()`, the same helper `deliverWorkTerminal`
+   * uses to name a row in its notification — `WorkRow` itself carries no
+   * label. Compute is resolved ONCE for the whole list and passed in, not
+   * per-row: `workFacts` takes a `resolvedService` for exactly this reason.
+   * Per-row, every `process` row on every 5s dock poll (per connected client)
+   * paid its own `resolveComputeService` — a GitHub token mint plus several D1
+   * reads. See the note at the resolve itself.
+   *
+   * Never throws — a throw inside a DO RPC method also fires an unhandled
+   * rejection (see `reportProcessCompletion`'s doc). Gated on
+   * `backgroundWorkAdmissionEnabled()`, like every other background-work
+   * surface.
+   */
+  async listBackgroundWork(): Promise<
+    Array<{
+      id: string;
+      kind: WorkKind;
+      label: string | null;
+      startedAt: number;
+      terminal: { outcome: WorkOutcome; reason: WorkReason } | null;
+    }>
+  > {
+    const admission = await this.backgroundWorkAdmissionEnabled();
+    if (!admission) return [];
+    const rows = this.workLedger.listRecent();
+    // Resolved ONCE for the whole list, not per row: `workFacts` accepts a
+    // `resolvedService` precisely so a caller with several rows to label can
+    // share one resolve. Without this, every `process` row on every 5s dock
+    // poll (per connected client) paid its own `resolveComputeService` — the
+    // callable this replaced (`listActiveWatchers`) was "a cheap read-only
+    // callable"; this kept that name without keeping the property.
+    // Caught to `null`, not left to propagate: `workFacts` treats `null` as
+    // "no service" (the same as a clean disabled/not-configured resolve) and
+    // falls back to the row id for the label, whereas `undefined` would make
+    // it resolve independently per row — re-paying (and re-throwing on) the
+    // same failure once per row instead of once for the whole list.
+    const resolved = await resolveComputeService(this.sandboxHostDeps(admission)).catch(() => null);
+    const out: Array<{
+      id: string;
+      kind: WorkKind;
+      label: string | null;
+      startedAt: number;
+      terminal: { outcome: WorkOutcome; reason: WorkReason } | null;
+    }> = [];
+    for (const row of rows) {
+      let label: string | null = null;
+      try {
+        const facts = await this.workFacts(row.id, row.kind, resolved);
+        label = facts.label;
+      } catch {
+        // workFacts already swallows its own failures; this is belt-and-braces
+        // so a dock read can never throw across the RPC boundary.
+      }
+      out.push({
+        id: row.id,
+        kind: row.kind,
+        label,
+        startedAt: row.startedAt,
+        terminal: row.terminal
+          ? { outcome: row.terminal.outcome, reason: row.terminal.reason }
+          : null,
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Push completion from a sandbox wrapper (the HTTP half lives in
+   * `completion-routes.ts`). Idempotent on the ledger row, NOT on the token:
+   * `verifyCompletionToken` is stateless and replayable until `exp`, so
+   * at-most-once delivery is enforced here, by the row going terminal exactly
+   * once (`workLedger.terminalize`'s exactly-once return) rather than by a
+   * nonce store.
+   *
+   * Never throws — a throw inside a DO RPC method also fires an unhandled
+   * rejection, which fails the caller even when its own assertions pass. Every
+   * failure path returns a result object instead.
+   *
+   * Deliberately does NOT bypass `backgroundWorkAdmissionEnabled()`: a
+   * workspace that turned background work off mid-flight should stop being
+   * told about it, same as every other work-ledger writer.
+   */
+  async reportProcessCompletion(input: {
+    processId: string;
+    exitCode: number;
+  }): Promise<{ accepted: boolean; reason?: string }> {
+    try {
+      if (!(await this.backgroundWorkAdmissionEnabled())) {
+        return { accepted: false, reason: "background_work_disabled" };
+      }
+      const row = this.workLedger.get(input.processId);
+      if (!row || row.kind !== "process") {
+        return { accepted: false, reason: "unknown_process" };
+      }
+      if (row.terminal !== null) {
+        // Replay, or a race with the poll path closing the same row first.
+        // Collapse to a no-op rather than deliver a second card.
+        return { accepted: true, reason: "already_terminal" };
+      }
+
+      // Resolved BEFORE `terminalize`, and that ordering is the whole point:
+      // `workFacts` is a full `resolveComputeService` (a GitHub token mint plus
+      // several D1 reads) and this path ALWAYS races a live watcher by
+      // construction. With the resolve after the terminalize, a `pollWatcher`
+      // landing in the gap saw `closed === false` and `isDelivered() === false`
+      // — closed but not yet claimed — and delivered a SECOND card for the same
+      // process; the injection buffer's dedupe key only suppresses an entry
+      // that is still pending. The sweep avoids the identical race with its
+      // `hasWatcher` skip; the push path has no analogue, so it closes the
+      // window by leaving no `await` at all between terminalize, deliver and
+      // stamp. Do not move this back down.
+      const facts = await this.workFacts(input.processId, "process");
+
+      const now = Date.now();
+      // "exited" regardless of the code: a non-zero status is still a clean
+      // exit, and `WorkOutcome` has no "failed" member. The code itself is
+      // what the model reads, and it rides in the message body below.
+      const outcome: WorkOutcome = "exited";
+      const terminal: WorkTerminal = {
+        outcome,
+        reason: "process_exit",
+        at: now,
+        detail: `exit code ${input.exitCode}`,
+      };
+      if (!this.workLedger.terminalize(input.processId, terminal)) {
+        // Lost a race with another writer (e.g. the backstop poll) that
+        // terminalized this row between our `get` and now.
+        return { accepted: true, reason: "already_terminal" };
+      }
+
+      // The SAME funnel the poll path uses (`pollWatcher` in
+      // thread-service.ts): `deliverInjection`'s dedupe key is
+      // `watcher:<processId>:<outcome>`, so a callback racing the backstop
+      // collapses onto the same queued entry instead of appending a second
+      // one, and a mid-turn arrival still STEERS into the running turn's next
+      // step rather than queuing behind it.
+      //
+      // `facts` was resolved above the `terminalize` deliberately — see there.
+      this.deliverInjection({
+        dedupeKey: `watcher:${input.processId}:${outcome}`,
+        kind: "watcher-completion",
+        message: buildWatcherCompletionMessage(
+          `Background process ${facts.label} (${facts.command}) exited with code ${input.exitCode}.`,
+          {
+            title: facts.label,
+            command: facts.command,
+            processId: input.processId,
+            outcome,
+            reason: "process_exit",
+            exitCode: input.exitCode,
+          },
+        ),
+      });
+      // Ownership is DECLARED by stamping `delivered_at`, never inferred from
+      // `reason` — that conflation previously caused a re-delivered reminder.
+      this.workLedger.markDelivered(input.processId, now);
+
+      // Teardown LAST and best-effort, same as `terminalizeWork`: the ledger
+      // terminal and the model notification are both already durable, so a
+      // failure here must cost stale compute-layer bookkeeping, never the
+      // notification. Without this, the compute store keeps reporting the
+      // process as running/watched (`execOutput`, `exec_watch_list`, the
+      // background-work dock) even though the model was just told it exited.
+      try {
+        await facts.service?.recordPushedExit(input.processId, input.exitCode);
+      } catch (error) {
+        log.warn("think_thread.report_process_completion_teardown_failed", {
+          threadId: this.name,
+          processId: input.processId,
+          error: String(error),
+        });
+      }
+      return { accepted: true };
+    } catch (error) {
+      log.warn("think_thread.report_process_completion_failed", {
+        threadId: this.name,
+        processId: input.processId,
+        error: String(error),
+      });
+      return { accepted: false, reason: "internal_error" };
+    }
   }
 
   toolProbeForTest() {
@@ -6237,17 +6458,20 @@ callable()(
   null as unknown as ClassMethodDecoratorContext,
 );
 callable()(
-  ThinkThreadAgent.prototype.clearFinishedSubagentRuns,
-  null as unknown as ClassMethodDecoratorContext,
-);
-callable()(
-  ThinkThreadAgent.prototype.getSubagentRunTimings,
-  null as unknown as ClassMethodDecoratorContext,
-);
-callable()(
   ThinkThreadAgent.prototype.listActiveWatchers,
   null as unknown as ClassMethodDecoratorContext,
 );
+callable()(
+  ThinkThreadAgent.prototype.listBackgroundWork,
+  null as unknown as ClassMethodDecoratorContext,
+);
+// `reportProcessCompletion` is deliberately NOT `callable()`. The HTTP route
+// reaches it through a plain DO stub (`getAgentByName(...).reportProcessCompletion`,
+// completion-routes.ts) — the same way `debugSandboxReset` and its neighbours are
+// called, none of which is decorated either. Registering it would additionally
+// expose it to any session-authorized browser client of this thread, which could
+// then fabricate a process completion; `completion-routes.ts` says the HMAC is
+// the entire gate, and that is only true while this stays unregistered.
 callable()(
   ThinkThreadAgent.prototype.debugThreadKnowledgeTools,
   null as unknown as ClassMethodDecoratorContext,
