@@ -36,6 +36,10 @@ import { FEEDBACK_MODEL_ID, FEEDBACK_MODEL_PROVIDER } from "../../src/agent/feed
 
 const featureEnv = env as typeof env & { BACKGROUND_WORK_ENABLED?: string | undefined };
 
+/** Opening words of the first-turn clock reminder (src/agent/thread-start-clock.ts).
+ *  Matched rather than reproduced in full so a wording change here is one edit. */
+const CLOCK_STAMP_PREFIX = "The current date and time is";
+
 type InitializableAgent = ThinkThreadAgentType & {
   __unsafe_ensureInitialized(): Promise<void>;
 };
@@ -1894,7 +1898,11 @@ describe("ThinkThreadAgent spike", () => {
         expect.objectContaining({
           role: "assistant",
           parts: expect.arrayContaining([
-            expect.objectContaining({ text: "Echo: Registry model" }),
+            // The mock model echoes the LAST message, and a thread's first turn
+            // ends with the one-shot clock reminder (thread-start-clock.ts). So
+            // this doubles as proof the stamp reaches the model through a real
+            // turn, not just the beforeTurn probe.
+            expect.objectContaining({ text: expect.stringContaining(CLOCK_STAMP_PREFIX) }),
           ]),
         }),
       ]),
@@ -2898,7 +2906,11 @@ describe("ThinkThreadAgent spike", () => {
         }),
         expect.objectContaining({
           role: "assistant",
-          parts: expect.arrayContaining([expect.objectContaining({ text: "Echo: History route" })]),
+          // Echo of the first turn's clock reminder — see the note in "runs a
+          // registry-resolved Think chat turn".
+          parts: expect.arrayContaining([
+            expect.objectContaining({ text: expect.stringContaining(CLOCK_STAMP_PREFIX) }),
+          ]),
         }),
       ]),
     );

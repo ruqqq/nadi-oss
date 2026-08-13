@@ -32,11 +32,17 @@ export function buildThreadStartClockReminder(now: Date): UIMessage {
  * reply is in the history, and several user messages in a row (a send queued
  * before the turn started) still count as the first turn.
  *
+ * An EMPTY history is not a first turn: there is no request to stamp, and a
+ * real turn always carries the message that triggered it. Only test probes and
+ * degenerate no-message turns get here, and stamping those would put a clock in
+ * front of a conversation that has not started.
+ *
  * A compaction that archives the transcript can leave a history with no
  * assistant message, which re-stamps the thread. That is the wanted behaviour,
  * not a leak: the surviving context is old and a fresher clock is strictly
  * better than the archived one.
  */
 export function isFirstTurn(messages: readonly ModelMessage[]): boolean {
+  if (messages.length === 0) return false;
   return !messages.some((message) => message.role === "assistant");
 }

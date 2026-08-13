@@ -72,7 +72,7 @@ describe("isFirstTurn", () => {
     expect(isFirstTurn(history)).toBe(false);
   });
 
-  it("is true for an empty history rather than throwing", () => {
-    expect(isFirstTurn([])).toBe(true);
+  it("is false for an empty history — there is no request to stamp", () => {
+    expect(isFirstTurn([])).toBe(false);
   });
 });
