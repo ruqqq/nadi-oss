@@ -52,6 +52,10 @@ export class SubAgent extends ThinkThreadAgent {
   /** Tool calls this run has made, cumulative across its steps. The number the
    *  dock shows — see {@link onStepFinish} for why it is not turns. */
   private _toolCalls = 0;
+  /** Guards the one-time restore in {@link restoreToolCalls}. */
+  private _toolCallsLoaded = false;
+  /** Guards the one-time DDL in {@link ensureProgressTable}. */
+  private _progressTableReady = false;
   /** When {@link pushProgressThrottled} last pushed. 0 = never, so the first
    *  tool call always publishes immediately. */
   private _lastProgressPushAt = 0;
@@ -273,7 +277,10 @@ export class SubAgent extends ThinkThreadAgent {
     // ever resolves synchronously (a cached stub), the reversed order would
     // send no marker at all on the first stamp — leaving the dock on "Waiting
     // for the first update" until the 30s tick.
-    this.setProgress("working");
+    // Pick up a count this run already banked, in case this is a fresh
+    // incarnation replaying the turn after an eviction.
+    this.restoreToolCalls();
+    this.setProgress(this._toolCalls > 0 ? this.toolCallsMessage() : "working");
     // A step is starting: real infrastructure activity, and the start of a
     // stretch (model call + tool execution) that can legitimately be silent for
     // minutes — so hold the row alive for as long as the turn is in flight, not
@@ -297,10 +304,8 @@ export class SubAgent extends ThinkThreadAgent {
    * Publication is a fire-and-forget push, rate-limited by
    * {@link PROGRESS_PUSH_MIN_GAP_MS}.
    *
-   * The count lives only in memory, so a DO eviction mid-run restarts it from
-   * zero and the displayed number can go DOWN once. `stampProgress` orders on
-   * the timestamp rather than the count, so the fresher-but-lower value wins —
-   * correct, since it is what the surviving incarnation can actually vouch for.
+   * The count survives a DO eviction — see {@link persistToolCalls}, which is
+   * why this can be trusted not to jump backwards mid-run.
    */
   override onStepFinish(ctx: StepContext): void {
     // FIRST: the base override records this step's token usage, and a subagent's
@@ -311,9 +316,13 @@ export class SubAgent extends ThinkThreadAgent {
     // report, and re-publishing the same count would just burn an RPC.
     if (calls === 0) return;
     this._toolCalls += calls;
-    this.setProgress(`${this._toolCalls} tool call${this._toolCalls === 1 ? "" : "s"}`);
+    this.setProgress(this.toolCallsMessage());
     void this.reportProgress({ phase: "working", message: this._progress?.message ?? "working" });
     this.pushProgressThrottled();
+  }
+
+  private toolCallsMessage(): string {
+    return `${this._toolCalls} tool call${this._toolCalls === 1 ? "" : "s"}`;
   }
 
   /** Single writer for {@link _progress}, so the field and its timestamp can
@@ -339,7 +348,83 @@ export class SubAgent extends ThinkThreadAgent {
     const now = Date.now();
     if (now - this._lastProgressPushAt < PROGRESS_PUSH_MIN_GAP_MS) return;
     this._lastProgressPushAt = now;
+    // Persist exactly what is about to be published, and on the same tick. That
+    // pairing is what makes the guarantee hold: the stored count is always the
+    // last count the dock was TOLD, so a resumed run continues from the number
+    // already on screen and the display never moves backwards.
+    this.persistToolCalls();
     void this.stampParentAlive();
+  }
+
+  /**
+   * Save / restore the tool-call count across a DO eviction.
+   *
+   * Without this the count is memory-only, so an eviction mid-run resumes from
+   * zero. That is visible: `WorkLedgerStore.stampProgress` orders on the
+   * timestamp, not the count, so a fresher-but-lower value overwrites the higher
+   * one and the number on screen drops.
+   *
+   * `this.sql` is SYNCHRONOUS (it returns the rows array), which is the only
+   * reason this is allowed anywhere near the step path — and even so, writing
+   * happens on the throttled 5s cadence rather than per step, so the tool loop
+   * pays nothing per step. The facet's storage belongs to this run alone (its
+   * name IS the run id), so a single row needs no key.
+   *
+   * `max()` on conflict: the stored count is monotonic for the same reason the
+   * ledger's is — a late write from a superseded incarnation must not undo real
+   * progress.
+   */
+  private persistToolCalls(): void {
+    try {
+      this.ensureProgressTable();
+      this.sql`
+        INSERT INTO subagent_progress (id, tool_calls) VALUES (1, ${this._toolCalls})
+        ON CONFLICT(id) DO UPDATE SET tool_calls = max(tool_calls, excluded.tool_calls)
+      `;
+    } catch {
+      // Cosmetic: losing the count costs a restarted number after an eviction,
+      // never correctness. It must not break the turn.
+    }
+  }
+
+  /**
+   * The table both {@link persistToolCalls} and {@link restoreToolCalls} use.
+   *
+   * Owned here rather than by whichever runs first, because the alternative bit:
+   * the DDL used to live only in the restore path, so a persist that ran before
+   * any restore hit a missing table and its `catch` swallowed the failure — a
+   * silently unsaved count. Ordering between two methods is not a thing to rely
+   * on when the failure is invisible.
+   */
+  private ensureProgressTable(): void {
+    if (this._progressTableReady) return;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS subagent_progress (
+        id integer primary key,
+        tool_calls integer not null
+      )
+    `;
+    this._progressTableReady = true;
+  }
+
+  /**
+   * Seed {@link _toolCalls} from storage, once per instance. Called from
+   * `beforeTurn`, which runs before any step of the turn — including the
+   * re-entered turn a recovery replays, which is exactly the case this exists
+   * for.
+   */
+  private restoreToolCalls(): void {
+    if (this._toolCallsLoaded) return;
+    this._toolCallsLoaded = true;
+    try {
+      this.ensureProgressTable();
+      const stored = this.sql`SELECT tool_calls FROM subagent_progress WHERE id = 1`[0];
+      const count = stored?.tool_calls;
+      if (typeof count === "number") this._toolCalls = count;
+    } catch {
+      // Start from zero: an under-count is a cosmetic wart, and a throw here
+      // would take down the turn.
+    }
   }
 
   /** Turn settled (completed/aborted/error) — nothing is in flight, so stop

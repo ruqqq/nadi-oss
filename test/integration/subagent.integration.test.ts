@@ -365,6 +365,62 @@ describe("SubAgent", () => {
     expect(result.pushes).toBe(1);
   });
 
+  /**
+   * The count must survive losing the in-memory instance. `stampProgress` orders
+   * on the timestamp rather than the count, so a fresher-but-lower value
+   * overwrites a higher one — meaning a memory-only count makes the number on
+   * screen visibly DROP after an eviction mid-run.
+   *
+   * Simulated by re-entering the SAME DO (same facet name = same storage) with a
+   * fresh in-memory count, which is what a new incarnation replaying the turn
+   * looks like.
+   */
+  it("resumes its tool-call count from storage after losing the instance", async () => {
+    const stub = env.SUB_AGENT.get(env.SUB_AGENT.idFromName("sub_run_count_resume"));
+    const seed = async (child: SubAgentTestSeam) => {
+      child._testSubagentContext = {
+        parentThreadId: "sub-parent",
+        workspaceId: "ws-sub-parent",
+        agentId: "agent-sub-parent",
+        attachedRuntime: {
+          provider: "daytona",
+          version: 1,
+          payload: { kind: "runtime", sandboxId: "fake_sbx_parent" },
+        },
+      };
+      await child.__unsafe_ensureInitialized();
+      (child as any).reportProgress = async () => {};
+      (child as any).parentAgent = async () => ({ stampSubagentAlive: async () => {} });
+    };
+
+    const before = await runInSubAgentDo(stub, async (child: SubAgentTestSeam) => {
+      await seed(child);
+      for (let i = 0; i < 3; i += 1) (child as any).onStepFinish({ toolCalls: [{}] });
+      await scheduler.wait(0);
+      return (child as any)._progress?.message as string | undefined;
+    });
+    // In memory it reached 3, but only the FIRST step published (the 5s throttle),
+    // so 1 is what the dock was told and 1 is what got banked. Storing the
+    // published value rather than the in-memory one is the point: what resumes is
+    // what the reader last saw.
+    expect(before).toBe("3 tool calls");
+
+    const after = await runInSubAgentDo(stub, async (child: SubAgentTestSeam) => {
+      await seed(child);
+      // A new incarnation: memory is empty, storage is not.
+      (child as any)._toolCalls = 0;
+      (child as any)._toolCallsLoaded = false;
+      (child as any)._progressTableReady = false;
+      (child as any).restoreToolCalls();
+      const restored = (child as any)._toolCalls as number;
+      (child as any).onStepFinish({ toolCalls: [{}] });
+      return { restored, message: (child as any)._progress?.message as string | undefined };
+    });
+    // Resumed from the banked 1, not from zero — so the dock's number goes UP.
+    expect(after.restored).toBe(1);
+    expect(after.message).toBe("2 tool calls");
+  });
+
   it("disables process monitoring (closes H1/H2): SubAgent overrides processMonitorEnabled to false", async () => {
     const stub = env.SUB_AGENT.get(env.SUB_AGENT.idFromName("sub_run_monitor"));
     const enabled = await runInSubAgentDo(stub, async (child: SubAgentTestSeam) => {
