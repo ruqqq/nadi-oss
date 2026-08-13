@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { SubAgent } from "../../../src/agent/subagent";
 import { ThinkThreadAgent } from "../../../src/agent/think-thread-agent";
 import { TurnUsageAccumulator } from "../../../src/agent/usage-recorder";
 
@@ -381,5 +382,70 @@ describe("ThinkThreadAgent turn-usage wiring", () => {
       expect(h.db.written.inserts).toEqual([]);
       expect(h.db.written.batches).toBe(0);
     });
+  });
+});
+
+/**
+ * `SubAgent` OVERRIDES `onStepFinish` to count the run's tool calls, and a
+ * subagent's tokens are the parent thread's. So its override must still run the
+ * base one, and nothing else in the suite proves that: dropping the `super`
+ * call silently loses a subagent's entire billing while 1076 tests stay green
+ * (measured). This is that guard.
+ */
+describe("SubAgent.onStepFinish keeps the parent's usage accounting", () => {
+  interface SubSeam {
+    onStepFinish(ctx: unknown): void;
+    turnUsage: TurnUsageAccumulator;
+    _progress?: { message: string | null };
+  }
+
+  function sub(): SubSeam {
+    const a = Object.create(SubAgent.prototype) as Record<string, unknown>;
+    a.turnUsage = new TurnUsageAccumulator();
+    a.tracksContextGauge = false;
+    a._usageFlush = null;
+    a._turnRuntimeConfig = {
+      workspaceId: "ws_1",
+      agentId: "agent_1",
+      modelConfig: { provider: "anthropic", model: "claude-sonnet-5" },
+    };
+    a.env = {};
+    a._toolCalls = 0;
+    a._lastProgressPushAt = 0;
+    // The override's two publication side effects, stubbed: this test is about
+    // the accounting, and both are fire-and-forget in production.
+    a.reportProgress = async () => {};
+    a.parentAgent = async () => ({ stampSubagentAlive: async () => {} });
+    Object.defineProperty(a, "name", { value: "sub_1", configurable: true });
+    return a as unknown as SubSeam;
+  }
+
+  it("records the step's usage AND counts the tool call", () => {
+    const a = sub();
+    a.onStepFinish({ usage: { inputTokens: 1_000, outputTokens: 50 }, toolCalls: [{}] });
+
+    expect(a.turnUsage.entries()).toEqual([
+      expect.objectContaining({
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        // Tagged as the subagent's spend, still billed to the parent thread.
+        source: "subagent",
+        inputTokens: 1_000,
+        outputTokens: 50,
+        calls: 1,
+      }),
+    ]);
+    expect(a._progress?.message).toBe("1 tool call");
+  });
+
+  it("still records usage for a step that made no tool calls", () => {
+    const a = sub();
+    // The early return for a tool-less step must come AFTER the super call —
+    // the model's closing text step carries real tokens.
+    a.onStepFinish({ usage: { inputTokens: 400, outputTokens: 20 }, toolCalls: [] });
+
+    expect(a.turnUsage.isEmpty()).toBe(false);
+    expect(a.turnUsage.entries()[0]).toMatchObject({ inputTokens: 400, outputTokens: 20 });
+    expect(a._progress).toBeUndefined();
   });
 });

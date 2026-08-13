@@ -1,5 +1,5 @@
 import { getAgentByName } from "agents";
-import type { TurnConfig, TurnContext } from "@cloudflare/think";
+import type { StepContext, TurnConfig, TurnContext } from "@cloudflare/think";
 import { ThinkThreadAgent, type SubagentContext } from "./think-thread-agent";
 import { resolveThreadRuntimeConfigForAgent } from "./thread-agent-config";
 import type { WorkProgress } from "./work-ledger";
@@ -29,6 +29,13 @@ const SUBAGENT_ROLE_PROMPT =
 const LIVENESS_STAMP_INTERVAL_MS = 30_000;
 
 /**
+ * Floor between two progress pushes from the per-step path. Matched to the
+ * dock's own 5s poll: a count fresher than its only reader cannot be seen, and
+ * each push is a cross-DO RPC fired from inside the tool loop.
+ */
+const PROGRESS_PUSH_MIN_GAP_MS = 5_000;
+
+/**
  * A shared-sandbox subagent: a facet child of a parent {@link ThinkThreadAgent}.
  * It shares the parent class's tool-composition code, but Phase 1 gets only
  * native + sandbox + web tools — NOT full-peer parity: `onStart()` is
@@ -42,7 +49,12 @@ const LIVENESS_STAMP_INTERVAL_MS = 30_000;
 export class SubAgent extends ThinkThreadAgent {
   private _subagentContext?: SubagentContext;
   private _attachedRuntime?: BackendReference;
-  private _turnCount?: number;
+  /** Tool calls this run has made, cumulative across its steps. The number the
+   *  dock shows — see {@link onStepFinish} for why it is not turns. */
+  private _toolCalls = 0;
+  /** When {@link pushProgressThrottled} last pushed. 0 = never, so the first
+   *  tool call always publishes immediately. */
+  private _lastProgressPushAt = 0;
   /**
    * The progress marker pushed to the parent alongside every liveness stamp.
    *
@@ -51,7 +63,7 @@ export class SubAgent extends ThinkThreadAgent {
    * which owns the ledger the dock reads — cannot see it (`inspectAgentToolRun`
    * on the parent reads the parent's empty copy of that table). `reportProgress`
    * still drives the live run card via its broadcast; this drives the dock.
-   * Both are fed from the same `_turnCount`, so they cannot disagree.
+   * Both are written from {@link setProgress}, so they cannot disagree.
    */
   private _progress?: WorkProgress;
   private _livenessTimer: ReturnType<typeof setInterval> | undefined;
@@ -249,9 +261,9 @@ export class SubAgent extends ThinkThreadAgent {
     // the attached runtime. Keep the result cached for the synchronous tool
     // composition performed by super.beforeTurn below.
     await this.subagentContext(true);
-    // Turn-counted phase marker so a running run card's status line visibly
-    // advances turn over turn; the streamed transcript carries the
-    // fine-grained detail (drill-in).
+    // The opening marker, before any tool has run. Deliberately carries NO
+    // count: `onStepFinish` owns the number, and this must not claim a unit of
+    // work that has not happened.
     //
     // Set BEFORE `startLiveness()`, which stamps the parent immediately — the
     // stamp is what carries this to the dock. Today either order happens to
@@ -259,22 +271,75 @@ export class SubAgent extends ThinkThreadAgent {
     // `parentAgent()`, so a later synchronous assignment still lands first;
     // this ordering is what stops that from being load-bearing. If that await
     // ever resolves synchronously (a cached stub), the reversed order would
-    // send the PREVIOUS turn's marker, and none at all on the first turn —
-    // leaving the dock on "Waiting for the first update" until the 30s tick.
-    this._turnCount = (this._turnCount ?? 0) + 1;
-    // One source for both consumers below — `WorkProgress` allows a null
-    // phase/message (a future signal may carry only one), but this one always
-    // has both, and `reportProgress` requires non-null.
-    const phase = "working";
-    const message = `working (step ${this._turnCount})`;
-    this._progress = { phase, message, at: Date.now() };
+    // send no marker at all on the first stamp — leaving the dock on "Waiting
+    // for the first update" until the 30s tick.
+    this.setProgress("working");
     // A step is starting: real infrastructure activity, and the start of a
     // stretch (model call + tool execution) that can legitimately be silent for
     // minutes — so hold the row alive for as long as the turn is in flight, not
     // just at this instant. `onChatResponse`/`onChatError` end it.
     this.startLiveness();
-    await this.reportProgress({ phase, message });
+    await this.reportProgress({ phase: "working", message: "working" });
     return super.beforeTurn(ctx);
+  }
+
+  /**
+   * Count the run's TOOL CALLS and publish that as its progress.
+   *
+   * Tool calls, not turns: a subagent gets one input and runs ONE turn, whose
+   * tool loop is the entire run, so the previous per-turn counter sat at
+   * "step 1" for the whole thing and only ever advanced when the turn was
+   * RE-ENTERED after a recovery — i.e. it counted restarts while reading like
+   * progress. Steps are where the work actually happens.
+   *
+   * Strictly in-memory arithmetic here, per the base override's contract: this
+   * runs between every step of every tool loop, so nothing may be awaited.
+   * Publication is a fire-and-forget push, rate-limited by
+   * {@link PROGRESS_PUSH_MIN_GAP_MS}.
+   *
+   * The count lives only in memory, so a DO eviction mid-run restarts it from
+   * zero and the displayed number can go DOWN once. `stampProgress` orders on
+   * the timestamp rather than the count, so the fresher-but-lower value wins —
+   * correct, since it is what the surviving incarnation can actually vouch for.
+   */
+  override onStepFinish(ctx: StepContext): void {
+    // FIRST: the base override records this step's token usage, and a subagent's
+    // spend is the parent thread's. Skipping it would silently drop billing.
+    super.onStepFinish(ctx);
+    const calls = ctx.toolCalls?.length ?? 0;
+    // A step with no tool calls is the model's closing text — no new work to
+    // report, and re-publishing the same count would just burn an RPC.
+    if (calls === 0) return;
+    this._toolCalls += calls;
+    this.setProgress(`${this._toolCalls} tool call${this._toolCalls === 1 ? "" : "s"}`);
+    void this.reportProgress({ phase: "working", message: this._progress?.message ?? "working" });
+    this.pushProgressThrottled();
+  }
+
+  /** Single writer for {@link _progress}, so the field and its timestamp can
+   *  never be set apart from each other. */
+  private setProgress(message: string): void {
+    this._progress = { phase: "working", message, at: Date.now() };
+  }
+
+  /**
+   * Publish the current marker to the parent, at most once per
+   * {@link PROGRESS_PUSH_MIN_GAP_MS}.
+   *
+   * Throttled because this is a cross-DO RPC on a per-step path: a tool-heavy
+   * run can finish several steps a second, and the dock that reads the result
+   * polls every 5s — so pushing faster than the reader reads buys nothing. The
+   * 30s liveness timer is the floor either way, so the worst case without this
+   * push would be a 30s-stale count, not a missing one.
+   *
+   * Fire-and-forget: `stampParentAlive` swallows its own failures, and awaiting
+   * it here would put cross-DO latency on the tool loop's hot path.
+   */
+  private pushProgressThrottled(): void {
+    const now = Date.now();
+    if (now - this._lastProgressPushAt < PROGRESS_PUSH_MIN_GAP_MS) return;
+    this._lastProgressPushAt = now;
+    void this.stampParentAlive();
   }
 
   /** Turn settled (completed/aborted/error) — nothing is in flight, so stop

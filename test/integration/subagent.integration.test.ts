@@ -288,6 +288,83 @@ describe("SubAgent", () => {
     expect(stamps[0]![1]).toHaveProperty("at", expect.any(Number));
   });
 
+  /**
+   * The number the dock shows counts TOOL CALLS, cumulatively across the run's
+   * steps. It used to count turns — and a subagent runs exactly one turn, so it
+   * read "step 1" for the entire run and only moved when the turn was re-entered
+   * after a recovery, i.e. it counted restarts while looking like progress.
+   *
+   * Driven through the real `onStepFinish` with synthetic step records, because
+   * the point is the accumulation across steps, not one step's shape.
+   */
+  it("counts tool calls across steps, not turns", async () => {
+    const stub = env.SUB_AGENT.get(env.SUB_AGENT.idFromName("sub_run_toolcalls"));
+    const seen = await runInSubAgentDo(stub, async (child: SubAgentTestSeam) => {
+      child._testSubagentContext = {
+        parentThreadId: "sub-parent",
+        workspaceId: "ws-sub-parent",
+        agentId: "agent-sub-parent",
+        attachedRuntime: {
+          provider: "daytona",
+          version: 1,
+          payload: { kind: "runtime", sandboxId: "fake_sbx_parent" },
+        },
+      };
+      await child.__unsafe_ensureInitialized();
+      (child as any).reportProgress = async () => {};
+      (child as any).parentAgent = async () => ({ stampSubagentAlive: async () => {} });
+      const step = (calls: number) => ({ toolCalls: Array.from({ length: calls }, () => ({})) });
+      const messages: Array<string | undefined> = [];
+      const read = () => (child as any)._progress?.message as string | undefined;
+
+      (child as any).onStepFinish(step(1));
+      messages.push(read());
+      (child as any).onStepFinish(step(2));
+      messages.push(read());
+      // A closing text step makes no tool calls — the count must hold, not tick.
+      (child as any).onStepFinish(step(0));
+      messages.push(read());
+      return messages;
+    });
+    expect(seen[0]).toBe("1 tool call"); // singular
+    expect(seen[1]).toBe("3 tool calls"); // cumulative, not per-step
+    expect(seen[2]).toBe("3 tool calls"); // unchanged by a tool-less step
+  });
+
+  it("rate-limits the per-step push, and never blocks the tool loop on it", async () => {
+    const stub = env.SUB_AGENT.get(env.SUB_AGENT.idFromName("sub_run_push_throttle"));
+    const result = await runInSubAgentDo(stub, async (child: SubAgentTestSeam) => {
+      child._testSubagentContext = {
+        parentThreadId: "sub-parent",
+        workspaceId: "ws-sub-parent",
+        agentId: "agent-sub-parent",
+        attachedRuntime: {
+          provider: "daytona",
+          version: 1,
+          payload: { kind: "runtime", sandboxId: "fake_sbx_parent" },
+        },
+      };
+      await child.__unsafe_ensureInitialized();
+      (child as any).reportProgress = async () => {};
+      let pushes = 0;
+      (child as any).parentAgent = async () => ({
+        stampSubagentAlive: async () => {
+          pushes += 1;
+        },
+      });
+      const step = () => ({ toolCalls: [{}] });
+      // Four steps back to back, well inside the 5s floor.
+      for (let i = 0; i < 4; i += 1) (child as any).onStepFinish(step());
+      // The count itself is NOT throttled — only its publication is.
+      const message = (child as any)._progress?.message as string | undefined;
+      // Let the fire-and-forget push settle before counting it.
+      await scheduler.wait(0);
+      return { pushes, message };
+    });
+    expect(result.message).toBe("4 tool calls");
+    expect(result.pushes).toBe(1);
+  });
+
   it("disables process monitoring (closes H1/H2): SubAgent overrides processMonitorEnabled to false", async () => {
     const stub = env.SUB_AGENT.get(env.SUB_AGENT.idFromName("sub_run_monitor"));
     const enabled = await runInSubAgentDo(stub, async (child: SubAgentTestSeam) => {
