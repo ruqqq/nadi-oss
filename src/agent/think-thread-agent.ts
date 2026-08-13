@@ -174,6 +174,7 @@ import {
   type WorkTerminal,
 } from "./work-ledger";
 import { buildSystemReminderMessage, buildWatcherCompletionMessage } from "./system-reminder";
+import { buildThreadStartClockReminder, isFirstTurn } from "./thread-start-clock";
 import { buildWorkbenchSwitchMessage } from "./workbench-switch-message";
 import { InjectionBuffer, type InjectionKind } from "./injection-buffer";
 import { assembleStepMessages, routeInjection } from "./injection-router";
@@ -1255,6 +1256,25 @@ export class ThinkThreadAgent extends Think<Env> {
       modelSupportsReasoning: runtimeConfig.modelConfig.modelSupportsReasoning,
     });
     const turnSetupReminders: ModelMessage[] = [];
+    // A one-shot wall clock on the thread's first turn (see thread-start-clock.ts).
+    // Appended to the turn tail AND persisted: turn two reads it from history,
+    // and the assistant reply that by then precedes it is what stops a second
+    // stamp. Deliberately after the auto-name block above — the reminder is a
+    // user-role message, and naming a thread from it would title every new
+    // thread with a timestamp.
+    if (isFirstTurn(_ctx.messages)) {
+      const clock = buildThreadStartClockReminder(new Date());
+      try {
+        turnSetupReminders.push(...(await convertToModelMessages([clock])));
+        await this.addMessages([clock]);
+      } catch (error) {
+        // A missing clock is not worth failing a turn over.
+        log.warn("think_thread.clock_reminder_failed", {
+          threadId: this.name,
+          error: String(error),
+        });
+      }
+    }
     this.currentTurnSetupReminders = turnSetupReminders;
     let hasWorkbench = false;
     try {
