@@ -1149,7 +1149,10 @@ describe("ThinkThreadAgent spike", () => {
     try {
       const result = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
         const testInstance = instance as SandboxServiceTestableAgent & {
-          backgroundWorkAdmissionForTest(): Promise<boolean>;
+          backgroundCapabilitiesForTest(): Promise<{
+            backgroundExec: boolean;
+            subagents: boolean;
+          }>;
         };
         await instance.resolveRuntimeConfigForThink();
         await drizzle(env.REGISTRY_DB, { schema })
@@ -1159,7 +1162,7 @@ describe("ThinkThreadAgent spike", () => {
         const resolved = await testInstance.resolveComputeServiceForTest();
         if (!resolved) throw new Error("expected sandbox service");
         return {
-          watcherAdmission: await testInstance.backgroundWorkAdmissionForTest(),
+          watcherAdmission: (await testInstance.backgroundCapabilitiesForTest()).backgroundExec,
           backstop: await instance.debugRunBackstop(),
           execAdmission: (
             resolved.service as unknown as {
@@ -1173,6 +1176,88 @@ describe("ThinkThreadAgent spike", () => {
         backstop: { attached: [], watchers: [], runningProcesses: [] },
         execAdmission: false,
       });
+    } finally {
+      await drizzle(env.REGISTRY_DB, { schema })
+        .update(schema.workspaces)
+        .set({ flagsJson: "{}" })
+        .where(eq(schema.workspaces.id, workspaceId));
+      featureEnv.BACKGROUND_WORK_ENABLED = previous;
+    }
+  });
+
+  // The IN-TURN pair, pinned against a MIXED config. The out-of-turn admission
+  // test below cannot catch these: it reads the compute deps through
+  // `resolveComputeServiceForTest`, which passes admission explicitly and so
+  // never consults `processMonitorEnabled()`. Without this, both getters could
+  // collapse back onto one field and every other test would still pass.
+  it("reads a different capability field in each in-turn gate", async () => {
+    const stub = env.THINK_THREAD_AGENT.get(
+      env.THINK_THREAD_AGENT.idFromName("think-capability-getters"),
+    );
+    const read = async (backgroundExecEnabled: boolean, subagentsEnabled: boolean) =>
+      runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
+        (instance as any)._turnRuntimeConfig = { backgroundExecEnabled, subagentsEnabled };
+        return {
+          exec: (instance as any).processMonitorEnabledForTest(),
+          subagents: (instance as any).subagentSpawnEnabledForTest(),
+        };
+      });
+
+    // Subagents only: the exec gate must be closed and the subagent gate open.
+    expect(await read(false, true)).toEqual({ exec: false, subagents: true });
+    // And the reverse, so neither getter can be hard-wired to one field.
+    expect(await read(true, false)).toEqual({ exec: true, subagents: false });
+  });
+
+  // The reason the capabilities are separate at all: a workspace can want
+  // subagents without leaving processes alive past the turn. Driven end to end
+  // through the real DO — the resolver's own unit tests prove the precedence, but
+  // only this proves the two halves of the AGENT read different fields.
+  it("admits subagents while refusing backgrounded exec, from one workspace's flags", async () => {
+    const previous = featureEnv.BACKGROUND_WORK_ENABLED;
+    featureEnv.BACKGROUND_WORK_ENABLED = "";
+    const workspaceId = "workspace-think-exec-background";
+    const stub = env.THINK_THREAD_AGENT.get(
+      env.THINK_THREAD_AGENT.idFromName("think-exec-background"),
+    );
+
+    try {
+      const result = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
+        const testInstance = instance as SandboxServiceTestableAgent & {
+          backgroundCapabilitiesForTest(): Promise<{
+            backgroundExec: boolean;
+            subagents: boolean;
+          }>;
+        };
+        await instance.resolveRuntimeConfigForThink();
+        await drizzle(env.REGISTRY_DB, { schema })
+          .update(schema.workspaces)
+          .set({ flagsJson: '{"backgroundWork":true,"backgroundExec":false}' })
+          .where(eq(schema.workspaces.id, workspaceId));
+        const capabilities = await testInstance.backgroundCapabilitiesForTest();
+        const resolved = await testInstance.resolveComputeServiceForTest();
+        return {
+          capabilities,
+          // The compute layer must agree: with exec refused, a long-running
+          // command may not detach.
+          execBackgrounding: resolved
+            ? (
+                resolved.service as unknown as {
+                  deps: { backgroundLongRunningExec?: boolean };
+                }
+              ).deps.backgroundLongRunningExec
+            : undefined,
+          // The exec-only RPC must refuse for exactly this reason, while the
+          // kind-agnostic dock read still answers (a subagent row belongs in it).
+          push: await instance.reportProcessCompletion({ processId: "proc_nope", exitCode: 0 }),
+          dockReadable: Array.isArray(await instance.listBackgroundWork()),
+        };
+      });
+
+      expect(result.capabilities).toEqual({ backgroundExec: false, subagents: true });
+      expect(result.execBackgrounding).toBe(false);
+      expect(result.push).toEqual({ accepted: false, reason: "background_work_disabled" });
+      expect(result.dockReadable).toBe(true);
     } finally {
       await drizzle(env.REGISTRY_DB, { schema })
         .update(schema.workspaces)
@@ -1201,16 +1286,21 @@ describe("ThinkThreadAgent spike", () => {
     try {
       const admission = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
         const testInstance = instance as SandboxServiceTestableAgent & {
-          backgroundWorkAdmissionForTest(): Promise<boolean>;
+          backgroundCapabilitiesForTest(): Promise<{
+            backgroundExec: boolean;
+            subagents: boolean;
+          }>;
         };
         await instance.resolveRuntimeConfigForThink();
         await drizzle(env.REGISTRY_DB, { schema })
           .update(schema.workspaces)
           .set({ flagsJson: '{"backgroundWork":true}' })
           .where(eq(schema.workspaces.id, workspaceId));
-        return testInstance.backgroundWorkAdmissionForTest();
+        return testInstance.backgroundCapabilitiesForTest();
       });
-      expect(admission).toBe(true);
+      // The legacy key still means BOTH, so a workspace that opted in before the
+      // capabilities were split keeps exactly what it had.
+      expect(admission).toEqual({ backgroundExec: true, subagents: true });
     } finally {
       await drizzle(env.REGISTRY_DB, { schema })
         .update(schema.workspaces)
@@ -1234,11 +1324,14 @@ describe("ThinkThreadAgent spike", () => {
     try {
       const admission = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
         const testInstance = instance as unknown as {
-          backgroundWorkAdmissionForTest(): Promise<boolean>;
+          backgroundCapabilitiesForTest(): Promise<{
+            backgroundExec: boolean;
+            subagents: boolean;
+          }>;
         };
-        return testInstance.backgroundWorkAdmissionForTest();
+        return testInstance.backgroundCapabilitiesForTest();
       });
-      expect(admission).toBe(false);
+      expect(admission).toEqual({ backgroundExec: false, subagents: false });
     } finally {
       featureEnv.BACKGROUND_WORK_ENABLED = previous;
     }

@@ -287,7 +287,8 @@ describe("thread runtime config export", () => {
     await expect(resolveThreadRuntimeConfigForAgent(env, seeded.threadId)).resolves.toMatchObject({
       workspaceId: seeded.workspaceId,
       agentId: `agent-${seeded.workspaceId}`,
-      backgroundWorkEnabled: true,
+      backgroundExecEnabled: true,
+      subagentsEnabled: true,
       modelConfig: {
         provider: "mock-tool-call",
         model: "mock-tool-call",
@@ -313,7 +314,8 @@ describe("thread runtime config export", () => {
       .where(eq(schema.workspaces.id, seeded.workspaceId));
 
     await expect(resolveThreadRuntimeConfigForAgent(env, seeded.threadId)).resolves.toMatchObject({
-      backgroundWorkEnabled: false,
+      backgroundExecEnabled: false,
+      subagentsEnabled: false,
     });
   });
 

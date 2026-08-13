@@ -78,7 +78,8 @@ describe("createThreadKnowledgeTools", () => {
       titleSet: true,
       archivedAt: null,
       source: "manual",
-      backgroundWorkEnabled: false,
+      backgroundExecEnabled: false,
+      subagentsEnabled: false,
     });
   });
 

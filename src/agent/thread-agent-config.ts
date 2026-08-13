@@ -9,7 +9,11 @@
 import { type LanguageModel } from "ai";
 import { eq } from "drizzle-orm";
 import type { Env } from "../env";
-import { backgroundWorkEnabled, isTruthyFlag, resolveWorkspaceBackgroundWork } from "../flags";
+import {
+  backgroundWorkEnabled,
+  isTruthyFlag,
+  resolveWorkspaceBackgroundCapabilities,
+} from "../flags";
 import { resolveEgressProxy } from "../providers/egress-proxy";
 import { canUseProvider, isGatedProvider, providerBindingMissing } from "../auth/provider-gate";
 import { registryDb } from "../db/client";
@@ -42,7 +46,11 @@ export interface ThreadRuntimeConfig {
   titleSet: boolean;
   archivedAt: number | null;
   source: "manual" | "automaton";
-  backgroundWorkEnabled: boolean;
+  /** The two background capabilities, resolved independently — see
+   *  `resolveWorkspaceBackgroundCapabilities`. Pinned for the whole turn so
+   *  every tool in it sees one capability surface. */
+  backgroundExecEnabled: boolean;
+  subagentsEnabled: boolean;
   projectContext?: ProjectPromptContext;
 }
 
@@ -127,10 +135,16 @@ export async function resolveThreadRuntimeConfigForAgent(
     titleSet: row.titleSet,
     archivedAt: row.archivedAt,
     source: row.source,
-    backgroundWorkEnabled: resolveWorkspaceBackgroundWork({
-      deploymentEnabled: backgroundWorkEnabled(env),
-      flagsJson: row.flagsJson,
-    }),
+    ...(() => {
+      const capabilities = resolveWorkspaceBackgroundCapabilities({
+        deploymentEnabled: backgroundWorkEnabled(env),
+        flagsJson: row.flagsJson,
+      });
+      return {
+        backgroundExecEnabled: capabilities.backgroundExec,
+        subagentsEnabled: capabilities.subagents,
+      };
+    })(),
     ...(projectContext ? { projectContext } : {}),
     modelConfig: resolveAgentModelConfig({
       provider,

@@ -1,5 +1,6 @@
 import { skills, type SkillSource } from "@cloudflare/think";
 import { FILE_TOOLS_GUIDANCE } from "../system-prompt";
+import type { BackgroundCapabilities } from "../../flags";
 
 const SKILL_AUTHORING_BODY = `Use this skill when the user asks you to save, revise, or remove reusable instructions for future Nadi work.
 
@@ -15,8 +16,14 @@ When writing or revising a user-authored skill:
 
 Use create_skill to save a new durable skill, edit_skill to revise or rename an existing skill, and delete_skill to remove a skill the user no longer wants.`;
 
-export function softwareEngineeringBody(backgroundWorkEnabled: boolean): string {
-  const subagentGuidance = backgroundWorkEnabled
+/**
+ * The two guidance blocks were always independent prose — they just read one
+ * boolean. Now each follows its own capability, so a workspace with subagents
+ * but not backgrounded exec gets the subagent playbook AND the truthful
+ * "commands are never backgrounded" note, instead of one of them lying.
+ */
+export function softwareEngineeringBody(capabilities: BackgroundCapabilities): string {
+  const subagentGuidance = capabilities.subagents
     ? `# Use subagents proactively
 Use subagents when the task benefits from parallelism. For substantial repo work, use at least one subagent for exploration or review unless the task is clearly small; if skipped, state why.
 - Exploration: ask a subagent to find relevant files, data flow, tests, conventions, and risks.
@@ -26,7 +33,7 @@ Use subagents when the task benefits from parallelism. For substantial repo work
 The main agent remains responsible for clear self-contained instructions, reconciling outputs, validating claims, editing the final code, and running verification. Do not blindly trust subagent conclusions.`
     : `# Subagents
 Subagents are unavailable in this deployment. Complete the work in the current agent.`;
-  const execGuidance = backgroundWorkEnabled
+  const execGuidance = capabilities.backgroundExec
     ? "Commands still running after the foreground window are backgrounded; the harness attempts to attach a watcher and the returned result says whether watching was attached. A completion message is delivered to this thread automatically when a watched process finishes — end your turn instead of polling. Use exec_output, exec_output_grep, exec_output_read, exec_stop, and exec_list only when you need partial output, truncated output, cancellation, or a one-off status peek."
     : "Commands wait until they exit and are never backgrounded.";
 
@@ -86,10 +93,10 @@ The sandbox is ephemeral; unpushed work can be lost. Preserve progress through c
 - Final response should include: summary, PR link, files changed, verification run, CI status, and any follow-ups.`;
 }
 
-export function createBuiltinSkillSource(backgroundWorkEnabled: boolean): SkillSource {
+export function createBuiltinSkillSource(capabilities: BackgroundCapabilities): SkillSource {
   return skills.fromManifest({
     id: "nadi-built-in-skills",
-    fingerprint: "nadi-built-in-skills-v7",
+    fingerprint: "nadi-built-in-skills-v8",
     skills: [
       {
         name: "skill_authoring",
@@ -101,7 +108,7 @@ export function createBuiltinSkillSource(backgroundWorkEnabled: boolean): SkillS
         name: "software_engineering",
         description:
           "Workflow for coding, debugging, refactoring, and build/test work in the sandbox.",
-        body: softwareEngineeringBody(backgroundWorkEnabled),
+        body: softwareEngineeringBody(capabilities),
         resources: [],
       },
     ],

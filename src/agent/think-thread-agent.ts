@@ -49,7 +49,11 @@ import {
 } from "ai";
 import { z } from "zod";
 import type { Env } from "../env";
-import { backgroundWorkEnabled } from "../flags";
+import {
+  anyBackgroundWorkEnabled,
+  backgroundWorkEnabled,
+  type BackgroundCapabilities,
+} from "../flags";
 import { buildModel } from "../providers/model-factory";
 import { invalidatablePromiseCache } from "./promise-cache";
 import { chatErrorForClient, serializeErrorChain } from "../error-details";
@@ -769,7 +773,10 @@ export class ThinkThreadAgent extends Think<Env> {
   async getSkills(): Promise<SkillSource[]> {
     const config = await this.resolveRuntimeConfigForThink();
     const sources: SkillSource[] = [
-      createBuiltinSkillSource(config.backgroundWorkEnabled),
+      createBuiltinSkillSource({
+        backgroundExec: config.backgroundExecEnabled,
+        subagents: config.subagentsEnabled,
+      }),
       createD1SkillSource({
         env: this.env,
         threadId: this.name,
@@ -1316,7 +1323,7 @@ export class ThinkThreadAgent extends Think<Env> {
     const webTools = await createWebTools(this.webHostDeps());
     const webToolNames = Object.keys(webTools);
     const subagentTools =
-      runtimeConfig.backgroundWorkEnabled && this.subagentSpawnEnabled()
+      runtimeConfig.subagentsEnabled && this.subagentSpawnEnabled()
         ? createSubagentTools({
             spawn: (input) => this.spawnSubagent(input),
             list: () => this.listSubagentRuns(),
@@ -2079,7 +2086,7 @@ export class ThinkThreadAgent extends Think<Env> {
   /** Whether process watchers + the turn-end auto-watch backstop are available.
    *  Overridden to false in SubAgent to avoid subagent-owned watchers. */
   protected processMonitorEnabled(): boolean {
-    return this._turnRuntimeConfig?.backgroundWorkEnabled ?? backgroundWorkEnabled(this.env);
+    return this._turnRuntimeConfig?.backgroundExecEnabled ?? backgroundWorkEnabled(this.env);
   }
 
   /** Whether an untitled thread gets named from its first message. Overridden to
@@ -2110,7 +2117,7 @@ export class ThinkThreadAgent extends Think<Env> {
 
   /** Whether this agent may spawn subagents. Parent: yes; SubAgent: no (depth-1). */
   protected subagentSpawnEnabled(): boolean {
-    return this._turnRuntimeConfig?.backgroundWorkEnabled ?? backgroundWorkEnabled(this.env);
+    return this._turnRuntimeConfig?.subagentsEnabled ?? backgroundWorkEnabled(this.env);
   }
 
   /**
@@ -2118,11 +2125,17 @@ export class ThinkThreadAgent extends Think<Env> {
    * rather than reuse the per-wake runtime cache. Within a turn the decision is
    * deliberately pinned so every tool has the same capability surface.
    */
-  private async backgroundWorkAdmissionEnabled(): Promise<boolean> {
-    if (this._turnRuntimeConfig) return this._turnRuntimeConfig.backgroundWorkEnabled;
+  private async backgroundCapabilities(): Promise<BackgroundCapabilities> {
+    if (this._turnRuntimeConfig) {
+      return {
+        backgroundExec: this._turnRuntimeConfig.backgroundExecEnabled,
+        subagents: this._turnRuntimeConfig.subagentsEnabled,
+      };
+    }
     this._runtimeConfig.invalidate();
     try {
-      return (await this.resolveRuntimeConfigForThink()).backgroundWorkEnabled;
+      const config = await this.resolveRuntimeConfigForThink();
+      return { backgroundExec: config.backgroundExecEnabled, subagents: config.subagentsEnabled };
     } catch {
       // Fail closed. This `catch` is what the removed deployment-flag
       // short-circuit used to provide for free: an unregistered thread cannot
@@ -2130,12 +2143,41 @@ export class ThinkThreadAgent extends Think<Env> {
       // must answer `false` rather than propagate. A throw here would be worse
       // than a wrong answer — inside a DO RPC it also fires an unhandled
       // rejection, which fails the suite even when assertions pass.
-      return false;
+      return { backgroundExec: false, subagents: false };
     }
   }
 
   /**
-   * WHY THERE IS NO `if (!backgroundWorkEnabled(this.env)) return false` HERE.
+   * May this thread background a shell command — detach it, watch it, and accept
+   * its pushed completion?
+   *
+   * The gate for every EXEC-side surface. Notably `reportProcessCompletion`
+   * gates on this rather than on {@link backgroundWorkAdmitted}: a workspace with
+   * exec off must not accept a process completion callback, even if it has
+   * subagents on.
+   */
+  private async backgroundExecAdmitted(): Promise<boolean> {
+    return (await this.backgroundCapabilities()).backgroundExec;
+  }
+
+  /** May this thread spawn subagents? */
+  private async subagentsAdmitted(): Promise<boolean> {
+    return (await this.backgroundCapabilities()).subagents;
+  }
+
+  /**
+   * Is ANY background work available? The gate for the kind-agnostic surfaces —
+   * the ledger read the dock polls, cancel, and clear-finished. They handle rows
+   * of both kinds and need no per-kind branch: with exec off, no process rows
+   * exist to return.
+   */
+  private async backgroundWorkAdmitted(): Promise<boolean> {
+    return anyBackgroundWorkEnabled(await this.backgroundCapabilities());
+  }
+
+  /**
+   * WHY THERE IS NO `if (!backgroundWorkEnabled(this.env)) return false` in
+   * {@link backgroundCapabilities}.
    *
    * There used to be, as an "outer fail-closed gate" ahead of the workspace
    * read. It made the deployment flag override a workspace OPT-IN, which is
@@ -2145,7 +2187,7 @@ export class ThinkThreadAgent extends Think<Env> {
    *
    * The two resolutions then disagreed. In-turn code
    * (`processMonitorEnabled`/`subagentSpawnEnabled`) reads
-   * `_turnRuntimeConfig.backgroundWorkEnabled`, which honours the override, so
+   * the pinned turn config, which honours the override, so
    * work was backgrounded and watched normally. Out-of-turn callers came through
    * here and were refused. Observed live on 2026-08-12 with the deployment flag
    * off and one workspace opted in: `listBackgroundWork` returned `[]` so the
@@ -2207,7 +2249,7 @@ export class ThinkThreadAgent extends Think<Env> {
     label?: string;
     toolCallId?: string;
   }): Promise<{ runId: string } | { error: string }> {
-    if (!(await this.backgroundWorkAdmissionEnabled())) {
+    if (!(await this.subagentsAdmitted())) {
       return { error: "background_work_disabled" };
     }
     const runId = `sub_${crypto.randomUUID()}`;
@@ -2443,7 +2485,7 @@ export class ThinkThreadAgent extends Think<Env> {
 
   /** Start a background command in this thread's own sandbox; returns its id. */
   async debugExecStart(command: string): Promise<{ processId: string; status: string }> {
-    const admission = await this.backgroundWorkAdmissionEnabled();
+    const admission = await this.backgroundExecAdmitted();
     if (!admission) throw new Error("background_work_disabled");
     const resolved = await resolveComputeService(this.sandboxHostDeps(admission));
     if (!resolved) throw new Error("sandbox_disabled");
@@ -2504,7 +2546,7 @@ export class ThinkThreadAgent extends Think<Env> {
     command: string,
     uploads = 0,
   ): Promise<{ elapsedMs: number; uploadMs: number; result: unknown }> {
-    const admission = await this.backgroundWorkAdmissionEnabled();
+    const admission = await this.backgroundExecAdmitted();
     const resolved = await resolveComputeService(this.sandboxHostDeps(admission));
     if (!resolved) throw new Error("sandbox_disabled");
     // Optionally do file uploads FIRST, in this same invocation — the one thing
@@ -3855,7 +3897,7 @@ export class ThinkThreadAgent extends Think<Env> {
     watchers: Array<{ processId: string; command: string; deadlineAt: number }>;
     runningProcesses: Array<{ processId: string; status: string }>;
   }> {
-    const admission = await this.backgroundWorkAdmissionEnabled();
+    const admission = await this.backgroundExecAdmitted();
     if (!admission) {
       return { attached: [], watchers: [], runningProcesses: [] };
     }
@@ -5200,7 +5242,7 @@ export class ThinkThreadAgent extends Think<Env> {
    *
    * Never throws — a throw inside a DO RPC method also fires an unhandled
    * rejection (see `reportProcessCompletion`'s doc). Gated on
-   * `backgroundWorkAdmissionEnabled()`, like every other background-work
+   * `backgroundWorkAdmitted()` — the kind-agnostic gate, since this list holds
    * surface.
    */
   async listBackgroundWork(): Promise<
@@ -5219,7 +5261,7 @@ export class ThinkThreadAgent extends Think<Env> {
       } | null;
     }>
   > {
-    const admission = await this.backgroundWorkAdmissionEnabled();
+    const admission = await this.backgroundWorkAdmitted();
     if (!admission) return [];
     const rows = this.workLedger.listRecent();
     // Resolved ONCE for the whole list, not per row: `workFacts` accepts a
@@ -5319,7 +5361,7 @@ export class ThinkThreadAgent extends Think<Env> {
     stream: "stdout" | "stderr";
   } | null> {
     try {
-      const admission = await this.backgroundWorkAdmissionEnabled();
+      const admission = await this.backgroundExecAdmitted();
       if (!admission) return null;
       const row = this.workLedger.get(processId);
       if (!row || row.kind !== "process") return null;
@@ -5360,7 +5402,7 @@ export class ThinkThreadAgent extends Think<Env> {
    */
   async cancelBackgroundWork(id: string): Promise<{ ok: boolean; reason?: string }> {
     try {
-      const admission = await this.backgroundWorkAdmissionEnabled();
+      const admission = await this.backgroundWorkAdmitted();
       if (!admission) return { ok: false, reason: "background_work_disabled" };
       const row = this.workLedger.get(id);
       if (!row) return { ok: false, reason: "unknown_id" };
@@ -5393,7 +5435,7 @@ export class ThinkThreadAgent extends Think<Env> {
    */
   async clearFinishedBackgroundWork(): Promise<{ cleared: number }> {
     try {
-      const admission = await this.backgroundWorkAdmissionEnabled();
+      const admission = await this.backgroundWorkAdmitted();
       if (!admission) return { cleared: 0 };
       return { cleared: this.workLedger.clearFinished(Date.now()) };
     } catch {
@@ -5413,7 +5455,7 @@ export class ThinkThreadAgent extends Think<Env> {
    * rejection, which fails the caller even when its own assertions pass. Every
    * failure path returns a result object instead.
    *
-   * Deliberately does NOT bypass `backgroundWorkAdmissionEnabled()`: a
+   * Deliberately does NOT bypass `backgroundExecAdmitted()`: a
    * workspace that turned background work off mid-flight should stop being
    * told about it, same as every other work-ledger writer.
    */
@@ -5422,7 +5464,7 @@ export class ThinkThreadAgent extends Think<Env> {
     exitCode: number;
   }): Promise<{ accepted: boolean; reason?: string }> {
     try {
-      if (!(await this.backgroundWorkAdmissionEnabled())) {
+      if (!(await this.backgroundExecAdmitted())) {
         return { accepted: false, reason: "background_work_disabled" };
       }
       const row = this.workLedger.get(input.processId);
@@ -5529,6 +5571,15 @@ export class ThinkThreadAgent extends Think<Env> {
     return this.processMonitorEnabled();
   }
 
+  /** @internal for tests only — the companion to
+   *  {@link processMonitorEnabledForTest}. Both exist so a test can prove the two
+   *  IN-TURN gates read DIFFERENT capability fields; the out-of-turn admission
+   *  path is a separate seam (`backgroundCapabilitiesForTest`) and covering only
+   *  that one leaves this pair free to collapse back onto a single flag. */
+  subagentSpawnEnabledForTest(): boolean {
+    return this.subagentSpawnEnabled();
+  }
+
   /** @internal for tests only — exposes the protected session role context
    *  (null on ThinkThreadAgent, the subagent notice on SubAgent). */
   sessionRoleContextForTest(): { name: string; text: string } | null {
@@ -5562,13 +5613,15 @@ export class ThinkThreadAgent extends Think<Env> {
 
   /** @internal for tests only — resolves the same sandbox service used by model-facing exec tools. */
   async resolveComputeServiceForTest() {
-    const admission = await this.backgroundWorkAdmissionEnabled();
+    const admission = await this.backgroundExecAdmitted();
     return resolveComputeService(this.sandboxHostDeps(admission));
   }
 
-  /** @internal for tests only — exposes the same fresh/pinned admission used by direct RPCs. */
-  async backgroundWorkAdmissionForTest(): Promise<boolean> {
-    return this.backgroundWorkAdmissionEnabled();
+  /** @internal for tests only — exposes the same fresh/pinned capabilities the
+   *  direct RPCs gate on. Returns BOTH, so a test can prove they resolve
+   *  independently rather than only that "something" is enabled. */
+  async backgroundCapabilitiesForTest(): Promise<BackgroundCapabilities> {
+    return this.backgroundCapabilities();
   }
 
   /** @internal for tests only — exposes buffered watcher completions before beforeStep drains them. */

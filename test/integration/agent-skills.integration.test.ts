@@ -354,7 +354,7 @@ describe("agent skill sources", () => {
   });
 
   it("lists and loads the built-in skill authoring source", async () => {
-    const source = createBuiltinSkillSource(true);
+    const source = createBuiltinSkillSource({ backgroundExec: true, subagents: true });
 
     await expect(source.list()).resolves.toEqual(
       expect.arrayContaining([

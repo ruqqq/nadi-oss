@@ -37,7 +37,7 @@ const COMPUTE_CONFIG: EffectiveComputeConfig = {
  * `_turnRuntimeConfig` is set directly (bypassing `resolveRuntimeConfigForThink`,
  * which requires a D1-registered thread) because `backgroundWorkAdmissionEnabled`
  * reads it before ever touching D1 when it is set — the same escape hatch a
- * real turn uses via `beforeTurn`. Only `backgroundWorkEnabled` is read off it
+ * real turn uses via `beforeTurn`. Only the two capability flags are read off it
  * here, so a minimal cast is enough.
  */
 
@@ -53,7 +53,7 @@ const COMPUTE_CONFIG: EffectiveComputeConfig = {
 // shape the DO had stopped returning — and a field the client depends on could
 // have been dropped from the RPC without a single test noticing.
 type TestableAgent = {
-  _turnRuntimeConfig: { backgroundWorkEnabled: boolean } | null;
+  _turnRuntimeConfig: { backgroundExecEnabled: boolean; subagentsEnabled: boolean } | null;
   listBackgroundWork(): ReturnType<ThinkThreadAgent["listBackgroundWork"]>;
   stampSubagentAlive: ThinkThreadAgent["stampSubagentAlive"];
   readBackgroundWorkOutput(processId: string): Promise<{
@@ -97,14 +97,14 @@ describe("ThinkThreadAgent.listBackgroundWork", () => {
   it("returns [] when background work is disabled, even with open rows", async () => {
     await withAgent(async ({ instance, store }) => {
       store.register(row({ id: "p1" }));
-      instance._turnRuntimeConfig = { backgroundWorkEnabled: false };
+      instance._turnRuntimeConfig = { backgroundExecEnabled: false, subagentsEnabled: false };
       expect(await instance.listBackgroundWork()).toEqual([]);
     });
   });
 
   it("returns open rows and terminal rows with their outcome, newest first", async () => {
     await withAgent(async ({ instance, store }) => {
-      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      instance._turnRuntimeConfig = { backgroundExecEnabled: true, subagentsEnabled: true };
       const now = Date.now();
       store.register(row({ id: "p1", kind: "process", startedAt: now - 2_000 }));
       store.register(row({ id: "s1", kind: "subagent", startedAt: now - 1_000 }));
@@ -136,7 +136,7 @@ describe("ThinkThreadAgent.listBackgroundWork", () => {
    */
   it("includes an owed row — terminal with no delivery yet", async () => {
     await withAgent(async ({ instance, store }) => {
-      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      instance._turnRuntimeConfig = { backgroundExecEnabled: true, subagentsEnabled: true };
       const terminalAt = Date.now() - 20 * 60_000;
       store.register(row({ id: "owed", startedAt: terminalAt }));
       store.terminalize("owed", {
@@ -166,7 +166,7 @@ describe("ThinkThreadAgent.listBackgroundWork", () => {
    */
   it("reports a running subagent's pushed progress", async () => {
     await withAgent(async ({ instance, store }) => {
-      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      instance._turnRuntimeConfig = { backgroundExecEnabled: true, subagentsEnabled: true };
       store.register(row({ id: "s1", kind: "subagent" }));
       await instance.stampSubagentAlive("s1", {
         phase: "working",
@@ -184,7 +184,7 @@ describe("ThinkThreadAgent.listBackgroundWork", () => {
 
   it("drops progress once the row is terminal, and never reports it for a process", async () => {
     await withAgent(async ({ instance, store }) => {
-      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      instance._turnRuntimeConfig = { backgroundExecEnabled: true, subagentsEnabled: true };
       store.register(row({ id: "s1", kind: "subagent" }));
       await instance.stampSubagentAlive("s1", { phase: "working", message: "step 3", at: 4_242 });
       store.register(row({ id: "p1", kind: "process" }));
@@ -205,7 +205,7 @@ describe("ThinkThreadAgent.listBackgroundWork", () => {
 
   it("keeps liveness working when a child stamps without progress", async () => {
     await withAgent(async ({ instance, store }) => {
-      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      instance._turnRuntimeConfig = { backgroundExecEnabled: true, subagentsEnabled: true };
       store.register(row({ id: "s1", kind: "subagent", lastAliveAt: 1_000 }));
       // An older child facet mid-deploy sends no progress — the liveness stamp
       // it exists for must still land, or the reaper would fault a healthy run.
@@ -225,7 +225,7 @@ describe("ThinkThreadAgent.listBackgroundWork", () => {
    */
   it("reports the subagent terminal status, which its outcome cannot express", async () => {
     await withAgent(async ({ instance, store }) => {
-      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      instance._turnRuntimeConfig = { backgroundExecEnabled: true, subagentsEnabled: true };
       const now = Date.now();
       for (const [id, detail] of [
         ["ok", "completed"],
@@ -247,7 +247,7 @@ describe("ThinkThreadAgent.listBackgroundWork", () => {
 
   it("leaves subagentStatus null for a process row and for an unrecognized status", async () => {
     await withAgent(async ({ instance, store }) => {
-      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      instance._turnRuntimeConfig = { backgroundExecEnabled: true, subagentsEnabled: true };
       const now = Date.now();
       store.register(row({ id: "p1", kind: "process" }));
       store.terminalize("p1", {
@@ -279,7 +279,7 @@ describe("ThinkThreadAgent.listBackgroundWork", () => {
    */
   it("reports the exit code so the client can tone on failure", async () => {
     await withAgent(async ({ instance, store }) => {
-      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      instance._turnRuntimeConfig = { backgroundExecEnabled: true, subagentsEnabled: true };
       store.register(row({ id: "p1", kind: "process" }));
       store.terminalize("p1", {
         outcome: "exited",
@@ -295,7 +295,7 @@ describe("ThinkThreadAgent.listBackgroundWork", () => {
 
   it("falls back to parsing `detail` for a row terminalized before the structured exitCode field existed", async () => {
     await withAgent(async ({ instance, store }) => {
-      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      instance._turnRuntimeConfig = { backgroundExecEnabled: true, subagentsEnabled: true };
       store.register(row({ id: "p1", kind: "process" }));
       // No `exitCode` on this terminal — the legacy shape.
       store.terminalize("p1", {
@@ -323,7 +323,7 @@ describe("ThinkThreadAgent.listBackgroundWork", () => {
    */
   it("a non-zero exit closed by the POLL path (not the push callback) still reports its exit code through listBackgroundWork", async () => {
     await withAgent(async ({ instance, store }) => {
-      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      instance._turnRuntimeConfig = { backgroundExecEnabled: true, subagentsEnabled: true };
 
       const backend = new FakeComputeBackend();
       // Real wall-clock time, not an arbitrary small number: `listRecent()`
@@ -368,7 +368,7 @@ describe("ThinkThreadAgent.listBackgroundWork", () => {
 
   it("reports a null exit code for a fault, which has none", async () => {
     await withAgent(async ({ instance, store }) => {
-      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      instance._turnRuntimeConfig = { backgroundExecEnabled: true, subagentsEnabled: true };
       store.register(row({ id: "p1", kind: "process" }));
       store.terminalize("p1", {
         outcome: "fault",
@@ -383,7 +383,7 @@ describe("ThinkThreadAgent.listBackgroundWork", () => {
 
   it("labels fall back to the row id when no richer label can be resolved", async () => {
     await withAgent(async ({ instance, store }) => {
-      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      instance._turnRuntimeConfig = { backgroundExecEnabled: true, subagentsEnabled: true };
       // Neither a real compute backend nor a real SDK run is wired up in this
       // DO, so `workFacts` for both kinds falls back to the id — proving the
       // RPC never throws (never rejects) even when its label lookup fails.
@@ -400,14 +400,14 @@ describe("ThinkThreadAgent.readBackgroundWorkOutput", () => {
   it("returns null when background work is disabled", async () => {
     await withAgent(async ({ instance, store }) => {
       store.register(row({ id: "p1", kind: "process" }));
-      instance._turnRuntimeConfig = { backgroundWorkEnabled: false };
+      instance._turnRuntimeConfig = { backgroundExecEnabled: false, subagentsEnabled: false };
       expect(await instance.readBackgroundWorkOutput("p1")).toBeNull();
     });
   });
 
   it("returns null for a subagent id — a subagent has no process output", async () => {
     await withAgent(async ({ instance, store }) => {
-      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      instance._turnRuntimeConfig = { backgroundExecEnabled: true, subagentsEnabled: true };
       store.register(row({ id: "s1", kind: "subagent" }));
       expect(await instance.readBackgroundWorkOutput("s1")).toBeNull();
     });
@@ -415,14 +415,14 @@ describe("ThinkThreadAgent.readBackgroundWorkOutput", () => {
 
   it("returns null for an unknown id, never throws", async () => {
     await withAgent(async ({ instance }) => {
-      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      instance._turnRuntimeConfig = { backgroundExecEnabled: true, subagentsEnabled: true };
       await expect(instance.readBackgroundWorkOutput("nope")).resolves.toBeNull();
     });
   });
 
   it("returns null for a process id when no compute service resolves (no sandbox wired up in this DO)", async () => {
     await withAgent(async ({ instance, store }) => {
-      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      instance._turnRuntimeConfig = { backgroundExecEnabled: true, subagentsEnabled: true };
       store.register(row({ id: "p1", kind: "process" }));
       await expect(instance.readBackgroundWorkOutput("p1")).resolves.toBeNull();
     });
@@ -433,7 +433,7 @@ describe("ThinkThreadAgent.cancelBackgroundWork", () => {
   it("returns ok:false when background work is disabled", async () => {
     await withAgent(async ({ instance, store }) => {
       store.register(row({ id: "p1", kind: "process" }));
-      instance._turnRuntimeConfig = { backgroundWorkEnabled: false };
+      instance._turnRuntimeConfig = { backgroundExecEnabled: false, subagentsEnabled: false };
       expect(await instance.cancelBackgroundWork("p1")).toEqual({
         ok: false,
         reason: "background_work_disabled",
@@ -443,7 +443,7 @@ describe("ThinkThreadAgent.cancelBackgroundWork", () => {
 
   it("returns ok:false for an unknown id, never throws", async () => {
     await withAgent(async ({ instance }) => {
-      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      instance._turnRuntimeConfig = { backgroundExecEnabled: true, subagentsEnabled: true };
       expect(await instance.cancelBackgroundWork("nope")).toEqual({
         ok: false,
         reason: "unknown_id",
@@ -453,7 +453,7 @@ describe("ThinkThreadAgent.cancelBackgroundWork", () => {
 
   it("returns ok:false for a row that is already terminal", async () => {
     await withAgent(async ({ instance, store }) => {
-      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      instance._turnRuntimeConfig = { backgroundExecEnabled: true, subagentsEnabled: true };
       store.register(row({ id: "p1", kind: "process" }));
       store.terminalize("p1", {
         outcome: "exited",
@@ -471,7 +471,7 @@ describe("ThinkThreadAgent.cancelBackgroundWork", () => {
 
   it("cancels an open subagent row via cancelSubagentRun (idempotent, no-op for an unknown run)", async () => {
     await withAgent(async ({ instance, store }) => {
-      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      instance._turnRuntimeConfig = { backgroundExecEnabled: true, subagentsEnabled: true };
       store.register(row({ id: "s1", kind: "subagent" }));
       expect(await instance.cancelBackgroundWork("s1")).toEqual({ ok: true });
     });
@@ -479,7 +479,7 @@ describe("ThinkThreadAgent.cancelBackgroundWork", () => {
 
   it("returns ok:false with a closed-set reason for an open process row this DO cannot actually cancel", async () => {
     await withAgent(async ({ instance, store }) => {
-      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      instance._turnRuntimeConfig = { backgroundExecEnabled: true, subagentsEnabled: true };
       store.register(row({ id: "p1", kind: "process" }));
       // Discriminating on the exact reason, not just `ok === false` — a test
       // asserting only the latter would keep passing even if the process
@@ -500,7 +500,7 @@ describe("ThinkThreadAgent.cancelBackgroundWork", () => {
 describe("ThinkThreadAgent.clearFinishedBackgroundWork", () => {
   it("returns cleared:0 when background work is disabled", async () => {
     await withAgent(async ({ instance }) => {
-      instance._turnRuntimeConfig = { backgroundWorkEnabled: false };
+      instance._turnRuntimeConfig = { backgroundExecEnabled: false, subagentsEnabled: false };
       expect(await instance.clearFinishedBackgroundWork()).toEqual({ cleared: 0 });
     });
   });
@@ -513,7 +513,7 @@ describe("ThinkThreadAgent.clearFinishedBackgroundWork", () => {
    */
   it("marks delivered terminal rows so listBackgroundWork stops returning them, without deleting them", async () => {
     await withAgent(async ({ instance, store }) => {
-      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      instance._turnRuntimeConfig = { backgroundExecEnabled: true, subagentsEnabled: true };
       store.register(row({ id: "p1", kind: "process" }));
       store.terminalize("p1", {
         outcome: "exited",
@@ -536,7 +536,7 @@ describe("ThinkThreadAgent.clearFinishedBackgroundWork", () => {
 
   it("leaves an open row and an owed (undelivered terminal) row alone", async () => {
     await withAgent(async ({ instance, store }) => {
-      instance._turnRuntimeConfig = { backgroundWorkEnabled: true };
+      instance._turnRuntimeConfig = { backgroundExecEnabled: true, subagentsEnabled: true };
       store.register(row({ id: "open", kind: "process" }));
       store.register(row({ id: "owed", kind: "process" }));
       store.terminalize("owed", {

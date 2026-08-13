@@ -1,9 +1,10 @@
 import type { Env } from "../env";
 import { resolveAppName } from "../app-name";
 import {
+  anyBackgroundWorkEnabled,
   backgroundWorkEnabled,
   voiceInputEnabled,
-  resolveWorkspaceBackgroundWork,
+  resolveWorkspaceBackgroundCapabilities,
   resolveWorkspaceWorkbenchNetworkAllowlist,
 } from "../flags";
 import { validateRequestSession } from "../auth/session";
@@ -70,10 +71,15 @@ export async function routeBootstrap(req: Request, env: Env): Promise<Response |
       voiceInput: voiceInputEnabled(env),
       workersAi: canUseProvider(env, "workers-ai", session.user.email),
       feedbackAdmin: isFeedbackAdmin(env, session.user.email),
-      backgroundWork: resolveWorkspaceBackgroundWork({
-        deploymentEnabled: backgroundWorkEnabled(env),
-        flagsJson: workspace?.flagsJson ?? "{}",
-      }),
+      // The OR of both capabilities: this flag answers only "should the dock
+      // exist", and the dock lists rows of either kind. A workspace with just
+      // one capability still needs it.
+      backgroundWork: anyBackgroundWorkEnabled(
+        resolveWorkspaceBackgroundCapabilities({
+          deploymentEnabled: backgroundWorkEnabled(env),
+          flagsJson: workspace?.flagsJson ?? "{}",
+        }),
+      ),
       workbenchNetworkAllowlist: resolveWorkspaceWorkbenchNetworkAllowlist(
         workspace?.flagsJson ?? "{}",
       ),
