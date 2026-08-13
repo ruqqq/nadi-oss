@@ -49,7 +49,11 @@ import {
 } from "ai";
 import { z } from "zod";
 import type { Env } from "../env";
-import { backgroundWorkEnabled } from "../flags";
+import {
+  anyBackgroundWorkEnabled,
+  backgroundWorkEnabled,
+  type BackgroundCapabilities,
+} from "../flags";
 import { buildModel } from "../providers/model-factory";
 import { invalidatablePromiseCache } from "./promise-cache";
 import { chatErrorForClient, serializeErrorChain } from "../error-details";
@@ -140,6 +144,7 @@ import {
 } from "./compute-tools";
 import {
   createSubagentTools,
+  deriveRunLabel,
   formatSubagentCompletion,
   unwrapStoredInputPreview,
   type SubagentRunStatus,
@@ -162,6 +167,7 @@ import {
   nextSweepAt,
   type CurrentGeneration,
   type WorkKind,
+  type WorkProgress,
   type WorkOutcome,
   type WorkReason,
   type WorkRow,
@@ -393,6 +399,58 @@ function modelMessageText(message: ModelMessage): string {
     })
     .filter(Boolean)
     .join("\n");
+}
+
+/**
+ * Fallback for terminal rows written before `WorkTerminal.exitCode` existed:
+ * `reportProcessCompletion`'s `detail` string (`"exit code 7"`) is the only
+ * place the code survives on those rows. This is the ONE place in the
+ * codebase that ever parses it back out of prose — `listBackgroundWork` is
+ * the sole caller, and every write going forward stamps the structured field
+ * directly (`reportProcessCompletion`, `pollWatcher`) instead of relying on
+ * this. Returns `null` for anything that doesn't match, same as "no exit code
+ * known" for a fault/timeout/stop.
+ */
+function parseExitCodeFromDetail(detail: string): number | null {
+  const match = /^exit code (-?\d+)$/.exec(detail);
+  if (!match?.[1]) return null;
+  const parsed = Number(match[1]);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * The SDK `AgentToolLifecycleResult.status` values a `subagent` row's terminal
+ * can carry. `onAgentToolFinish` writes `result.status` VERBATIM into
+ * `WorkTerminal.detail`, so for a subagent row the detail string is already
+ * this closed set rather than prose — unlike a `process` row, whose detail is
+ * `"exit code 7"`.
+ *
+ * This exists because a subagent's `WorkOutcome` cannot tell success from
+ * failure on its own: `onAgentToolFinish` maps only `aborted` to `"stopped"`,
+ * so `completed`, `error` AND `interrupted` all land as `"exited"`. A UI toning
+ * a row on `outcome` alone therefore paints a crashed subagent as a clean one.
+ * `exitCode` cannot cover the gap either — a subagent never has one, which is
+ * exactly why the dock read every finished subagent as a FAILURE (an absent
+ * code is an unconfirmed exit for a process, but the normal case for a
+ * subagent).
+ */
+const SUBAGENT_TERMINAL_STATUSES = ["completed", "error", "aborted", "interrupted"] as const;
+export type SubagentTerminalStatus = (typeof SUBAGENT_TERMINAL_STATUSES)[number];
+
+/**
+ * Validate a `subagent` row's `detail` into {@link SubagentTerminalStatus}.
+ *
+ * Validated HERE, server-side, rather than shipping `detail` to the client for
+ * it to interpret: this codebase's rule is that a client switches on a typed
+ * field, never on prose (see `WorkTerminal.exitCode`'s doc, added for the same
+ * reason). `null` for an unrecognized value — a row written by a future SDK
+ * status, or a `process` row's `"exit code 7"` — and the UI must treat that as
+ * "outcome unknown", never as success.
+ */
+function subagentStatusFromDetail(detail: string): SubagentTerminalStatus | null {
+  return (SUBAGENT_TERMINAL_STATUSES as readonly string[]).includes(detail)
+    ? (detail as SubagentTerminalStatus)
+    : null;
 }
 
 function modelMessageId(message: { id?: unknown }): string | null {
@@ -715,7 +773,10 @@ export class ThinkThreadAgent extends Think<Env> {
   async getSkills(): Promise<SkillSource[]> {
     const config = await this.resolveRuntimeConfigForThink();
     const sources: SkillSource[] = [
-      createBuiltinSkillSource(config.backgroundWorkEnabled),
+      createBuiltinSkillSource({
+        backgroundExec: config.backgroundExecEnabled,
+        subagents: config.subagentsEnabled,
+      }),
       createD1SkillSource({
         env: this.env,
         threadId: this.name,
@@ -1262,7 +1323,7 @@ export class ThinkThreadAgent extends Think<Env> {
     const webTools = await createWebTools(this.webHostDeps());
     const webToolNames = Object.keys(webTools);
     const subagentTools =
-      runtimeConfig.backgroundWorkEnabled && this.subagentSpawnEnabled()
+      runtimeConfig.subagentsEnabled && this.subagentSpawnEnabled()
         ? createSubagentTools({
             spawn: (input) => this.spawnSubagent(input),
             list: () => this.listSubagentRuns(),
@@ -2025,7 +2086,7 @@ export class ThinkThreadAgent extends Think<Env> {
   /** Whether process watchers + the turn-end auto-watch backstop are available.
    *  Overridden to false in SubAgent to avoid subagent-owned watchers. */
   protected processMonitorEnabled(): boolean {
-    return this._turnRuntimeConfig?.backgroundWorkEnabled ?? backgroundWorkEnabled(this.env);
+    return this._turnRuntimeConfig?.backgroundExecEnabled ?? backgroundWorkEnabled(this.env);
   }
 
   /** Whether an untitled thread gets named from its first message. Overridden to
@@ -2056,7 +2117,7 @@ export class ThinkThreadAgent extends Think<Env> {
 
   /** Whether this agent may spawn subagents. Parent: yes; SubAgent: no (depth-1). */
   protected subagentSpawnEnabled(): boolean {
-    return this._turnRuntimeConfig?.backgroundWorkEnabled ?? backgroundWorkEnabled(this.env);
+    return this._turnRuntimeConfig?.subagentsEnabled ?? backgroundWorkEnabled(this.env);
   }
 
   /**
@@ -2064,11 +2125,17 @@ export class ThinkThreadAgent extends Think<Env> {
    * rather than reuse the per-wake runtime cache. Within a turn the decision is
    * deliberately pinned so every tool has the same capability surface.
    */
-  private async backgroundWorkAdmissionEnabled(): Promise<boolean> {
-    if (this._turnRuntimeConfig) return this._turnRuntimeConfig.backgroundWorkEnabled;
+  private async backgroundCapabilities(): Promise<BackgroundCapabilities> {
+    if (this._turnRuntimeConfig) {
+      return {
+        backgroundExec: this._turnRuntimeConfig.backgroundExecEnabled,
+        subagents: this._turnRuntimeConfig.subagentsEnabled,
+      };
+    }
     this._runtimeConfig.invalidate();
     try {
-      return (await this.resolveRuntimeConfigForThink()).backgroundWorkEnabled;
+      const config = await this.resolveRuntimeConfigForThink();
+      return { backgroundExec: config.backgroundExecEnabled, subagents: config.subagentsEnabled };
     } catch {
       // Fail closed. This `catch` is what the removed deployment-flag
       // short-circuit used to provide for free: an unregistered thread cannot
@@ -2076,12 +2143,41 @@ export class ThinkThreadAgent extends Think<Env> {
       // must answer `false` rather than propagate. A throw here would be worse
       // than a wrong answer — inside a DO RPC it also fires an unhandled
       // rejection, which fails the suite even when assertions pass.
-      return false;
+      return { backgroundExec: false, subagents: false };
     }
   }
 
   /**
-   * WHY THERE IS NO `if (!backgroundWorkEnabled(this.env)) return false` HERE.
+   * May this thread background a shell command — detach it, watch it, and accept
+   * its pushed completion?
+   *
+   * The gate for every EXEC-side surface. Notably `reportProcessCompletion`
+   * gates on this rather than on {@link backgroundWorkAdmitted}: a workspace with
+   * exec off must not accept a process completion callback, even if it has
+   * subagents on.
+   */
+  private async backgroundExecAdmitted(): Promise<boolean> {
+    return (await this.backgroundCapabilities()).backgroundExec;
+  }
+
+  /** May this thread spawn subagents? */
+  private async subagentsAdmitted(): Promise<boolean> {
+    return (await this.backgroundCapabilities()).subagents;
+  }
+
+  /**
+   * Is ANY background work available? The gate for the kind-agnostic surfaces —
+   * the ledger read the dock polls, cancel, and clear-finished. They handle rows
+   * of both kinds and need no per-kind branch: with exec off, no process rows
+   * exist to return.
+   */
+  private async backgroundWorkAdmitted(): Promise<boolean> {
+    return anyBackgroundWorkEnabled(await this.backgroundCapabilities());
+  }
+
+  /**
+   * WHY THERE IS NO `if (!backgroundWorkEnabled(this.env)) return false` in
+   * {@link backgroundCapabilities}.
    *
    * There used to be, as an "outer fail-closed gate" ahead of the workspace
    * read. It made the deployment flag override a workspace OPT-IN, which is
@@ -2091,7 +2187,7 @@ export class ThinkThreadAgent extends Think<Env> {
    *
    * The two resolutions then disagreed. In-turn code
    * (`processMonitorEnabled`/`subagentSpawnEnabled`) reads
-   * `_turnRuntimeConfig.backgroundWorkEnabled`, which honours the override, so
+   * the pinned turn config, which honours the override, so
    * work was backgrounded and watched normally. Out-of-turn callers came through
    * here and were refused. Observed live on 2026-08-12 with the deployment flag
    * off and one workspace opted in: `listBackgroundWork` returned `[]` so the
@@ -2153,7 +2249,7 @@ export class ThinkThreadAgent extends Think<Env> {
     label?: string;
     toolCallId?: string;
   }): Promise<{ runId: string } | { error: string }> {
-    if (!(await this.backgroundWorkAdmissionEnabled())) {
+    if (!(await this.subagentsAdmitted())) {
       return { error: "background_work_disabled" };
     }
     const runId = `sub_${crypto.randomUUID()}`;
@@ -2220,7 +2316,7 @@ export class ThinkThreadAgent extends Think<Env> {
       const result = await this.runAgentTool(SubAgent, {
         input: input.task,
         runId,
-        display: { name: input.label ?? input.task },
+        display: { name: deriveRunLabel(input.task, input.label) },
         // Bind the run to the spawning tool call so useAgentToolEvents places it
         // in runsByToolCallId (the web run card correlates on this). Without it
         // the detached run is "unbound" and no card renders.
@@ -2254,9 +2350,20 @@ export class ThinkThreadAgent extends Think<Env> {
    *
    * `stampAlive` is a no-op for an unknown or already-terminal row, so a late
    * or duplicate stamp can never resurrect a closed run.
+   *
+   * `progress` rides along on this same call rather than getting an RPC of its
+   * own — the child already stamps liveness every turn and on a timer, so this
+   * is free. It is the ONLY way the parent learns a child's progress: the SDK's
+   * `reportProgress` persists to the CHILD's storage, so the parent's
+   * `inspectAgentToolRun` can never see it (see `WorkRow.progress`). Optional
+   * so an older child facet mid-deploy still stamps liveness correctly.
    */
-  async stampSubagentAlive(runId: string): Promise<void> {
-    this.workLedger.stampAlive(runId, Date.now());
+  async stampSubagentAlive(runId: string, progress?: WorkProgress): Promise<void> {
+    const at = Date.now();
+    this.workLedger.stampAlive(runId, at);
+    // Trusted like the liveness stamp itself — this comes from the child's own
+    // turn bookkeeping (`beforeTurn`'s step counter), never from model output.
+    if (progress) this.workLedger.stampProgress(runId, progress);
   }
 
   /**
@@ -2378,7 +2485,7 @@ export class ThinkThreadAgent extends Think<Env> {
 
   /** Start a background command in this thread's own sandbox; returns its id. */
   async debugExecStart(command: string): Promise<{ processId: string; status: string }> {
-    const admission = await this.backgroundWorkAdmissionEnabled();
+    const admission = await this.backgroundExecAdmitted();
     if (!admission) throw new Error("background_work_disabled");
     const resolved = await resolveComputeService(this.sandboxHostDeps(admission));
     if (!resolved) throw new Error("sandbox_disabled");
@@ -2439,7 +2546,7 @@ export class ThinkThreadAgent extends Think<Env> {
     command: string,
     uploads = 0,
   ): Promise<{ elapsedMs: number; uploadMs: number; result: unknown }> {
-    const admission = await this.backgroundWorkAdmissionEnabled();
+    const admission = await this.backgroundExecAdmitted();
     const resolved = await resolveComputeService(this.sandboxHostDeps(admission));
     if (!resolved) throw new Error("sandbox_disabled");
     // Optionally do file uploads FIRST, in this same invocation — the one thing
@@ -3790,7 +3897,7 @@ export class ThinkThreadAgent extends Think<Env> {
     watchers: Array<{ processId: string; command: string; deadlineAt: number }>;
     runningProcesses: Array<{ processId: string; status: string }>;
   }> {
-    const admission = await this.backgroundWorkAdmissionEnabled();
+    const admission = await this.backgroundExecAdmitted();
     if (!admission) {
       return { attached: [], watchers: [], runningProcesses: [] };
     }
@@ -5118,9 +5225,24 @@ export class ThinkThreadAgent extends Think<Env> {
    * paid its own `resolveComputeService` — a GitHub token mint plus several D1
    * reads. See the note at the resolve itself.
    *
+   * Two fields exist only for `subagent` rows, and both are `null` on a
+   * `process` row:
+   *
+   *  - `subagentStatus` — the SDK terminal status, without which the UI cannot
+   *    tell a completed subagent from a crashed one. See
+   *    {@link subagentStatusFromDetail}.
+   *  - `progress` — the child's last progress signal, read from the LEDGER row
+   *    the child stamps over `stampSubagentAlive`, NOT from the live event
+   *    stream. That is the whole point: the stream only carries runs whose
+   *    start a given client socket witnessed, so a client that reloads mid-run
+   *    could never show progress for a run already in flight. This survives a
+   *    reload, a second client, and DO eviction. (It is also NOT read from the
+   *    SDK — see `WorkRow.progress` for why the parent cannot see the child's
+   *    own `reportProgress` state.)
+   *
    * Never throws — a throw inside a DO RPC method also fires an unhandled
    * rejection (see `reportProcessCompletion`'s doc). Gated on
-   * `backgroundWorkAdmissionEnabled()`, like every other background-work
+   * `backgroundWorkAdmitted()` — the kind-agnostic gate, since this list holds
    * surface.
    */
   async listBackgroundWork(): Promise<
@@ -5129,10 +5251,17 @@ export class ThinkThreadAgent extends Think<Env> {
       kind: WorkKind;
       label: string | null;
       startedAt: number;
-      terminal: { outcome: WorkOutcome; reason: WorkReason } | null;
+      progress: { message: string | null; phase: string | null; at: number } | null;
+      terminal: {
+        outcome: WorkOutcome;
+        reason: WorkReason;
+        exitCode: number | null;
+        subagentStatus: SubagentTerminalStatus | null;
+        at: number;
+      } | null;
     }>
   > {
-    const admission = await this.backgroundWorkAdmissionEnabled();
+    const admission = await this.backgroundWorkAdmitted();
     if (!admission) return [];
     const rows = this.workLedger.listRecent();
     // Resolved ONCE for the whole list, not per row: `workFacts` accepts a
@@ -5152,7 +5281,14 @@ export class ThinkThreadAgent extends Think<Env> {
       kind: WorkKind;
       label: string | null;
       startedAt: number;
-      terminal: { outcome: WorkOutcome; reason: WorkReason } | null;
+      progress: { message: string | null; phase: string | null; at: number } | null;
+      terminal: {
+        outcome: WorkOutcome;
+        reason: WorkReason;
+        exitCode: number | null;
+        subagentStatus: SubagentTerminalStatus | null;
+        at: number;
+      } | null;
     }> = [];
     for (const row of rows) {
       let label: string | null = null;
@@ -5168,12 +5304,143 @@ export class ThinkThreadAgent extends Think<Env> {
         kind: row.kind,
         label,
         startedAt: row.startedAt,
+        progress: this.subagentProgress(row),
         terminal: row.terminal
-          ? { outcome: row.terminal.outcome, reason: row.terminal.reason }
+          ? {
+              outcome: row.terminal.outcome,
+              reason: row.terminal.reason,
+              exitCode: row.terminal.exitCode ?? parseExitCodeFromDetail(row.terminal.detail),
+              subagentStatus:
+                row.kind === "subagent" ? subagentStatusFromDetail(row.terminal.detail) : null,
+              at: row.terminal.at,
+            }
           : null,
       });
     }
     return out;
+  }
+
+  /**
+   * The last progress signal a RUNNING subagent pushed, or `null` for anything
+   * else. A plain read of the row the child already stamps — see
+   * `WorkRow.progress` for why the parent stores this rather than asking the
+   * SDK, which cannot answer from this side.
+   *
+   * Only for rows still open: a finished row's stale "working (step 12)" is
+   * noise next to its actual outcome, and its result renders inline in the
+   * transcript anyway.
+   */
+  private subagentProgress(row: WorkRow): WorkProgress | null {
+    if (row.kind !== "subagent" || row.terminal !== null) return null;
+    return row.progress ?? null;
+  }
+
+  /**
+   * Head+tail output for one row in the background-work sheet — the sheet's
+   * "… N lines hidden …" elision. `null` for anything that is not a watched
+   * `process` row: a `subagent` id has no process output at all (returning
+   * `null` there is a legitimate answer, not a failure), and so does an
+   * unknown/stale id or admission being off. Never throws — see
+   * `listBackgroundWork`'s doc for why a throw inside a DO RPC method is
+   * doubly costly (it also fires an unhandled rejection that fails the caller
+   * even when its own assertions pass).
+   *
+   * `stream` says which stream the slice actually came from:
+   * `execOutputHeadTail` falls back to stderr when stdout is empty (a failed
+   * build commonly writes its failure there, not to stdout), so the sheet
+   * must not assume stdout just because that's the default request.
+   */
+  async readBackgroundWorkOutput(
+    processId: string,
+    stream?: "stdout" | "stderr",
+  ): Promise<{
+    head: string[];
+    tail: string[];
+    hiddenLines: number;
+    truncated: boolean;
+    stream: "stdout" | "stderr";
+  } | null> {
+    try {
+      const admission = await this.backgroundExecAdmitted();
+      if (!admission) return null;
+      const row = this.workLedger.get(processId);
+      if (!row || row.kind !== "process") return null;
+      const resolved = await resolveComputeService(this.sandboxHostDeps(admission));
+      if (!resolved) return null;
+      return await resolved.service.execOutputHeadTail({ processId, stream });
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Cancel one row from the background-work sheet, dispatching by `kind`:
+   * `cancelSubagentRun` for a subagent, `execStop` for a process — the same
+   * two teardown paths `terminalizeWork` already uses for a REAPER-driven
+   * close, here invoked directly for a user-driven one. Returns a result
+   * object rather than throwing, same reasoning as every other work-ledger
+   * RPC: a throw inside a DO RPC method also fires an unhandled rejection.
+   *
+   * `reason` is a CLOSED set the client switches on
+   * (`"background_work_disabled" | "unknown_id" | "already_terminal" |
+   * "sandbox_disabled" | "cancel_failed"`) — never raw error text. A provider
+   * error from `execStop` -> `ensureRuntime` can carry sandbox ids, workspace
+   * paths, or raw HTTP response text, none of which belongs on a browser
+   * client; the detail goes to `log.warn` instead, same pattern as
+   * `deliverWorkTerminal`'s teardown failure a few methods up.
+   *
+   * The subagent branch returns `{ok:true}` once `cancelSubagentRun` resolves
+   * without throwing, but `cancelAgentTool` is DOCUMENTED to no-op silently
+   * for a run id the SDK's own store has already forgotten — so `ok:true`
+   * here means "the cancel call completed", not "a live run was actually
+   * torn down". That gap is accepted: distinguishing the two would mean
+   * reading SDK-internal run state (`_readAgentToolRun`, the same escape
+   * hatch `workFacts` uses for a label) from a path that otherwise never
+   * touches it, for a case — an open ledger row whose SDK run has vanished
+   * out from under it — that should not occur while the row itself is
+   * un-terminal.
+   */
+  async cancelBackgroundWork(id: string): Promise<{ ok: boolean; reason?: string }> {
+    try {
+      const admission = await this.backgroundWorkAdmitted();
+      if (!admission) return { ok: false, reason: "background_work_disabled" };
+      const row = this.workLedger.get(id);
+      if (!row) return { ok: false, reason: "unknown_id" };
+      if (row.terminal) return { ok: false, reason: "already_terminal" };
+      if (row.kind === "subagent") {
+        await this.cancelSubagentRun(id);
+        return { ok: true };
+      }
+      const resolved = await resolveComputeService(this.sandboxHostDeps(admission));
+      if (!resolved) return { ok: false, reason: "sandbox_disabled" };
+      await resolved.service.execStop({ processId: id });
+      return { ok: true };
+    } catch (error) {
+      log.warn("think_thread.cancel_background_work_failed", {
+        threadId: this.name,
+        id,
+        error: String(error),
+      });
+      return { ok: false, reason: "cancel_failed" };
+    }
+  }
+
+  /**
+   * "Clear finished" for the sheet. Delegates straight to
+   * `WorkLedgerStore.clearFinished` — see that method's doc for why this
+   * marks rows rather than deleting them: `WORK_ROW_RETENTION_MS` is a
+   * correctness floor, and deleting on "clear" would reintroduce the exact
+   * false `no_liveness` fault it exists to prevent (a pruned id, re-registered
+   * later, comes back as a fresh open row).
+   */
+  async clearFinishedBackgroundWork(): Promise<{ cleared: number }> {
+    try {
+      const admission = await this.backgroundWorkAdmitted();
+      if (!admission) return { cleared: 0 };
+      return { cleared: this.workLedger.clearFinished(Date.now()) };
+    } catch {
+      return { cleared: 0 };
+    }
   }
 
   /**
@@ -5188,7 +5455,7 @@ export class ThinkThreadAgent extends Think<Env> {
    * rejection, which fails the caller even when its own assertions pass. Every
    * failure path returns a result object instead.
    *
-   * Deliberately does NOT bypass `backgroundWorkAdmissionEnabled()`: a
+   * Deliberately does NOT bypass `backgroundExecAdmitted()`: a
    * workspace that turned background work off mid-flight should stop being
    * told about it, same as every other work-ledger writer.
    */
@@ -5197,7 +5464,7 @@ export class ThinkThreadAgent extends Think<Env> {
     exitCode: number;
   }): Promise<{ accepted: boolean; reason?: string }> {
     try {
-      if (!(await this.backgroundWorkAdmissionEnabled())) {
+      if (!(await this.backgroundExecAdmitted())) {
         return { accepted: false, reason: "background_work_disabled" };
       }
       const row = this.workLedger.get(input.processId);
@@ -5233,6 +5500,7 @@ export class ThinkThreadAgent extends Think<Env> {
         reason: "process_exit",
         at: now,
         detail: `exit code ${input.exitCode}`,
+        exitCode: input.exitCode,
       };
       if (!this.workLedger.terminalize(input.processId, terminal)) {
         // Lost a race with another writer (e.g. the backstop poll) that
@@ -5303,6 +5571,15 @@ export class ThinkThreadAgent extends Think<Env> {
     return this.processMonitorEnabled();
   }
 
+  /** @internal for tests only — the companion to
+   *  {@link processMonitorEnabledForTest}. Both exist so a test can prove the two
+   *  IN-TURN gates read DIFFERENT capability fields; the out-of-turn admission
+   *  path is a separate seam (`backgroundCapabilitiesForTest`) and covering only
+   *  that one leaves this pair free to collapse back onto a single flag. */
+  subagentSpawnEnabledForTest(): boolean {
+    return this.subagentSpawnEnabled();
+  }
+
   /** @internal for tests only — exposes the protected session role context
    *  (null on ThinkThreadAgent, the subagent notice on SubAgent). */
   sessionRoleContextForTest(): { name: string; text: string } | null {
@@ -5336,13 +5613,15 @@ export class ThinkThreadAgent extends Think<Env> {
 
   /** @internal for tests only — resolves the same sandbox service used by model-facing exec tools. */
   async resolveComputeServiceForTest() {
-    const admission = await this.backgroundWorkAdmissionEnabled();
+    const admission = await this.backgroundExecAdmitted();
     return resolveComputeService(this.sandboxHostDeps(admission));
   }
 
-  /** @internal for tests only — exposes the same fresh/pinned admission used by direct RPCs. */
-  async backgroundWorkAdmissionForTest(): Promise<boolean> {
-    return this.backgroundWorkAdmissionEnabled();
+  /** @internal for tests only — exposes the same fresh/pinned capabilities the
+   *  direct RPCs gate on. Returns BOTH, so a test can prove they resolve
+   *  independently rather than only that "something" is enabled. */
+  async backgroundCapabilitiesForTest(): Promise<BackgroundCapabilities> {
+    return this.backgroundCapabilities();
   }
 
   /** @internal for tests only — exposes buffered watcher completions before beforeStep drains them. */
@@ -6463,6 +6742,18 @@ callable()(
 );
 callable()(
   ThinkThreadAgent.prototype.listBackgroundWork,
+  null as unknown as ClassMethodDecoratorContext,
+);
+callable()(
+  ThinkThreadAgent.prototype.readBackgroundWorkOutput,
+  null as unknown as ClassMethodDecoratorContext,
+);
+callable()(
+  ThinkThreadAgent.prototype.cancelBackgroundWork,
+  null as unknown as ClassMethodDecoratorContext,
+);
+callable()(
+  ThinkThreadAgent.prototype.clearFinishedBackgroundWork,
   null as unknown as ClassMethodDecoratorContext,
 );
 // `reportProcessCompletion` is deliberately NOT `callable()`. The HTTP route

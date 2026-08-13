@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { grepOutputChunks, readOutputChunks, tailOutputChunks } from "../../../src/compute/output";
+import {
+  grepOutputChunks,
+  headTailOutputChunks,
+  readOutputChunks,
+  tailOutputChunks,
+  type OutputChunkView,
+} from "../../../src/compute/output";
 
 const chunks = [
   {
@@ -97,5 +103,81 @@ describe("sandbox output helpers", () => {
         maxBytes: 1000,
       }),
     ).toThrow("sandbox_grep_pattern_too_long");
+  });
+
+  describe("headTailOutputChunks", () => {
+    function manyLines(count: number): OutputChunkView[] {
+      const text = Array.from({ length: count }, (_, i) => `line ${i + 1}\n`).join("");
+      return [
+        {
+          stream: "stdout",
+          lineStart: 1,
+          lineEnd: count,
+          byteStart: 0,
+          byteEnd: text.length,
+          text,
+        },
+      ];
+    }
+
+    it("returns everything with no hidden lines when the stream fits in head+tail", () => {
+      const result = headTailOutputChunks(manyLines(10), {
+        stream: "stdout",
+        headLines: 20,
+        tailLines: 20,
+      });
+      expect(result.hiddenLines).toBe(0);
+      expect(result.head).toEqual(Array.from({ length: 10 }, (_, i) => `line ${i + 1}`));
+      expect(result.tail).toEqual([]);
+    });
+
+    it("reports the exact count of elided lines — never silently drops the middle", () => {
+      const result = headTailOutputChunks(manyLines(452), {
+        stream: "stdout",
+        headLines: 20,
+        tailLines: 20,
+      });
+      expect(result.head).toEqual(Array.from({ length: 20 }, (_, i) => `line ${i + 1}`));
+      expect(result.tail).toEqual(Array.from({ length: 20 }, (_, i) => `line ${452 - 20 + i + 1}`));
+      // 452 total - 20 head - 20 tail = 412, mirroring the brief's own example.
+      expect(result.hiddenLines).toBe(412);
+    });
+
+    it("filters by stream", () => {
+      const result = headTailOutputChunks(chunks, {
+        stream: "stderr",
+        headLines: 20,
+        tailLines: 20,
+      });
+      expect(result).toEqual({ head: ["err"], tail: [], hiddenLines: 0 });
+    });
+
+    it("boundary: exactly headLines + tailLines fits with no overlap and no hidden lines", () => {
+      // 40 lines, headLines:20 + tailLines:20 = 40 exactly — every line must
+      // appear ONCE, split cleanly between head and tail, nothing hidden.
+      const result = headTailOutputChunks(manyLines(40), {
+        stream: "stdout",
+        headLines: 20,
+        tailLines: 20,
+      });
+      expect(result.head).toEqual(Array.from({ length: 20 }, (_, i) => `line ${i + 1}`));
+      expect(result.tail).toEqual(Array.from({ length: 20 }, (_, i) => `line ${21 + i}`));
+      expect(result.hiddenLines).toBe(0);
+      expect(result.head.length + result.tail.length).toBe(40);
+    });
+
+    it("boundary: one line past headLines + tailLines hides exactly one line", () => {
+      // 41 lines: one line over the fits-cleanly boundary must hide exactly
+      // one — the off-by-one case right at the edge of the "everything fits"
+      // branch.
+      const result = headTailOutputChunks(manyLines(41), {
+        stream: "stdout",
+        headLines: 20,
+        tailLines: 20,
+      });
+      expect(result.head).toEqual(Array.from({ length: 20 }, (_, i) => `line ${i + 1}`));
+      expect(result.tail).toEqual(Array.from({ length: 20 }, (_, i) => `line ${22 + i}`));
+      expect(result.hiddenLines).toBe(1);
+    });
   });
 });

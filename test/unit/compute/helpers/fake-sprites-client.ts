@@ -423,6 +423,18 @@ export class FakeSpritesClient implements SpritesClient {
         `refresher watches ${groups.refresherRc}/${groups.refresherRc2}, not ${rcPath}`,
       );
     }
+    // The refresher's tick cap must stay ABOVE the runtime `timeout` allows the
+    // command, or the hold lapses out from under a legitimately running command
+    // and the sprite hibernates mid-run. Both values come from the same wrapper,
+    // so this catches a cap hardcoded to a constant (which passes any
+    // single-timeout assertion) as well as one scaled the wrong way.
+    const secs = Number.parseInt(groups.secs ?? "0", 10);
+    const cap = Number.parseInt(groups.capTicks ?? "0", 10);
+    if (cap <= secs / 60) {
+      throw new Error(
+        `refresher cap ${cap} ticks is not above the command's own ${secs}s runtime (${secs / 60} ticks)`,
+      );
+    }
     // The completion callback, when present, must read back the SAME rc path
     // the main run just wrote — not a different one, and not a re-read of
     // `$?`. Only meaningful when the wrapper actually carries a callback
@@ -575,9 +587,14 @@ export function createFakeSpritesBackend(env?: Record<string, string>): {
  * includes the `{ ...; } >/dev/null 2>&1` GROUP around it: every fragment in a
  * detached session redirects, and the group (rather than a suffix) is what
  * makes the redirect cover a multi-segment fragment.
+ *
+ * The refresher's two orphan guards are pinned here too, `capTicks` captured so
+ * `runWrapper` can check it against `secs`. Loosening this fragment would let a
+ * wrapper whose refresher outlives its parent — ~24h of awake billing, measured;
+ * see `buildSpritesWrapper`'s doc — parse cleanly.
  */
 const WRAPPER_RE =
-  /^cd (?<cwd>.+?) && curl -sf --unix-socket \/\.sprite\/api\.sock -H 'Content-Type: application\/json' -X POST http:\/\/sprite\/v1\/tasks -d '\{"name":"(?<holdId>[^"]+)","expire":"5m"\}' >\/dev\/null 2>&1 \|\| \{ printf %s 97 > (?<exit97tmp>\S+) && mv -f (?<exit97tmp2>\S+) (?<exit97rc>\S+); exit 97; \}; \( while \[ ! -f (?<refresherRc>\S+) \]; do sleep 60; \[ -f (?<refresherRc2>\S+) \] && break; curl -sf --unix-socket \/\.sprite\/api\.sock -H 'Content-Type: application\/json' -X PUT http:\/\/sprite\/v1\/tasks\/(?<holdId2>[^ ]+) -d '\{"expire":"5m"\}' >\/dev\/null 2>&1 \|\| true; done \) & timeout (?<secs>\d+) bash -c (?<cmd>.+) < (?<stdin>\S+) > (?<out>\S+) 2> (?<err>\S+); __nadi_rc="\$\?"; printf %s "\$__nadi_rc" > (?<rctmp>\S+) && mv -f (?<rcmoved>\S+) (?<rc>\S+)(?:; NADI_EXIT_CODE="\$\(cat (?<cbRc>\S+)\)"; \{ curl -sf -m (?<cbTimeout>\d+) -X POST (?<cbUrl>\S+) -H 'Authorization: Bearer (?<cbToken>[^']*)' -H 'Content-Type: application\/json' -d "(?<cbBody>\{\\"processId\\":\\"[^\\]*\\",\\"exitCode\\":\$NADI_EXIT_CODE\})" ; \} >\/dev\/null 2>&1)?; curl -sf --unix-socket \/\.sprite\/api\.sock -X DELETE http:\/\/sprite\/v1\/tasks\/(?<holdId3>[^ ]+) >\/dev\/null 2>&1; exit "\$__nadi_rc"$/;
+  /^cd (?<cwd>.+?) && curl -sf --unix-socket \/\.sprite\/api\.sock -H 'Content-Type: application\/json' -X POST http:\/\/sprite\/v1\/tasks -d '\{"name":"(?<holdId>[^"]+)","expire":"5m"\}' >\/dev\/null 2>&1 \|\| \{ printf %s 97 > (?<exit97tmp>\S+) && mv -f (?<exit97tmp2>\S+) (?<exit97rc>\S+); exit 97; \}; __nadi_parent="\$\$"; \( __nadi_ticks=0; while \[ ! -f (?<refresherRc>\S+) \]; do sleep 60; \[ -f (?<refresherRc2>\S+) \] && break; kill -0 "\$__nadi_parent" 2>\/dev\/null \|\| break; __nadi_ticks=\$\(\(__nadi_ticks\+1\)\); \[ "\$__nadi_ticks" -gt (?<capTicks>\d+) \] && break; curl -sf --unix-socket \/\.sprite\/api\.sock -H 'Content-Type: application\/json' -X PUT http:\/\/sprite\/v1\/tasks\/(?<holdId2>[^ ]+) -d '\{"expire":"5m"\}' >\/dev\/null 2>&1 \|\| true; done \) & timeout (?<secs>\d+) bash -c (?<cmd>.+) < (?<stdin>\S+) > (?<out>\S+) 2> (?<err>\S+); __nadi_rc="\$\?"; printf %s "\$__nadi_rc" > (?<rctmp>\S+) && mv -f (?<rcmoved>\S+) (?<rc>\S+)(?:; NADI_EXIT_CODE="\$\(cat (?<cbRc>\S+)\)"; \{ curl -sf -m (?<cbTimeout>\d+) -X POST (?<cbUrl>\S+) -H 'Authorization: Bearer (?<cbToken>[^']*)' -H 'Content-Type: application\/json' -d "(?<cbBody>\{\\"processId\\":\\"[^\\]*\\",\\"exitCode\\":\$NADI_EXIT_CODE\})" ; \} >\/dev\/null 2>&1)?; curl -sf --unix-socket \/\.sprite\/api\.sock -X DELETE http:\/\/sprite\/v1\/tasks\/(?<holdId3>[^ ]+) >\/dev\/null 2>&1; exit "\$__nadi_rc"$/;
 
 interface InnerResult {
   stdout: string;

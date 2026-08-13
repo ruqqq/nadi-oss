@@ -15,7 +15,6 @@ import "./index.css";
 
 import { ProjectPicker } from "@/components/projects/ProjectPicker";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
-import { WatcherResultNotice } from "@/components/chat/WatcherResultNotice";
 import { StaleBundleNotice } from "@/components/StaleBundleNotice";
 import { RootErrorBoundary } from "@/components/RootErrorBoundary";
 import type { ProjectSummary } from "@/projects-api";
@@ -841,63 +840,69 @@ function WatcherCompletionPreview() {
     <div className="flex min-h-screen flex-col gap-4 bg-background p-6">
       <ToggleTheme />
       <div className="mx-auto flex w-full max-w-xl flex-col">
-        <WatcherResultNotice
-          message={card({
+        <CompletionGroup
+          runsById={{}}
+          run={[card({
             title: "build",
             command: "pnpm build",
             processId: "p1",
             outcome: "exited",
             exitCode: 0,
             outputTail: "compiled in 4.2s\n",
-          })}
+          })]}
         />
-        <WatcherResultNotice
-          message={card({
+        <CompletionGroup
+          runsById={{}}
+          run={[card({
             title: "tests",
             command: "pnpm test",
             processId: "p2",
             outcome: "exited",
             exitCode: 1,
             outputTail: "3 failing\n",
-          })}
+          })]}
         />
-        <WatcherResultNotice
-          message={card({
+        <CompletionGroup
+          runsById={{}}
+          run={[card({
             title: "slack digest",
             command: "node read.js",
             processId: "p3",
             outcome: "timeout",
             exitCode: null,
-          })}
+          })]}
         />
-        <WatcherResultNotice
-          message={card({
+        <CompletionGroup
+          runsById={{}}
+          run={[card({
             title: "npm test",
             command: "npm test",
             processId: "p4",
             outcome: "stopped",
             exitCode: null,
-          })}
+          })]}
         />
-        <WatcherResultNotice
-          message={card({
+        <CompletionGroup
+          runsById={{}}
+          run={[card({
             title: "read channels",
             command: "node read-channels.js",
             processId: "p5",
             outcome: "fault",
             reason: "no_liveness",
             exitCode: null,
-          })}
+          })]}
         />
-        <WatcherResultNotice
-          message={card({
+        <CompletionGroup
+          runsById={{}}
+          run={[card({
             title: "index repo",
             command: "node index.js",
             processId: "p6",
             outcome: "fault",
             reason: "sandbox_reset",
             exitCode: null,
-          })}
+          })]}
         />
       </div>
     </div>

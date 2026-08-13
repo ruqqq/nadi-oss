@@ -1,7 +1,8 @@
 import { getAgentByName } from "agents";
-import type { TurnConfig, TurnContext } from "@cloudflare/think";
+import type { StepContext, TurnConfig, TurnContext } from "@cloudflare/think";
 import { ThinkThreadAgent, type SubagentContext } from "./think-thread-agent";
 import { resolveThreadRuntimeConfigForAgent } from "./thread-agent-config";
+import type { WorkProgress } from "./work-ledger";
 import type { BackendReference } from "../compute/backend";
 import type { UsageSource } from "./usage-recorder";
 
@@ -28,6 +29,13 @@ const SUBAGENT_ROLE_PROMPT =
 const LIVENESS_STAMP_INTERVAL_MS = 30_000;
 
 /**
+ * Floor between two progress pushes from the per-step path. Matched to the
+ * dock's own 5s poll: a count fresher than its only reader cannot be seen, and
+ * each push is a cross-DO RPC fired from inside the tool loop.
+ */
+const PROGRESS_PUSH_MIN_GAP_MS = 5_000;
+
+/**
  * A shared-sandbox subagent: a facet child of a parent {@link ThinkThreadAgent}.
  * It shares the parent class's tool-composition code, but Phase 1 gets only
  * native + sandbox + web tools — NOT full-peer parity: `onStart()` is
@@ -41,7 +49,27 @@ const LIVENESS_STAMP_INTERVAL_MS = 30_000;
 export class SubAgent extends ThinkThreadAgent {
   private _subagentContext?: SubagentContext;
   private _attachedRuntime?: BackendReference;
-  private _turnCount?: number;
+  /** Tool calls this run has made, cumulative across its steps. The number the
+   *  dock shows — see {@link onStepFinish} for why it is not turns. */
+  private _toolCalls = 0;
+  /** Guards the one-time restore in {@link restoreToolCalls}. */
+  private _toolCallsLoaded = false;
+  /** Guards the one-time DDL in {@link ensureProgressTable}. */
+  private _progressTableReady = false;
+  /** When {@link pushProgressThrottled} last pushed. 0 = never, so the first
+   *  tool call always publishes immediately. */
+  private _lastProgressPushAt = 0;
+  /**
+   * The progress marker pushed to the parent alongside every liveness stamp.
+   *
+   * This duplicates what `reportProgress` reports, and it has to: the SDK
+   * persists that call's snapshot to THIS facet's own storage, so the parent —
+   * which owns the ledger the dock reads — cannot see it (`inspectAgentToolRun`
+   * on the parent reads the parent's empty copy of that table). `reportProgress`
+   * still drives the live run card via its broadcast; this drives the dock.
+   * Both are written from {@link setProgress}, so they cannot disagree.
+   */
+  private _progress?: WorkProgress;
   private _livenessTimer: ReturnType<typeof setInterval> | undefined;
   /** Test seam: inject the parent context so unit tests skip the real parentAgent() facet call. */
   _testSubagentContext?: SubagentContext;
@@ -61,7 +89,7 @@ export class SubAgent extends ThinkThreadAgent {
   private async stampParentAlive(): Promise<void> {
     try {
       const parent = await this.parentAgent(ThinkThreadAgent);
-      await parent.stampSubagentAlive(this.name);
+      await parent.stampSubagentAlive(this.name, this._progress);
     } catch {
       // Best effort: a facet/RPC failure must never break the child's turn.
     }
@@ -237,17 +265,166 @@ export class SubAgent extends ThinkThreadAgent {
     // the attached runtime. Keep the result cached for the synchronous tool
     // composition performed by super.beforeTurn below.
     await this.subagentContext(true);
+    // The opening marker, before any tool has run. Deliberately carries NO
+    // count: `onStepFinish` owns the number, and this must not claim a unit of
+    // work that has not happened.
+    //
+    // Set BEFORE `startLiveness()`, which stamps the parent immediately — the
+    // stamp is what carries this to the dock. Today either order happens to
+    // work, because `stampParentAlive` reads this field only AFTER awaiting
+    // `parentAgent()`, so a later synchronous assignment still lands first;
+    // this ordering is what stops that from being load-bearing. If that await
+    // ever resolves synchronously (a cached stub), the reversed order would
+    // send no marker at all on the first stamp — leaving the dock on "Waiting
+    // for the first update" until the 30s tick.
+    // Pick up a count this run already banked, in case this is a fresh
+    // incarnation replaying the turn after an eviction.
+    this.restoreToolCalls();
+    this.setProgress(this._toolCalls > 0 ? this.toolCallsMessage() : "working");
     // A step is starting: real infrastructure activity, and the start of a
     // stretch (model call + tool execution) that can legitimately be silent for
     // minutes — so hold the row alive for as long as the turn is in flight, not
     // just at this instant. `onChatResponse`/`onChatError` end it.
     this.startLiveness();
-    // Turn-counted phase marker so a running run card's status line visibly
-    // advances turn over turn; the streamed transcript carries the
-    // fine-grained detail (drill-in).
-    this._turnCount = (this._turnCount ?? 0) + 1;
-    await this.reportProgress({ phase: "working", message: `working (step ${this._turnCount})` });
+    await this.reportProgress({ phase: "working", message: "working" });
     return super.beforeTurn(ctx);
+  }
+
+  /**
+   * Count the run's TOOL CALLS and publish that as its progress.
+   *
+   * Tool calls, not turns: a subagent gets one input and runs ONE turn, whose
+   * tool loop is the entire run, so the previous per-turn counter sat at
+   * "step 1" for the whole thing and only ever advanced when the turn was
+   * RE-ENTERED after a recovery — i.e. it counted restarts while reading like
+   * progress. Steps are where the work actually happens.
+   *
+   * Strictly in-memory arithmetic here, per the base override's contract: this
+   * runs between every step of every tool loop, so nothing may be awaited.
+   * Publication is a fire-and-forget push, rate-limited by
+   * {@link PROGRESS_PUSH_MIN_GAP_MS}.
+   *
+   * The count survives a DO eviction — see {@link persistToolCalls}, which is
+   * why this can be trusted not to jump backwards mid-run.
+   */
+  override onStepFinish(ctx: StepContext): void {
+    // FIRST: the base override records this step's token usage, and a subagent's
+    // spend is the parent thread's. Skipping it would silently drop billing.
+    super.onStepFinish(ctx);
+    const calls = ctx.toolCalls?.length ?? 0;
+    // A step with no tool calls is the model's closing text — no new work to
+    // report, and re-publishing the same count would just burn an RPC.
+    if (calls === 0) return;
+    this._toolCalls += calls;
+    this.setProgress(this.toolCallsMessage());
+    void this.reportProgress({ phase: "working", message: this._progress?.message ?? "working" });
+    this.pushProgressThrottled();
+  }
+
+  private toolCallsMessage(): string {
+    return `${this._toolCalls} tool call${this._toolCalls === 1 ? "" : "s"}`;
+  }
+
+  /** Single writer for {@link _progress}, so the field and its timestamp can
+   *  never be set apart from each other. */
+  private setProgress(message: string): void {
+    this._progress = { phase: "working", message, at: Date.now() };
+  }
+
+  /**
+   * Publish the current marker to the parent, at most once per
+   * {@link PROGRESS_PUSH_MIN_GAP_MS}.
+   *
+   * Throttled because this is a cross-DO RPC on a per-step path: a tool-heavy
+   * run can finish several steps a second, and the dock that reads the result
+   * polls every 5s — so pushing faster than the reader reads buys nothing. The
+   * 30s liveness timer is the floor either way, so the worst case without this
+   * push would be a 30s-stale count, not a missing one.
+   *
+   * Fire-and-forget: `stampParentAlive` swallows its own failures, and awaiting
+   * it here would put cross-DO latency on the tool loop's hot path.
+   */
+  private pushProgressThrottled(): void {
+    const now = Date.now();
+    if (now - this._lastProgressPushAt < PROGRESS_PUSH_MIN_GAP_MS) return;
+    this._lastProgressPushAt = now;
+    // Persist exactly what is about to be published, and on the same tick. That
+    // pairing is what makes the guarantee hold: the stored count is always the
+    // last count the dock was TOLD, so a resumed run continues from the number
+    // already on screen and the display never moves backwards.
+    this.persistToolCalls();
+    void this.stampParentAlive();
+  }
+
+  /**
+   * Save / restore the tool-call count across a DO eviction.
+   *
+   * Without this the count is memory-only, so an eviction mid-run resumes from
+   * zero. That is visible: `WorkLedgerStore.stampProgress` orders on the
+   * timestamp, not the count, so a fresher-but-lower value overwrites the higher
+   * one and the number on screen drops.
+   *
+   * `this.sql` is SYNCHRONOUS (it returns the rows array), which is the only
+   * reason this is allowed anywhere near the step path — and even so, writing
+   * happens on the throttled 5s cadence rather than per step, so the tool loop
+   * pays nothing per step. The facet's storage belongs to this run alone (its
+   * name IS the run id), so a single row needs no key.
+   *
+   * `max()` on conflict: the stored count is monotonic for the same reason the
+   * ledger's is — a late write from a superseded incarnation must not undo real
+   * progress.
+   */
+  private persistToolCalls(): void {
+    try {
+      this.ensureProgressTable();
+      this.sql`
+        INSERT INTO subagent_progress (id, tool_calls) VALUES (1, ${this._toolCalls})
+        ON CONFLICT(id) DO UPDATE SET tool_calls = max(tool_calls, excluded.tool_calls)
+      `;
+    } catch {
+      // Cosmetic: losing the count costs a restarted number after an eviction,
+      // never correctness. It must not break the turn.
+    }
+  }
+
+  /**
+   * The table both {@link persistToolCalls} and {@link restoreToolCalls} use.
+   *
+   * Owned here rather than by whichever runs first, because the alternative bit:
+   * the DDL used to live only in the restore path, so a persist that ran before
+   * any restore hit a missing table and its `catch` swallowed the failure — a
+   * silently unsaved count. Ordering between two methods is not a thing to rely
+   * on when the failure is invisible.
+   */
+  private ensureProgressTable(): void {
+    if (this._progressTableReady) return;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS subagent_progress (
+        id integer primary key,
+        tool_calls integer not null
+      )
+    `;
+    this._progressTableReady = true;
+  }
+
+  /**
+   * Seed {@link _toolCalls} from storage, once per instance. Called from
+   * `beforeTurn`, which runs before any step of the turn — including the
+   * re-entered turn a recovery replays, which is exactly the case this exists
+   * for.
+   */
+  private restoreToolCalls(): void {
+    if (this._toolCallsLoaded) return;
+    this._toolCallsLoaded = true;
+    try {
+      this.ensureProgressTable();
+      const stored = this.sql`SELECT tool_calls FROM subagent_progress WHERE id = 1`[0];
+      const count = stored?.tool_calls;
+      if (typeof count === "number") this._toolCalls = count;
+    } catch {
+      // Start from zero: an under-count is a cosmetic wart, and a throw here
+      // would take down the turn.
+    }
   }
 
   /** Turn settled (completed/aborted/error) — nothing is in flight, so stop

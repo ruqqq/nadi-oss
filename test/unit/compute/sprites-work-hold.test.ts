@@ -87,7 +87,65 @@ describe("sprites workHold", () => {
     // let the hold lapse while the command keeps running) — it should retry
     // on the next tick instead.
     expect(wrapper).toMatch(/-X PUT[^;]*\|\| true/);
-    expect(wrapper).not.toMatch(/kill \$/);
+    // The refresher is never SIGNALLED by the wrapper (that is what the
+    // sentinel gate replaces) — `kill -0` below is a liveness probe pointing
+    // the other way, at the wrapper, and sends nothing.
+    expect(wrapper).not.toMatch(/kill (?!-0\b)/);
+  });
+
+  it("stops the refresher when the wrapper dies, watching its OWN pid and not $PPID", () => {
+    const wrapper = buildSpritesWrapper({
+      command: "make build",
+      cwd: "/workspace",
+      stdinPath: "/dev/null",
+      processId: "abc",
+      timeoutSecs: 600,
+      hold: backend.workHold!,
+    });
+    // Without this guard a wrapper killed before writing rc leaves the
+    // refresher re-`PUT`ting the hold every 60s for ~24h of awake billing:
+    // nothing else reaps it (measured — see `buildSpritesWrapper`'s doc).
+    expect(wrapper).toContain('kill -0 "$__nadi_parent" 2>/dev/null || break');
+    // `$$` captured OUTSIDE the subshell, so the variable holds the WRAPPER's
+    // pid. `$PPID` read inside a backgrounded subshell names the wrapper's
+    // parent instead — a guard on that watches a process that outlives the
+    // wrapper and never fires, which is the whole reason this assertion is
+    // pinned to the exact expansion rather than "mentions kill -0".
+    expect(wrapper).toContain('__nadi_parent="$$"; (');
+    expect(wrapper).not.toContain("PPID");
+    // Ahead of the refresh, so a dead wrapper costs at most one more tick...
+    const guardAt = wrapper.indexOf("kill -0");
+    const refreshAt = wrapper.indexOf("-X PUT");
+    expect(guardAt).toBeLessThan(refreshAt);
+    // ...and after the rc re-check, so a clean finish still exits on the
+    // sentinel rather than depending on process liveness at all.
+    expect(wrapper.indexOf("[ -f /tmp/.nadi-rc-abc ] && break")).toBeLessThan(guardAt);
+  });
+
+  it("caps the refresher at the command's own runtime plus two ticks", () => {
+    // Covers what `kill -0` cannot: pid reuse handing the guard a live
+    // stranger, and a wrapper that survives while rc never lands.
+    const wrapper = buildSpritesWrapper({
+      command: "make build",
+      cwd: "/workspace",
+      stdinPath: "/dev/null",
+      processId: "abc",
+      timeoutSecs: 600,
+      hold: backend.workHold!,
+    });
+    // 600s of `timeout` = 10 ticks, +2 spare. Derived from timeoutSecs, NOT a
+    // constant: a cap below the command's own runtime would drop the hold out
+    // from under a legitimately running command.
+    expect(wrapper).toContain('[ "$__nadi_ticks" -gt 12 ] && break');
+    const short = buildSpritesWrapper({
+      command: "true",
+      cwd: "/workspace",
+      stdinPath: "/dev/null",
+      processId: "abc",
+      timeoutSecs: 30,
+      hold: backend.workHold!,
+    });
+    expect(short).toContain('[ "$__nadi_ticks" -gt 3 ] && break');
   });
 
   it("writes 97 to the rc sentinel (not a synchronous fallback) when the hold cannot be taken", () => {

@@ -7,9 +7,10 @@ import {
 
 // Mirror of the client's completion-detection regex (web/src/lib/subagent-runs.ts
 // SUBAGENT_COMPLETION_RE): a subagent completion only renders as the result card
-// when its text matches this. Duplicated here to pin the cross-package contract.
+// when its text matches this. Duplicated here to pin the cross-package contract —
+// keep this in sync with the client's copy, quote-tolerance included.
 const SUBAGENT_COMPLETION_RE =
-  /^<system-reminder>\s*Subagent (?:"([^"]*)"|\(unlabeled\)) finished: (\w+)\.\s*\[([^\]]+)\]\s*([\s\S]*?)\s*<\/system-reminder>\s*$/;
+  /^<system-reminder>\s*Subagent (?:"([\s\S]*?)"(?= finished: )|\(unlabeled\)) finished: (\w+)\.\s*\[([^\]]+)\]\s*([\s\S]*?)\s*<\/system-reminder>\s*$/;
 
 describe("unwrapStoredInputPreview", () => {
   it("parses a JSON-encoded string back to the clean value", () => {
@@ -26,17 +27,19 @@ describe("unwrapStoredInputPreview", () => {
 });
 
 describe("formatSubagentCompletion label wrapping", () => {
-  it("renders as a card only once the JSON-stored label is unwrapped", () => {
+  /**
+   * Skipping the unwrap and handing the raw JSON-encoded `input_preview`
+   * column straight to `formatSubagentCompletion` used to break the client's
+   * regex outright (the doubled quotes `""scan the repo""` could not match a
+   * strict `"([^"]*)"` capture). It no longer breaks the MATCH — sanitizing
+   * quotes before wrapping (this describe block's other test) happens to
+   * absorb this simple case too — but the label text is still wrong unless
+   * unwrapped first: this case just doesn't reveal it, because a plain string
+   * has no internal escaping for the strip to mangle. `formatSubagentCompletion`
+   * sanitizing quotes is belt-and-braces, not a replacement for unwrapping.
+   */
+  it("renders correct label text only once the JSON-stored label is unwrapped", () => {
     const stored = JSON.stringify("scan the repo"); // how the SDK stores input_preview
-    // Raw (double-encoded) label breaks the client regex -> plain bubble, no card.
-    const broken = formatSubagentCompletion({
-      runId: "sub_1",
-      label: stored,
-      status: "completed",
-      summary: "done",
-    });
-    expect(SUBAGENT_COMPLETION_RE.test(broken)).toBe(false);
-    // Unwrapped label roundtrips through the regex -> card renders.
     const label = unwrapStoredInputPreview(stored);
     if (!label) throw new Error("expected a label");
     const fixed = formatSubagentCompletion({
@@ -49,6 +52,61 @@ describe("formatSubagentCompletion label wrapping", () => {
     expect(m?.[1]).toBe("scan the repo");
     expect(m?.[2]).toBe("completed");
     expect(m?.[3]).toBe("sub_1");
+  });
+
+  /**
+   * Where skipping the unwrap actually still mangles the label: JSON escapes
+   * an embedded quote as `\"`, and stripping raw `"` characters from the
+   * still-encoded column value leaves the stray backslash behind — a
+   * corrupted label the regex happily matches anyway. Unwrapping first (via
+   * `unwrapStoredInputPreview`) is the real fix; the formatter's quote strip
+   * only prevents a broken RENDER, not a broken label.
+   */
+  it("still corrupts the label if the raw JSON-encoded column value skips unwrapping", () => {
+    const original = 'the project "Markdump"';
+    const stored = JSON.stringify(original);
+    const stillEncoded = formatSubagentCompletion({
+      runId: "sub_1",
+      label: stored,
+      status: "completed",
+      summary: "done",
+    });
+    const brokenMatch = SUBAGENT_COMPLETION_RE.exec(stillEncoded);
+    expect(brokenMatch).not.toBeNull();
+    expect(brokenMatch?.[1]).not.toBe(original);
+
+    const label = unwrapStoredInputPreview(stored);
+    if (!label) throw new Error("expected a label");
+    const fixed = formatSubagentCompletion({
+      runId: "sub_1",
+      label,
+      status: "completed",
+      summary: "done",
+    });
+    const m = SUBAGENT_COMPLETION_RE.exec(fixed);
+    // The unwrapped label itself had embedded quotes — the production bug's
+    // actual trigger — which the formatter strips before wrapping.
+    expect(m?.[1]).toBe("the project Markdump");
+  });
+
+  /**
+   * The production bug this whole chain traces back to: a task/label
+   * containing double quotes (`the project "Markdump"`) broke the client
+   * regex outright, because `formatSubagentCompletion` did not sanitize the
+   * label before wrapping it in quotes. It now strips `"` from the label —
+   * belt-and-braces alongside `deriveRunLabel` sanitizing at the SOURCE
+   * (`display.name`) and the client regex being quote-tolerant.
+   */
+  it("strips embedded quotes from the label before wrapping it", () => {
+    const text = formatSubagentCompletion({
+      runId: "sub_1",
+      label: 'the project "Markdump"',
+      status: "completed",
+      summary: "done",
+    });
+    const m = SUBAGENT_COMPLETION_RE.exec(text);
+    expect(m).not.toBeNull();
+    expect(m?.[1]).toBe("the project Markdump");
   });
 });
 

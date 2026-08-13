@@ -1,7 +1,7 @@
-import type { WorkKind, WorkRow, WorkTerminal } from "./work-ledger";
+import type { WorkKind, WorkProgress, WorkRow, WorkTerminal } from "./work-ledger";
 
 const WORK_LEDGER_SCHEMA = "agent_work_ledger";
-const WORK_LEDGER_SCHEMA_VERSION = 2;
+const WORK_LEDGER_SCHEMA_VERSION = 4;
 
 /**
  * The surface the compute layer is handed (see `WorkLedgerSink` in
@@ -69,7 +69,12 @@ interface WorkLedgerRow extends Record<string, string | number | null> {
   terminal_reason: string | null;
   terminal_at: number | null;
   terminal_detail: string | null;
+  terminal_exit_code: number | null;
   delivered_at: number | null;
+  cleared_at: number | null;
+  progress_message: string | null;
+  progress_phase: string | null;
+  progress_at: number | null;
 }
 
 function toWorkRow(row: WorkLedgerRow): WorkRow {
@@ -89,10 +94,31 @@ function toWorkRow(row: WorkLedgerRow): WorkRow {
             reason: row.terminal_reason,
             at: row.terminal_at,
             detail: row.terminal_detail ?? "",
+            // Omitted (not `null`) when the column is null: keeps every row
+            // built before this column existed passing a straight `toEqual`
+            // against a `WorkTerminal` literal with no `exitCode` key at all.
+            ...(row.terminal_exit_code === null ? {} : { exitCode: row.terminal_exit_code }),
           } as WorkTerminal),
     // Rows written before schema v2 have no column at all; the migration
     // backfills them, so a NULL here always means a genuinely owed delivery.
     deliveredAt: row.delivered_at ?? null,
+    // Same omission convention as `exitCode` above, for the same reason: a
+    // row that was never cleared must round-trip identically to how it did
+    // before this column existed.
+    ...(row.cleared_at === null ? {} : { clearedAt: row.cleared_at }),
+    // `progress_at` is the presence test, not the message: a child may report a
+    // `phase` with no `message` (or the reverse), so keying on either text
+    // column would drop a real signal. Omitted rather than null for the same
+    // round-trip reason as `clearedAt` above.
+    ...(row.progress_at === null
+      ? {}
+      : {
+          progress: {
+            message: row.progress_message,
+            phase: row.progress_phase,
+            at: row.progress_at,
+          },
+        }),
   };
 }
 
@@ -148,6 +174,26 @@ export class WorkLedgerStore implements WorkLedgerSink {
            WHERE terminal_outcome IS NOT NULL AND delivered_at IS NULL`,
         );
       }
+      // v2 -> v3, additive: a structured exit code (`exitCode`, the
+      // green-check-on-exit-7 fix) and a non-destructive "clear finished" flag.
+      // Both are pure NULL-defaulted additions — no backfill needed, since NULL
+      // is exactly the correct value for every row written before this column
+      // existed (no exit code known / never cleared).
+      if (!columns.some((column) => column.name === "terminal_exit_code")) {
+        this.storage.sql.exec("ALTER TABLE background_work ADD COLUMN terminal_exit_code integer");
+      }
+      if (!columns.some((column) => column.name === "cleared_at")) {
+        this.storage.sql.exec("ALTER TABLE background_work ADD COLUMN cleared_at integer");
+      }
+      // v3 -> v4, additive: the last progress signal a subagent's child pushed
+      // (see `WorkRow.progress` for why the parent stores it instead of asking
+      // the SDK). NULL-defaulted with no backfill — NULL is correct for every
+      // row written before this existed, since none of them ever reported one.
+      if (!columns.some((column) => column.name === "progress_at")) {
+        this.storage.sql.exec("ALTER TABLE background_work ADD COLUMN progress_message text");
+        this.storage.sql.exec("ALTER TABLE background_work ADD COLUMN progress_phase text");
+        this.storage.sql.exec("ALTER TABLE background_work ADD COLUMN progress_at integer");
+      }
       this.storage.sql.exec(
         `INSERT INTO work_ledger_schema (name, version) VALUES (?, ?)
          ON CONFLICT(name) DO UPDATE SET version = excluded.version`,
@@ -166,8 +212,8 @@ export class WorkLedgerStore implements WorkLedgerSink {
     this.storage.sql.exec(
       `INSERT INTO background_work
          (id, kind, started_at, last_alive_at, stale_after_ms, deadline_at, generation,
-          terminal_outcome, terminal_reason, terminal_at, terminal_detail)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          terminal_outcome, terminal_reason, terminal_at, terminal_detail, terminal_exit_code)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          last_alive_at = max(background_work.last_alive_at, excluded.last_alive_at),
          stale_after_ms = excluded.stale_after_ms,
@@ -184,6 +230,7 @@ export class WorkLedgerStore implements WorkLedgerSink {
       row.terminal?.reason ?? null,
       row.terminal?.at ?? null,
       row.terminal?.detail ?? null,
+      row.terminal?.exitCode ?? null,
     );
   }
 
@@ -198,6 +245,31 @@ export class WorkLedgerStore implements WorkLedgerSink {
        WHERE id = ? AND terminal_outcome IS NULL`,
       at,
       id,
+    );
+  }
+
+  /**
+   * Record a subagent's latest progress signal. Same guards as
+   * {@link stampAlive}, for the same reasons: a no-op on an unknown or already
+   * terminal row (a late push must not decorate a closed run), and time only
+   * moves forward, so a stamp that arrives out of order cannot replace a newer
+   * signal with an older one.
+   *
+   * All three columns move together under that one guard — a newer signal with
+   * no `message` must not leave the previous signal's message stranded beside
+   * a fresher `at`.
+   */
+  stampProgress(id: string, progress: WorkProgress): void {
+    this.storage.sql.exec(
+      `UPDATE background_work
+         SET progress_message = ?, progress_phase = ?, progress_at = ?
+       WHERE id = ? AND terminal_outcome IS NULL
+         AND (progress_at IS NULL OR progress_at <= ?)`,
+      progress.message,
+      progress.phase,
+      progress.at,
+      id,
+      progress.at,
     );
   }
 
@@ -246,14 +318,42 @@ export class WorkLedgerStore implements WorkLedgerSink {
     return this.storage.sql
       .exec<WorkLedgerRow>(
         `SELECT * FROM background_work
-         WHERE terminal_outcome IS NULL
-            OR delivered_at IS NULL
-            OR delivered_at >= ?
+         WHERE cleared_at IS NULL
+           AND (terminal_outcome IS NULL
+                OR delivered_at IS NULL
+                OR delivered_at >= ?)
          ORDER BY started_at DESC`,
         now - within,
       )
       .toArray()
       .map(toWorkRow);
+  }
+
+  /**
+   * "Clear finished" for the dock: mark every delivered terminal row so
+   * `listRecent` stops returning it, WITHOUT deleting it. Deletion is exactly
+   * the wrong tool here — see `WORK_ROW_RETENTION_MS`'s doc: a pruned id that
+   * is later re-registered comes back as a fresh OPEN row and gets falsely
+   * faulted `no_liveness` a stale window later, and that hazard does not care
+   * whether the row was pruned by age or by this call.
+   *
+   * Scoped to `delivered_at IS NOT NULL` on purpose: an owed row (terminal but
+   * undelivered) must stay visible and retryable — clearing it would hide the
+   * one thing the sweep's retry list depends on being able to find, and the
+   * model would never learn the outcome. Returns how many rows were newly
+   * cleared, so a repeat call reports 0 rather than reasserting a stale count.
+   */
+  clearFinished(now: number): number {
+    this.storage.sql.exec(
+      `UPDATE background_work
+         SET cleared_at = ?
+       WHERE terminal_outcome IS NOT NULL AND delivered_at IS NOT NULL AND cleared_at IS NULL`,
+      now,
+    );
+    return (
+      this.storage.sql.exec<{ changes: number }>("SELECT changes() AS changes").toArray()[0]
+        ?.changes ?? 0
+    );
   }
 
   /**
@@ -264,12 +364,14 @@ export class WorkLedgerStore implements WorkLedgerSink {
   terminalize(id: string, terminal: WorkTerminal): boolean {
     this.storage.sql.exec(
       `UPDATE background_work
-         SET terminal_outcome = ?, terminal_reason = ?, terminal_at = ?, terminal_detail = ?
+         SET terminal_outcome = ?, terminal_reason = ?, terminal_at = ?, terminal_detail = ?,
+             terminal_exit_code = ?
        WHERE id = ? AND terminal_outcome IS NULL`,
       terminal.outcome,
       terminal.reason,
       terminal.at,
       terminal.detail,
+      terminal.exitCode ?? null,
       id,
     );
     return (

@@ -87,9 +87,18 @@ function statusLabelFor(
  * shape, not on message.metadata: @cloudflare/think attaches the detached-notify
  * metadata to the *submission* row, never to the message applied to history, so
  * `message.metadata.source` is absent on the client.
+ *
+ * The label group is a LAZY `[\s\S]*?` up to the literal `" finished: `
+ * marker, not `[^"]*` — this regex has broken twice on the same shape:
+ * `formatSubagentCompletion` now strips `"` from the label server-side, but a
+ * run registered before that fix (or a future caller that skips it) can still
+ * carry an embedded `"`, and a strict "no quotes allowed" capture cannot match
+ * that case at all — the whole message then falls back to a raw text bubble
+ * instead of a result card. The marker string is specific enough that a label
+ * containing it verbatim is the only case the laziness could mis-split on.
  */
 const SUBAGENT_COMPLETION_RE =
-  /^<system-reminder>\s*Subagent (?:"([^"]*)"|\(unlabeled\)) finished: (\w+)\.\s*\[([^\]]+)\]\s*([\s\S]*?)\s*<\/system-reminder>\s*$/;
+  /^<system-reminder>\s*Subagent (?:"([\s\S]*?)"(?= finished: )|\(unlabeled\)) finished: (\w+)\.\s*\[([^\]]+)\]\s*([\s\S]*?)\s*<\/system-reminder>\s*$/;
 
 export interface SubagentCompletionParse {
   label?: string;

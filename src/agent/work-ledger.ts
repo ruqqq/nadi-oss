@@ -161,6 +161,20 @@ export interface WorkTerminal {
   reason: WorkReason;
   at: number;
   detail: string;
+  /**
+   * Structured exit status for a `process` row's `"exited"` outcome — the
+   * dock cannot tone a chip on failure from `outcome` alone, since `"exited"`
+   * covers exit 0 and exit 7 identically. `detail` already carries the code
+   * as prose (`"exit code 7"`), but that is not a field a client can read;
+   * this is the field. Optional and omitted for outcomes that have no exit
+   * code (fault, timeout, a user-initiated stop) and for subagent rows, which
+   * never have one — so existing fixtures/tests built before this field
+   * existed keep passing straight `toEqual` comparisons (`exactOptionalPropertyTypes`
+   * treats an omitted key and `undefined` as compatible with `?:`, but this
+   * codebase's convention — see the `?? null` writers — is to omit the key
+   * entirely rather than write `undefined`).
+   */
+  exitCode?: number | null;
 }
 
 export interface WorkRow {
@@ -199,6 +213,49 @@ export interface WorkRow {
    * filter, no guessing at ownership.
    */
   deliveredAt: number | null;
+  /**
+   * When "clear finished" hid this row from `listRecent`, or `undefined`/omitted
+   * for a row that was never cleared. NEVER a signal to delete the row — see
+   * `WORK_ROW_RETENTION_MS`'s doc: a pruned id that is later re-registered comes
+   * back as a fresh OPEN row and gets falsely faulted `no_liveness` a stale
+   * window later. "Clear finished" only needed to stop `listRecent` from
+   * returning the row, so it reuses that same non-destructive shape — a flag
+   * column, not a delete.
+   */
+  clearedAt?: number | null;
+  /**
+   * Last progress signal a `subagent` row's child reported, or
+   * `undefined`/omitted when it has reported none (and always for a `process`
+   * row, which has real output instead).
+   *
+   * Kept HERE rather than read from the SDK on demand, and the reason is a
+   * storage-locality trap worth stating plainly: the SDK's `reportProgress`
+   * persists to `cf_agent_tool_child_runs.progress_json` on the DO where it is
+   * CALLED — the child facet, which has its own storage. `inspectAgentToolRun`
+   * on the PARENT reads the parent's copy of that table, which the parent never
+   * populates (the parent's own agent-tool bookkeeping lives in a different
+   * table, `cf_agent_tool_runs`). Reading it from the parent therefore always
+   * yields nothing, which is exactly how the dock came to show "Waiting for the
+   * first update" forever.
+   *
+   * So the child pushes instead, on the liveness stamp it already sends the
+   * parent every turn (`stampSubagentAlive`) — no extra RPC, and the dock read
+   * stays a local ledger query rather than a cross-DO wake of every running
+   * child on every 5-second poll.
+   */
+  progress?: WorkProgress | null;
+}
+
+/**
+ * A subagent's self-reported progress. `phase` is a coarse machine-ish marker
+ * and `message` the human line; either may be absent, so a consumer must fall
+ * back rather than assume both.
+ */
+export interface WorkProgress {
+  message: string | null;
+  phase: string | null;
+  /** When the child reported it — NOT when the parent stored it. */
+  at: number;
 }
 
 export type WorkClassification =

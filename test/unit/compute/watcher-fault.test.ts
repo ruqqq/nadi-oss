@@ -264,6 +264,7 @@ describe("settled work closes its own ledger row (I-1)", () => {
       reason: "process_exit",
       at: now.value,
       detail: "process exited",
+      exitCode: 0,
     });
 
     // Now let the stale threshold pass with no further stamps — precisely the

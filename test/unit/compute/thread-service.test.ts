@@ -659,6 +659,155 @@ describe("ThreadComputeService output retention signal", () => {
   });
 });
 
+describe("ThreadComputeService.execOutputHeadTail", () => {
+  it("reports head, tail, and an exact hidden-line count for a long stream", async () => {
+    const { service, store, now } = createService();
+    const started = await service.execStart({ command: "sleep 300", label: "build" });
+    for (let i = 1; i <= 50; i += 1) {
+      store.appendOutput({
+        processId: started.processId,
+        stream: "stdout",
+        text: `line ${i}\n`,
+        now: now.value,
+      });
+    }
+
+    const result = await service.execOutputHeadTail({ processId: started.processId });
+
+    expect(result.head).toEqual(Array.from({ length: 20 }, (_, i) => `line ${i + 1}`));
+    expect(result.tail).toEqual(Array.from({ length: 20 }, (_, i) => `line ${31 + i}`));
+    // 50 total - 20 head - 20 tail = 10, and this must be reported, never
+    // just dropped: a silent gap between head and tail is a repeat offender
+    // in this codebase (see `hiddenLines`'s doc).
+    expect(result.hiddenLines).toBe(10);
+    expect(result.truncated).toBe(false);
+    expect(result.stream).toBe("stdout");
+  });
+
+  it("returns everything with no hidden lines for a short stream", async () => {
+    const { service, store, now } = createService();
+    const started = await service.execStart({ command: "sleep 300" });
+    store.appendOutput({
+      processId: started.processId,
+      stream: "stdout",
+      text: "hi\n",
+      now: now.value,
+    });
+
+    const result = await service.execOutputHeadTail({ processId: started.processId });
+    expect(result).toEqual({
+      head: ["hi"],
+      tail: [],
+      hiddenLines: 0,
+      truncated: false,
+      stream: "stdout",
+    });
+  });
+
+  /**
+   * Important 1: a command that writes its failure to stderr (the common case
+   * for a failed build) must not read as "no output" just because the caller
+   * defaulted to stdout — that's the exact row a user opens the sheet to
+   * investigate. Mirrors the fallback `buildOutputTail` already uses for the
+   * watcher-completion message.
+   */
+  it("falls back to stderr when stdout is empty, and reports which stream it returned", async () => {
+    const { service, store, now } = createService();
+    const started = await service.execStart({ command: "sleep 300" });
+    store.appendOutput({
+      processId: started.processId,
+      stream: "stderr",
+      text: "build failed: missing dependency\n",
+      now: now.value,
+    });
+
+    const result = await service.execOutputHeadTail({ processId: started.processId });
+    expect(result.stream).toBe("stderr");
+    expect(result.head).toEqual(["build failed: missing dependency"]);
+    expect(result.tail).toEqual([]);
+  });
+
+  it("does NOT fall back to stderr when the caller explicitly asked for stdout content that is genuinely empty and stderr also has nothing", async () => {
+    const { service } = createService();
+    const started = await service.execStart({ command: "sleep 300" });
+
+    const result = await service.execOutputHeadTail({ processId: started.processId });
+    expect(result.stream).toBe("stdout");
+    expect(result).toMatchObject({ head: [], tail: [], hiddenLines: 0 });
+  });
+
+  it("does NOT fall back when the caller explicitly requested stderr", async () => {
+    const { service, store, now } = createService();
+    const started = await service.execStart({ command: "sleep 300" });
+    store.appendOutput({
+      processId: started.processId,
+      stream: "stdout",
+      text: "stdout line\n",
+      now: now.value,
+    });
+
+    const result = await service.execOutputHeadTail({
+      processId: started.processId,
+      stream: "stderr",
+    });
+    expect(result.stream).toBe("stderr");
+    expect(result).toMatchObject({ head: [], tail: [], hiddenLines: 0 });
+  });
+
+  it("clamps headLines/tailLines to limits.tailMaxLines like execOutput does", async () => {
+    const { service, store, now } = createService();
+    const started = await service.execStart({ command: "sleep 300" });
+    // More lines than `CONFIG.limits.tailMaxLines` (200), so an unclamped
+    // request would swallow the whole stream into `head` with an empty
+    // `tail` — proving whether the clamp actually applied, not just that a
+    // small stream happens to fit either way.
+    const total = DEFAULT_COMPUTE_LIMITS.tailMaxLines + 50;
+    for (let i = 1; i <= total; i += 1) {
+      store.appendOutput({
+        processId: started.processId,
+        stream: "stdout",
+        text: `line ${i}\n`,
+        now: now.value,
+      });
+    }
+
+    // A caller-supplied count far past the configured cap must not reach the
+    // slicer unbounded — this callable is browser-reachable, unlike the
+    // model-tool exec surfaces that already clamp the same way.
+    const result = await service.execOutputHeadTail({
+      processId: started.processId,
+      headLines: 10_000,
+      tailLines: 10_000,
+    });
+    expect(result.head).toHaveLength(DEFAULT_COMPUTE_LIMITS.tailMaxLines);
+    expect(result.tail).toHaveLength(50);
+    expect(result.hiddenLines).toBe(0);
+  });
+
+  it("surfaces retention truncation independently of hiddenLines", async () => {
+    const { service, store, now } = createService();
+    const started = await service.execStart({ command: "yes" });
+    store.appendOutput({
+      processId: started.processId,
+      stream: "stdout",
+      text: "kept\n",
+      now: now.value,
+    });
+    store.updateProcess(started.processId, { outputTruncated: true });
+
+    const result = await service.execOutputHeadTail({ processId: started.processId });
+    expect(result.hiddenLines).toBe(0);
+    expect(result.truncated).toBe(true);
+  });
+
+  it("throws for an unknown process id", async () => {
+    const { service } = createService();
+    await expect(service.execOutputHeadTail({ processId: "nope" })).rejects.toThrow(
+      "sandbox_process_not_found",
+    );
+  });
+});
+
 describe("ThreadComputeService stopAllRunningProcesses", () => {
   // The UI stop button aborts the model turn, but anything the model launched
   // kept running in the container until it exited or hit maxProcessRuntimeMs.

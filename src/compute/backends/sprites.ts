@@ -188,6 +188,47 @@ function holdIdFor(processId: string): string {
  * fatal (`|| break`): killing the refresher on a single dropped `curl` would
  * let the hold lapse while the command is still running.
  *
+ * The sentinel gate alone is NOT enough, and the gap was measured rather than
+ * reasoned about: if the wrapper dies before writing rc, `[ ! -f rc ]` is never
+ * satisfied and the refresher re-`PUT`s the hold every 60s forever. Nothing
+ * outside reaps it. A live probe (child holding the sprite, deliberately short
+ * 20s `max_run_after_disconnect`) kept ticking at full duty for 185s — 9x the
+ * deadline — so `max_run_after_disconnect` does not reap a BACKGROUNDED child of
+ * the session's argv, only its foreground. Nor can anything kill it by hand: the
+ * session leaves `listSessions` the moment its foreground exits (observed at
+ * +11s), so no session id exists to target. And the service never intervenes,
+ * because `nativeIdleSuspend` makes `resolveIdleDisposition` return
+ * "recoverable" and `release(recoverable)` makes no provider call — the only
+ * thing that ends it is TTL eviction calling `destroy()` at `recoveryTtlMs`,
+ * i.e. ~24 HOURS of fully awake CPU and RAM.
+ *
+ * Hence two more stop conditions, both self-terminating because nothing else
+ * can:
+ *
+ *   - `kill -0 "$__nadi_parent"` — the wrapper is gone. `$$` is captured OUTSIDE
+ *     the subshell and used inside it, which is the same value either way; what
+ *     is NOT interchangeable is `$PPID`, which inside a backgrounded subshell
+ *     names the wrapper's PARENT (verified in bash: wrapper 24636, subshell sees
+ *     `$$`=24636 and `$PPID`=24633). A `kill -0 $PPID` guard would watch the
+ *     session runner, outlive the wrapper, and silently never fire.
+ *   - A tick cap — covers pid reuse handing `kill -0` a live stranger, and any
+ *     case where the wrapper survives but rc never lands. It is derived from
+ *     `timeoutSecs`, never a constant: a full-length run needs
+ *     `floor(timeoutSecs/60)` refreshes, so `ceil(timeoutSecs/60) + 2` leaves at
+ *     least two spare ticks, and a cap BELOW the command's own runtime would drop
+ *     the hold out from under a legitimately running command. The one case it
+ *     bounds deliberately: `timeout` sends SIGTERM without a `-k` follow-up, so a
+ *     command that ignores it keeps the wrapper alive past `timeoutSecs` with
+ *     `kill -0` still passing. There the cap lapses the hold ~2 minutes late and
+ *     the sprite hibernates mid-wrapper — the process is already wedged, the
+ *     ledger reaper handles it via `PROCESS_STALE_AFTER_MS`, and this is the
+ *     trade that keeps the bound finite.
+ *
+ * Worst case after either fires: up to 60s to notice, then `HOLD_EXPIRY` lapses
+ * on its own, so ~6 minutes of awake billing instead of 24 hours. The sprite is
+ * NOT destroyed — with no hold it hibernates, disk intact, exactly as it does
+ * between turns, and the normal 24h recovery TTL still governs deletion.
+ *
  * The rc write itself is a write-then-RENAME, not a plain redirect: `> rc`
  * creates the file before `printf` fills it, so a status poll landing in that
  * window reads an empty file. `readRcOnce` treats unparsable content as "no
@@ -238,8 +279,13 @@ export function buildSpritesWrapper(input: {
     ? `${hold.acquireFor(placeholderRef)} || ` +
       `{ printf %s 97 > ${rcPath}.tmp && mv -f ${rcPath}.tmp ${rcPath}; exit 97; }; `
     : "";
+  // Ticks are 60s and `timeout` bounds the command itself, so the command's own
+  // runtime plus two spare ticks is the longest a LEGITIMATE refresher can need.
+  const refresherCap = Math.ceil(timeoutSecs / 60) + 2;
   const refresher = hold
-    ? `( while [ ! -f ${rcPath} ]; do sleep 60; [ -f ${rcPath} ] && break; ` +
+    ? `__nadi_parent="$$"; ( __nadi_ticks=0; while [ ! -f ${rcPath} ]; do sleep 60; ` +
+      `[ -f ${rcPath} ] && break; kill -0 "$__nadi_parent" 2>/dev/null || break; ` +
+      `__nadi_ticks=$((__nadi_ticks+1)); [ "$__nadi_ticks" -gt ${refresherCap} ] && break; ` +
       `${hold.refreshFor(placeholderRef)} || true; done ) & `
     : "";
   const release = hold ? `; ${hold.releaseFor(placeholderRef)}` : "";

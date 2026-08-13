@@ -143,3 +143,31 @@ describe("subagentResultModel", () => {
     expect(model.tone).toBe("success");
   });
 });
+
+describe("SUBAGENT_COMPLETION_RE quote tolerance", () => {
+  /**
+   * The actual production bug: a label containing embedded double quotes (the
+   * observed one contained `the project "Markdump"`, via the now-fixed
+   * `label ?? task` fallback making the whole task brief the label) could not
+   * match a strict `"([^"]*)"` capture at all, so the message fell back to a
+   * raw text bubble instead of a result card. `formatSubagentCompletion` now
+   * strips `"` from the label server-side, but this proves the CLIENT side is
+   * independently robust too — this regex has broken twice, so both ends are
+   * now defensive rather than relying on the other to always sanitize first.
+   */
+  it("still parses a completion whose label contains embedded double quotes", () => {
+    const text =
+      '<system-reminder>\nSubagent "the project "Markdump"" finished: completed. [sub_1]\nDone.\n</system-reminder>';
+    const message = userMsg(text);
+    expect(isSubagentCompletionMessage(message)).toBe(true);
+    const parsed = parseSubagentCompletion(message);
+    expect(parsed?.label).toBe('the project "Markdump"');
+    expect(parsed?.status).toBe("completed");
+    expect(parsed?.runId).toBe("sub_1");
+    expect(parsed?.body).toBe("Done.");
+  });
+
+  it("still matches the plain (already-sanitized) label shape", () => {
+    expect(isSubagentCompletionMessage(completion({ label: "Repo scan" }))).toBe(true);
+  });
+});
