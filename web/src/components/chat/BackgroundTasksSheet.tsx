@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { CaretDown, CaretRight, Robot, Stop, Terminal } from "@/icons";
+import { CaretRight, Robot, Stop, Terminal } from "@/icons";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -131,28 +131,38 @@ function KindGlyph({ row, tone }: { row: BackgroundWorkRow; tone: Tone }) {
 }
 
 /**
- * The trigger for an ITEM's disclosure — one row's Output or Result.
+ * The disclosure caret for EVERYTHING that opens in this sheet — sections and
+ * the rows inside them alike.
  *
- * `CaretRight` rotating to 90°, which is this app's item-level convention
- * (`ToolRunLog`'s rows and `ActivityLine` both do exactly this): collapsed
- * points right, open points down. The sheet's SECTION headers use the other
- * convention on purpose — `CaretDown` rotating 180°, the accordion idiom — so
- * the two read as different kinds of thing rather than as an inconsistency.
+ * Collapsed points right, open points down: the disclosure-triangle convention,
+ * and what `ToolRunLog`'s rows and `ActivityLine` already do.
  *
- * These two triggers used to be written out twice, and both had borrowed the
- * SECTION caret: a collapsed `Result` pointed down while every other
- * expandable item in the app pointed right, and it sat inside a section whose
- * own expanded caret pointed up. One component now, so they cannot drift apart
- * or drift back.
+ * ONE convention on purpose. The sheet previously mixed two — `CaretDown`
+ * rotating 180° on its section headers (the accordion idiom, so open pointed
+ * UP) and nothing at all consistent on the rows, which had borrowed the section
+ * caret and so pointed down while collapsed. Whatever can be said for either
+ * idiom in isolation, showing both on one screen — a section pointing up
+ * wrapping a row pointing down, both "open" in their own vocabulary — reads as
+ * a bug. Every caret in here now rotates the same way.
  */
+function DisclosureCaret({ size }: { size: "sm" | "md" }) {
+  return (
+    <CaretRight
+      aria-hidden
+      data-testid="disclosure-caret"
+      className={cn(
+        "shrink-0 transition-transform group-data-[state=open]:rotate-90",
+        size === "sm" ? "size-3" : "size-3.5 text-muted-foreground",
+      )}
+    />
+  );
+}
+
+/** The trigger for one row's Output or Result. */
 function DisclosureTrigger({ label }: { label: string }) {
   return (
     <CollapsibleTrigger className="group flex items-center gap-1 text-muted-foreground text-xs hover:text-foreground">
-      <CaretRight
-        aria-hidden
-        data-testid="disclosure-caret"
-        className="size-3 shrink-0 transition-transform group-data-[state=open]:rotate-90"
-      />
+      <DisclosureCaret size="sm" />
       {label}
     </CollapsibleTrigger>
   );
@@ -461,10 +471,7 @@ function Section({
   return (
     <Collapsible open={open} onOpenChange={onOpenChange}>
       <CollapsibleTrigger className="group flex w-full items-center gap-2 py-1.5 text-left font-medium text-sm">
-        <CaretDown
-          aria-hidden
-          className="size-3.5 text-muted-foreground transition-transform group-data-[state=open]:rotate-180"
-        />
+        <DisclosureCaret size="md" />
         {title}
         <Badge variant="secondary">{count}</Badge>
       </CollapsibleTrigger>

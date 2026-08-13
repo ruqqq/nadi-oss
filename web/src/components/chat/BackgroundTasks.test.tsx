@@ -523,11 +523,12 @@ describe("BackgroundTasksSheet — subagent progress", () => {
     expect(document.querySelector(".h-1\\.5.w-10")).toBeNull();
   });
 
-  it("points an item disclosure right when collapsed and down when open", () => {
-    // The app's ITEM convention (ToolRunLog rows, ActivityLine): CaretRight
-    // rotating 90°. The sheet's SECTION headers use CaretDown/180° instead, and
-    // these two triggers had borrowed that one — so a collapsed Result pointed
-    // down while every other expandable item pointed right.
+  it("rotates EVERY caret the same way — sections and rows alike", () => {
+    // Right when collapsed, down when open, for the section headers AND the rows
+    // inside them. The sheet used to mix two idioms: sections on CaretDown/180°
+    // (so open pointed UP) wrapping rows that had borrowed that caret and so
+    // pointed DOWN while collapsed. Both "open" in their own vocabulary, on one
+    // screen, pointing opposite ways.
     const done = finishedSubagent("completed");
     render(
       <BackgroundTasksSheet
@@ -547,9 +548,16 @@ describe("BackgroundTasksSheet — subagent progress", () => {
     );
     // `className` on an SVG element is an SVGAnimatedString, not a string —
     // read the attribute.
-    const caret = screen.getByTestId("disclosure-caret").getAttribute("class") ?? "";
-    expect(caret).toContain("group-data-[state=open]:rotate-90");
-    expect(caret).not.toContain("rotate-180");
+    // Every caret in the sheet: the "Finished" section header and the row's
+    // Result trigger. Asserting on ALL of them is what makes this a convention
+    // test rather than a test of one component.
+    const carets = screen.getAllByTestId("disclosure-caret");
+    expect(carets.length).toBeGreaterThan(1);
+    for (const caret of carets) {
+      const className = caret.getAttribute("class") ?? "";
+      expect(className).toContain("group-data-[state=open]:rotate-90");
+      expect(className).not.toContain("rotate-180");
+    }
   });
 
   it("shows NO result disclosure when the completion is no longer in the transcript", () => {
