@@ -498,6 +498,60 @@ describe("BackgroundTasksSheet — subagent progress", () => {
     expect(screen.getByText("the answer body")).toBeInTheDocument();
   });
 
+  it("closes the way every other sheet does — one standard close, no bespoke button", () => {
+    render(<BackgroundTasksSheet {...base} rows={[finishedSubagent("completed")]} />);
+    // `SheetContent`'s own close, not a second hand-rolled one. Exactly one:
+    // opting out of the default and adding a custom button (or forgetting to opt
+    // out) both produce a sheet that closes unlike the rest of the app.
+    // Exactly one: opting out of `SheetContent`'s default and adding a custom
+    // button gives a sheet that closes unlike the rest of the app; forgetting to
+    // opt out gives two. The count catches both.
+    const closes = screen.getAllByRole("button", { name: /close/i });
+    expect(closes).toHaveLength(1);
+    // And it is the sheet's own, not the bespoke circular target this replaced.
+    expect(closes[0]?.getAttribute("class") ?? "").not.toContain("rounded-full");
+  });
+
+  it("has no grab handle promising a drag that does not exist", () => {
+    render(<BackgroundTasksSheet {...base} rows={[finishedSubagent("completed")]} />);
+    // Queried off `document`, NOT render()'s `container`: the sheet renders in a
+    // PORTAL, so container-scoped queries find nothing here whether the handle
+    // exists or not — which made the first version of this test vacuous.
+    //
+    // Radix's Dialog has no drag-to-dismiss, so a pill that looks draggable is
+    // an affordance for a gesture that never worked.
+    expect(document.querySelector(".h-1\\.5.w-10")).toBeNull();
+  });
+
+  it("points an item disclosure right when collapsed and down when open", () => {
+    // The app's ITEM convention (ToolRunLog rows, ActivityLine): CaretRight
+    // rotating 90°. The sheet's SECTION headers use CaretDown/180° instead, and
+    // these two triggers had borrowed that one — so a collapsed Result pointed
+    // down while every other expandable item pointed right.
+    const done = finishedSubagent("completed");
+    render(
+      <BackgroundTasksSheet
+        {...base}
+        rows={[done]}
+        resultFor={() => ({
+          segments: [],
+          state: "idle",
+          label: "",
+          title: "t",
+          statusLabel: "Completed",
+          tone: "ok",
+          body: "body",
+          kind: "subagent",
+        })}
+      />,
+    );
+    // `className` on an SVG element is an SVGAnimatedString, not a string —
+    // read the attribute.
+    const caret = screen.getByTestId("disclosure-caret").getAttribute("class") ?? "";
+    expect(caret).toContain("group-data-[state=open]:rotate-90");
+    expect(caret).not.toContain("rotate-180");
+  });
+
   it("shows NO result disclosure when the completion is no longer in the transcript", () => {
     // Compaction. An empty "Result" panel would state that the run returned
     // nothing, which is a different and false claim than "we no longer have it".

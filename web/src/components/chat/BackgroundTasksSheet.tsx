@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { CaretDown, Robot, Stop, Terminal, X } from "@/icons";
+import { CaretDown, CaretRight, Robot, Stop, Terminal } from "@/icons";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -130,6 +130,34 @@ function KindGlyph({ row, tone }: { row: BackgroundWorkRow; tone: Tone }) {
   );
 }
 
+/**
+ * The trigger for an ITEM's disclosure — one row's Output or Result.
+ *
+ * `CaretRight` rotating to 90°, which is this app's item-level convention
+ * (`ToolRunLog`'s rows and `ActivityLine` both do exactly this): collapsed
+ * points right, open points down. The sheet's SECTION headers use the other
+ * convention on purpose — `CaretDown` rotating 180°, the accordion idiom — so
+ * the two read as different kinds of thing rather than as an inconsistency.
+ *
+ * These two triggers used to be written out twice, and both had borrowed the
+ * SECTION caret: a collapsed `Result` pointed down while every other
+ * expandable item in the app pointed right, and it sat inside a section whose
+ * own expanded caret pointed up. One component now, so they cannot drift apart
+ * or drift back.
+ */
+function DisclosureTrigger({ label }: { label: string }) {
+  return (
+    <CollapsibleTrigger className="group flex items-center gap-1 text-muted-foreground text-xs hover:text-foreground">
+      <CaretRight
+        aria-hidden
+        data-testid="disclosure-caret"
+        className="size-3 shrink-0 transition-transform group-data-[state=open]:rotate-90"
+      />
+      {label}
+    </CollapsibleTrigger>
+  );
+}
+
 function StopButton({
   row,
   onCancel,
@@ -212,13 +240,7 @@ function ProcessOutput({
         if (next && status === "idle") void load(stream);
       }}
     >
-      <CollapsibleTrigger className="group flex items-center gap-1 text-muted-foreground text-xs hover:text-foreground">
-        <CaretDown
-          aria-hidden
-          className="size-3 transition-transform group-data-[state=open]:rotate-180"
-        />
-        Output
-      </CollapsibleTrigger>
+      <DisclosureTrigger label="Output" />
       <CollapsibleContent className="mt-2 space-y-2">
         {status === "loading" && <p className="text-muted-foreground text-xs">Loading output…</p>}
         {status === "error" && <p className="text-reject text-xs">Couldn't load output.</p>}
@@ -322,13 +344,7 @@ function SubagentResult({ model }: { model: CompletionLineModel | undefined }) {
   if (!model) return null;
   return (
     <Collapsible open={expanded} onOpenChange={setExpanded}>
-      <CollapsibleTrigger className="group flex items-center gap-1 text-muted-foreground text-xs hover:text-foreground">
-        <CaretDown
-          aria-hidden
-          className="size-3 transition-transform group-data-[state=open]:rotate-180"
-        />
-        Result
-      </CollapsibleTrigger>
+      <DisclosureTrigger label="Result" />
       <CollapsibleContent className="mt-2">
         <CompletionResultBody model={model} />
       </CollapsibleContent>
@@ -550,31 +566,23 @@ export function BackgroundTasksSheet({
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
+      {/* Close button and header padding match `ToolGroup`'s sheet exactly —
+          `SheetContent`'s own corner close, and `pr-12` to keep the title clear
+          of it. This used to opt out (`showCloseButton={false}`) for a large
+          circular button of its own, which made the one sheet reached from the
+          composer the only sheet in the app that closed differently.
+
+          There was also a grab handle here. It only ever LOOKED draggable:
+          Radix's Dialog primitive has no drag-to-dismiss, so the affordance
+          promised a gesture that did nothing. Removed rather than implemented —
+          the overlay tap and the corner close already dismiss this. */}
       <SheetContent
         side="bottom"
-        showCloseButton={false}
         style={sheetStyle}
         className="flex max-h-[85vh] flex-col gap-0 overflow-hidden p-0 pb-[env(safe-area-inset-bottom)]"
       >
-        {/* Grab handle — a thumb-reachable affordance the shadcn `Sheet`
-            doesn't give us on its own. */}
-        <div className="flex shrink-0 justify-center pt-2">
-          <div aria-hidden className="h-1.5 w-10 rounded-full bg-muted-foreground/25" />
-        </div>
-        <SheetHeader className="shrink-0 flex-row items-center justify-between border-b py-3 pr-3 pl-5 text-left">
+        <SheetHeader className="shrink-0 border-b py-3 pr-12 pl-5 text-left">
           <SheetTitle className="text-base">Background tasks</SheetTitle>
-          {/* Large circular close target, in place of the sheet's default
-              small corner X — thumb-reachable on a bottom sheet. */}
-          <Button
-            type="button"
-            aria-label="Close"
-            variant="outline"
-            size="icon-lg"
-            className="rounded-full"
-            onClick={() => onOpenChange(false)}
-          >
-            <X aria-hidden className="size-4" />
-          </Button>
         </SheetHeader>
         <ScrollArea className="min-h-0 flex-auto">
           <div className="flex flex-col gap-1 px-4 py-2">
