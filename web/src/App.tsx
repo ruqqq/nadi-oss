@@ -236,6 +236,7 @@ import { usePendingSteers } from "./lib/use-pending-steers";
 import { useToolServers } from "./lib/use-tool-servers";
 import { useSubagentEvents } from "./lib/use-subagent-events";
 import { useBackgroundWork } from "./lib/use-background-work";
+import { subagentResultsByRunId } from "./lib/completion-line";
 import { BackgroundTasksRow } from "./components/chat/BackgroundTasksRow";
 import { BackgroundTasksSheet } from "./components/chat/BackgroundTasksSheet";
 import { FeedbackDraftCard } from "./components/feedback/FeedbackDraftCard";
@@ -4606,6 +4607,17 @@ function ThreadChat({
     clearFinished: clearFinishedBackgroundWork,
   } = useBackgroundWork(agent, messages, backgroundWorkEnabled);
 
+  // The sheet's "Result" for a finished subagent, from the SAME transcript the
+  // inline completion line renders — no extra RPC, since the completion body is
+  // already in history keyed by run id. Memoized on `messages` because it walks
+  // the whole transcript, and reuses the `subagentRuns` subscription ChatLog
+  // reads rather than opening a second one.
+  const subagentResults = useMemo(
+    () => subagentResultsByRunId(messages, subagentRuns.runsById),
+    [messages, subagentRuns.runsById],
+  );
+  const resultFor = useCallback((id: string) => subagentResults[id], [subagentResults]);
+
   const trackThreadEvent = useCallback(
     (event: string, props?: Record<string, unknown>) => {
       if (canUseWorkspaceTelemetry({ consentWorkspaceId, workspaceId: thread.workspaceId })) {
@@ -5364,6 +5376,7 @@ function ThreadChat({
           cancel={cancelBackgroundWork}
           clearFinished={clearFinishedBackgroundWork}
           onChanged={() => void refreshBackgroundWork()}
+          resultFor={resultFor}
         />
 
         {browserNotificationPrompt && (

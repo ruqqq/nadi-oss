@@ -144,6 +144,7 @@ describe("BackgroundTasksSheet — the three exit-code states", () => {
     cancel: vi.fn(async () => ({ ok: true })),
     clearFinished: vi.fn(async () => ({ cleared: 0 })),
     onChanged: noop,
+    resultFor: () => undefined,
   };
 
   it("reads Exit 0 in the clean tone for a zero exit", () => {
@@ -183,6 +184,7 @@ describe("BackgroundTasksSheet — output", () => {
         readOutput={readOutput}
         cancel={vi.fn(async () => ({ ok: true }))}
         clearFinished={vi.fn(async () => ({ cleared: 0 }))}
+        resultFor={() => undefined}
         onChanged={noop}
       />,
     );
@@ -208,6 +210,7 @@ describe("BackgroundTasksSheet — output", () => {
         readOutput={readOutput}
         cancel={vi.fn(async () => ({ ok: true }))}
         clearFinished={vi.fn(async () => ({ cleared: 0 }))}
+        resultFor={() => undefined}
         onChanged={noop}
       />,
     );
@@ -228,6 +231,7 @@ describe("BackgroundTasksSheet — output", () => {
         readOutput={readOutput}
         cancel={vi.fn(async () => ({ ok: true }))}
         clearFinished={vi.fn(async () => ({ cleared: 0 }))}
+        resultFor={() => undefined}
         onChanged={noop}
       />,
     );
@@ -252,6 +256,7 @@ describe("BackgroundTasksSheet — output", () => {
         readOutput={readOutput}
         cancel={vi.fn(async () => ({ ok: true }))}
         clearFinished={vi.fn(async () => ({ cleared: 0 }))}
+        resultFor={() => undefined}
         onChanged={noop}
       />,
     );
@@ -270,6 +275,7 @@ describe("BackgroundTasksSheet — kind glyph carries state", () => {
         readOutput={vi.fn(async () => null)}
         cancel={vi.fn(async () => ({ ok: true }))}
         clearFinished={vi.fn(async () => ({ cleared: 0 }))}
+        resultFor={() => undefined}
         onChanged={noop}
       />,
     );
@@ -307,6 +313,7 @@ describe("BackgroundTasksSheet — duration", () => {
           readOutput={vi.fn(async () => null)}
           cancel={vi.fn(async () => ({ ok: true }))}
           clearFinished={vi.fn(async () => ({ cleared: 0 }))}
+          resultFor={() => undefined}
           onChanged={noop}
         />,
       );
@@ -327,6 +334,7 @@ describe("BackgroundTasksSheet — sections", () => {
         readOutput={vi.fn(async () => null)}
         cancel={vi.fn(async () => ({ ok: true }))}
         clearFinished={vi.fn(async () => ({ cleared: 0 }))}
+        resultFor={() => undefined}
         onChanged={noop}
       />,
     );
@@ -345,6 +353,7 @@ describe("BackgroundTasksSheet — sections", () => {
         readOutput={vi.fn(async () => null)}
         cancel={cancel}
         clearFinished={vi.fn(async () => ({ cleared: 0 }))}
+        resultFor={() => undefined}
         onChanged={onChanged}
       />,
     );
@@ -364,6 +373,7 @@ describe("BackgroundTasksSheet — subagent progress", () => {
     cancel: vi.fn(async () => ({ ok: true })),
     clearFinished: vi.fn(async () => ({ cleared: 0 })),
     onChanged: noop,
+    resultFor: () => undefined,
   };
 
   function subagent(overrides?: Partial<BackgroundWorkRow>): BackgroundWorkRow {
@@ -458,6 +468,68 @@ describe("BackgroundTasksSheet — subagent progress", () => {
     expect(screen.getByText(/1 clean/)).toBeInTheDocument();
     expect(screen.queryByText(/failed/)).not.toBeInTheDocument();
     expect(screen.getByTestId("bg-indicator")).toHaveAttribute("data-state", "clean");
+  });
+
+  it("shows a finished subagent's result, read from the transcript", () => {
+    const done = finishedSubagent("completed");
+    render(
+      <BackgroundTasksSheet
+        {...base}
+        rows={[done]}
+        resultFor={(id) =>
+          id === done.id
+            ? {
+                segments: [],
+                state: "idle",
+                label: "",
+                title: "List the 10 largest files",
+                statusLabel: "Completed",
+                tone: "ok",
+                body: "the answer body",
+                kind: "subagent",
+              }
+            : undefined
+        }
+      />,
+    );
+    // Collapsed by default — a sheet full of expanded results is a wall of text.
+    expect(screen.queryByText("the answer body")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("Result"));
+    expect(screen.getByText("the answer body")).toBeInTheDocument();
+  });
+
+  it("shows NO result disclosure when the completion is no longer in the transcript", () => {
+    // Compaction. An empty "Result" panel would state that the run returned
+    // nothing, which is a different and false claim than "we no longer have it".
+    render(
+      <BackgroundTasksSheet
+        {...base}
+        rows={[finishedSubagent("completed")]}
+        resultFor={() => undefined}
+      />,
+    );
+    expect(screen.queryByText("Result")).not.toBeInTheDocument();
+  });
+
+  it("offers no result for a RUNNING subagent — it shows progress instead", () => {
+    render(
+      <BackgroundTasksSheet
+        {...base}
+        rows={[subagent({ progress: { message: "3 tool calls", phase: "working", at: 5_000 } })]}
+        resultFor={() => ({
+          segments: [],
+          state: "idle",
+          label: "",
+          title: "x",
+          statusLabel: "Completed",
+          tone: "ok",
+          body: "premature body",
+          kind: "subagent",
+        })}
+      />,
+    );
+    expect(screen.getByText("3 tool calls")).toBeInTheDocument();
+    expect(screen.queryByText("Result")).not.toBeInTheDocument();
   });
 
   it("still counts a crashed subagent as failed in the dock summary", () => {

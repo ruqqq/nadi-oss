@@ -8,6 +8,8 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Sheet, SheetContent, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { useVisualViewportInset } from "@/lib/use-visual-viewport-inset";
 import { cn } from "@/lib/utils";
+import type { CompletionLineModel } from "@/lib/completion-line";
+import { CompletionResultBody } from "./CompletionResult";
 import {
   type BackgroundWorkCancelReason,
   type BackgroundWorkOutcome,
@@ -302,6 +304,38 @@ function ProcessOutput({
  * Neither remaining state renders an empty container — a blank panel here was
  * the original bug.
  */
+/**
+ * A finished subagent's result, inside the sheet.
+ *
+ * Reads the SAME model the transcript renders (`subagentResultsByRunId`), not a
+ * new RPC — the completion body is already in history, keyed by the run id that
+ * IS this row's id. So the sheet stops being a status list you have to leave in
+ * order to read the answer.
+ *
+ * `model === undefined` means the completion is not in the transcript — most
+ * often compacted out of it. Then there is NO disclosure at all: an empty
+ * "Result" panel would state that the run returned nothing, which is a
+ * different and false claim. Same rule the progress line follows.
+ */
+function SubagentResult({ model }: { model: CompletionLineModel | undefined }) {
+  const [expanded, setExpanded] = useState(false);
+  if (!model) return null;
+  return (
+    <Collapsible open={expanded} onOpenChange={setExpanded}>
+      <CollapsibleTrigger className="group flex items-center gap-1 text-muted-foreground text-xs hover:text-foreground">
+        <CaretDown
+          aria-hidden
+          className="size-3 transition-transform group-data-[state=open]:rotate-180"
+        />
+        Result
+      </CollapsibleTrigger>
+      <CollapsibleContent className="mt-2">
+        <CompletionResultBody model={model} />
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
 function SubagentProgress({ row }: { row: BackgroundWorkRow }) {
   // A finished subagent's outcome is already carried by the duration and
   // status line above, and its result renders inline in the transcript.
@@ -337,6 +371,7 @@ function TaskRow({
   now,
   readOutput,
   onCancel,
+  resultFor,
 }: {
   row: BackgroundWorkRow;
   now: number;
@@ -345,6 +380,7 @@ function TaskRow({
     stream?: BackgroundWorkOutputStream,
   ) => Promise<BackgroundWorkOutput | null>;
   onCancel: (id: string) => Promise<void>;
+  resultFor: (id: string) => CompletionLineModel | undefined;
 }) {
   const tone = toneFor(row);
   const running = isRunning(row);
@@ -383,6 +419,9 @@ function TaskRow({
         // correlate the two rather than new information.
         <div className="flex flex-col gap-1 pl-6">
           <SubagentProgress row={row} />
+          {/* Only once it has finished: a running subagent has progress to show,
+              and no result yet. */}
+          {!running && <SubagentResult model={resultFor(row.id)} />}
           <p className="font-mono text-[11px] text-muted-foreground">{row.id}</p>
         </div>
       )}
@@ -437,6 +476,7 @@ export function BackgroundTasksSheet({
   cancel,
   clearFinished,
   onChanged,
+  resultFor,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -448,6 +488,10 @@ export function BackgroundTasksSheet({
   cancel: (id: string) => Promise<{ ok: boolean; reason?: BackgroundWorkCancelReason }>;
   clearFinished: () => Promise<{ cleared: number }>;
   onChanged: () => void;
+  /** Looks up a finished subagent's result by run id, from the transcript.
+   *  `undefined` means the completion is no longer in history (compaction), and
+   *  the row then shows no Result disclosure at all. */
+  resultFor: (id: string) => CompletionLineModel | undefined;
 }) {
   const viewport = useVisualViewportInset(open);
   const sheetStyle =
@@ -548,6 +592,7 @@ export function BackgroundTasksSheet({
                     now={now}
                     readOutput={readOutput}
                     onCancel={handleCancel}
+                    resultFor={resultFor}
                   />
                 ))}
               </Section>
@@ -566,6 +611,7 @@ export function BackgroundTasksSheet({
                     now={now}
                     readOutput={readOutput}
                     onCancel={handleCancel}
+                    resultFor={resultFor}
                   />
                 ))}
               </Section>
