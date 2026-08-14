@@ -74,6 +74,21 @@
 # proxied to MinIO's real port.
 #
 # Harmless without the `minio` profile: nothing routes here, so nothing asks.
+#
+# ONLY the attachments bucket is served here. The same MinIO also holds the
+# FLEET bucket — the registry, every thread's history, and the workspace
+# secrets — and celld reaches that one over S3_ENDPOINT_INTERNAL, never from a
+# browser. Without this matcher a deployment that exposes S3_SITE publicly puts
+# the whole database one credential away from the internet.
+#
+# Both path forms are needed: presigned object URLs are path-style
+# (/<bucket>/<key>) and the S3 facade lists with /<bucket>?<params>.
 {$S3_SITE} {
-	reverse_proxy minio:9000
+	@attachments path /{$S3_ATTACHMENTS_BUCKET_NAME} /{$S3_ATTACHMENTS_BUCKET_NAME}/*
+	handle @attachments {
+		reverse_proxy minio:9000
+	}
+	handle {
+		respond 404
+	}
 }
