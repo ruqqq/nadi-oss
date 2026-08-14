@@ -51,12 +51,16 @@ services:
       # host: Caddy is the only thing that should reach it.
       - "--listen"
       - "0.0.0.0:8080"
-      # celld REFUSES to start on an unspecified listen address without this —
-      # it is the address peers would dial. There are no peers in the
-      # single-node posture this deployment is built around, but the flag is
-      # still mandatory, so it names this container on the compose network.
-      - "--advertise"
-      - "celld:8080"
+      # celld REFUSES to start on an unspecified listen address without an
+      # explicit internal listener: since v0.2.0 the public listener carries
+      # only the Worker's routes, and peer traffic plus the operator API
+      # (/state, /shutdown) live on a second port. That API is UNAUTHENTICATED
+      # — it can evict cells and stop the node — so bind it to loopback INSIDE
+      # the container, where nothing else on the compose network can dial it.
+      # There are no peers in the single-node posture this deployment is built
+      # around, so no --advertise is needed at all.
+      - "--internal-listen"
+      - "127.0.0.1:8081"
     environment:
       CELLD_VARS_FILE: /etc/nadi/celld-vars.env
       # Bounds what an unclean stop costs, by deciding how soon a quiet cell

@@ -160,9 +160,10 @@ application tier, no leader.
               │  host A    ││  host B    ││  host C    │
               │  caddy :80 ││  caddy :80 ││  caddy :80 │
               │    │       ││    │       ││    │       │
-              │  celld:8080││  celld:8080││  celld:8080│
+              │  celld:8080││  celld:8080││  celld:8080│  ← Worker routes
+              │      :8081 ││      :8081 ││      :8081 │  ← peers + operator API
               └──────┬─────┘└─────┬──────┘└────┬───────┘
-                     └──── peer mesh, private network, PLAINTEXT ────┘
+                     └─ peer mesh on :8081, private network, PLAINTEXT ─┘
                                   │
                        external S3: the fleet bucket
                        (this bucket IS the cluster)
@@ -183,10 +184,12 @@ nothing will tell you.
 
 ## Prerequisites
 
-- **A private network between the hosts.** Peer traffic is unencrypted. celld
-  refuses to advertise a public IP unless you set
-  `CELLD_UNSAFE_PUBLIC_ADVERTISE`, and that flag is named accurately. A cloud
-  VPC, a private-networking interface, or WireGuard. Not the open internet.
+- **A private network between the hosts.** Peer traffic is unencrypted, and
+  the same internal port serves an operator API that permits unauthenticated
+  state inspection, eviction and shutdown. celld refuses to advertise a public
+  IP unless you set `CELLD_UNSAFE_PUBLIC_ADVERTISE=1`, and that flag is named
+  accurately. A cloud VPC, a private-networking interface, or WireGuard. Not
+  the open internet.
 - **External S3.** R2, AWS, or a MinIO cluster of its own. Every node must
   reach the same bucket, so the bundled single-host MinIO is not an option and
   the multi-node stack has no `minio` profile.
@@ -211,13 +214,13 @@ In `.env.multinode`, exactly two values differ per host:
 
 | Variable          | Host A           | Host B           |
 | ----------------- | ---------------- | ---------------- |
-| `CELLD_ADVERTISE` | `10.0.0.11:8080` | `10.0.0.12:8080` |
+| `CELLD_ADVERTISE` | `10.0.0.11:8081` | `10.0.0.12:8081` |
 | `PEER_BIND_IP`    | `10.0.0.11`      | `10.0.0.12`      |
 
 `CELLD_ADVERTISE` is the address **peers dial**, so it cannot be a Docker
-service name. The single-node file passes `--advertise celld:8080` and gets
-away with it only because it has no peers; copying that into a cluster gives
-every node the same unroutable name.
+service name, and since celld v0.2.0 it names the _internal_ listener (8081),
+not the public Worker port (8080). The single-node file has no peers and omits
+it entirely.
 
 Then once, from any host:
 

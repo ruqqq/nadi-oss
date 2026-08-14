@@ -43,11 +43,13 @@ ECDH is available rather than by platform, and verified byte-identical to the
 Cloudflare path. VAPID keys in either common format work — a raw 32-byte scalar
 (what `web-push generate-vapid-keys` emits) or PKCS#8.
 
-**GitHub App auth works**, though celld's WebCrypto has no RSA: the RS256 JWT
-that private-repo clone/push needs is signed in-repo with BigInt, selected by
-probing whether native `importKey("pkcs8", …, RSASSA-PKCS1-v1_5)` succeeds
-rather than by platform, and verified byte-identical to the Cloudflare path in
-the integration suite. Only PKCS#8 keys are accepted — if your GitHub App key
+**GitHub App auth works**, though celld's WebCrypto cannot sign with RSA: the
+RS256 JWT that private-repo clone/push needs is signed in-repo with BigInt,
+selected by probing whether the runtime can actually *sign* rather than by
+platform, and verified byte-identical to the Cloudflare path in the integration
+suite. (The probe signs rather than merely importing because v0.2.0 accepts the
+key import and then refuses the signature — see
+[Upgrading celld](#upgrading-celld).) Only PKCS#8 keys are accepted — if your GitHub App key
 is PKCS#1 (`BEGIN RSA PRIVATE KEY`), convert it with
 `openssl pkcs8 -topk8 -nocrypt -in github-app.pem -out github-app-pkcs8.pem`.
 
@@ -111,15 +113,46 @@ avoid this.
 > write concurrency matters.
 >
 > Reproduced on a minimal worker
-> (github.com/ruqqq/celld-incomplete-backup-repro). On Nadi itself we have only
-> observed the plain rollback above, never this corruption — treat them as two
-> distinct problems, not one. Root-caused upstream to a capture/checkpoint race
-> in celld's LTX replication; a fix is in review.
+> (github.com/ruqqq/celld-incomplete-backup-repro). Root-caused upstream to a
+> capture/checkpoint race in celld's LTX replication; a fix is in review.
+>
+> **v0.2.0 does not fix it, and on Nadi it now presents as silent corruption
+> rather than a loud failure.** Observed on the packaged stack under a
+> write-heavy run (a forced compaction seeding 60 messages, the search
+> projector reindexing behind it, then thread deletes and a restart): a restore
+> produced a registry whose `PRAGMA integrity_check` fails — rowids out of
+> order in `thread_index` itself and in `thread_search_messages`, four indexes
+> over `thread_index` with the wrong entry count, an unused page. The two
+> restores before it were clean, so the damage entered at one restore and then
+> replicated, surviving every subsequent restart. `REINDEX` cannot repair it
+> (the table B-tree, not just the indexes, is inconsistent).
+>
+> The app-visible symptom is narrow and misleading: every other registry read
+> and write kept working, and only the thread-list query — the one joining
+> `automata` through a damaged index — failed, taking `/api/bootstrap` and
+> `/api/threads` to a 500. **Do not read "the app mostly works" as "the
+> database is fine."** `sqlite3 PRAGMA integrity_check` on the node's working
+> copy is the check that tells the truth:
+>
+> ```bash
+> D=$(docker exec nadi-celld-celld-1 sh -c 'ls -d /tmp/celld-1/Registry*/ltx/*/ | tail -1')
+> docker cp "nadi-celld-celld-1:${D}db.sqlite" ./registry.sqlite
+> sqlite3 ./registry.sqlite 'PRAGMA integrity_check;'
+> ```
+>
+> Recovery is from your bucket backup. `sqlite3 .recover` reads the data out of
+> a damaged copy, but there is no supported way to hand a repaired file back to
+> celld — it restores from the bucket at startup and discards local state. This
+> is the strongest argument for the backup section below, and for keeping write
+> concurrency low.
 
 ## Prerequisites
 
 - A machine with Node 22+, `pnpm`, and `git`.
-- **celld**: `curl -fsSL https://celld.dev/install.sh | sh`
+- **celld v0.2.0**: `curl -fsSL https://celld.dev/install.sh | sh` (add
+  `CELLD_VERSION=v0.2.0` to pin). This is the version Nadi is verified against
+  and the one `deploy/celld/Dockerfile` pins. See
+  [Upgrading celld](#upgrading-celld) before moving it.
 - **An S3-compatible bucket.** [MinIO](https://min.io) is fine and is what this
   was tested against; so is Cloudflare R2 or AWS S3. You need two buckets, or one
   bucket and one prefix: the *fleet* bucket celld replicates into, and an
@@ -471,6 +504,46 @@ curl -H "x-debug-token: $DEBUG_TOKEN" http://127.0.0.1:8080/api/debug/celld-tick
 
 A `lastTickMs` older than a couple of minutes means the ticker is not running.
 
+## Upgrading celld
+
+Nadi pins **v0.2.0** (`CELLD_VERSION` in `deploy/celld/Dockerfile`). What the
+v0.1.0 → v0.2.0 move cost, verified here rather than read off the release notes:
+
+**The listener flags changed, and a v0.1.0 command line does not start.** A
+non-loopback `--listen` now requires `--internal-listen`; `--advertise` names
+that internal address and is peers-only. Both Compose files were updated. The
+upgrade must not be rolling — stop every old node, then start the new ones.
+
+**An in-place upgrade reads the old data.** A v0.2.0 node restored cells
+written by v0.1.0 with no migration step: sign-in, workspace, agent, threads
+and the ticker's persisted alarm all survived.
+
+**Two crypto capabilities moved half-way, which is worse than not moving.**
+v0.2.0 announces ECDH derivation and PKCS#8 import. Measured on the runtime:
+
+| Operation | v0.2.0 |
+| --- | --- |
+| `importKey("pkcs8", …, RSASSA-PKCS1-v1_5)` | **succeeds** (v0.1.0 threw) |
+| `sign("RSASSA-PKCS1-v1_5", …)` | still `NotSupportedError` |
+| `importKey("pkcs8", …, ECDH)`, `generateKey(ECDH)` | **succeed** |
+| `importKey("raw", …, ECDH)` → so `deriveBits` | still `NotSupportedError` |
+| ECDSA sign, AES-GCM | work, as before |
+
+Nadi picks its in-repo shims by probing the runtime, and the RS256 probe used
+to stop at the import — so on v0.2.0 it reported native RSA, took the native
+path, and threw on every GitHub App JWT, breaking all private-repo clone/push.
+The probe now signs (`nativeRsaAvailable`, `src/github/jwt.ts`). The web-push
+ECDH probe already exercised the whole derivation and was unaffected. **If you
+touch either probe, probe the operation that has to work, not a proxy for it.**
+
+**The first request to a cell after a restart can fail once.** Observed:
+`RestoreFailed … database disk image is malformed`, which then re-restored from
+the replicated objects and served normally on retry. Like the
+`remote RPC owner was stale` window, it clears itself — but it is a hard error
+to the caller, so a client with no retry sees a 500.
+
+**It does not fix the replication corruption below.** See the warning there.
+
 ## Backups
 
 The fleet bucket is the durable copy of everything: the registry, every thread's
@@ -530,12 +603,19 @@ case the ticker never replicates and does not survive restarts. Check
 **A route 404s that should exist** — `/api/debug/*` requires `DEBUG_TOKEN` to be
 set *and* the matching `x-debug-token` header.
 
-**The node exits immediately with `--advertise is required when --listen uses
-an unspecified address`** — celld refuses to bind `0.0.0.0` without being told
-the address peers would dial, even though the recommended posture has no peers.
-The Compose file passes `--advertise celld:8080` for this. Running celld by
+**The node exits immediately with `a non-loopback --listen or CELLD_ADDR
+requires an explicit --internal-listen or CELLD_INTERNAL_ADDR`** — since
+v0.2.0 celld serves the Worker's routes on `--listen` and everything else
+(peer traffic, and the operator API `/state` + `/shutdown`) on a second
+listener, and it will not reuse the public one for both. The Compose file
+passes `--internal-listen 127.0.0.1:8081` for this: with a single node there
+are no peers, so the internal listener stays on loopback inside the container
+where nothing can reach the unauthenticated operator routes. Running celld by
 hand on `0.0.0.0` needs the same flag; the localhost form in step 4 does not,
 because `127.0.0.1` is not an unspecified address.
+
+On v0.1.0 this same situation demanded `--advertise` instead. That flag now
+names the *internal* address and is only needed with peers.
 
 **Caddy exits on startup with an `email` or site-address parse error** — a
 `*_SITE` variable is empty. All three (`NADI_SITE`, `ARTIFACTS_SITE`,
