@@ -414,7 +414,16 @@ describe("resolveComputeService (real D1 + real DO storage)", () => {
       expect(resolved).toBeNull();
     });
 
-    expect(snapshotSpy).not.toHaveBeenCalled();
+    // Scoped to THIS thread on purpose. The spy is installed on the prototype,
+    // so a bare `not.toHaveBeenCalled()` also fails on calls made by anything
+    // else alive in the isolate — background work from another suite, an alarm
+    // still draining — none of which says anything about the behaviour under
+    // test. That is exactly how this flaked in CI: the recorded call was for an
+    // app-generated `thr_c6ff892e-…`, while every thread in this file is a
+    // deterministic `thr_resolve_*`. The claim is "resolving a
+    // compute-disabled thread does not query ITS snapshot", and this asserts
+    // that claim rather than a global that the test cannot control.
+    expect(snapshotSpy).not.toHaveBeenCalledWith(threadId);
   });
 
   /**
