@@ -2,6 +2,7 @@ import { routeAgentRequest } from "agents";
 import { handleArtifactHostRequest } from "./artifacts/serve";
 import type { Env } from "./env";
 import { authorizeAgentRequest } from "./agent-routing/authorize";
+import { rewriteToPublicOrigin } from "./agent-routing/public-origin";
 import { VOICE_PARTY_PREFIX, rewriteVoiceRoom } from "./agent-routing/voice-room";
 import { validateRequestSession } from "./auth/session";
 import { canonicalRedirectUrl } from "./http/canonical-host";
@@ -66,7 +67,16 @@ export default {
       req.method === "GET" &&
       req.headers.get("upgrade")?.toLowerCase() !== "websocket"
     ) {
-      return (await routeAgentRequest(req, env)) ?? new Response("Not found", { status: 404 });
+      // Behind a TLS-terminating proxy the Worker sees http:// while the OAuth
+      // provider was given the https:// callback built from APP_BASE_URL. The
+      // SDK matches by origin, so without this the callback falls through to
+      // the base onRequest and answers "Not implemented". No-op wherever the
+      // request already arrives on the public origin.
+      const publicUrl = rewriteToPublicOrigin(url, env.APP_BASE_URL);
+      const forwarded = publicUrl ? new Request(publicUrl, req) : req;
+      return (
+        (await routeAgentRequest(forwarded, env)) ?? new Response("Not found", { status: 404 })
+      );
     }
 
     if (url.pathname.startsWith("/think-agents/")) {
