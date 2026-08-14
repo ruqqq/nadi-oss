@@ -97,6 +97,10 @@ services:
       ARTIFACTS_SITE: ${ARTIFACTS_SITE}
       S3_SITE: ${S3_SITE}
       ACME_EMAIL: ${ACME_EMAIL}
+      # Load-bearing: the Caddyfile's S3 block matches on this to expose ONLY
+      # the attachments bucket. Unset, the placeholder expands to nothing and
+      # the matcher silently matches no request at all.
+      S3_ATTACHMENTS_BUCKET_NAME: ${S3_ATTACHMENTS_BUCKET_NAME}
     networks:
       default:
         aliases:

@@ -39,3 +39,10 @@ scratch
 # The operator's own filled-in copies, which sit next to the Dockerfile.
 deploy/celld/.env
 deploy/celld/celld-vars.env
+
+# Runtime state (MinIO's data, Caddy's certs) written by containers running as
+# root. On Linux the build context is read as the invoking user, so leaving
+# this in fails `docker compose run --rm deploy` outright with "permission
+# denied" — and the README's own order provokes it, since `up -d` creates these
+# directories before the deploy build runs. Docker Desktop hides this.
+deploy/celld/data
