@@ -58,19 +58,27 @@ services:
       - "${S3_ENDPOINT_INTERNAL}"
       - "--listen"
       - "0.0.0.0:8080"
+      # Since v0.2.0 peers and the operator API have their OWN port, separate
+      # from the public Worker listener above. This is the one that carries
+      # cluster traffic, so it is the one published below.
+      - "--internal-listen"
+      - "0.0.0.0:8081"
       # THE per-host value, and the one thing most likely to be wrong. Peers
       # read this out of the fleet bucket and dial it directly, so it must be
-      # an address reachable from the OTHER hosts — not a Docker service name.
-      # The single-node file gets away with `celld:8080` precisely because it
-      # has no peers.
+      # an address reachable from the OTHER hosts — not a Docker service name —
+      # and it must name the INTERNAL port (8081), not the public one. The
+      # single-node file omits it entirely, because it has no peers.
       - "--advertise"
       - "${CELLD_ADVERTISE}"
     ports:
-      # Peer traffic is unencrypted (celld refuses a public advertise address
-      # without --unsafe-public-advertise, and that flag is named honestly).
-      # Bind the peer port to the PRIVATE interface only. Never 0.0.0.0 here:
-      # this port speaks for the whole cluster's storage.
-      - "${PEER_BIND_IP}:8080:8080"
+      # Peer traffic is unencrypted, and the operator API on this same port
+      # permits unauthenticated eviction, state inspection and shutdown. (celld
+      # refuses a public advertise address without --unsafe-public-advertise,
+      # and that flag is named honestly.) Bind it to the PRIVATE interface
+      # only. Never 0.0.0.0 here: this port speaks for the whole cluster's
+      # storage. The public 8080 stays unpublished — Caddy reaches it over the
+      # compose network.
+      - "${PEER_BIND_IP}:8081:8081"
     environment:
       CELLD_VARS_FILE: /etc/nadi/celld-vars.env
       # Two knobs decide how much a node dying costs, and they compound:

@@ -38,9 +38,12 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates curl \
   && rm -rf /var/lib/apt/lists/*
 ENV CELLD_INSTALL_ROOT=/usr/local
-# Pin with --build-arg CELLD_VERSION=… to make the image reproducible; unset
-# takes the latest release, which means two builds a week apart differ.
-ARG CELLD_VERSION=""
+# Pinned so the image is reproducible and so it matches the version this
+# deployment was actually verified against. Override with --build-arg
+# CELLD_VERSION=… ; an empty value takes the latest release, which means two
+# builds a week apart differ. Do not move this without re-reading the upgrade
+# notes in docs/self-hosting-celld.md — v0.2.0 changed the listener flags.
+ARG CELLD_VERSION="v0.2.0"
 RUN CELLD_VERSION="${CELLD_VERSION}" sh -c 'curl -fsSL https://celld.dev/install.sh | sh'
 
 # --- web-server: Caddy with the SPA baked in --------------------------------

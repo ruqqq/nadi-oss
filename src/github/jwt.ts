@@ -7,16 +7,24 @@ function b64urlJson(value: unknown): string {
 }
 
 /**
- * Capability probe: does this runtime's native WebCrypto support RSA? celld's
- * WebCrypto rejects any RSA key import with `unsupported key import`, so one
- * PKCS#8 import answers the question. Choosing by capability rather than
- * platform means a future celld that gains RSA silently stops using the shim.
+ * Capability probe: does this runtime's native WebCrypto support RSA? Choosing
+ * by capability rather than platform means a future celld that gains RSA
+ * silently stops using the shim.
  *
- * The probe imports the caller's own key rather than an embedded one: it is
- * the exact operation the native path would perform, and it keeps a private
- * key blob out of this source file. A key that fails to import for some
- * *other* reason (corrupt DER) falls through to the shim, which reports a
- * precise parse error instead of WebCrypto's opaque `DataError`.
+ * **The probe signs, it does not merely import.** It used to stop at the
+ * PKCS#8 import, on the reasoning that a runtime without RSA rejects the key
+ * outright — which celld 0.1.0 did (`unsupported key import`). celld 0.2.0
+ * broke that assumption: it accepts the import and then throws on sign
+ * (`unsupported sign algorithm: RSASSA-PKCS1-V1_5`), so an import-only probe
+ * reports native support, takes the native path, and fails every GitHub App
+ * JWT — i.e. all private-repo clone/push. Probe the operation that has to
+ * work, not a proxy for it.
+ *
+ * The probe uses the caller's own key rather than an embedded one: it is the
+ * exact operation the native path would perform, and it keeps a private key
+ * blob out of this source file. A key that fails for some *other* reason
+ * (corrupt DER) falls through to the shim, which reports a precise parse error
+ * instead of WebCrypto's opaque `DataError`.
  *
  * The result is memoized per isolate; a deployment has one GitHub App key.
  */
@@ -27,13 +35,14 @@ export async function nativeRsaAvailable(pkcs8Der: Uint8Array): Promise<boolean>
     return nativeRsaCached;
   }
   try {
-    await crypto.subtle.importKey(
+    const key = await crypto.subtle.importKey(
       "pkcs8",
       pkcs8Der.buffer as ArrayBuffer,
       { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
       false,
       ["sign"],
     );
+    await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, new Uint8Array([0]));
     nativeRsaCached = true;
   } catch {
     nativeRsaCached = false;

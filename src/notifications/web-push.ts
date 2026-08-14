@@ -34,9 +34,15 @@ export function isWebPushConfigured(env: PushEnv): boolean {
 /**
  * Capability probe: does this runtime's native WebCrypto support ECDH?
  * web-push-neo encrypts payloads with native ECDH, which celld's WebCrypto
- * lacks (it throws `NotSupportedError: unsupported key algorithm: ECDH`).
- * Choosing by capability rather than platform means a future celld that gains
- * ECDH silently stops using the shim. The result is memoized per isolate.
+ * lacks. Choosing by capability rather than platform means a future celld that
+ * gains ECDH silently stops using the shim. The result is memoized per isolate.
+ *
+ * It probes the WHOLE derivation, and that is load-bearing rather than
+ * thorough-for-its-own-sake: on celld 0.2.0 `generateKey` and a PKCS#8 import
+ * both succeed, and only the `raw` public import fails (`NotSupportedError:
+ * unsupported key import`). A probe that stopped at either earlier step would
+ * report native support and then throw mid-encryption. (The RS256 probe in
+ * `github/jwt.ts` learned this the hard way — see the note there.)
  */
 let nativeEcdhCached: boolean | undefined;
 

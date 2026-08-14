@@ -263,4 +263,43 @@ describe("RS256 on the celld path (workers-pool oracle)", () => {
       signSpy.mockRestore();
     }
   });
+
+  it("7. a runtime that imports RSA keys but cannot sign with them falls back to the shim", async () => {
+    // celld 0.2.0 exactly: `importKey("pkcs8", …, RSASSA-PKCS1-v1_5)` resolves,
+    // and `sign` then throws `unsupported sign algorithm`. An import-only probe
+    // called that native support and broke every GitHub App JWT — i.e. all
+    // private-repo clone/push — so the probe has to reach the sign.
+    vi.resetModules();
+    const freshJwt = await import("../../src/github/jwt");
+
+    const realSign = crypto.subtle.sign.bind(crypto.subtle);
+    const signSpy = vi
+      .spyOn(crypto.subtle, "sign")
+      .mockImplementation((algorithm, key, data): Promise<ArrayBuffer> => {
+        const name = typeof algorithm === "string" ? algorithm : algorithm.name;
+        if (name === "RSASSA-PKCS1-v1_5") {
+          throw new Error("NotSupportedError: unsupported sign algorithm: RSASSA-PKCS1-V1_5");
+        }
+        return realSign(algorithm, key, data);
+      });
+
+    try {
+      expect(await freshJwt.nativeRsaAvailable(pkcs8Der)).toBe(false);
+
+      // And the production entry still mints a JWT that verifies — via the shim.
+      const jwt = await freshJwt.createAppJwt(configWith(pkcs8Pem), NOW_MS);
+      const parts = jwt.split(".");
+      expect(parts).toHaveLength(3);
+      expect(
+        await crypto.subtle.verify(
+          "RSASSA-PKCS1-v1_5",
+          publicKey,
+          b64urlDecode(parts[2]!),
+          textEncoder.encode(`${parts[0]}.${parts[1]}`),
+        ),
+      ).toBe(true);
+    } finally {
+      signSpy.mockRestore();
+    }
+  });
 });
