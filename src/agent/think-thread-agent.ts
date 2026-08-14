@@ -255,6 +255,13 @@ const WORKSPACE_TOOL_NAMES = new Set([
 ]);
 
 /** DO storage key for this thread's single, thread-scoped composer draft. */
+/**
+ * How long a turn will wait for in-flight MCP tool discovery before starting
+ * without it. Generous enough for a real remote handshake plus discovery, short
+ * enough that an unreachable server costs one turn's tools rather than the turn.
+ */
+const MCP_DISCOVERY_WAIT_MS = 5_000;
+
 const DRAFT_STORAGE_KEY = "composer:draft";
 const FEEDBACK_ACTIVE_INTERVIEW_STORAGE_KEY = "feedback:active-interview";
 const FEEDBACK_DRAFT_STORAGE_KEY = "feedback:draft";
@@ -1354,6 +1361,20 @@ export class ThinkThreadAgent extends Think<Env> {
     // turn must wait for it here before reading `this.mcp.getAITools()`. Usually
     // already settled by the time the user sends a message; memoized after.
     await this._ensureMcpServers();
+    // `_ensureMcpServers` resolves when each server is CONNECTED, which is not
+    // when its tools exist: discovery runs after the handshake, and the SDK
+    // also restores connections by itself when a cell wakes from hibernation.
+    // Reading `getAITools()` in between yields an incomplete tool set and the
+    // SDK's own warning ("Reading tools from connection … in state
+    // 'discovering'"), i.e. a turn that silently cannot see its MCP tools.
+    // Observed on celld, where an evicted cell wakes on the message that starts
+    // the turn; a warm cell mostly hides it.
+    //
+    // Bounded on purpose. This is the turn's hot path, and `waitForConnections`
+    // defaults to waiting indefinitely — one unreachable MCP server would hang
+    // every turn. It never rejects, so a server that is slow or dead simply
+    // misses this turn and is picked up by the next one.
+    await this.mcp.waitForConnections({ timeout: MCP_DISCOVERY_WAIT_MS });
     const mcpTurnConfig = await this.buildMcpPolicyTurnConfig(_ctx, runtimeConfig.workspaceId);
 
     // Merge sandbox tools into the turn tool set (Think merges TurnConfig.tools

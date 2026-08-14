@@ -447,12 +447,31 @@ rather than a limit of the runtime. If you need the availability, there is an
 untested starting point in [`deploy/celld/README.md`](../deploy/celld/README.md)
 — read what failover costs there before deciding it is worth it.
 
-**`CELLD_IDLE_EVICT_S` = 31–40 s.** This is the only thing bounding what a crash
-costs, because it decides how soon a quiet cell replicates. It must also stay
-well below the scheduler's 60-second tick: at 35 s, each cycle leaves a ~25 s
-quiet window in which the registry replicates. Raise it past ~60 s and the
-registry never idles, never replicates, and a crash loses everything back to the
-last restart.
+**`CELLD_IDLE_EVICT_S` = 300.** This decides how long a quiet cell stays
+resident, and the default is deliberately high.
+
+The old guidance here was 31–40 s, for two reasons that were true on celld
+v0.1.0 and are not on v0.2.0. Replication happened *only* on idle eviction, so a
+low threshold bounded what a crash cost; and anything past the scheduler's
+60-second tick meant the registry never idled and therefore never replicated at
+all. Measured against v0.2.0: the bucket now carries **one LTX frame per
+transaction**, an unquiesced `SIGKILL` with the container destroyed 0.1 s after
+the last write lost **0 of 25** registry rows, and with this set to 300 and the
+ticker watchdog stopped the scheduler's alarm still fired after a node restart.
+
+What the high value buys is warmth, and the cost of getting it wrong is
+concrete. When a thread's cell is evicted between messages, the next message
+pays for it three times over: the transcript is restored from the bucket before
+the turn can start (805 KB across 22 objects on a young thread, and it grows
+with the thread), the MCP servers are re-connected and re-discovered, and any
+hibernatable WebSocket goes with the cell — which a client can be slow to
+notice, leaving it on a dead socket watching nothing arrive.
+
+**Treat 300 as a choice rather than a proof.** The measurements above are one
+pass against a local MinIO, and the durability defect that motivated the old
+low value is still open upstream; the assumption baked in here is that it gets
+fixed. If you would rather not make that bet, lower it — but stay above 31, for
+the heartbeat reason below.
 
 The lower bound is not about durability but about a heartbeat. The SPA posts
 presence every 30 s (`setInterval(sendPresence, 30_000)`, `web/src/App.tsx`), so

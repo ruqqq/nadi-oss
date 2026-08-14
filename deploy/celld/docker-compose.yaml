@@ -63,9 +63,12 @@ services:
       - "127.0.0.1:8081"
     environment:
       CELLD_VARS_FILE: /etc/nadi/celld-vars.env
-      # Bounds what an unclean stop costs, by deciding how soon a quiet cell
-      # replicates. Must stay well under the 60s ticker interval.
-      CELLD_IDLE_EVICT_S: ${CELLD_IDLE_EVICT_S:-15}
+      # How long a quiet cell stays resident. Keep it HIGH: an evicted thread
+      # cell restores its whole transcript from the bucket on the next message,
+      # re-discovers its MCP servers, and drops its hibernatable WebSockets.
+      # The old "stay under the 60s tick" rule was a v0.1.0 constraint and no
+      # longer holds — see the long note in .env.example.
+      CELLD_IDLE_EVICT_S: ${CELLD_IDLE_EVICT_S:-300}
       # Without this the ticker's always-imminent 60s alarm keeps its cell
       # resident forever, so it never replicates and scheduled work silently
       # stops after a restart.

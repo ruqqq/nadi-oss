@@ -2314,6 +2314,44 @@ describe("ThinkThreadAgent spike", () => {
     expect(result.startedBeforeRelease).toBe(true);
   });
 
+  // `_ensureMcpServers` resolves on CONNECTED, not on discovered — so without
+  // the wait, beforeTurn reads `getAITools()` while discovery is still running
+  // and assembles a turn with an incomplete tool set. It fails silently: the
+  // model simply does not see those tools. Found live on celld, where a cell
+  // evicted between messages wakes on the turn itself.
+  it("waits for MCP discovery to settle before reading the tool set", async () => {
+    await seedRegistryThread(env.REGISTRY_DB, {
+      workspaceId: "workspace-mcp-discovery-wait",
+      agentId: "agent-mcp-discovery-wait",
+      threadId: "think-mcp-discovery-wait",
+    });
+    const stub = env.THINK_THREAD_AGENT.get(
+      env.THINK_THREAD_AGENT.idFromName("think-mcp-discovery-wait"),
+    );
+    const order = await runInThinkDo(stub, async (instance: any) => {
+      const seen: string[] = [];
+      instance._connectEnabledMcpServers = async () => {
+        seen.push("connect");
+      };
+      instance.mcp.waitForConnections = async (options: { timeout?: number }) => {
+        seen.push(`wait:${options?.timeout}`);
+      };
+      const realGetAITools = instance.mcp.getAITools.bind(instance.mcp);
+      instance.mcp.getAITools = () => {
+        seen.push("getAITools");
+        return realGetAITools();
+      };
+      await instance.__unsafe_ensureInitialized();
+      await instance.beforeTurnProbeForTest();
+      return seen;
+    });
+
+    // The timeout is asserted, not just the ordering: `waitForConnections`
+    // defaults to waiting FOREVER, so dropping the bound would let one
+    // unreachable MCP server hang every turn on this thread.
+    expect(order).toEqual(["connect", "wait:5000", "getAITools"]);
+  });
+
   // Three one-line wirings with no other test coverage, each of which fails
   // SILENTLY when reverted: `contextOverflow.proactive` (Think skips the guard
   // when maxInputTokens is absent), `classifyChatError` (reactive recovery becomes
