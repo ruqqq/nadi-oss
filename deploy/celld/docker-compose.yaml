@@ -91,6 +91,11 @@ services:
       context: ../..
       dockerfile: deploy/celld/Dockerfile
       target: web-server
+      args:
+        # Only needed when this deployment is installed as a PWA alongside
+        # another one; see .env.example. Changing it requires a rebuild
+        # (`docker compose build caddy`), not just a restart.
+        APP_NAME: ${APP_NAME:-}
     restart: unless-stopped
     ports:
       - "80:80"

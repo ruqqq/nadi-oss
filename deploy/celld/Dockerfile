@@ -30,6 +30,13 @@ RUN pnpm install --frozen-lockfile
 # --- web-build: the SPA bundle ---------------------------------------------
 FROM deps AS web-build
 COPY . .
+# The PWA's install name (manifest + the iOS home-screen meta) is baked at
+# build time, unlike the in-app title which the Worker's APP_NAME already
+# drives at runtime. Set this when a deployment is installed ALONGSIDE another
+# one — otherwise both appear in the launcher as an identical "Nadi". Blank
+# falls back to "Nadi" in web/vite.config.ts.
+ARG APP_NAME=""
+ENV APP_NAME=${APP_NAME}
 RUN pnpm web:build
 
 # --- celld-bin: the celld binary, fetched once ------------------------------

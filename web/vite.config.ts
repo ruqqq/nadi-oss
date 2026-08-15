@@ -11,10 +11,37 @@ import { minimal2023Preset } from "@vite-pwa/assets-generator/config";
 // transparent corners, and use it as the launch splash background too.
 const ICON_NAVY = "#07073f";
 
+/**
+ * Install identity for this build. The running app already renames itself from
+ * the Worker's `APP_NAME` (bootstrap -> `useDocumentTitle`), but a PWA's name
+ * lives in the manifest and the iOS meta tag, both of which are baked at build
+ * time — so a second deployment installed alongside the first would otherwise
+ * show up as a second, identical "Nadi" in the launcher with no way to tell
+ * them apart. Set APP_NAME when building the web image to distinguish them.
+ *
+ * The origin already separates the two installs; this only fixes the label.
+ */
+const APP_NAME = process.env.APP_NAME?.trim() || "Nadi";
+
+/**
+ * `%APP_NAME%` in index.html. Vite's own `%VITE_*%` substitution leaves an
+ * unmatched placeholder verbatim in the output, which would ship a literal
+ * "%APP_NAME%" as the home-screen label on any build that forgot the var —
+ * worse than the hardcoded name it replaced. Doing it here guarantees the
+ * default instead.
+ */
+const appNameHtmlPlugin = {
+  name: "nadi-app-name-html",
+  transformIndexHtml(html: string) {
+    return html.replaceAll("%APP_NAME%", APP_NAME);
+  },
+};
+
 export default defineConfig({
   plugins: [
     react(),
     tailwindcss(),
+    appNameHtmlPlugin,
     VitePWA({
       // Shell-precaching PWA. The service worker (src/sw.ts) is hand-written
       // (injectManifest) because it must ALSO carry the push handlers: two
@@ -76,8 +103,8 @@ export default defineConfig({
       },
       manifest: {
         id: "/",
-        name: "Nadi",
-        short_name: "Nadi",
+        name: APP_NAME,
+        short_name: APP_NAME,
         description:
           "Nadi is the workspace: agents that work in parallel, a sandbox they can run code in, work they can schedule. You bring the brain, on your own key.",
         start_url: "/",
