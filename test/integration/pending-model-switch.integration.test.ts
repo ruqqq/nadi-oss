@@ -65,6 +65,84 @@ describe("pending model switch persistence", () => {
     });
   });
 
+  it("persists a supplied modelInputModalities against the real registry/DO path", async () => {
+    const { threadId } = await seedRegistryThread(env.REGISTRY_DB, {
+      threadId: "thr_pending_switch_modalities",
+    });
+    const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
+
+    await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
+      // A freshly-seeded thread has no stored modalities, so the thread's
+      // current value is the ["text"] fallback. Supplying a wider list here
+      // must persist that list, not the thread's old one — the defect this
+      // task fixes.
+      const result = await agent.setPendingModelSwitch({
+        provider: "mock-tool-call",
+        model: "mock-model-vision",
+        modelInputModalities: ["text", "image"],
+      });
+      expect(result).toMatchObject({
+        ok: true,
+        value: { modelInputModalities: ["text", "image"] },
+      });
+      expect(await agent.getPendingModelSwitch()).toMatchObject({
+        modelInputModalities: ["text", "image"],
+      });
+    });
+  });
+
+  it("inherits the thread's current modalities/reasoning when neither is supplied", async () => {
+    const { threadId } = await seedRegistryThread(env.REGISTRY_DB, {
+      threadId: "thr_pending_switch_inherit",
+    });
+    const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
+
+    await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
+      const result = await agent.setPendingModelSwitch({
+        provider: "mock-tool-call",
+        model: "mock-model-2",
+      });
+      expect(result).toMatchObject({
+        ok: true,
+        value: { modelInputModalities: ["text"], modelSupportsReasoning: null },
+      });
+    });
+  });
+
+  it("rejects an invalid modelInputModalities and stores nothing", async () => {
+    const { threadId } = await seedRegistryThread(env.REGISTRY_DB, {
+      threadId: "thr_pending_switch_bad_modalities",
+    });
+    const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
+
+    await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
+      const result = await agent.setPendingModelSwitch({
+        provider: "mock-tool-call",
+        model: "mock-model-2",
+        modelInputModalities: ["not-a-real-modality"],
+      });
+      expect(result).toMatchObject({ ok: false, error: "invalid_modalities" });
+      expect(await agent.getPendingModelSwitch()).toBeNull();
+    });
+  });
+
+  it("round-trips an explicit modelSupportsReasoning: false, distinct from unknown/null", async () => {
+    const { threadId } = await seedRegistryThread(env.REGISTRY_DB, {
+      threadId: "thr_pending_switch_no_reasoning",
+    });
+    const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
+
+    await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
+      const result = await agent.setPendingModelSwitch({
+        provider: "mock-tool-call",
+        model: "mock-model-no-reasoning",
+        modelSupportsReasoning: false,
+      });
+      expect(result).toMatchObject({ ok: true, value: { modelSupportsReasoning: false } });
+      expect(await agent.getPendingModelSwitch()).toMatchObject({ modelSupportsReasoning: false });
+    });
+  });
+
   it("rejects a provider the workspace cannot use and stores nothing", async () => {
     const { threadId } = await seedRegistryThread(env.REGISTRY_DB, {
       threadId: "thr_pending_switch_rejected",

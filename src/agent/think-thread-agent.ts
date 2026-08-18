@@ -6344,6 +6344,16 @@ export class ThinkThreadAgent extends Think<Env> {
   async setPendingModelSwitch(input: {
     provider: string;
     model: string;
+    // Both optional: the picker doesn't always know a candidate model's
+    // modalities or reasoning support up front. Omitting either must inherit
+    // the thread's CURRENT value below — never the new model's — because
+    // that's what `resolveThreadModelSnapshotValue` does for an `undefined`
+    // field. Passing them through when known is the fix: without this, a
+    // switch keeps the OLD model's modalities/reasoning flag, which silently
+    // drops attachments (`prepare-attachments.ts`) or mis-declares reasoning
+    // support for the NEW model.
+    modelInputModalities?: string[];
+    modelSupportsReasoning?: boolean | null;
   }): Promise<{ ok: true; value: ThreadModelSnapshotValue } | { ok: false; error: string }> {
     await this.assertThreadWritable();
     const runtimeConfig = await this.resolveRuntimeConfigForThink();
@@ -6358,7 +6368,19 @@ export class ThinkThreadAgent extends Think<Env> {
         reasoningEffort: runtimeConfig.modelConfig.reasoningEffort,
         modelSupportsReasoning: runtimeConfig.modelConfig.modelSupportsReasoning ?? null,
       },
-      { provider: input.provider, model: input.model },
+      {
+        provider: input.provider,
+        model: input.model,
+        // Symmetric with `createThread` (thread-routes.ts): pass through only
+        // when supplied, so an omitted field inherits the target above rather
+        // than being coerced to `undefined` under `exactOptionalPropertyTypes`.
+        ...(input.modelInputModalities !== undefined
+          ? { modelInputModalities: input.modelInputModalities }
+          : {}),
+        ...(input.modelSupportsReasoning !== undefined
+          ? { modelSupportsReasoning: input.modelSupportsReasoning }
+          : {}),
+      },
       await this.viewerEmailForModelSelection(),
     );
     if (!validated.ok) return { ok: false, error: validated.error };

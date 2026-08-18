@@ -91,6 +91,102 @@ describe("pending model switch", () => {
     expect(read).toBeNull();
   });
 
+  it("persists a supplied modelInputModalities instead of the thread's old one", async () => {
+    const storage = fakeStorage();
+    const a = agent(storage);
+
+    // `agent()`'s stubbed runtime config carries `["text"]` — the OLD model's
+    // modalities. Supplying a new list here proves the RPC now passes it
+    // through to `resolveThreadModelSnapshotValue` rather than silently
+    // keeping the old value, which is exactly the defect: switching to a
+    // vision-capable model must not leave attachments gated to text-only.
+    const result = await (
+      ThinkThreadAgent.prototype.setPendingModelSwitch as (input: {
+        provider: string;
+        model: string;
+        modelInputModalities?: string[];
+      }) => Promise<{ ok: boolean; value?: unknown; error?: string }>
+    ).call(a, {
+      provider: "mock-tool-call",
+      model: "gpt-5-vision",
+      modelInputModalities: ["text", "image"],
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: { modelInputModalities: ["text", "image"] },
+    });
+    const read = await (
+      ThinkThreadAgent.prototype.getPendingModelSwitch as () => Promise<unknown>
+    ).call(a);
+    expect(read).toMatchObject({ modelInputModalities: ["text", "image"] });
+  });
+
+  it("inherits the thread's current modalities/reasoning when neither is supplied", async () => {
+    const storage = fakeStorage();
+    const a = agent(storage);
+
+    const result = await (
+      ThinkThreadAgent.prototype.setPendingModelSwitch as (input: {
+        provider: string;
+        model: string;
+      }) => Promise<{ ok: boolean; value?: unknown; error?: string }>
+    ).call(a, { provider: "mock-tool-call", model: "gpt-5" });
+
+    expect(result).toMatchObject({
+      ok: true,
+      // Matches `agent()`'s stubbed runtime config exactly — today's
+      // behaviour (inherit-from-thread) must survive the fix.
+      value: { modelInputModalities: ["text"], modelSupportsReasoning: null },
+    });
+  });
+
+  it("rejects an invalid modelInputModalities and stores nothing", async () => {
+    const storage = fakeStorage();
+    const a = agent(storage);
+
+    const result = await (
+      ThinkThreadAgent.prototype.setPendingModelSwitch as (input: {
+        provider: string;
+        model: string;
+        modelInputModalities?: unknown;
+      }) => Promise<{ ok: boolean; error?: string }>
+    ).call(a, {
+      provider: "mock-tool-call",
+      model: "gpt-5",
+      modelInputModalities: ["not-a-real-modality"],
+    });
+
+    expect(result).toMatchObject({ ok: false, error: "invalid_modalities" });
+    expect(storage.store.size).toBe(0);
+  });
+
+  it("round-trips an explicit modelSupportsReasoning: false, distinct from unknown/null", async () => {
+    const storage = fakeStorage();
+    const a = agent(storage);
+
+    const result = await (
+      ThinkThreadAgent.prototype.setPendingModelSwitch as (input: {
+        provider: string;
+        model: string;
+        modelSupportsReasoning?: boolean | null;
+      }) => Promise<{ ok: boolean; value?: unknown; error?: string }>
+    ).call(a, {
+      provider: "mock-tool-call",
+      model: "gpt-5-no-reasoning",
+      modelSupportsReasoning: false,
+    });
+
+    // An explicit `false` must persist as `false`, not fall through to the
+    // thread's `null` ("unknown") default — only an explicit `false`
+    // withholds reasoning options at turn time.
+    expect(result).toMatchObject({ ok: true, value: { modelSupportsReasoning: false } });
+    const read = await (
+      ThinkThreadAgent.prototype.getPendingModelSwitch as () => Promise<unknown>
+    ).call(a);
+    expect(read).toMatchObject({ modelSupportsReasoning: false });
+  });
+
   it("clears", async () => {
     const storage = fakeStorage();
     const a = agent(storage);
