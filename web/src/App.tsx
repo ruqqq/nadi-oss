@@ -325,6 +325,8 @@ import { Label } from "./components/ui/label";
 import { Alert, AlertDescription } from "./components/ui/alert";
 import { ModelPicker } from "./components/model/ModelPicker";
 import { ThreadModelBadge } from "./components/model/ThreadModelBadge";
+import { ComposerModelPicker, type ModelTuple } from "./components/model/ComposerModelPicker";
+import { toModelPickerProviders } from "./lib/model-picker";
 import { Spinner } from "./components/ui/spinner";
 import { ScrollArea } from "./components/ui/scroll-area";
 import { Separator } from "./components/ui/separator";
@@ -1674,6 +1676,7 @@ export function ChatApp({
     messageId: string;
     text: string;
     files: FileUIPart[];
+    provider: SettingsProvider;
     model: string;
   } | null>(null);
   const [loading, setLoading] = useState(true);
@@ -2380,7 +2383,13 @@ export function ChatApp({
       setDraftText(text);
       setDraftFiles(files);
       const messageId = `msg_${crypto.randomUUID()}`;
-      setPendingThreadCreation({ messageId, text, files, model: newChatModel });
+      setPendingThreadCreation({
+        messageId,
+        text,
+        files,
+        provider: selectedProvider,
+        model: newChatModel,
+      });
       const selectedProjectId =
         newChatProjectId !== "none" && projects.some((project) => project.id === newChatProjectId)
           ? newChatProjectId
@@ -3280,6 +3289,7 @@ export function ChatApp({
                 leading={threadNav}
                 text={pendingThreadCreation.text}
                 files={pendingThreadCreation.files}
+                provider={pendingThreadCreation.provider}
                 model={pendingThreadCreation.model}
               />
             ) : draft ? (
@@ -4095,11 +4105,7 @@ export function NewChatView({
                   variant="composer"
                   triggerId="new-chat-model"
                   triggerLabel="New chat model"
-                  providers={providers.map((entry) => ({
-                    value: entry.provider,
-                    label: entry.displayName,
-                    whitelistModels: entry.whitelistModels ?? null,
-                  }))}
+                  providers={toModelPickerProviders(providers)}
                   provider={provider}
                   model={model}
                   placeholder={SETTINGS_PROVIDER_MODEL_PLACEHOLDERS[provider]}
@@ -4121,13 +4127,21 @@ function PendingNewThreadView({
   leading,
   text,
   files,
+  provider,
   model,
 }: {
   leading: React.ReactNode;
   text: string;
   files: FileUIPart[];
+  provider?: SettingsProvider;
   model?: string;
 }) {
+  // Same trigger, wrapped instead of the plain badge, so this footer slot
+  // reads identically whether the composer is live or (as here) disabled
+  // while the thread is still being created — no relayout on the swap. It
+  // can't be operated: the picker's own `disabled` blocks the popover, and
+  // there is no thread yet to carry a pending switch.
+  const tuple: ModelTuple | null = provider && model ? { provider, model } : null;
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <Topbar
@@ -4146,7 +4160,13 @@ function PendingNewThreadView({
           disabled
           sendBlocked
           safeAreaBottom
-          footerTrailing={model ? <ThreadModelBadge model={model} /> : undefined}
+          footerTrailing={
+            tuple ? (
+              <ComposerModelPicker value={tuple} providers={[]} disabled onSelect={() => {}} />
+            ) : model ? (
+              <ThreadModelBadge model={model} />
+            ) : undefined
+          }
         />
       </div>
     </div>
@@ -4279,6 +4299,7 @@ function ThreadChatSkeleton({
   title,
   threadId,
   leading,
+  provider,
   model,
   statusHint,
   pendingBubble,
@@ -4287,6 +4308,7 @@ function ThreadChatSkeleton({
   title: string;
   threadId: string;
   leading: React.ReactNode;
+  provider?: SettingsProvider;
   model?: string;
   statusHint?: string;
   /** The optimistic first message, when this skeleton is the history-loading
@@ -4299,6 +4321,10 @@ function ThreadChatSkeleton({
   } | null;
   onRetryFirstMessage?: () => void;
 }) {
+  // Same rationale as PendingNewThreadView: wrap in the picker purely to keep
+  // the footer slot's geometry identical to the live composer. It renders
+  // disabled — history/socket aren't up yet, so there is nothing to switch.
+  const tuple: ModelTuple | null = provider && model ? { provider, model } : null;
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <Topbar
@@ -4329,7 +4355,13 @@ function ThreadChatSkeleton({
           sendBlocked
           statusHint={statusHint}
           safeAreaBottom
-          footerTrailing={model ? <ThreadModelBadge model={model} /> : undefined}
+          footerTrailing={
+            tuple ? (
+              <ComposerModelPicker value={tuple} providers={[]} disabled onSelect={() => {}} />
+            ) : model ? (
+              <ThreadModelBadge model={model} />
+            ) : undefined
+          }
         />
       </div>
     </div>
@@ -4462,6 +4494,7 @@ function ThreadChatConnected({
             title={thread.title}
             threadId={thread.threadId}
             leading={leading}
+            provider={isSettingsProvider(thread.provider) ? thread.provider : undefined}
             model={thread.model}
             pendingBubble={pendingBubble}
             onRetryFirstMessage={onRetryFirstMessage}
@@ -4471,6 +4504,31 @@ function ThreadChatConnected({
         <ThreadChat agent={agent} {...props} />
       </Suspense>
     </ThreadHistoryErrorBoundary>
+  );
+}
+
+/** A locally-held pending model switch: the tuple plus whatever the picker
+ *  knew about the new model's modalities / reasoning support, so a re-render
+ *  (or a repeated switch to the same model) doesn't have to re-derive them.
+ *  `modelInputModalities`/`modelSupportsReasoning` are the same tri-state
+ *  contract as `ThreadModelSnapshotValue` server-side: absent means inherit,
+ *  never coerce to a default. */
+type PendingModelSwitchValue = ModelTuple & {
+  modelInputModalities?: string[];
+  modelSupportsReasoning?: boolean;
+};
+
+/** Narrows the `getPendingModelSwitch` RPC's `unknown` result. Only the two
+ *  fields this component actually renders are required; the rest ride along
+ *  if present. */
+function isPendingModelSwitchValue(value: unknown): value is PendingModelSwitchValue {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.provider === "string" &&
+    isSettingsProvider(candidate.provider) &&
+    typeof candidate.model === "string" &&
+    candidate.model.length > 0
   );
 }
 
@@ -4740,6 +4798,27 @@ function ThreadChat({
       })
       .catch(() => {
         if (active) setDraftSeed("");
+      });
+    return () => {
+      active = false;
+    };
+  }, [thread.threadId]);
+
+  // Hydrate a pending model switch on mount / thread change, same
+  // cancellation-guard shape as the draft load above. Not optional: without
+  // it, a hard refresh would show the committed model while the server still
+  // holds a pending switch, and the next send would silently apply a switch
+  // the UI never displayed.
+  const [pendingModel, setPendingModel] = useState<PendingModelSwitchValue | null>(null);
+  useEffect(() => {
+    setPendingModel(null);
+    let active = true;
+    (agentRef.current.call("getPendingModelSwitch", []) as Promise<unknown>)
+      .then((value) => {
+        if (active) setPendingModel(isPendingModelSwitchValue(value) ? value : null);
+      })
+      .catch(() => {
+        if (active) setPendingModel(null);
       });
     return () => {
       active = false;
@@ -5060,6 +5139,60 @@ function ThreadChat({
   // them above it). Cover the create → deliver → stream-start gap here.
   const showOptimisticTyping = !!bubble && bubble.status !== "failed";
   const showTyping = streamTyping && !bubble;
+
+  // The thread's actual committed model. Kept separate from `pendingModel`
+  // even though only one of the two is ever displayed (see
+  // ComposerModelPicker's "no pending affordance" doc) — Task 10's transcript
+  // divider needs this as the switch's `from` value once it lands.
+  const committedModel: ModelTuple | null = isSettingsProvider(thread.provider)
+    ? { provider: thread.provider, model: thread.model }
+    : null;
+
+  const handleModelSwitchSelect = useCallback(
+    (tuple: ModelTuple, picked: ProviderModelSearchResult) => {
+      const input: {
+        provider: string;
+        model: string;
+        modelInputModalities?: string[];
+        modelSupportsReasoning?: boolean;
+      } = {
+        provider: tuple.provider,
+        model: tuple.model,
+        modelInputModalities: picked.inputModalities,
+        // Tri-state: only an explicit true/false is a real claim about
+        // reasoning support. `undefined` means unknown and must NOT be
+        // coerced to false (that would withhold reasoning from a model that
+        // can do it) or collapsed away with `??`/truthiness.
+        ...(typeof picked.reasoning === "boolean"
+          ? { modelSupportsReasoning: picked.reasoning }
+          : {}),
+      };
+      void (
+        agentRef.current.call("setPendingModelSwitch", [input]) as Promise<
+          { ok: true; value: unknown } | { ok: false; error: string }
+        >
+      )
+        .then((result) => {
+          if (result.ok) {
+            setPendingModel({
+              provider: tuple.provider,
+              model: tuple.model,
+              ...(picked.inputModalities ? { modelInputModalities: picked.inputModalities } : {}),
+              ...(typeof picked.reasoning === "boolean"
+                ? { modelSupportsReasoning: picked.reasoning }
+                : {}),
+            });
+          } else {
+            toast.error("Couldn't switch models. Please try again.");
+          }
+        })
+        .catch(() => {
+          toast.error("Couldn't switch models. Please try again.");
+        });
+    },
+    [],
+  );
+
   const handleSend = useCallback(
     async (text: string, files: FileUIPart[], opts?: { steer?: boolean }) => {
       if (feedbackMode) {
@@ -5165,6 +5298,11 @@ function ThreadChat({
             { message, clientMessageId: message.id },
           ])) as QueuedMessage[];
           setQueuedMessages((current) => mergeQueuedMessages(current, rows));
+          // The server captures the pending switch into the queued batch on
+          // submit (see `withCapturedModelSwitch`), so it now owns it — keep
+          // showing it via `thread`/history once it commits rather than this
+          // local echo.
+          setPendingModel(null);
         } catch {
           toast.error("Couldn't queue the message. Please try again.");
           return;
@@ -5189,6 +5327,9 @@ function ThreadChat({
       // keeps no failed-send restore, so we clear the saved draft on submit.
       saveDraft.cancel();
       void (agentRef.current.call("setDraft", [""]) as Promise<unknown>).catch(() => {});
+      // The turn this starts drains the pending switch server-side
+      // (`commitPendingModelSwitch`) — the server now owns it.
+      setPendingModel(null);
     },
     [
       busy,
@@ -5465,7 +5606,23 @@ function ThreadChat({
                       disabled={draftSeed === null || sendingFirstMessage}
                     />
                   )}
-                <ThreadModelBadge model={thread.model} />
+                {(() => {
+                  // Pending, when this thread has one, always wins over the
+                  // committed model — see ComposerModelPicker's doc: the two
+                  // render identically, so there is nothing else to signal
+                  // here beyond which value is current.
+                  const displayModel = pendingModel ?? committedModel;
+                  return displayModel ? (
+                    <ComposerModelPicker
+                      value={displayModel}
+                      providers={toModelPickerProviders(providers)}
+                      disabled={draftSeed === null || sendingFirstMessage}
+                      onSelect={handleModelSwitchSelect}
+                    />
+                  ) : (
+                    <ThreadModelBadge model={thread.model} />
+                  );
+                })()}
               </>
             )
           }
