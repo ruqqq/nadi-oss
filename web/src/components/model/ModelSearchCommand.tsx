@@ -8,6 +8,7 @@ import {
   CommandList,
 } from "@/components/ui/command";
 import { Spinner } from "@/components/ui/spinner";
+import { willCompactOnSwitch } from "@/lib/context-window";
 import { filterModels } from "@/lib/model-picker";
 import {
   getProviderModelCatalog,
@@ -171,13 +172,9 @@ function ModelRow({
   currentUsageTokens?: number | null;
   onSelect: () => void;
 }) {
-  // Only a KNOWN, smaller window earns the note. `contextLength` is absent
-  // for an uncurated provider or a catalog miss — that's unknown, not "too
-  // small", and warning on every row would just train the user to ignore it.
-  const willCompact =
-    typeof currentUsageTokens === "number" &&
-    typeof model.contextLength === "number" &&
-    model.contextLength < currentUsageTokens;
+  // Compared against the model's COMPACTION TRIGGER, not its raw window — a
+  // thread only has to reach ~56% of a window to compact on the next send.
+  const willCompact = willCompactOnSwitch(model.contextLength, currentUsageTokens);
 
   return (
     <CommandItem value={model.id} onSelect={onSelect}>

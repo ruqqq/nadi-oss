@@ -23,7 +23,23 @@ const FULL_CATALOG: ProviderModelSearchResult[] = [
 ];
 
 const MIXED_WINDOW_CATALOG: ProviderModelSearchResult[] = [
-  { id: "gpt-5", name: "GPT-5", inputModalities: ["text"], contextLength: 500_000, source: "live" },
+  {
+    id: "gpt-5",
+    name: "GPT-5",
+    inputModalities: ["text"],
+    contextLength: 1_000_000,
+    source: "live",
+  },
+  // Window (500k) is LARGER than the 400k thread, so the old raw-window
+  // comparison stayed silent — but its compaction trigger is 334,400, so the
+  // very next send compacts. This row is the mainline case the warning missed.
+  {
+    id: "gpt-5-wide",
+    name: "GPT-5 wide",
+    inputModalities: ["text"],
+    contextLength: 500_000,
+    source: "live",
+  },
   {
     id: "gpt-5-mini",
     name: "GPT-5 mini",
@@ -128,7 +144,7 @@ describe("ComposerModelPicker", () => {
     expect(onSelect).not.toHaveBeenCalled();
   });
 
-  it("marks models whose window cannot hold the current thread, and no others", async () => {
+  it("marks models whose COMPACTION TRIGGER the current thread already passes, and no others", async () => {
     api.getProviderModelCatalog.mockResolvedValue({
       provider: "openai",
       models: MIXED_WINDOW_CATALOG,
@@ -150,6 +166,11 @@ describe("ComposerModelPicker", () => {
     const miniRow = (await screen.findByText("GPT-5 mini")).closest('[data-slot="command-item"]');
     expect(miniRow).not.toBeNull();
     expect(miniRow).toHaveTextContent(/will compact/i);
+
+    // Bigger window than the thread's usage, yet already past its trigger:
+    // the raw-window comparison this replaced said nothing here.
+    const wideRow = screen.getByText("GPT-5 wide").closest('[data-slot="command-item"]');
+    expect(wideRow).toHaveTextContent(/will compact/i);
 
     const bigRow = screen.getByText("GPT-5").closest('[data-slot="command-item"]');
     expect(bigRow).not.toHaveTextContent(/will compact/i);

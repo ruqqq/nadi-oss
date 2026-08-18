@@ -9,6 +9,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { willCompactOnSwitch } from "@/lib/context-window";
 import type { ProviderModelSearchResult, SettingsProvider } from "@/settings-api";
 import { ModelPicker, type ModelPickerProviderOption } from "./ModelPicker";
 
@@ -99,11 +100,7 @@ export function ComposerModelPicker({
         onModelChange={() => {}}
         onModelSelected={(picked) => {
           const tuple = { provider, model: picked.id };
-          const willCompact =
-            typeof currentUsageTokens === "number" &&
-            typeof picked.contextLength === "number" &&
-            picked.contextLength < currentUsageTokens;
-          if (willCompact) {
+          if (willCompactOnSwitch(picked.contextLength, currentUsageTokens)) {
             setPendingConfirm({ tuple, picked });
             return;
           }
@@ -122,8 +119,8 @@ export function ComposerModelPicker({
               Switch to {pendingConfirm?.picked.name ?? pendingConfirm?.picked.id}?
             </AlertDialogTitle>
             <AlertDialogDescription>
-              This model's context window is smaller than what this conversation is already using,
-              so switching will compact it right away to fit.
+              This conversation is already past this model's compaction threshold, so switching will
+              compact it right away to fit.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
