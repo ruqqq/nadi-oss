@@ -38,6 +38,7 @@ const integrationGroupedIsolatedFiles = [
   "test/integration/queued-model-switch.integration.test.ts",
   "test/integration/skill-script-runner-gating.integration.test.ts",
   "test/integration/subagent-detached-injection.test.ts",
+  "test/integration/subagent-model-pin.integration.test.ts",
   "test/integration/subagent.integration.test.ts",
   "test/integration/think-thread-agent.integration.test.ts",
   "test/integration/thread-draft.integration.test.ts",
