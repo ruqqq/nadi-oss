@@ -3,11 +3,7 @@ import { getAgentByName } from "agents";
 import type { Env } from "../env";
 import { validateRequestSession, type ValidatedSession } from "../auth/session";
 import { registryBinding, registryDb } from "../db/client";
-import {
-  DEFAULT_REASONING_EFFORT,
-  parseReasoningEffort,
-  type ReasoningEffort,
-} from "../agent/reasoning-options";
+import { parseReasoningEffort, type ReasoningEffort } from "../agent/reasoning-options";
 import {
   agents,
   automata,
@@ -30,15 +26,15 @@ import { WorkbenchRepository } from "../db/repositories/workbenches";
 import { ArchivedMessageRepository } from "../db/repositories/archived-messages";
 import { ArchivedCompactionRepository } from "../db/repositories/archived-compactions";
 import { ThreadSearchProjectionRepository } from "../db/repositories/thread-search-projection";
-import {
-  isSupportedAgentProvider,
-  isUsableProviderForWorkspace,
-  parseModelInputModalities,
-  parseStoredModelInputModalities,
-} from "../settings/model-selection";
 import { log } from "../log";
 import { ProjectRepository } from "../db/repositories/projects";
 import { serializeErrorChain } from "../error-details";
+import {
+  resolveThreadModelSnapshotValue,
+  type ThreadModelSnapshotError,
+  type ThreadModelSnapshotTarget,
+  type ThreadModelSnapshotValue,
+} from "../settings/thread-model-snapshot";
 
 // Named so the throw site (selectThreadSummariesForUser) and the catch site
 // (listThreads, ~170 lines apart) are coupled by a type, not a string literal
@@ -1250,129 +1246,28 @@ async function selectThreadTarget(env: Env, session: ValidatedSession) {
     .get();
 }
 
+const THREAD_MODEL_SNAPSHOT_MESSAGES: Record<ThreadModelSnapshotError, string> = {
+  malformed_body: "Thread snapshot must be an object",
+  unsupported_provider: "unsupported provider",
+  provider_not_usable: "provider is not usable",
+  invalid_model: "model must be a non-empty string",
+  invalid_modalities: "modelInputModalities must be an array of supported modalities",
+  invalid_show_reasoning: "showReasoning must be a boolean",
+  invalid_reasoning_effort: "reasoningEffort must be one of off, low, medium, high",
+  invalid_model_supports_reasoning: "modelSupportsReasoning must be a boolean or null",
+};
+
 async function resolveThreadModelSnapshot(
   env: Env,
-  target: {
-    workspaceId: string;
-    provider: string;
-    model: string;
-    modelInputModalities: string;
-    showReasoning: boolean;
-    reasoningEffort: string;
-    modelSupportsReasoning: boolean | null;
-  },
+  target: ThreadModelSnapshotTarget,
   body: unknown,
   viewerEmail: string | null | undefined,
-): Promise<
-  | {
-      ok: true;
-      value: {
-        provider: string;
-        model: string;
-        modelInputModalities: string[];
-        showReasoning: boolean;
-        reasoningEffort: ReasoningEffort;
-        modelSupportsReasoning: boolean | null;
-      };
-    }
-  | { ok: false; response: Response }
-> {
-  if (body !== null && (typeof body !== "object" || Array.isArray(body))) {
-    return {
-      ok: false,
-      response: new Response("Thread snapshot must be an object", { status: 400 }),
-    };
-  }
-  const input = (body ?? {}) as ThreadModelSnapshotInput;
-
-  let provider = target.provider;
-  if (input.provider !== undefined) {
-    if (typeof input.provider !== "string" || !isSupportedAgentProvider(input.provider)) {
-      return { ok: false, response: new Response("unsupported provider", { status: 400 }) };
-    }
-    provider = input.provider;
-  }
-
-  if (!(await isUsableProviderForWorkspace(env, target.workspaceId, provider, viewerEmail))) {
-    return { ok: false, response: new Response("provider is not usable", { status: 400 }) };
-  }
-
-  let model = target.model;
-  if (input.model !== undefined) {
-    if (typeof input.model !== "string" || !input.model.trim()) {
-      return {
-        ok: false,
-        response: new Response("model must be a non-empty string", { status: 400 }),
-      };
-    }
-    model = input.model.trim();
-  }
-
-  let modelInputModalities = parseStoredModelInputModalities(target.modelInputModalities);
-  if (input.modelInputModalities !== undefined) {
-    const parsed = parseModelInputModalities(input.modelInputModalities);
-    if (!parsed) {
-      return {
-        ok: false,
-        response: new Response("modelInputModalities must be an array of supported modalities", {
-          status: 400,
-        }),
-      };
-    }
-    modelInputModalities = parsed;
-  }
-
-  let showReasoning = target.showReasoning;
-  if (input.showReasoning !== undefined) {
-    if (typeof input.showReasoning !== "boolean") {
-      return {
-        ok: false,
-        response: new Response("showReasoning must be a boolean", { status: 400 }),
-      };
-    }
-    showReasoning = input.showReasoning;
-  }
-
-  let reasoningEffort = parseReasoningEffort(target.reasoningEffort) ?? DEFAULT_REASONING_EFFORT;
-  if (input.reasoningEffort !== undefined) {
-    const parsed = parseReasoningEffort(input.reasoningEffort);
-    if (parsed === null) {
-      return {
-        ok: false,
-        response: new Response("reasoningEffort must be one of off, low, medium, high", {
-          status: 400,
-        }),
-      };
-    }
-    reasoningEffort = parsed;
-  }
-
-  // Defaults to the agent's recorded capability, NOT to false: an unrecognised
-  // model is unknown, and only an explicit false withholds reasoning at turn time.
-  let modelSupportsReasoning = target.modelSupportsReasoning;
-  if (input.modelSupportsReasoning !== undefined) {
-    if (
-      input.modelSupportsReasoning !== null &&
-      typeof input.modelSupportsReasoning !== "boolean"
-    ) {
-      return {
-        ok: false,
-        response: new Response("modelSupportsReasoning must be a boolean or null", { status: 400 }),
-      };
-    }
-    modelSupportsReasoning = input.modelSupportsReasoning;
-  }
-
+): Promise<{ ok: true; value: ThreadModelSnapshotValue } | { ok: false; response: Response }> {
+  const result = await resolveThreadModelSnapshotValue(env, target, body, viewerEmail);
+  if (result.ok) return result;
   return {
-    ok: true,
-    value: {
-      provider,
-      model,
-      modelInputModalities,
-      showReasoning,
-      reasoningEffort,
-      modelSupportsReasoning,
-    },
+    ok: false,
+    response: new Response(THREAD_MODEL_SNAPSHOT_MESSAGES[result.error], { status: 400 }),
   };
 }
 
