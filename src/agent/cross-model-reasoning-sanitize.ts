@@ -1,5 +1,12 @@
+import { isCompactionMessage } from "agents/experimental/memory/utils";
 import type { UIMessage } from "ai";
-import { readModelSwitchPart, sameModelTuple, type ModelTuple } from "./model-switch";
+import {
+  modelSwitchPart,
+  readModelSwitchPart,
+  sameModelTuple,
+  type ModelSwitchData,
+  type ModelTuple,
+} from "./model-switch";
 import { assignOrDelete, stripProviderEntry } from "./provider-metadata-strip";
 
 /**
@@ -79,4 +86,83 @@ function segmentTuples(messages: UIMessage[]): {
   // No marker anywhere: one segment, nothing to compare against.
   if (!sawMarker) return { byIndex: new Array(messages.length), current: undefined };
   return { byIndex, current: active };
+}
+
+/**
+ * The durable record of where the CURRENT segment begins, written by
+ * `commitPendingModelSwitch`. `anchorMessageId` is the message the transcript
+ * marker was attached to.
+ */
+export interface ModelSwitchOrigin extends ModelSwitchData {
+  anchorMessageId?: string;
+}
+
+/**
+ * Re-establish segmentation when the transcript no longer carries the marker.
+ *
+ * Compaction ARCHIVES a contiguous middle span and replaces it with a summary
+ * message that has one text part — so a marker that sat inside that span is
+ * simply gone, and `sanitizeCrossModelReasoning` then sees ONE segment and
+ * concludes everything is same-origin. On a thread that switched away from a
+ * reasoning model, the protected head still holds signed reasoning from the
+ * OLD model, and it would be replayed at the new one. That is the exact
+ * failure the marker exists to prevent, so the marker cannot be allowed to be
+ * the only copy of the origin: this function restores it from DO storage.
+ *
+ * Injection position, in order of preference:
+ *  1. Nothing to do — a surviving marker already names `origin.to`.
+ *  2. The anchor message itself, if it is still in the transcript (covers a
+ *     transcript write that never landed, and any pre-existing thread whose
+ *     marker was lost some other way).
+ *  3. The LAST compaction summary message: the anchor was archived, so the
+ *     switch happened at or before the end of that archived span. Choosing the
+ *     last (not the first) summary is deliberate — with several summaries it
+ *     can attribute a few post-switch messages to the OLD tuple, which drops
+ *     reasoning that could have been kept. That is the safe direction; the
+ *     reverse would replay foreign reasoning.
+ *
+ * If neither anchor nor summary is present the transcript is returned
+ * unchanged: with no position to anchor to there is no marker semantics to
+ * express, and a marker at index 0 would claim the whole transcript is
+ * post-switch — the unsafe reading.
+ *
+ * Pure, and deterministic given (transcript, origin) — the same property
+ * `sanitizeCrossModelReasoning` relies on for prompt caching.
+ */
+export function restoreModelSwitchMarker(
+  messages: UIMessage[],
+  origin: ModelSwitchOrigin | null | undefined,
+): UIMessage[] {
+  if (!origin) return messages;
+  if (sameModelTuple(origin.from, origin.to)) return messages;
+  if (messages.some((message) => carriesSwitchTo(message, origin.to))) return messages;
+
+  const index = injectionIndex(messages, origin.anchorMessageId);
+  if (index === -1) return messages;
+
+  const part = modelSwitchPart({
+    from: origin.from,
+    to: origin.to,
+  }) as unknown as UIMessage["parts"][number];
+  return messages.map((message, at) =>
+    at === index ? { ...message, parts: [part, ...message.parts] } : message,
+  );
+}
+
+function carriesSwitchTo(message: UIMessage, to: ModelTuple): boolean {
+  return message.parts.some((part) => {
+    const marker = readModelSwitchPart(part);
+    return marker !== null && sameModelTuple(marker.to, to);
+  });
+}
+
+function injectionIndex(messages: UIMessage[], anchorMessageId: string | undefined): number {
+  if (anchorMessageId) {
+    const at = messages.findIndex((message) => message.id === anchorMessageId);
+    if (at !== -1) return at;
+  }
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (isCompactionMessage(messages[i] as never)) return i;
+  }
+  return -1;
 }

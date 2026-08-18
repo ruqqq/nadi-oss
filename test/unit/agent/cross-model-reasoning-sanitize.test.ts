@@ -1,7 +1,13 @@
+import { isCompactionMessage } from "agents/experimental/memory/utils";
 import { convertToModelMessages, type UIMessage } from "ai";
 import { describe, expect, it } from "vitest";
-import { modelSwitchPart } from "../../../src/agent/model-switch";
-import { sanitizeCrossModelReasoning } from "../../../src/agent/cross-model-reasoning-sanitize";
+import { createNadiCompactFunction } from "../../../src/agent/compaction";
+import { resolveContextBudget } from "../../../src/agent/context-budget";
+import { modelSwitchPart, readModelSwitchPart } from "../../../src/agent/model-switch";
+import {
+  restoreModelSwitchMarker,
+  sanitizeCrossModelReasoning,
+} from "../../../src/agent/cross-model-reasoning-sanitize";
 
 const anthropicReasoning = {
   type: "reasoning" as const,
@@ -225,5 +231,140 @@ describe("assembly order", () => {
     expect(sanitizeAt).toBeGreaterThan(-1);
     expect(truncateAt).toBeGreaterThan(-1);
     expect(sanitizeAt).toBeLessThan(truncateAt);
+  });
+});
+
+/**
+ * The failure that made `restoreModelSwitchMarker` necessary: compaction
+ * ARCHIVES the message the marker rode on, and a marker-less transcript reads
+ * as one same-origin segment. Everything here is real — the real Nadi compact
+ * function picks the span, and the summary message is materialized exactly as
+ * the SDK's `applyCompactions` does (an assistant message with one text part
+ * and a `compaction_*` id, which `isCompactionMessage` is asserted to accept
+ * below so the fixture cannot drift from the contract the restore relies on).
+ */
+describe("sanitizer x compaction", () => {
+  const budget = resolveContextBudget(200_000);
+  const ANTHROPIC = { provider: "openrouter", model: "anthropic/claude-opus-5" };
+  const GPT = { provider: "openrouter", model: "openai/gpt-5" };
+
+  /** The SDK replaces [fromMessageId..toMessageId] with ONE assistant message
+   *  carrying only the summary text — see `session/index.js`'s
+   *  `applyCompactions`. Parts of the archived span, marker included, are gone. */
+  function applyCompaction(
+    messages: UIMessage[],
+    result: { fromMessageId: string; toMessageId: string; summary: string },
+  ): UIMessage[] {
+    const start = messages.findIndex((m) => m.id === result.fromMessageId);
+    const end = messages.findIndex((m) => m.id === result.toMessageId);
+    return [
+      ...messages.slice(0, start),
+      {
+        id: "compaction_c1",
+        role: "assistant",
+        parts: [{ type: "text", text: result.summary }],
+      } as UIMessage,
+      ...messages.slice(end + 1),
+    ];
+  }
+
+  function longTranscript(): UIMessage[] {
+    const filler = "x".repeat(6_000);
+    const messages: UIMessage[] = [
+      user("m0", [{ type: "text", text: `opening ${filler}` }]),
+      // The signed Anthropic thinking block that must never reach gpt-5.
+      assistant("m1", [anthropicReasoning, { type: "text", text: `claude turn ${filler}` }]),
+      user("m2", [{ type: "text", text: `more ${filler}` }]),
+    ];
+    for (let i = 3; i < 40; i += 1) {
+      messages.push(
+        (i % 2 === 0 ? user : assistant)(`m${i}`, [{ type: "text", text: `turn ${i} ${filler}` }]),
+      );
+    }
+    // The switch itself, mid-transcript — the marker rides the user message
+    // whose turn committed it.
+    messages.push(user("m40", [SWITCH, { type: "text", text: `switch here ${filler}` }]));
+    for (let i = 41; i < 60; i += 1) {
+      messages.push(
+        (i % 2 === 0 ? user : assistant)(`m${i}`, [{ type: "text", text: `turn ${i} ${filler}` }]),
+      );
+    }
+    return messages;
+  }
+
+  it("loses the marker to compaction, and the sanitizer then keeps foreign reasoning", async () => {
+    const compact = createNadiCompactFunction({
+      budget,
+      summarize: async () => "## Topic\nEverything so far.",
+      onOutcome: () => {},
+    });
+    const before = longTranscript();
+    const result = await compact(before as never);
+    expect(result).not.toBeNull();
+
+    const after = applyCompaction(before, result!);
+    expect(isCompactionMessage(after.find((m) => m.id === "compaction_c1") as never)).toBe(true);
+    // The premise: the marker really is gone, and message 1's Anthropic
+    // reasoning really did survive in the protected head.
+    expect(after.some((m) => m.parts.some((p) => readModelSwitchPart(p)))).toBe(false);
+    expect(after[1]?.parts).toContain(anthropicReasoning);
+    // ... and with no marker the sanitizer alone is a no-op, so the signed
+    // Anthropic block would be replayed at gpt-5.
+    expect(sanitizeCrossModelReasoning(after)).toBe(after);
+  });
+
+  it("restores segmentation from the durable origin record and drops the foreign reasoning", async () => {
+    const compact = createNadiCompactFunction({
+      budget,
+      summarize: async () => "## Topic\nEverything so far.",
+      onOutcome: () => {},
+    });
+    const before = longTranscript();
+    const after = applyCompaction(before, (await compact(before as never))!);
+
+    const restored = restoreModelSwitchMarker(after, {
+      from: ANTHROPIC,
+      to: GPT,
+      anchorMessageId: "m40",
+    });
+    const sanitized = sanitizeCrossModelReasoning(restored);
+
+    // The head is pre-switch again, so its signed Anthropic block is dropped.
+    expect(sanitized[1]?.parts).toEqual([before[1]!.parts[1]]);
+    // The marker lands on the summary message (the anchor was archived), so
+    // everything after it stays attributed to the current tuple.
+    expect(readModelSwitchPart(sanitized[3]?.parts[0])).toEqual({ from: ANTHROPIC, to: GPT });
+    expect(sanitized[3]?.id).toBe("compaction_c1");
+    // Deterministic: a second pass over an already-restored transcript is a
+    // no-op, which is what keeps prompt caching to one miss per switch.
+    expect(restoreModelSwitchMarker(restored, { from: ANTHROPIC, to: GPT })).toBe(restored);
+  });
+
+  it("prefers the anchor message itself when it survived", () => {
+    const messages = [
+      user("u1", [{ type: "text", text: "hi" }]),
+      assistant("a1", [anthropicReasoning, { type: "text", text: "claude" }]),
+      user("u2", [{ type: "text", text: "switch now" }]),
+      assistant("a2", [openaiReasoning, { type: "text", text: "gpt" }]),
+    ];
+    const restored = restoreModelSwitchMarker(messages, {
+      from: ANTHROPIC,
+      to: GPT,
+      anchorMessageId: "u2",
+    });
+    expect(readModelSwitchPart(restored[2]?.parts[0])).toEqual({ from: ANTHROPIC, to: GPT });
+    const sanitized = sanitizeCrossModelReasoning(restored);
+    expect(sanitized[1]?.parts).toEqual([{ type: "text", text: "claude" }]);
+    expect(sanitized[3]?.parts).toEqual([openaiReasoning, { type: "text", text: "gpt" }]);
+  });
+
+  it("leaves the transcript alone when there is no record, no anchor and no summary", () => {
+    const messages = [assistant("a1", [anthropicReasoning, { type: "text", text: "claude" }])];
+    expect(restoreModelSwitchMarker(messages, null)).toBe(messages);
+    // No position to anchor to: a marker at index 0 would claim the whole
+    // transcript is POST-switch, which is the unsafe reading.
+    expect(
+      restoreModelSwitchMarker(messages, { from: ANTHROPIC, to: GPT, anchorMessageId: "gone" }),
+    ).toBe(messages);
   });
 });
