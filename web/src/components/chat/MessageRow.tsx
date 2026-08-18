@@ -10,11 +10,13 @@ import {
   MessageResponse,
 } from "@/components/ai-elements/message";
 import { MessageAttachmentView } from "./MessageAttachmentView";
+import { ModelSwitchDivider } from "@/components/model/ModelSwitchDivider";
 import { ArtifactChip } from "./ArtifactChip";
 import { collectMessageArtifactParts } from "@/lib/message-artifact-parts";
 import { collectMessageFileParts } from "@/lib/message-file-parts";
 import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-elements/reasoning";
 import { buildToolTimeline } from "@/lib/group-tool-parts";
+import { MODEL_SWITCH_PART_TYPE, readModelSwitchPart } from "@/lib/model-switch";
 import type { ToolNameServer } from "@/lib/resolve-tool-name";
 import { isSteeredMessage } from "@/lib/steering-messages";
 import { ArrowBendDownRight } from "@/icons";
@@ -65,8 +67,20 @@ export function MessageRow({
     isTransparent: (p) =>
       p.type === "step-start" ||
       (p.type === "text" && p.text.trim() === "") ||
-      (!showReasoning && p.type === "reasoning"),
+      (!showReasoning && p.type === "reasoning") ||
+      p.type === MODEL_SWITCH_PART_TYPE,
   });
+
+  // The model-switch marker renders as a divider ABOVE this message's bubble,
+  // not as one of the parts inside it (see ModelSwitchDivider's doc) — so it
+  // is pulled out of the timeline entirely (isTransparent, above) and read
+  // here instead. `readModelSwitchPart` also validates the payload shape, so
+  // a malformed data part (never expected — the client is the only writer —
+  // but data parts are still untyped payloads) degrades to "no divider"
+  // rather than a render crash.
+  const modelSwitch = message.parts
+    .map((p) => readModelSwitchPart(p))
+    .find((d): d is NonNullable<typeof d> => d !== null);
 
   // File parts render as a grouped thumbnail/chip grid (skipped in the timeline
   // switch below); images open a lightbox, other types download. Include files
@@ -83,98 +97,99 @@ export function MessageRow({
   }, [artifactParts.length]);
 
   return (
-    <Message from={message.role}>
-      <MessageContent>
-        {isSteeredMessage(message) && (
-          <span className="mb-1.5 inline-flex w-fit items-center gap-1 rounded-md border border-steer/40 bg-steer-bg px-1.5 py-0.5 font-bold font-mono text-[10px] text-steer uppercase tracking-wide">
-            <ArrowBendDownRight className="size-3" weight="bold" />
-            Steered
-          </span>
-        )}
-        {timeline.map((node) => {
-          // ── Tool calls → the Dispatch strip card (single or grouped) ──
-          if (node.kind === "group") {
-            return (
-              <ToolGroup
-                key={node.key}
-                items={node.items.map((it) => ({ key: it.key, part: it.part as ToolUIPart }))}
-                servers={servers}
-              />
-            );
-          }
-          if (node.kind === "tool") {
-            const feedbackDraft = feedbackDraftFromToolPart(node.part as ToolUIPart);
-            if (feedbackDraft && onFeedbackDraftSubmit && onFeedbackDraftEdit) {
+    <>
+      {modelSwitch && <ModelSwitchDivider from={modelSwitch.from} to={modelSwitch.to} />}
+      <Message from={message.role}>
+        <MessageContent>
+          {isSteeredMessage(message) && (
+            <span className="mb-1.5 inline-flex w-fit items-center gap-1 rounded-md border border-steer/40 bg-steer-bg px-1.5 py-0.5 font-bold font-mono text-[10px] text-steer uppercase tracking-wide">
+              <ArrowBendDownRight className="size-3" weight="bold" />
+              Steered
+            </span>
+          )}
+          {timeline.map((node) => {
+            // ── Tool calls → the Dispatch strip card (single or grouped) ──
+            if (node.kind === "group") {
               return (
-                <FeedbackDraftToolCard
+                <ToolGroup
                   key={node.key}
-                  draft={feedbackDraft}
-                  screenshots={feedbackScreenshots}
-                  onKeepEditing={onFeedbackDraftEdit}
-                  onSubmit={onFeedbackDraftSubmit}
-                  submitted={submittedFeedbackDraftIds.has(feedbackDraft.id)}
+                  items={node.items.map((it) => ({ key: it.key, part: it.part as ToolUIPart }))}
+                  servers={servers}
                 />
               );
             }
-            return (
-              <ToolGroup
-                key={node.key}
-                items={[{ key: node.key, part: node.part as ToolUIPart }]}
-                servers={servers}
-              />
-            );
-          }
+            if (node.kind === "tool") {
+              const feedbackDraft = feedbackDraftFromToolPart(node.part as ToolUIPart);
+              if (feedbackDraft && onFeedbackDraftSubmit && onFeedbackDraftEdit) {
+                return (
+                  <FeedbackDraftToolCard
+                    key={node.key}
+                    draft={feedbackDraft}
+                    screenshots={feedbackScreenshots}
+                    onKeepEditing={onFeedbackDraftEdit}
+                    onSubmit={onFeedbackDraftSubmit}
+                    submitted={submittedFeedbackDraftIds.has(feedbackDraft.id)}
+                  />
+                );
+              }
+              return (
+                <ToolGroup
+                  key={node.key}
+                  items={[{ key: node.key, part: node.part as ToolUIPart }]}
+                  servers={servers}
+                />
+              );
+            }
 
-          // ── A tool awaiting a human decision → signature approval gate ─
-          if (node.kind === "approval") {
-            const part = node.part as ToolUIPart;
-            const approval = getToolApproval(part);
-            const waitingApproval = getToolPartState(part) === "waiting-approval";
-            return (
-              <ApprovalGate
-                key={node.key}
-                part={part}
-                servers={servers}
-                disabled={readOnly || !approval || !waitingApproval}
-                onApprove={() =>
-                  approval && addToolApprovalResponse({ id: approval.id, approved: true })
-                }
-                onReject={() =>
-                  approval && addToolApprovalResponse({ id: approval.id, approved: false })
-                }
-              />
-            );
-          }
+            // ── A tool awaiting a human decision → signature approval gate ─
+            if (node.kind === "approval") {
+              const part = node.part as ToolUIPart;
+              const approval = getToolApproval(part);
+              const waitingApproval = getToolPartState(part) === "waiting-approval";
+              return (
+                <ApprovalGate
+                  key={node.key}
+                  part={part}
+                  servers={servers}
+                  disabled={readOnly || !approval || !waitingApproval}
+                  onApprove={() =>
+                    approval && addToolApprovalResponse({ id: approval.id, approved: true })
+                  }
+                  onReject={() =>
+                    approval && addToolApprovalResponse({ id: approval.id, approved: false })
+                  }
+                />
+              );
+            }
 
-          // ── Plain parts: text and reasoning ──────────────────────────
-          const part = node.part;
-          if (part.type === "text") {
-            return <MessageResponse key={node.key}>{part.text}</MessageResponse>;
-          }
-          if (part.type === "reasoning") {
-            return (
-              <Reasoning key={node.key} isStreaming={part.state === "streaming"}>
-                <ReasoningTrigger />
-                <ReasoningContent>{part.text}</ReasoningContent>
-              </Reasoning>
-            );
-          }
-          return null;
-        })}
-        {(fileParts.length > 0 || artifactParts.length > 0) && (
-          <MessageAttachments
-            className={message.role === "assistant" ? "ml-0" : undefined}
-          >
-            {fileParts.map((part, i) => (
-              <MessageAttachmentView key={`attachment-${i}`} data={part} />
-            ))}
-            {artifactParts.map((artifact) => (
-              <ArtifactChip key={artifact.artifactId} artifact={artifact} nowMs={nowMs} />
-            ))}
-          </MessageAttachments>
-        )}
-      </MessageContent>
-    </Message>
+            // ── Plain parts: text and reasoning ──────────────────────────
+            const part = node.part;
+            if (part.type === "text") {
+              return <MessageResponse key={node.key}>{part.text}</MessageResponse>;
+            }
+            if (part.type === "reasoning") {
+              return (
+                <Reasoning key={node.key} isStreaming={part.state === "streaming"}>
+                  <ReasoningTrigger />
+                  <ReasoningContent>{part.text}</ReasoningContent>
+                </Reasoning>
+              );
+            }
+            return null;
+          })}
+          {(fileParts.length > 0 || artifactParts.length > 0) && (
+            <MessageAttachments className={message.role === "assistant" ? "ml-0" : undefined}>
+              {fileParts.map((part, i) => (
+                <MessageAttachmentView key={`attachment-${i}`} data={part} />
+              ))}
+              {artifactParts.map((artifact) => (
+                <ArtifactChip key={artifact.artifactId} artifact={artifact} nowMs={nowMs} />
+              ))}
+            </MessageAttachments>
+          )}
+        </MessageContent>
+      </Message>
+    </>
   );
 }
 
