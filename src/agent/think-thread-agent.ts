@@ -192,8 +192,13 @@ import { runCloudflareComputeSmoke } from "../compute/backends/cloudflare-smoke"
 import { AgentSkillRepository } from "../db/repositories/agent-skills";
 import { FeedbackRepository } from "../db/repositories/feedback";
 import { WorkspacePrivacySettingsRepository } from "../db/repositories/workspace-privacy-settings";
+import { WorkspaceRepository } from "../db/repositories/workspaces";
 import { ThreadRepository } from "../db/repositories/threads";
 import { hasRegistry, registryBinding, registryDb } from "../db/client";
+import {
+  resolveThreadModelSnapshotValue,
+  type ThreadModelSnapshotValue,
+} from "../settings/thread-model-snapshot";
 import { attachmentsBucket } from "../storage/bucket-binding";
 import { log } from "../log";
 import {
@@ -264,6 +269,10 @@ const WORKSPACE_TOOL_NAMES = new Set([
 const MCP_DISCOVERY_WAIT_MS = 5_000;
 
 const DRAFT_STORAGE_KEY = "composer:draft";
+/** DO storage key for a model switch chosen but not yet committed. Ephemeral
+ *  composer intent, exactly like the draft above — it must NOT reach
+ *  `thread_index` until a user message actually runs on it. */
+const PENDING_MODEL_SWITCH_STORAGE_KEY = "composer:pendingModelSwitch";
 const FEEDBACK_ACTIVE_INTERVIEW_STORAGE_KEY = "feedback:active-interview";
 const FEEDBACK_DRAFT_STORAGE_KEY = "feedback:draft";
 const FEEDBACK_INTERVIEW_BOUNDS_STORAGE_KEY = "feedback:interview-bounds";
@@ -6291,6 +6300,61 @@ export class ThinkThreadAgent extends Think<Env> {
       return;
     }
     await this.ctx.storage.put(DRAFT_STORAGE_KEY, text);
+  }
+
+  /**
+   * The owning workspace member's email, for the same `required-viewerEmail`
+   * gate `isUsableProviderForWorkspace` enforces elsewhere (see
+   * `automaton-tools.ts`'s `resolveService`, which sources it identically).
+   * `null` when the workspace has no owner row — a provider gated on viewer
+   * email then correctly fails closed instead of being silently offered.
+   */
+  private async viewerEmailForModelSelection(): Promise<string | null> {
+    const { workspaceId } = await this.resolveRuntimeConfigForThink();
+    const workspaces = new WorkspaceRepository(registryDb(this.env));
+    return workspaces.getOwnerEmail(workspaceId);
+  }
+
+  /**
+   * Validate and park a model switch chosen mid-conversation. Stored in DO
+   * storage only — exactly like the draft above — so a later task can commit
+   * it onto `thread_index` when the user's next message actually runs on it,
+   * and so an abandoned pick never touches the persisted thread row.
+   */
+  async setPendingModelSwitch(input: {
+    provider: string;
+    model: string;
+  }): Promise<{ ok: true; value: ThreadModelSnapshotValue } | { ok: false; error: string }> {
+    await this.assertThreadWritable();
+    const runtimeConfig = await this.resolveRuntimeConfigForThink();
+    const validated = await resolveThreadModelSnapshotValue(
+      this.env,
+      {
+        workspaceId: runtimeConfig.workspaceId,
+        provider: runtimeConfig.modelConfig.provider,
+        model: runtimeConfig.modelConfig.model,
+        modelInputModalities: JSON.stringify(runtimeConfig.modelConfig.modelInputModalities),
+        showReasoning: runtimeConfig.modelConfig.showReasoning,
+        reasoningEffort: runtimeConfig.modelConfig.reasoningEffort,
+        modelSupportsReasoning: runtimeConfig.modelConfig.modelSupportsReasoning ?? null,
+      },
+      { provider: input.provider, model: input.model },
+      await this.viewerEmailForModelSelection(),
+    );
+    if (!validated.ok) return { ok: false, error: validated.error };
+    await this.ctx.storage.put(PENDING_MODEL_SWITCH_STORAGE_KEY, validated.value);
+    return { ok: true, value: validated.value };
+  }
+
+  async getPendingModelSwitch(): Promise<ThreadModelSnapshotValue | null> {
+    return (
+      (await this.ctx.storage.get<ThreadModelSnapshotValue>(PENDING_MODEL_SWITCH_STORAGE_KEY)) ??
+      null
+    );
+  }
+
+  async clearPendingModelSwitch(): Promise<void> {
+    await this.ctx.storage.delete(PENDING_MODEL_SWITCH_STORAGE_KEY);
   }
 
   /**
