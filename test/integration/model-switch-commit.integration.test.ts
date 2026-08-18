@@ -1,6 +1,7 @@
 import { env, runInDurableObject } from "cloudflare:test";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { ThinkThreadAgent } from "../../src/agent/think-thread-agent";
+import { ThreadRepository } from "../../src/db/repositories/threads";
 import { applyRegistryTestSchema, seedRegistryThread } from "./helpers/registry";
 
 type PrivateCommit = {
@@ -107,6 +108,40 @@ describe("commitPendingModelSwitch (integration)", () => {
     expect(result).toBeNull();
     const after = await readThreadIndexRow(threadId);
     expect(after).toEqual(before);
+  });
+
+  it("clears pending WITHOUT writing when the switch matches the current model", async () => {
+    // The thread's default (from `seedRegistryThread`) is provider "mock",
+    // model "mock" — "switching" to the same tuple must still clear the
+    // pending slot (the user's action completed) but must not touch
+    // `thread_index` at all. A regression that hoists the
+    // `updateModelSnapshot` call above the `sameModelTuple` check would
+    // start writing here even though nothing changed; a regression that
+    // drops the `clearPendingModelSwitch()` call in this branch would leave
+    // the pending slot parked forever. Both are asserted positively below —
+    // "the row looks unchanged" alone would not catch a same-value write.
+    const { threadId } = await seedRegistryThread(env.REGISTRY_DB, {
+      threadId: "thr_commit_same_model",
+    });
+    const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
+
+    const updateSpy = vi.spyOn(ThreadRepository.prototype, "updateModelSnapshot");
+    try {
+      const result = await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
+        await agent.setPendingModelSwitch({ provider: "mock", model: "mock" });
+        return (agent as unknown as PrivateCommit).commitPendingModelSwitch();
+      });
+
+      expect(result).toBeNull();
+      expect(updateSpy).not.toHaveBeenCalled();
+
+      const pendingAfter = await runInDurableObject(stub, (agent: ThinkThreadAgent) =>
+        agent.getPendingModelSwitch(),
+      );
+      expect(pendingAfter).toBeNull();
+    } finally {
+      updateSpy.mockRestore();
+    }
   });
 
   it("commits onto the SAME turn it runs in, not the next one", async () => {
