@@ -37,6 +37,7 @@ export function ModelPicker({
   triggerId,
   triggerLabel,
   hideProviderPrefix,
+  currentUsageTokens,
   onProviderChange,
   onModelChange,
   onModelSelected,
@@ -56,6 +57,10 @@ export function ModelPicker({
    * agent's model), where naming a provider would imply one had been pinned.
    */
   hideProviderPrefix?: boolean;
+  /** Forwarded to {@link ModelSearchCommand} to mark rows that would shrink
+   *  below the thread's current usage. See its doc for the null/absent
+   *  meaning. */
+  currentUsageTokens?: number | null;
   onProviderChange: (provider: SettingsProvider) => void;
   onModelChange: (model: string) => void;
   onModelSelected?: (model: ProviderModelSearchResult) => void;
@@ -182,9 +187,8 @@ export function ModelPicker({
               placeholder={placeholder}
               inputId={triggerId ? `${triggerId}-search` : undefined}
               autoFocusInput
-              {...(pinned
-                ? { leadingGroup: { heading: "Current", models: [pinned] } }
-                : {})}
+              currentUsageTokens={currentUsageTokens}
+              {...(pinned ? { leadingGroup: { heading: "Current", models: [pinned] } } : {})}
               {...(showCurated
                 ? {
                     footer: (

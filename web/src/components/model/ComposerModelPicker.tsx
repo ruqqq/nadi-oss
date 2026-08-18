@@ -1,4 +1,14 @@
 import { useEffect, useState } from "react";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import type { ProviderModelSearchResult, SettingsProvider } from "@/settings-api";
 import { ModelPicker, type ModelPickerProviderOption } from "./ModelPicker";
 
@@ -32,11 +42,20 @@ export function ComposerModelPicker({
   value,
   providers,
   disabled,
+  currentUsageTokens,
   onSelect,
 }: {
   value: ModelTuple;
   providers: ModelPickerProviderOption[];
   disabled?: boolean;
+  /**
+   * The thread's current token usage, when the caller has one. Used only to
+   * mark rows whose catalog window is smaller than this — see
+   * {@link ModelSearchCommand}'s doc — and to gate the one-time confirm
+   * below. `null`/absent (a new-thread picker, or a pre-feature thread with
+   * no recorded usage) shows no warnings and skips the confirm entirely.
+   */
+  currentUsageTokens?: number | null;
   /**
    * Fires only on a genuine model pick — never while the user is typing a
    * search query — and carries the full catalog entry alongside the tuple so
@@ -55,21 +74,71 @@ export function ComposerModelPicker({
     setProvider(value.provider);
   }, [value.provider]);
 
+  // A pick that would shrink below the thread's current usage waits here for
+  // one confirmation before it reaches `onSelect` (and so before it's stored
+  // as the pending switch). Not a disable: deliberately compacting onto a
+  // cheaper/smaller model is legitimate, it just shouldn't happen by accident.
+  const [pendingConfirm, setPendingConfirm] = useState<{
+    tuple: ModelTuple;
+    picked: ProviderModelSearchResult;
+  } | null>(null);
+
   return (
-    <ModelPicker
-      variant="composer"
-      triggerLabel={`Model: ${value.model}`}
-      providers={providers}
-      provider={provider}
-      model={value.model}
-      placeholder="Search models"
-      disabled={disabled}
-      onProviderChange={setProvider}
-      // Typed search text is not a selection — only onModelSelected commits.
-      onModelChange={() => {}}
-      onModelSelected={(picked) => {
-        onSelect({ provider, model: picked.id }, picked);
-      }}
-    />
+    <>
+      <ModelPicker
+        variant="composer"
+        triggerLabel={`Model: ${value.model}`}
+        providers={providers}
+        provider={provider}
+        model={value.model}
+        placeholder="Search models"
+        disabled={disabled}
+        currentUsageTokens={currentUsageTokens}
+        onProviderChange={setProvider}
+        // Typed search text is not a selection — only onModelSelected commits.
+        onModelChange={() => {}}
+        onModelSelected={(picked) => {
+          const tuple = { provider, model: picked.id };
+          const willCompact =
+            typeof currentUsageTokens === "number" &&
+            typeof picked.contextLength === "number" &&
+            picked.contextLength < currentUsageTokens;
+          if (willCompact) {
+            setPendingConfirm({ tuple, picked });
+            return;
+          }
+          onSelect(tuple, picked);
+        }}
+      />
+      <AlertDialog
+        open={pendingConfirm !== null}
+        onOpenChange={(next) => {
+          if (!next) setPendingConfirm(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Switch to {pendingConfirm?.picked.name ?? pendingConfirm?.picked.id}?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              This model's context window is smaller than what this conversation is already using,
+              so switching will compact it right away to fit.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (pendingConfirm) onSelect(pendingConfirm.tuple, pendingConfirm.picked);
+                setPendingConfirm(null);
+              }}
+            >
+              Switch and compact
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 }

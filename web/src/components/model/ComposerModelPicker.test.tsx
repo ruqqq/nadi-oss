@@ -22,6 +22,20 @@ const FULL_CATALOG: ProviderModelSearchResult[] = [
   { id: "gpt-5-mini", name: "GPT-5 mini", inputModalities: ["text", "image"], source: "live" },
 ];
 
+const MIXED_WINDOW_CATALOG: ProviderModelSearchResult[] = [
+  { id: "gpt-5", name: "GPT-5", inputModalities: ["text"], contextLength: 500_000, source: "live" },
+  {
+    id: "gpt-5-mini",
+    name: "GPT-5 mini",
+    inputModalities: ["text"],
+    contextLength: 128_000,
+    source: "live",
+  },
+  // No `contextLength` at all — an uncurated/catalog-miss model. Must never
+  // be marked: unknown is not "too small".
+  { id: "gpt-5-nano", name: "GPT-5 nano", inputModalities: ["text"], source: "live" },
+];
+
 beforeAll(() => {
   Element.prototype.scrollIntoView = vi.fn() as never;
   Element.prototype.hasPointerCapture = vi.fn(() => false) as never;
@@ -112,5 +126,101 @@ describe("ComposerModelPicker", () => {
     await userEvent.click(await screen.findByText("GPT-5"));
 
     expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it("marks models whose window cannot hold the current thread, and no others", async () => {
+    api.getProviderModelCatalog.mockResolvedValue({
+      provider: "openai",
+      models: MIXED_WINDOW_CATALOG,
+      source: "live",
+      fetchedAt: Date.now(),
+      stale: false,
+    });
+
+    render(
+      <ComposerModelPicker
+        value={{ provider: "openai", model: "gpt-5" }}
+        providers={providers}
+        currentUsageTokens={400_000}
+        onSelect={vi.fn()}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button"));
+
+    const miniRow = (await screen.findByText("GPT-5 mini")).closest('[data-slot="command-item"]');
+    expect(miniRow).not.toBeNull();
+    expect(miniRow).toHaveTextContent(/will compact/i);
+
+    const bigRow = screen.getByText("GPT-5").closest('[data-slot="command-item"]');
+    expect(bigRow).not.toHaveTextContent(/will compact/i);
+
+    const unknownRow = screen.getByText("GPT-5 nano").closest('[data-slot="command-item"]');
+    expect(unknownRow).not.toHaveTextContent(/will compact/i);
+  });
+
+  it("confirms once before storing a switch that will compact the conversation", async () => {
+    api.getProviderModelCatalog.mockResolvedValue({
+      provider: "openai",
+      models: MIXED_WINDOW_CATALOG,
+      source: "live",
+      fetchedAt: Date.now(),
+      stale: false,
+    });
+
+    const onSelect = vi.fn();
+    render(
+      <ComposerModelPicker
+        value={{ provider: "openai", model: "gpt-5" }}
+        providers={providers}
+        currentUsageTokens={400_000}
+        onSelect={onSelect}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button"));
+    await userEvent.click(await screen.findByText("GPT-5 mini"));
+
+    // Not stored yet — the confirm is still open, and it's not disabled: the
+    // option must remain pickable, just gated behind one confirmation.
+    expect(onSelect).not.toHaveBeenCalled();
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent(/compact/i);
+
+    await userEvent.click(screen.getByRole("button", { name: /switch and compact/i }));
+
+    expect(onSelect).toHaveBeenCalledWith(
+      { provider: "openai", model: "gpt-5-mini" },
+      expect.objectContaining({ id: "gpt-5-mini" }),
+    );
+  });
+
+  it("does not warn or confirm when the thread's usage is unknown", async () => {
+    api.getProviderModelCatalog.mockResolvedValue({
+      provider: "openai",
+      models: MIXED_WINDOW_CATALOG,
+      source: "live",
+      fetchedAt: Date.now(),
+      stale: false,
+    });
+
+    const onSelect = vi.fn();
+    render(
+      <ComposerModelPicker
+        value={{ provider: "openai", model: "gpt-5" }}
+        providers={providers}
+        currentUsageTokens={null}
+        onSelect={onSelect}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button"));
+
+    const miniRow = (await screen.findByText("GPT-5 mini")).closest('[data-slot="command-item"]');
+    expect(miniRow).not.toHaveTextContent(/will compact/i);
+
+    await userEvent.click(screen.getByText("GPT-5 mini"));
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(onSelect).toHaveBeenCalledWith(
+      { provider: "openai", model: "gpt-5-mini" },
+      expect.objectContaining({ id: "gpt-5-mini" }),
+    );
   });
 });

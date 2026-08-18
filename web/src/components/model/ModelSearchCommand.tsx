@@ -38,6 +38,7 @@ export function ModelSearchCommand({
   autoFocusInput,
   leadingGroup,
   footer,
+  currentUsageTokens,
   onQueryChange,
   onSelect,
 }: {
@@ -54,6 +55,12 @@ export function ModelSearchCommand({
   leadingGroup?: { heading: string; models: ProviderModelSearchResult[] };
   /** Rendered below the list, e.g. the escape hatch to the full catalog. */
   footer?: ReactNode;
+  /** The thread's current token usage, when the caller has one to compare
+   *  rows against. A row whose model window sits below this gets a muted
+   *  "will compact" note — see {@link ModelRow}. `null`/absent means the
+   *  caller has no usage signal (new-thread pickers, Settings) and no row
+   *  is marked. */
+  currentUsageTokens?: number | null;
   /** Fires while typing — treat as a free-typed model id. */
   onQueryChange: (value: string) => void;
   /** Fires when a model is picked from the list. */
@@ -121,18 +128,32 @@ export function ModelSearchCommand({
             <Spinner label="Loading models" />
           </div>
         )}
-        {!loading && failed && <CommandEmpty>Couldn’t load models. Type a model ID to use one anyway.</CommandEmpty>}
-        {showEmpty && <CommandEmpty>No models match. Type a model ID to use one anyway.</CommandEmpty>}
+        {!loading && failed && (
+          <CommandEmpty>Couldn’t load models. Type a model ID to use one anyway.</CommandEmpty>
+        )}
+        {showEmpty && (
+          <CommandEmpty>No models match. Type a model ID to use one anyway.</CommandEmpty>
+        )}
         {leadingGroup && leading.length > 0 && (
           <CommandGroup heading={leadingGroup.heading}>
             {leading.map((model) => (
-              <ModelRow key={`leading-${model.id}`} model={model} onSelect={() => pick(model)} />
+              <ModelRow
+                key={`leading-${model.id}`}
+                model={model}
+                currentUsageTokens={currentUsageTokens}
+                onSelect={() => pick(model)}
+              />
             ))}
           </CommandGroup>
         )}
         <CommandGroup>
           {visible.map((model) => (
-            <ModelRow key={model.id} model={model} onSelect={() => pick(model)} />
+            <ModelRow
+              key={model.id}
+              model={model}
+              currentUsageTokens={currentUsageTokens}
+              onSelect={() => pick(model)}
+            />
           ))}
         </CommandGroup>
         {footer}
@@ -143,11 +164,21 @@ export function ModelSearchCommand({
 
 function ModelRow({
   model,
+  currentUsageTokens,
   onSelect,
 }: {
   model: ProviderModelSearchResult;
+  currentUsageTokens?: number | null;
   onSelect: () => void;
 }) {
+  // Only a KNOWN, smaller window earns the note. `contextLength` is absent
+  // for an uncurated provider or a catalog miss — that's unknown, not "too
+  // small", and warning on every row would just train the user to ignore it.
+  const willCompact =
+    typeof currentUsageTokens === "number" &&
+    typeof model.contextLength === "number" &&
+    model.contextLength < currentUsageTokens;
+
   return (
     <CommandItem value={model.id} onSelect={onSelect}>
       <div className="min-w-0">
@@ -155,6 +186,11 @@ function ModelRow({
         <div className="truncate font-mono text-muted-foreground text-xs">
           {model.id} · {formatModalities(model.inputModalities)}
         </div>
+        {willCompact && (
+          <div className="truncate text-muted-foreground text-xs italic">
+            Will compact this conversation
+          </div>
+        )}
       </div>
     </CommandItem>
   );

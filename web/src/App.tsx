@@ -5653,6 +5653,7 @@ function ThreadChat({
                       value={displayModel}
                       providers={toModelPickerProviders(providers)}
                       disabled={draftSeed === null || sendingFirstMessage}
+                      currentUsageTokens={thread.lastContextTokens}
                       onSelect={handleModelSwitchSelect}
                     />
                   ) : (
