@@ -207,3 +207,37 @@ describe("pending model switch", () => {
     expect(read).toBeNull();
   });
 });
+
+/**
+ * The methods above are reached from the browser over the agents-SDK socket,
+ * which refuses anything not registered with `callable()` — `_isCallable` is a
+ * WeakMap lookup keyed by the function itself, so a plain public method is NOT
+ * enough. Every other test in this file (and the integration one) invokes the
+ * prototype methods DIRECTLY, which bypasses that registry entirely, so none of
+ * them can see a missing registration.
+ *
+ * That gap shipped: production logged `Method setPendingModelSwitch is not
+ * callable` on the first real switch, with every suite green. This is the test
+ * that fails when a client-reachable RPC is added and not registered.
+ */
+describe("client-callable registration", () => {
+  const CLIENT_RPCS = [
+    "setPendingModelSwitch",
+    "getPendingModelSwitch",
+    "clearPendingModelSwitch",
+  ] as const;
+
+  it.each(CLIENT_RPCS)("%s is registered as a client-callable RPC", (method) => {
+    const probe = Object.create(ThinkThreadAgent.prototype) as {
+      _isCallable(name: string): boolean;
+    };
+    expect(probe._isCallable(method)).toBe(true);
+  });
+
+  it("getDraft is registered, proving the probe detects registration", () => {
+    const probe = Object.create(ThinkThreadAgent.prototype) as {
+      _isCallable(name: string): boolean;
+    };
+    expect(probe._isCallable("getDraft")).toBe(true);
+  });
+});

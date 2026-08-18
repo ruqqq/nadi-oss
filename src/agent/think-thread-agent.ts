@@ -7145,6 +7145,25 @@ callable()(
 );
 callable()(ThinkThreadAgent.prototype.getDraft, null as unknown as ClassMethodDecoratorContext);
 callable()(ThinkThreadAgent.prototype.setDraft, null as unknown as ClassMethodDecoratorContext);
+// Reached from the composer's model picker over the client socket. Registering
+// here is NOT optional bookkeeping: the SDK's `_isCallable` is a WeakMap lookup
+// keyed by the function, so an unregistered public method throws "Method X is
+// not callable" at the wire and never runs. Every unit/integration test invokes
+// these on the prototype directly, which bypasses this registry — so only
+// `pending-model-switch.test.ts`'s callable-registration block can catch a
+// missing entry here.
+callable()(
+  ThinkThreadAgent.prototype.setPendingModelSwitch,
+  null as unknown as ClassMethodDecoratorContext,
+);
+callable()(
+  ThinkThreadAgent.prototype.getPendingModelSwitch,
+  null as unknown as ClassMethodDecoratorContext,
+);
+callable()(
+  ThinkThreadAgent.prototype.clearPendingModelSwitch,
+  null as unknown as ClassMethodDecoratorContext,
+);
 callable()(
   ThinkThreadAgent.prototype.exportHistory,
   null as unknown as ClassMethodDecoratorContext,
