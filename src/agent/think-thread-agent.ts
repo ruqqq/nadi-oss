@@ -98,11 +98,16 @@ import {
 } from "./attachment-extraction";
 import {
   cancelQueuedUserMessageFromBatch,
+  effectiveModelSwitch,
+  isQueuedBatchApplied,
   normalizeQueuedUserMessageInput,
+  queuedBatchFromMetadata,
   serializeQueuedUserMessageSubmissionRows,
   submitQueuedUserMessageBatch,
+  withCapturedModelSwitch,
   type NormalizedQueuedUserMessage,
   type QueuedSubmissionPort,
+  type QueuedUserMessageItem,
 } from "./queued-user-messages";
 import { runAutomatonTurn } from "./automaton-run";
 import { buildReasoningProviderOptions } from "./reasoning-options";
@@ -5770,7 +5775,16 @@ export class ThinkThreadAgent extends Think<Env> {
     await this.assertThreadWritable();
     const normalized = normalizeQueuedUserMessageInput(input);
     return this.serializeQueuedRpc(async () => {
-      await submitQueuedUserMessageBatch(this.queuedSubmissionPort(), normalized);
+      // Capture whatever switch is parked mid-conversation onto THIS item,
+      // then empty the thread-scoped slot — per-item storage is what makes
+      // cancelling a queued message carry its switch away for free (see
+      // `queued-user-messages.ts`). A message queued with no pending switch
+      // must carry none; emptying unconditionally (idempotent when already
+      // empty) is what stops a later picker change from retro-editing an
+      // item that already queued.
+      const captured = withCapturedModelSwitch(normalized, await this.getPendingModelSwitch());
+      await this.clearPendingModelSwitch();
+      await submitQueuedUserMessageBatch(this.queuedSubmissionPort(), captured);
       if (normalized.attachmentIds.length > 0) {
         await new AttachmentRepository(registryBinding(this.env)).markCommitted(
           normalized.attachmentIds,
@@ -6380,9 +6394,25 @@ export class ThinkThreadAgent extends Think<Env> {
    * `think-model-messages-override.test.ts` and
    * `pending-model-switch.test.ts` establish the stub-`this.messages` /
    * stub-`_incompleteToolCallIds` pattern this guard is tested with.
+   *
+   * The switch itself may come from two places (task 7): the ITEM that
+   * carried this turn through the queue, if one drove it, or — for a direct,
+   * unqueued turn (test probes, automaton runs) where no such item exists —
+   * the plain thread-scoped slot, exactly as task 6 left it. See
+   * `carriedQueuedModelSwitch` for why a batch, once found, is authoritative
+   * even when none of its items carries a switch.
    */
   private async commitPendingModelSwitch(): Promise<ModelSwitchData | null> {
-    const pending = await this.getPendingModelSwitch();
+    const carried = await this.carriedQueuedModelSwitch();
+    if (carried !== undefined) {
+      // A batch drove this turn: its items are the source of truth. Clear any
+      // stray thread-scoped value now, before deciding whether to apply
+      // `carried` — a picker change made AFTER queuing (task-7 brief) leaves
+      // exactly such a stray value, and it must not leak onto a later,
+      // unrelated turn.
+      await this.clearPendingModelSwitch();
+    }
+    const pending = carried !== undefined ? carried : await this.getPendingModelSwitch();
     if (!pending) return null;
 
     const incompleteToolCallIds = (
@@ -6416,6 +6446,44 @@ export class ThinkThreadAgent extends Think<Env> {
     this._runtimeConfig.invalidate();
     log.info("think_thread.model_switched", { threadId: this.name, from, to });
     return { from, to };
+  }
+
+  /**
+   * The switch carried by the queued submission whose messages ARE this
+   * turn — `null` when a batch drives this turn but none of its items
+   * carries a switch, `undefined` when no batch can be found at all (a
+   * direct, unqueued turn). Only the `undefined` case falls back to the
+   * thread-scoped slot in `commitPendingModelSwitch`.
+   *
+   * Finds the batch the same way the queued drain already reaches its
+   * metadata (`listSubmissions` + `queuedBatchFromMetadata`, same as
+   * `queued-user-messages.ts`'s `findWaitingQueuedBatch`), but looks for
+   * "running" + already-applied rather than "waiting" + not-yet-applied:
+   * by the time `beforeTurn` runs, the triggering submission has been
+   * claimed (running) and its messages are already in `this.messages`.
+   */
+  private async carriedQueuedModelSwitch(): Promise<ThreadModelSnapshotValue | null | undefined> {
+    const submissions = await this.listSubmissions({ limit: 50 });
+    const applied = new Set(this.messages.map((message) => message.id));
+    let active: { items: QueuedUserMessageItem[]; createdAt: number } | null = null;
+    for (const submission of submissions) {
+      if (submission.status !== "running") continue;
+      if (typeof submission.createdAt !== "number") continue;
+      const batch = queuedBatchFromMetadata(submission.metadata);
+      if (!batch || !isQueuedBatchApplied(batch.items, applied)) continue;
+      if (active && active.createdAt >= submission.createdAt) continue;
+      active = { items: batch.items, createdAt: submission.createdAt };
+    }
+    if (!active) return undefined;
+    return effectiveModelSwitch(active.items);
+  }
+
+  /** Test seam: runs the SDK drain loop so a waiting queued batch actually
+   *  executes its turn, following the `_test*`/`ForTest` naming already used
+   *  in this class. Thin wrapper over Think's own (unsafe-cast) drain hook,
+   *  same seam `queued-user-messages` integration coverage already uses. */
+  async drainQueuedUserMessagesForTest(): Promise<void> {
+    await (this as unknown as { _drainThinkSubmissions(): Promise<void> })._drainThinkSubmissions();
   }
 
   /**

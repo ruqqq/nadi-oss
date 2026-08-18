@@ -15,6 +15,12 @@ import { ThinkThreadAgent } from "../../../src/agent/think-thread-agent";
  * `test/integration/model-switch-commit.integration.test.ts` instead — same
  * split `pending-model-switch.test.ts` / `pending-model-switch.integration.test.ts`
  * uses for the RPCs this method consumes.
+ *
+ * Task 7 added a `listSubmissions` lookup (`carriedQueuedModelSwitch`) at the
+ * TOP of `commitPendingModelSwitch`, ahead of everything asserted here —
+ * stubbed to return no submissions so it falls straight through to the
+ * thread-scoped `getPendingModelSwitch` path this file exercises, same as an
+ * unqueued/direct turn (no batch found) in production.
  */
 
 function agent(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -25,6 +31,7 @@ function agent(overrides: Record<string, unknown> = {}): Record<string, unknown>
   a.getPendingModelSwitch = async () => null;
   a.clearPendingModelSwitch = async () => {};
   a._incompleteToolCallIds = () => [];
+  a.listSubmissions = async () => [];
   Object.assign(a, overrides);
   return a;
 }

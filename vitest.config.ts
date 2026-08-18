@@ -35,6 +35,7 @@ const integrationGroupedIsolatedFiles = [
   "test/integration/kv-oauth-provider.integration.test.ts",
   "test/integration/model-switch-commit.integration.test.ts",
   "test/integration/pending-model-switch.integration.test.ts",
+  "test/integration/queued-model-switch.integration.test.ts",
   "test/integration/skill-script-runner-gating.integration.test.ts",
   "test/integration/subagent-detached-injection.test.ts",
   "test/integration/subagent.integration.test.ts",

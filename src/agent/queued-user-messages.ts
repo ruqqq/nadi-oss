@@ -1,6 +1,9 @@
 import type { ThinkSubmissionInspection } from "@cloudflare/think";
 import type { FileUIPart, UIMessage } from "ai";
 import { extractAttachmentIdsFromUiMessages } from "./prepare-attachments";
+import { isReasoningEffort } from "./reasoning-options";
+import { isSupportedAgentProvider, parseModelInputModalities } from "../settings/model-selection";
+import type { ThreadModelSnapshotValue } from "../settings/thread-model-snapshot";
 import { isSystemReminderMessage, isWatcherCompletionMessage } from "./system-reminder";
 
 export const NADI_QUEUED_USER_MESSAGE_KIND = "queued_user_message";
@@ -25,6 +28,15 @@ export type QueuedUserMessageItem = {
   textPreview: string;
   attachmentCount: number;
   attachments: QueuedAttachmentPreview[];
+  /**
+   * The model switch parked mid-conversation at the moment THIS item was
+   * queued (see `think-thread-agent.ts`'s `submitQueuedUserMessage`). Stored
+   * per item, never per batch: the queue holds one waiting submission
+   * carrying every waiting message, and cancellation is per-item, so a
+   * batch-level switch would outlive the message that requested it and
+   * silently apply to a sibling the user never chose it for.
+   */
+  modelSwitch?: ThreadModelSnapshotValue;
 };
 
 // The queue holds AT MOST ONE waiting submission at a time, carrying every
@@ -65,6 +77,9 @@ export type QueuedUserMessageSubmission = {
   attachmentCount: number;
   clientMessageId: string;
   attachments: QueuedAttachmentPreview[];
+  /** The model this item will (or did) run on, so the queued chip can show
+   *  it. Absent when the item carries no captured switch. */
+  model?: string;
 };
 
 export type QueuedUserMessageInput = {
@@ -142,6 +157,20 @@ export function normalizeQueuedUserMessageInput(input: unknown): NormalizedQueue
   };
 }
 
+/**
+ * Binds a pending model switch onto the item being queued — the ONE place a
+ * switch enters the queue, so it travels with this message and no other. A
+ * `null` switch (nothing was pending) leaves the item untouched: a message
+ * queued with no pending switch must carry none, never inherit a sibling's.
+ */
+export function withCapturedModelSwitch(
+  normalized: NormalizedQueuedUserMessage,
+  modelSwitch: ThreadModelSnapshotValue | null,
+): NormalizedQueuedUserMessage {
+  if (!modelSwitch) return normalized;
+  return { ...normalized, item: { ...normalized.item, modelSwitch } };
+}
+
 export function appendToQueuedBatch(
   existing: { items: QueuedUserMessageItem[]; messages: UIMessage[] } | null,
   normalized: NormalizedQueuedUserMessage,
@@ -214,6 +243,50 @@ function isQueuedUserMessageItem(value: unknown): value is QueuedUserMessageItem
   return true;
 }
 
+/**
+ * Defensive parse of a captured switch pulled off submission metadata — a
+ * client-controlled channel over the wire, same trust level as everything
+ * else read here. Anything malformed degrades to `null` ("no switch") rather
+ * than rejecting the item: a user's queued text is more valuable than their
+ * model choice.
+ */
+function readStoredModelSwitch(value: unknown): ThreadModelSnapshotValue | null {
+  if (!isObject(value)) return null;
+  const { provider, model, modelInputModalities, showReasoning, reasoningEffort } = value;
+  if (typeof provider !== "string" || !provider || !isSupportedAgentProvider(provider)) {
+    return null;
+  }
+  if (typeof model !== "string" || !model) return null;
+  const modalities = parseModelInputModalities(modelInputModalities);
+  if (!modalities) return null;
+  if (typeof showReasoning !== "boolean") return null;
+  if (!isReasoningEffort(reasoningEffort)) return null;
+  const modelSupportsReasoning = value.modelSupportsReasoning;
+  if (modelSupportsReasoning !== null && typeof modelSupportsReasoning !== "boolean") return null;
+  return {
+    provider,
+    model,
+    modelInputModalities: modalities,
+    showReasoning,
+    reasoningEffort,
+    modelSupportsReasoning,
+  };
+}
+
+/** Sanitizes a structurally-valid item's `modelSwitch`, degrading a
+ *  malformed capture to "no switch" rather than rejecting the item. */
+function sanitizeQueuedUserMessageItem(value: QueuedUserMessageItem): QueuedUserMessageItem {
+  const { clientMessageId, textPreview, attachmentCount, attachments } = value;
+  const modelSwitch = readStoredModelSwitch((value as { modelSwitch?: unknown }).modelSwitch);
+  return {
+    clientMessageId,
+    textPreview,
+    attachmentCount,
+    attachments,
+    ...(modelSwitch ? { modelSwitch } : {}),
+  };
+}
+
 function isStoredUiMessage(value: unknown): value is UIMessage {
   return isObject(value) && typeof value.id === "string" && Array.isArray(value.parts);
 }
@@ -223,7 +296,7 @@ export function queuedBatchFromMetadata(metadata: unknown): QueuedUserMessageBat
 
   if (Array.isArray(metadata.items)) {
     if (metadata.items.length === 0 || !metadata.items.every(isQueuedUserMessageItem)) return null;
-    const items = metadata.items;
+    const items = metadata.items.map(sanitizeQueuedUserMessageItem);
     const messages =
       Array.isArray(metadata.messages) &&
       metadata.messages.length === items.length &&
@@ -234,13 +307,32 @@ export function queuedBatchFromMetadata(metadata: unknown): QueuedUserMessageBat
   }
 
   // Legacy v1 shape (single message, previews at the top level, no stored
-  // messages): listable and cancellable-whole, but never merged into.
+  // messages): listable and cancellable-whole, but never merged into. Legacy
+  // items never carried a `modelSwitch`, so this reads as "no switch".
   if (isQueuedUserMessageItem(metadata)) {
     const { clientMessageId, textPreview: preview, attachmentCount, attachments } = metadata;
     return {
       items: [{ clientMessageId, textPreview: preview, attachmentCount, attachments }],
       messages: null,
     };
+  }
+  return null;
+}
+
+/**
+ * All of a batch's messages run in ONE turn, so at most one switch can
+ * apply: the last surviving item that carries one — the user's most recent
+ * expressed intent. Cancelling that item drops its switch and the previous
+ * one takes over, which is what makes per-item cancellation carry the
+ * switch away for free (see `queued-user-messages.ts`'s per-item storage
+ * note on `QueuedUserMessageItem`).
+ */
+export function effectiveModelSwitch(
+  items: QueuedUserMessageItem[],
+): ThreadModelSnapshotValue | null {
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    const found = items[i]?.modelSwitch;
+    if (found) return found;
   }
   return null;
 }
@@ -304,6 +396,7 @@ export function serializeQueuedUserMessageSubmissionRows(
       attachments: item.attachments,
     };
     if (storedMessage) row.text = fullMessageText(storedMessage);
+    if (item.modelSwitch) row.model = item.modelSwitch.model;
     if (submission.requestId !== undefined) row.requestId = submission.requestId;
     if (submission.error !== undefined) row.error = submission.error;
     if (submission.startedAt !== undefined) row.startedAt = submission.startedAt;
