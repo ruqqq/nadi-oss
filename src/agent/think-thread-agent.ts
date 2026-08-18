@@ -84,6 +84,7 @@ import { composeSystemPrompt } from "./system-prompt";
 import { autoNameThread, firstUserText } from "./auto-name-thread";
 import { resolveMemoryIndex } from "./memory-index";
 import { sanitizeOpenAIOAuthMessages } from "./openai-oauth-message-sanitize";
+import { sanitizeCrossModelReasoning } from "./cross-model-reasoning-sanitize";
 import {
   extractAttachmentIdsFromModelMessages,
   type ExtractionResult,
@@ -6575,7 +6576,12 @@ async function assembleWindowScaledModelMessages(
   };
   const budget = await self.currentContextBudget();
   const repaired = await self._repairTranscriptForProvider(self.messages);
-  const truncated = truncateOlderMessages(repaired, truncationOptionsFor(budget));
+  // Cross-model reasoning is dropped BEFORE truncation: a reasoning block that
+  // will not be sent must not consume the truncation budget. Markers are still
+  // present here and are gone after convertToModelMessages, so this is the only
+  // seam where the segment origins are readable.
+  const sanitized = sanitizeCrossModelReasoning(repaired);
+  const truncated = truncateOlderMessages(sanitized, truncationOptionsFor(budget));
   // Same post-repair diagnostic Think's own _assembleModelMessages runs: a
   // survivor here means _repairToolTranscriptParts has a gap, even though
   // ignoreIncompleteToolCalls keeps the turn itself safe.

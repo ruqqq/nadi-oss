@@ -124,4 +124,106 @@ describe("sanitizeCrossModelReasoning", () => {
     ]);
     expect(JSON.stringify(modelMessages)).not.toContain("model-switch");
   });
+
+  it("treats a marker on message index 0 as a zero-iteration backfill (no misattribution)", () => {
+    // The backfill loop in segmentTuples runs `for i in 0..index-1` to
+    // attribute messages BEFORE the first marker. When the first marker is on
+    // message 0 itself, that loop must do nothing rather than write anything
+    // (there is nothing before index 0 to backfill).
+    const away = modelSwitchPart({
+      from: { provider: "openai", model: "gpt-5" },
+      to: { provider: "anthropic", model: "claude-opus-5" },
+    }) as unknown as UIMessage["parts"][number];
+
+    const result = sanitizeCrossModelReasoning([
+      user("u1", [SWITCH]),
+      assistant("a1", [openaiReasoning, { type: "text", text: "new" }]),
+      user("u2", [away]),
+      assistant("a2", [anthropicReasoning, { type: "text", text: "later" }]),
+    ]);
+    // a1 was produced by the marker's `to` tuple (openai/gpt-5), which is
+    // superseded by the later switch back to anthropic — its reasoning drops.
+    expect(result[1]?.parts).toEqual([{ type: "text", text: "new" }]);
+    // a2 is produced by the CURRENT tuple (anthropic/claude-opus-5) — kept.
+    expect(result[3]?.parts).toEqual([anthropicReasoning, { type: "text", text: "later" }]);
+  });
+
+  it("attributes a message with several markers to the LAST marker's `to` tuple", () => {
+    // Two switches land on the SAME message: anthropic -> openai -> google.
+    // Only the FIRST marker may trigger the backfill (it is already
+    // guarded by `sawMarker`), but the message's own `active` tuple — used to
+    // attribute the very next assistant turn — must end up as the LAST
+    // marker's `to` (google), not the first marker's `to` (openai).
+    //
+    // A trailing THIRD switch (google -> deepseek) is required to make this
+    // observable: without it, "the message's own attribution" and "the
+    // transcript's current tuple" are read from the same final `active`
+    // value and always agree, so a first-vs-last bug would go unnoticed. The
+    // trailing switch pulls `current` away from what u2 should have been
+    // attributed to, so a3's origin is compared against something OTHER than
+    // whatever the buggy code happened to leave in `active`.
+    const bToC = modelSwitchPart({
+      from: { provider: "openai", model: "gpt-5" },
+      to: { provider: "google", model: "gemini-3-pro" },
+    }) as unknown as UIMessage["parts"][number];
+
+    const cToD = modelSwitchPart({
+      from: { provider: "google", model: "gemini-3-pro" },
+      to: { provider: "deepseek", model: "deepseek-v4" },
+    }) as unknown as UIMessage["parts"][number];
+
+    const googleReasoning = {
+      type: "reasoning" as const,
+      text: "thinking as gemini",
+      providerMetadata: { google: { thoughtSignature: "sig-g" } },
+    };
+
+    const deepseekReasoning = {
+      type: "reasoning" as const,
+      text: "thinking as deepseek",
+      providerMetadata: { deepseek: { signature: "sig-d" } },
+    };
+
+    const result = sanitizeCrossModelReasoning([
+      assistant("a1", [anthropicReasoning]),
+      user("u2", [SWITCH, bToC, { type: "text", text: "now use gemini" }]),
+      assistant("a3", [googleReasoning, { type: "text", text: "gemini turn" }]),
+      user("u4", [cToD, { type: "text", text: "now use deepseek" }]),
+      assistant("a5", [deepseekReasoning, { type: "text", text: "deepseek turn" }]),
+    ]);
+    // a3 is attributed to u2's LAST marker (google), which the trailing
+    // switch supersedes — so its reasoning is dropped. This IS the
+    // discriminating case: a buggy implementation that lets only the first
+    // marker of a message win (openai, guarded by the SAME `sawMarker` flag
+    // that gates the backfill) would also stop updating `active` on every
+    // later marker, so `current` would stay wrongly pinned at openai too —
+    // making a3's (wrong) origin equal the (wrong) current, and keeping
+    // reasoning that should have been dropped.
+    expect(result[2]?.parts).toEqual([{ type: "text", text: "gemini turn" }]);
+    // a5 is attributed to the CURRENT tuple (deepseek) and survives — this
+    // pins that later markers keep updating `active` at all, which the same
+    // buggy variant above would also break.
+    expect(result[4]?.parts).toEqual([deepseekReasoning, { type: "text", text: "deepseek turn" }]);
+  });
+});
+
+describe("assembly order", () => {
+  it("sanitizes before truncation so the budget reflects what is sent", async () => {
+    // truncateOlderMessages lives in the agents SDK, not in this repo — the
+    // ordering assertion below is the real guard; this import just confirms
+    // the symbol the source string refers to actually exists.
+    const { truncateOlderMessages } = await import("agents/experimental/memory/utils");
+    expect(typeof truncateOlderMessages).toBe("function");
+    // Guard: this test exists to pin the ORDER in
+    // assembleWindowScaledModelMessages. If the sanitizer moves after
+    // truncation, the truncation budget counts reasoning that never ships.
+    const source = await import("node:fs").then((fs) =>
+      fs.readFileSync("src/agent/think-thread-agent.ts", "utf8"),
+    );
+    const sanitizeAt = source.indexOf("sanitizeCrossModelReasoning(");
+    const truncateAt = source.indexOf("truncateOlderMessages(sanitized");
+    expect(sanitizeAt).toBeGreaterThan(-1);
+    expect(truncateAt).toBeGreaterThan(-1);
+    expect(sanitizeAt).toBeLessThan(truncateAt);
+  });
 });
