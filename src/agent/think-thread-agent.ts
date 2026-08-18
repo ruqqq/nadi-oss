@@ -199,6 +199,7 @@ import {
   resolveThreadModelSnapshotValue,
   type ThreadModelSnapshotValue,
 } from "../settings/thread-model-snapshot";
+import { sameModelTuple, type ModelSwitchData } from "./model-switch";
 import { attachmentsBucket } from "../storage/bucket-binding";
 import { log } from "../log";
 import {
@@ -1169,6 +1170,11 @@ export class ThinkThreadAgent extends Think<Env> {
     // resolve is fresh; the onStart burst and idle status reads still share one
     // cached D1 query.
     this._runtimeConfig.invalidate();
+    // Drain any model switch parked mid-conversation BEFORE the resolve below,
+    // so this turn (not the next one) runs on the newly chosen model. See
+    // `commitPendingModelSwitch` for why this position makes the Anthropic
+    // thinking/tool_use ordering rule unreachable.
+    await this.commitPendingModelSwitch();
     // Reset only — draining happens in `beforeStep` (see its comment for why
     // draining here would duplicate messages between the base and injections).
     this._activeTurnInjections = [];
@@ -6355,6 +6361,61 @@ export class ThinkThreadAgent extends Think<Env> {
 
   async clearPendingModelSwitch(): Promise<void> {
     await this.ctx.storage.delete(PENDING_MODEL_SWITCH_STORAGE_KEY);
+  }
+
+  /**
+   * Drain a pending model switch into `thread_index`. Called at the TOP of
+   * `beforeTurn`, before the turn's runtime config is resolved, so the turn
+   * runs on the new model rather than one turn late.
+   *
+   * Committing here — after the user message that triggered this turn is
+   * already appended — is what makes the Anthropic thinking/tool_use
+   * ordering rule unreachable: with extended thinking on, an assistant turn
+   * containing `tool_use` must open with a thinking block, and switching
+   * models while the last assistant message still held a live tool call
+   * would make the sanitizer strip that foreign thinking block and leave
+   * `tool_use` first — a 400. The last assistant message cannot hold a live
+   * tool call at this point in the turn, but the guard below asserts that
+   * rather than assuming it (a repair gap upstream could still leave one).
+   * `think-model-messages-override.test.ts` and
+   * `pending-model-switch.test.ts` establish the stub-`this.messages` /
+   * stub-`_incompleteToolCallIds` pattern this guard is tested with.
+   */
+  private async commitPendingModelSwitch(): Promise<ModelSwitchData | null> {
+    const pending = await this.getPendingModelSwitch();
+    if (!pending) return null;
+
+    const incompleteToolCallIds = (
+      this as unknown as { _incompleteToolCallIds(messages: UIMessage[]): string[] }
+    )._incompleteToolCallIds(this.messages);
+    if (incompleteToolCallIds.length > 0) {
+      log.warn("think_thread.model_switch_deferred", {
+        threadId: this.name,
+        reason: "incomplete_tool_calls",
+      });
+      return null;
+    }
+
+    const runtimeConfig = await this.resolveRuntimeConfigForThink();
+    const from = {
+      provider: runtimeConfig.modelConfig.provider,
+      model: runtimeConfig.modelConfig.model,
+    };
+    const to = { provider: pending.provider, model: pending.model };
+    if (sameModelTuple(from, to)) {
+      await this.clearPendingModelSwitch();
+      return null;
+    }
+
+    await new ThreadRepository(registryDb(this.env)).updateModelSnapshot(this.name, pending);
+    await this.clearPendingModelSwitch();
+    // The config just changed underneath the per-wake cache `beforeTurn`
+    // already fetched via the call above — invalidate so the SAME turn's
+    // `resolveRuntimeConfigForThink` read (right after this call returns)
+    // sees the committed switch instead of replaying the stale `from` value.
+    this._runtimeConfig.invalidate();
+    log.info("think_thread.model_switched", { threadId: this.name, from, to });
+    return { from, to };
   }
 
   /**

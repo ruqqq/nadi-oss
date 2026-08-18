@@ -165,6 +165,40 @@ export class ThreadRepository {
     await this.db.update(threadIndex).set(fields).where(eq(threadIndex.id, threadId));
   }
 
+  /**
+   * Commit a mid-thread model switch. All six columns move together — a
+   * partial write produces a thread that claims reasoning support it does
+   * not have.
+   *
+   * Deliberately does NOT touch `updatedAt`: thread dismissal is
+   * `recentDismissedAt >= updatedAt`, so bumping it here would silently
+   * un-dismiss the thread. The user message sent in the same turn already
+   * owns that column.
+   */
+  async updateModelSnapshot(
+    threadId: string,
+    value: {
+      provider: string;
+      model: string;
+      modelInputModalities: string[];
+      showReasoning: boolean;
+      reasoningEffort: string;
+      modelSupportsReasoning: boolean | null;
+    },
+  ) {
+    await this.db
+      .update(threadIndex)
+      .set({
+        modelProvider: value.provider,
+        model: value.model,
+        modelInputModalities: JSON.stringify(value.modelInputModalities),
+        showReasoning: value.showReasoning,
+        reasoningEffort: value.reasoningEffort,
+        modelSupportsReasoning: value.modelSupportsReasoning,
+      })
+      .where(eq(threadIndex.id, threadId));
+  }
+
   async archive(threadId: string, archivedAt: number) {
     await this.db
       .update(threadIndex)
