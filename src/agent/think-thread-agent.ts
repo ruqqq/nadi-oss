@@ -84,7 +84,11 @@ import { composeSystemPrompt } from "./system-prompt";
 import { autoNameThread, firstUserText } from "./auto-name-thread";
 import { resolveMemoryIndex } from "./memory-index";
 import { sanitizeOpenAIOAuthMessages } from "./openai-oauth-message-sanitize";
-import { sanitizeCrossModelReasoning } from "./cross-model-reasoning-sanitize";
+import {
+  restoreModelSwitchMarker,
+  sanitizeCrossModelReasoning,
+  type ModelSwitchOrigin,
+} from "./cross-model-reasoning-sanitize";
 import {
   extractAttachmentIdsFromModelMessages,
   type ExtractionResult,
@@ -204,7 +208,12 @@ import {
   resolveThreadModelSnapshotValue,
   type ThreadModelSnapshotValue,
 } from "../settings/thread-model-snapshot";
-import { sameModelTuple, type ModelSwitchData } from "./model-switch";
+import {
+  modelSwitchPart,
+  readModelSwitchPart,
+  sameModelTuple,
+  type ModelSwitchData,
+} from "./model-switch";
 import { attachmentsBucket } from "../storage/bucket-binding";
 import { log } from "../log";
 import {
@@ -279,6 +288,25 @@ const DRAFT_STORAGE_KEY = "composer:draft";
  *  composer intent, exactly like the draft above — it must NOT reach
  *  `thread_index` until a user message actually runs on it. */
 const PENDING_MODEL_SWITCH_STORAGE_KEY = "composer:pendingModelSwitch";
+/**
+ * Where the transcript's CURRENT segment begins — the durable twin of the
+ * `data-model-switch` marker. The marker lives in the transcript and the
+ * transcript is compacted; this record is not, so it is what
+ * `restoreModelSwitchMarker` rebuilds segmentation from. Written on every
+ * commit, never cleared (the thread always has a current segment once it has
+ * switched once).
+ */
+const MODEL_SWITCH_ORIGIN_STORAGE_KEY = "modelSwitch:origin";
+/**
+ * "Some queued item may carry a model switch." Cheap gate for the
+ * `listSubmissions` + message-id scan in `carriedQueuedModelSwitch`, which
+ * otherwise runs on EVERY turn of every agent (subagents included) to find
+ * nothing. Stale-safe in one direction only: a stale `true` costs one wasted
+ * scan, a missing `true` would drop a switch — so it is written whenever a
+ * switch is captured onto a queued item and cleared only once a batch has
+ * been consulted.
+ */
+const QUEUED_MODEL_SWITCH_FLAG_KEY = "modelSwitch:queued";
 const FEEDBACK_ACTIVE_INTERVIEW_STORAGE_KEY = "feedback:active-interview";
 const FEEDBACK_DRAFT_STORAGE_KEY = "feedback:draft";
 const FEEDBACK_INTERVIEW_BOUNDS_STORAGE_KEY = "feedback:interview-bounds";
@@ -598,6 +626,10 @@ export class ThinkThreadAgent extends Think<Env> {
   private _turnRuntimeConfig: Awaited<
     ReturnType<ThinkThreadAgent["resolveRuntimeConfigForThink"]>
   > | null = null;
+
+  /** Memoized `modelSwitch:origin` record. `undefined` means "not read yet";
+   *  `null` means "read, and this thread has never switched". */
+  private _modelSwitchOrigin: ModelSwitchOrigin | null | undefined = undefined;
 
   /**
    * Usage for the turn in flight. In-memory ONLY: `onStepFinish` runs BETWEEN
@@ -5784,6 +5816,10 @@ export class ThinkThreadAgent extends Think<Env> {
       // item that already queued.
       const captured = withCapturedModelSwitch(normalized, await this.getPendingModelSwitch());
       await this.clearPendingModelSwitch();
+      // Raise the cheap gate `commitPendingModelSwitch` reads: from here the
+      // switch lives only inside submission metadata, which nothing but the
+      // full `listSubmissions` scan can see.
+      if (captured.item.modelSwitch) await this.markQueuedModelSwitch();
       await submitQueuedUserMessageBatch(this.queuedSubmissionPort(), captured);
       if (normalized.attachmentIds.length > 0) {
         await new AttachmentRepository(registryBinding(this.env)).markCommitted(
@@ -6425,6 +6461,14 @@ export class ThinkThreadAgent extends Think<Env> {
    * even when none of its items carries a switch.
    */
   private async commitPendingModelSwitch(): Promise<ModelSwitchData | null> {
+    // Cheap gate before the `listSubmissions` + message-id scan below: with
+    // nothing parked in the thread slot AND no queued item known to carry a
+    // switch, every branch of this method reaches the same `null`. Two DO
+    // storage reads replace that scan on the overwhelming majority of turns.
+    const slot = await this.getPendingModelSwitch();
+    const queuedMaybe = await this.hasQueuedModelSwitch();
+    if (!slot && !queuedMaybe) return null;
+
     const carried = await this.carriedQueuedModelSwitch();
     if (carried !== undefined) {
       // A batch drove this turn: its items are the source of truth. Clear any
@@ -6433,8 +6477,12 @@ export class ThinkThreadAgent extends Think<Env> {
       // exactly such a stray value, and it must not leak onto a later,
       // unrelated turn.
       await this.clearPendingModelSwitch();
+      await this.clearQueuedModelSwitchFlag();
+    } else if (!slot) {
+      // The flag was stale: no batch drives this turn and nothing is parked.
+      await this.clearQueuedModelSwitchFlag();
     }
-    const pending = carried !== undefined ? carried : await this.getPendingModelSwitch();
+    const pending = carried !== undefined ? carried : slot;
     if (!pending) return null;
 
     const incompleteToolCallIds = (
@@ -6466,8 +6514,104 @@ export class ThinkThreadAgent extends Think<Env> {
     // `resolveRuntimeConfigForThink` read (right after this call returns)
     // sees the committed switch instead of replaying the stale `from` value.
     this._runtimeConfig.invalidate();
+    // The transcript's record of the switch, written by the SERVER — the only
+    // component that knows a switch actually committed. The client attaches
+    // nothing: a commit can originate from an automaton run, a queued batch,
+    // or a turn whose client never hydrated its pending state, and every one
+    // of those used to commit with no marker at all, leaving the sanitizer to
+    // read the transcript as one segment and replay the old model's signed
+    // reasoning at the new model.
+    await this.recordCommittedModelSwitch({ from, to });
     log.info("think_thread.model_switched", { threadId: this.name, from, to });
     return { from, to };
+  }
+
+  /**
+   * Record a committed switch in BOTH places it has to exist.
+   *
+   * 1. DO storage (`modelSwitch:origin`) — the durable copy. The transcript
+   *    marker sits inside a message and compaction archives messages, so the
+   *    transcript alone cannot be trusted to still hold it;
+   *    `restoreModelSwitchMarker` rebuilds the marker from this record during
+   *    model-message assembly.
+   * 2. The transcript itself, as a `data-model-switch` part prepended to the
+   *    message the switch commits against (the turn's triggering user
+   *    message). This is what the UI renders the divider from, and it keeps
+   *    the divider exactly where the client used to put it.
+   *
+   * The transcript write is best-effort — it must never fail a turn — which is
+   * safe precisely because (1) is the copy the sanitizer can always fall back
+   * to. Idempotent: a message already carrying a marker for this `to` (an
+   * older client that still attaches its own) is left alone, so one switch can
+   * never render two dividers.
+   */
+  private async recordCommittedModelSwitch(data: ModelSwitchData): Promise<void> {
+    const anchor = this.modelSwitchAnchorMessage();
+    const origin: ModelSwitchOrigin = {
+      ...data,
+      ...(anchor ? { anchorMessageId: anchor.id } : {}),
+    };
+    await this.ctx.storage.put(MODEL_SWITCH_ORIGIN_STORAGE_KEY, origin);
+    this._modelSwitchOrigin = origin;
+    if (!anchor) return;
+    const alreadyMarked = anchor.parts.some((part) => {
+      const marker = readModelSwitchPart(part);
+      return marker !== null && sameModelTuple(marker.to, data.to);
+    });
+    if (alreadyMarked) return;
+    try {
+      await this.addMessages(
+        [
+          {
+            ...anchor,
+            parts: [
+              modelSwitchPart(data) as unknown as UIMessage["parts"][number],
+              ...anchor.parts,
+            ],
+          },
+        ],
+        { mode: "upsert" },
+      );
+    } catch (error) {
+      log.warn("think_thread.model_switch_marker_write_failed", {
+        threadId: this.name,
+        error: String(error),
+      });
+    }
+  }
+
+  /** The message a committed switch hangs its marker on: the turn's
+   *  triggering user message (the commit runs after it is appended), so the
+   *  divider renders above it — the placement the client used to produce. */
+  private modelSwitchAnchorMessage(): UIMessage | undefined {
+    const messages = this.messages;
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const message = messages[i];
+      if (message && message.role === "user") return message;
+    }
+    return messages[messages.length - 1];
+  }
+
+  /** The durable current-segment record, memoized per instance (assembly runs
+   *  on every step, and the record only changes when a commit rewrites it). */
+  private async currentModelSwitchOrigin(): Promise<ModelSwitchOrigin | null> {
+    if (this._modelSwitchOrigin !== undefined) return this._modelSwitchOrigin;
+    const stored =
+      (await this.ctx.storage.get<ModelSwitchOrigin>(MODEL_SWITCH_ORIGIN_STORAGE_KEY)) ?? null;
+    this._modelSwitchOrigin = stored;
+    return stored;
+  }
+
+  private async hasQueuedModelSwitch(): Promise<boolean> {
+    return (await this.ctx.storage.get<boolean>(QUEUED_MODEL_SWITCH_FLAG_KEY)) === true;
+  }
+
+  private async markQueuedModelSwitch(): Promise<void> {
+    await this.ctx.storage.put(QUEUED_MODEL_SWITCH_FLAG_KEY, true);
+  }
+
+  private async clearQueuedModelSwitchFlag(): Promise<void> {
+    await this.ctx.storage.delete(QUEUED_MODEL_SWITCH_FLAG_KEY);
   }
 
   /**
@@ -6786,16 +6930,22 @@ async function assembleWindowScaledModelMessages(
     messages: UIMessage[];
     currentContextBudget(): Promise<ContextBudget>;
     _repairTranscriptForProvider(messages: UIMessage[]): Promise<UIMessage[]>;
+    currentModelSwitchOrigin(): Promise<ModelSwitchOrigin | null>;
     _incompleteToolCallIds(messages: UIMessage[]): string[];
     _emit(event: string, payload: Record<string, unknown>): void;
   };
   const budget = await self.currentContextBudget();
   const repaired = await self._repairTranscriptForProvider(self.messages);
+  // Rebuild the segmentation marker from DO storage when the transcript no
+  // longer carries it — compaction archives whole spans of messages, marker
+  // included, and a marker-less transcript reads as one same-origin segment.
+  // See `restoreModelSwitchMarker`.
+  const segmented = restoreModelSwitchMarker(repaired, await self.currentModelSwitchOrigin());
   // Cross-model reasoning is dropped BEFORE truncation: a reasoning block that
   // will not be sent must not consume the truncation budget. Markers are still
   // present here and are gone after convertToModelMessages, so this is the only
   // seam where the segment origins are readable.
-  const sanitized = sanitizeCrossModelReasoning(repaired);
+  const sanitized = sanitizeCrossModelReasoning(segmented);
   const truncated = truncateOlderMessages(sanitized, truncationOptionsFor(budget));
   // Same post-repair diagnostic Think's own _assembleModelMessages runs: a
   // survivor here means _repairToolTranscriptParts has a gap, even though

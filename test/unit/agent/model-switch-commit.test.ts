@@ -23,11 +23,30 @@ import { ThinkThreadAgent } from "../../../src/agent/think-thread-agent";
  * unqueued/direct turn (no batch found) in production.
  */
 
+/** Minimal stand-in for `this.ctx.storage`: the commit path reads the
+ *  queued-switch gate flag off it and writes the origin record to it. */
+function fakeStorage(initial: Record<string, unknown> = {}) {
+  const map = new Map(Object.entries(initial));
+  return {
+    map,
+    storage: {
+      get: async (key: string) => map.get(key),
+      put: async (key: string, value: unknown) => {
+        map.set(key, value);
+      },
+      delete: async (key: string) => {
+        map.delete(key);
+      },
+    },
+  };
+}
+
 function agent(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   const a = Object.create(ThinkThreadAgent.prototype) as Record<string, unknown>;
   Object.defineProperty(a, "name", { value: "thr_1", configurable: true });
   Object.defineProperty(a, "messages", { value: [], configurable: true });
   a.env = {};
+  a.ctx = { storage: fakeStorage().storage };
   a.getPendingModelSwitch = async () => null;
   a.clearPendingModelSwitch = async () => {};
   a._incompleteToolCallIds = () => [];
@@ -102,5 +121,126 @@ describe("commitPendingModelSwitch", () => {
 
     await expect(commit(a)).resolves.toBeNull();
     expect(clearCalled).toBe(false);
+  });
+});
+
+/**
+ * The `undefined` vs `null` tri-state of `carriedQueuedModelSwitch` is what
+ * makes a model switch bind to the queued item that carried it. `undefined`
+ * means "no batch drove this turn" and only THAT falls back to the
+ * thread-scoped slot; `null` means "a batch drove this turn and none of its
+ * items carried a switch", which must apply nothing and clear the stray slot.
+ *
+ * Nothing pinned the difference: collapsing the two comparisons in
+ * `commitPendingModelSwitch` to `carried != null` left every model-switch
+ * suite green while making a queued message run on a model the user chose
+ * AFTER queueing it — the exact bug per-item binding exists to prevent.
+ */
+describe("commitPendingModelSwitch tri-state", () => {
+  const strayPending = {
+    provider: "openai",
+    model: "gpt-5",
+    modelInputModalities: ["text"],
+    showReasoning: true,
+    reasoningEffort: "medium" as const,
+    modelSupportsReasoning: true,
+  };
+
+  it("applies nothing and clears the slot when the running batch carries no switch", async () => {
+    // m1 was queued with nothing pending; the picker was changed to gpt-5
+    // afterwards, leaving a stray thread-scoped value. m1's turn is running
+    // now (its message id is in `this.messages`, so the batch is "applied").
+    const applied = [{ id: "c1", role: "user", parts: [{ type: "text", text: "m1" }] }];
+    let clearCalled = 0;
+    let resolveCalled = 0;
+    const a = agent({
+      getPendingModelSwitch: async () => strayPending,
+      clearPendingModelSwitch: async () => {
+        clearCalled += 1;
+      },
+      resolveRuntimeConfigForThink: async () => {
+        resolveCalled += 1;
+        return { modelConfig: { provider: "mock", model: "mock" } };
+      },
+      listSubmissions: async () => [
+        {
+          submissionId: "sub-0",
+          status: "running",
+          createdAt: 100,
+          metadata: {
+            nadiKind: "queued_user_message",
+            items: [
+              { clientMessageId: "c1", textPreview: "m1", attachmentCount: 0, attachments: [] },
+            ],
+            messages: applied,
+          },
+        },
+      ],
+    });
+    Object.defineProperty(a, "messages", { value: applied, configurable: true });
+
+    await expect(commit(a)).resolves.toBeNull();
+    // The batch is authoritative even carrying nothing: the stray slot is
+    // dropped, and the turn is NOT re-resolved to commit anything.
+    expect(clearCalled).toBe(1);
+    expect(resolveCalled).toBe(0);
+  });
+
+  it("falls back to the thread slot when NO batch drove the turn", async () => {
+    // The mirror case, so the test above cannot be satisfied by a variant
+    // that simply ignores the thread slot entirely.
+    let resolveCalled = 0;
+    const a = agent({
+      getPendingModelSwitch: async () => strayPending,
+      resolveRuntimeConfigForThink: async () => {
+        resolveCalled += 1;
+        return { modelConfig: { provider: "mock", model: "mock" } };
+      },
+      listSubmissions: async () => [],
+    });
+
+    await commit(a).catch(() => {});
+    expect(resolveCalled).toBe(1);
+  });
+});
+
+/**
+ * `carriedQueuedModelSwitch` runs `listSubmissions({ limit: 50 })` plus a full
+ * `this.messages` id scan. It sat unconditionally at the top of every turn of
+ * every agent — subagent turns included — overwhelmingly to find nothing. The
+ * gate is two DO storage reads: the thread-scoped slot, and a flag raised when
+ * a queued item captures a switch (the only way a switch can exist that the
+ * slot cannot see).
+ */
+describe("commitPendingModelSwitch queue-scan gate", () => {
+  it("does not scan submissions when nothing is parked anywhere", async () => {
+    let scans = 0;
+    const a = agent({
+      listSubmissions: async () => {
+        scans += 1;
+        return [];
+      },
+    });
+
+    await expect(commit(a)).resolves.toBeNull();
+    expect(scans).toBe(0);
+  });
+
+  it("scans when a queued item is known to carry a switch", async () => {
+    let scans = 0;
+    const { map, storage } = fakeStorage({ "modelSwitch:queued": true });
+    const a = agent({
+      ctx: { storage },
+      listSubmissions: async () => {
+        scans += 1;
+        return [];
+      },
+    });
+
+    await expect(commit(a)).resolves.toBeNull();
+    expect(scans).toBe(1);
+    // The flag was stale (no batch, nothing parked), so it is dropped rather
+    // than left to force the scan on every subsequent turn forever.
+    expect(map.has("modelSwitch:queued")).toBe(false);
   });
 });

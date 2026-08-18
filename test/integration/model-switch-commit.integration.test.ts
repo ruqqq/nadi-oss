@@ -2,7 +2,10 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { ThinkThreadAgent } from "../../src/agent/think-thread-agent";
 import { ThreadRepository } from "../../src/db/repositories/threads";
+import { modelSwitchPart, readModelSwitchPart } from "../../src/agent/model-switch";
 import { applyRegistryTestSchema, seedRegistryThread } from "./helpers/registry";
+
+type Initializable = { __unsafe_ensureInitialized(): Promise<void> };
 
 type PrivateCommit = {
   commitPendingModelSwitch(): Promise<{
@@ -181,5 +184,92 @@ describe("commitPendingModelSwitch (integration)", () => {
       agent.getPendingModelSwitch(),
     );
     expect(pendingAfter).toBeNull();
+  });
+});
+
+/**
+ * The SERVER writes the transcript marker, from the commit it actually
+ * performed. It used to be written only by `web/src/App.tsx` on send, which
+ * made it conditional on that one code path running: an automaton run
+ * (`buildAutomatonRunMessage` carries no metadata), a failed
+ * `getPendingModelSwitch` hydration, and the feedback branch all committed a
+ * parked switch with NO marker anywhere — and a marker-less transcript reads
+ * to the sanitizer as one same-origin segment, which replays the old model's
+ * signed reasoning at the new one. None of those paths differ from this
+ * method's point of view: they all reach `commitPendingModelSwitch` with a
+ * transcript the client never decorated, which is exactly what these drive.
+ */
+describe("commitPendingModelSwitch marks the transcript", () => {
+  beforeAll(async () => {
+    await applyRegistryTestSchema(env.REGISTRY_DB);
+  });
+
+  it("writes the marker and the durable origin record with no client help", async () => {
+    const { threadId } = await seedRegistryThread(env.REGISTRY_DB, {
+      threadId: "thr_commit_marker",
+    });
+    const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
+
+    const parts = await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
+      // Session-backed writes need the Think init that a raw DO stub skips.
+      await (agent as unknown as Initializable).__unsafe_ensureInitialized();
+      // A plain user message, exactly as an automaton run or an un-hydrated
+      // client produces it: no `data-model-switch` part attached.
+      await agent.addMessages([
+        { id: "u1", role: "user", parts: [{ type: "text", text: "keep going" }] },
+      ]);
+      await agent.setPendingModelSwitch({ provider: "mock-tool-call", model: "mock-model-2" });
+      await (agent as unknown as PrivateCommit).commitPendingModelSwitch();
+      return agent.messages.find((m) => m.id === "u1")?.parts;
+    });
+
+    expect(readModelSwitchPart(parts?.[0])).toEqual({
+      from: { provider: "mock", model: "mock" },
+      to: { provider: "mock-tool-call", model: "mock-model-2" },
+    });
+    // The marker goes AHEAD of the message's own content, so the divider
+    // renders above the message whose turn committed the switch.
+    expect(parts?.[1]).toEqual({ type: "text", text: "keep going" });
+
+    const origin = await runInDurableObject(stub, (agent: ThinkThreadAgent) =>
+      (
+        agent as unknown as { currentModelSwitchOrigin(): Promise<unknown> }
+      ).currentModelSwitchOrigin(),
+    );
+    expect(origin).toEqual({
+      from: { provider: "mock", model: "mock" },
+      to: { provider: "mock-tool-call", model: "mock-model-2" },
+      anchorMessageId: "u1",
+    });
+  });
+
+  it("never doubles a divider when a client already attached its own part", async () => {
+    const { threadId } = await seedRegistryThread(env.REGISTRY_DB, {
+      threadId: "thr_commit_marker_dedupe",
+    });
+    const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
+
+    const parts = await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
+      await (agent as unknown as Initializable).__unsafe_ensureInitialized();
+      await agent.addMessages([
+        {
+          id: "u1",
+          role: "user",
+          parts: [
+            // An older deployed client that still decorates its send.
+            modelSwitchPart({
+              from: { provider: "mock", model: "mock" },
+              to: { provider: "mock-tool-call", model: "mock-model-2" },
+            }) as never,
+            { type: "text", text: "keep going" },
+          ],
+        },
+      ]);
+      await agent.setPendingModelSwitch({ provider: "mock-tool-call", model: "mock-model-2" });
+      await (agent as unknown as PrivateCommit).commitPendingModelSwitch();
+      return agent.messages.find((m) => m.id === "u1")?.parts;
+    });
+
+    expect(parts?.filter((part) => readModelSwitchPart(part) !== null)).toHaveLength(1);
   });
 });

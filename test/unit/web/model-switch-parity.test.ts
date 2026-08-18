@@ -91,3 +91,21 @@ describe("model-switch marker parity", () => {
     expect(web.sameModelTuple(a, neitherSame)).toBe(false);
   });
 });
+
+/**
+ * The client READS the marker (MessageRow renders the divider from it) but
+ * must never WRITE one. Client-side attachment made the marker conditional on
+ * one send path: an automaton tick, a failed `getPendingModelSwitch`
+ * hydration and the feedback branch all committed switches the transcript
+ * never recorded, and two queued sends drew two dividers for one switch —
+ * naming a model that never ran, since only the last queued switch applies.
+ * The server writes it from the commit it actually performs.
+ */
+describe("the client never writes the marker", () => {
+  it("App.tsx does not construct a model-switch part", async () => {
+    const source = await import("node:fs").then((fs) =>
+      fs.readFileSync("web/src/App.tsx", "utf8"),
+    );
+    expect(source).not.toContain("modelSwitchPart(");
+  });
+});

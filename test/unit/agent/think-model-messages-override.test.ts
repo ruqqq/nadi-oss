@@ -46,6 +46,8 @@ describe("ThinkThreadAgent._assembleModelMessages override", () => {
     agent._repairTranscriptForProvider = async (m: unknown) => m;
     agent._incompleteToolCallIds = () => [];
     agent._emit = () => {};
+    // No DO storage on a duck-typed `this`; this thread never switched model.
+    agent.currentModelSwitchOrigin = async () => null;
 
     const out = await (
       agent as {
@@ -108,5 +110,71 @@ describe("compaction overlays are never persisted", () => {
 
     // The overlay must never reach storage; the real message must.
     expect(persisted).toEqual(["msg_real"]);
+  });
+});
+
+/**
+ * Assembly must REBUILD the segmentation marker from DO storage before it
+ * sanitizes. Compaction archives whole spans of messages, and the marker rides
+ * one of them: without the rebuild the sanitizer sees a marker-less transcript,
+ * calls it one same-origin segment, and replays the pre-switch model's signed
+ * reasoning at the post-switch model. `cross-model-reasoning-sanitize.test.ts`
+ * proves the rebuild itself; this proves the override actually calls it.
+ */
+describe("assembly rebuilds a compacted-away model-switch marker", () => {
+  it("drops pre-switch reasoning even though no marker survives in the transcript", async () => {
+    const history = [
+      {
+        id: "m1",
+        role: "assistant",
+        parts: [
+          {
+            type: "reasoning",
+            text: "thinking as claude",
+            providerMetadata: { anthropic: { signature: "sig-abc" } },
+          },
+          { type: "text", text: "claude turn" },
+        ],
+      },
+      // The compaction overlay that replaced the span the marker rode on.
+      { id: "compaction_c1", role: "assistant", parts: [{ type: "text", text: "summary" }] },
+      {
+        id: "m50",
+        role: "assistant",
+        parts: [
+          { type: "reasoning", text: "thinking as gpt" },
+          { type: "text", text: "gpt turn" },
+        ],
+      },
+    ];
+
+    const agent = Object.create(ThinkThreadAgent.prototype) as Record<string, unknown>;
+    Object.defineProperty(agent, "messages", { value: history, configurable: true });
+    agent.currentContextBudget = async () => resolveContextBudget(200_000);
+    agent._repairTranscriptForProvider = async (m: unknown) => m;
+    agent._incompleteToolCallIds = () => [];
+    agent._emit = () => {};
+    // No DO storage on a duck-typed `this`; this thread never switched model.
+    agent.currentModelSwitchOrigin = async () => null;
+    agent.currentModelSwitchOrigin = async () => ({
+      from: { provider: "openrouter", model: "anthropic/claude-opus-5" },
+      to: { provider: "openrouter", model: "openai/gpt-5" },
+      // Archived with its message — the only surviving position is the summary.
+      anchorMessageId: "m40",
+    });
+
+    const out = await (
+      agent as {
+        _assembleModelMessages(
+          tools: unknown,
+        ): Promise<Array<{ role: string; content: Array<{ type: string; text?: string }> }>>;
+      }
+    )._assembleModelMessages({});
+
+    const kinds = out.map((m) => m.content.map((c) => c.type));
+    // The pre-switch (Anthropic) turn keeps its text and loses its reasoning...
+    expect(kinds[0]).toEqual(["text"]);
+    // ...while the current model's own reasoning still ships.
+    expect(kinds[2]).toContain("reasoning");
   });
 });

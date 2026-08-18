@@ -328,7 +328,6 @@ import { ModelPicker } from "./components/model/ModelPicker";
 import { ThreadModelBadge } from "./components/model/ThreadModelBadge";
 import { ComposerModelPicker, type ModelTuple } from "./components/model/ComposerModelPicker";
 import { toModelPickerProviders } from "./lib/model-picker";
-import { modelSwitchPart, sameModelTuple } from "./lib/model-switch";
 import { Spinner } from "./components/ui/spinner";
 import { ScrollArea } from "./components/ui/scroll-area";
 import { Separator } from "./components/ui/separator";
@@ -5264,21 +5263,14 @@ function ThreadChat({
       const hasContent = text.trim().length > 0 || files.length > 0;
       if (hasContent) setCompactionNotice("none");
 
-      // The transcript divider is the ONLY feedback a switch happened (Task
-      // 9 deliberately gives the picker no "pending" affordance), and the
-      // server never itself writes one into the transcript — it only commits
-      // the switch into the thread's model snapshot (`commitPendingModelSwitch`
-      // / `withCapturedModelSwitch` for a queued batch). So the client attaches
-      // this part on send, ahead of the outgoing message's text. That's safe
-      // only because `data-*` parts are UI-only: `convertToModelMessages` drops
-      // them, so this can never reach a model — do not extend the pattern to
-      // anything that can. If the server's own pending state disagrees with
-      // what's attached here (a race), the server wins; this part is
-      // presentation only and no client logic tries to reconcile the two.
-      const switchPart =
-        pendingModel && committedModel && !sameModelTuple(pendingModel, committedModel)
-          ? modelSwitchPart({ from: committedModel, to: pendingModel })
-          : null;
+      // NOTE: the client does NOT write the `data-model-switch` marker. It
+      // used to, and that made the marker conditional on this exact code path
+      // running: an automaton run, a failed `getPendingModelSwitch` hydration
+      // and the feedback branch all committed switches with no marker, and
+      // two queued sends drew two dividers for one switch (only the last of
+      // them ever runs). The server writes it from the commit it actually
+      // performs (`recordCommittedModelSwitch`), which is the only place that
+      // knows what committed.
 
       // Steer: interject the running turn (see the user-steering-message spec).
       // Meaningful only while a turn is in flight; text-only (no attachment
@@ -5315,15 +5307,7 @@ function ThreadChat({
         const message: UIMessage = {
           id: crypto.randomUUID(),
           role: "user",
-          // The switch part goes ahead of the text part — see the comment
-          // above `switchPart`. A queued message can carry a switch just like
-          // a direct send (Task 7 binds the pending switch to the queued item
-          // that commits it), so this path needs the same marker.
-          parts: [
-            ...(switchPart ? [switchPart] : []),
-            ...(text ? [{ type: "text" as const, text }] : []),
-            ...files,
-          ],
+          parts: [...(text ? [{ type: "text" as const, text }] : []), ...files],
         };
         try {
           // The server merges every waiting message into one batch submission
@@ -5352,16 +5336,7 @@ function ThreadChat({
         return;
       }
 
-      // sendMessage's `parts` and `text`/`files` overloads are mutually
-      // exclusive (the AI SDK types them as `never` on the other), so a
-      // switch forces the parts form rather than letting text/files build it.
-      if (switchPart) {
-        sendMessage({
-          parts: [switchPart, ...(text ? [{ type: "text" as const, text }] : []), ...files],
-        });
-      } else {
-        sendMessage({ text, files });
-      }
+      sendMessage({ text, files });
       trackThreadEvent("message_sent", {
         thread_id: thread.threadId,
         length: text.length,
@@ -5377,7 +5352,6 @@ function ThreadChat({
     },
     [
       busy,
-      committedModel,
       compactionPhase,
       pendingModel,
       refreshSteers,
