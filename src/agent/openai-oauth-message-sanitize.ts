@@ -1,4 +1,5 @@
 import type { ModelMessage } from "ai";
+import { assignOrDelete, isRecord, stripProviderEntry } from "./provider-metadata-strip";
 
 /**
  * `openai-oauth` forces Responses API `store:false`, so OpenAI does not persist
@@ -43,8 +44,8 @@ export function sanitizeOpenAIOAuthMessages(messages: ModelMessage[]): ModelMess
 function stripOpenAIItemMetadata<T>(value: T): T {
   if (!isRecord(value)) return value;
 
-  const nextProviderOptions = stripOpenAIEntry(value.providerOptions);
-  const nextProviderMetadata = stripOpenAIEntry(value.providerMetadata);
+  const nextProviderOptions = stripProviderEntry(value.providerOptions, "openai");
+  const nextProviderMetadata = stripProviderEntry(value.providerMetadata, "openai");
   if (
     nextProviderOptions === value.providerOptions &&
     nextProviderMetadata === value.providerMetadata
@@ -56,24 +57,4 @@ function stripOpenAIItemMetadata<T>(value: T): T {
   assignOrDelete(next, "providerOptions", nextProviderOptions);
   assignOrDelete(next, "providerMetadata", nextProviderMetadata);
   return next as T;
-}
-
-function stripOpenAIEntry(value: unknown): unknown {
-  if (!isRecord(value) || !("openai" in value)) return value;
-
-  const next = { ...value };
-  delete next.openai;
-  return Object.keys(next).length === 0 ? undefined : next;
-}
-
-function assignOrDelete(target: Record<string, unknown>, key: string, value: unknown): void {
-  if (value === undefined) {
-    delete target[key];
-    return;
-  }
-  target[key] = value;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
 }
