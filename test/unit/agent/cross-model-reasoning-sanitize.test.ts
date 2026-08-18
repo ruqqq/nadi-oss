@@ -368,3 +368,79 @@ describe("sanitizer x compaction", () => {
     ).toBe(messages);
   });
 });
+
+/**
+ * The oscillating thread. `restoreModelSwitchMarker` used to skip restoration
+ * whenever ANY surviving marker named `origin.to` — a different question from
+ * the one the sanitizer asks. With A->B on m10, B->A on m20 and A->B on m30,
+ * compaction can archive m30 while m10 and m20 survive in the protected head:
+ * m10 still names `to: B`, so the restore no-oped, but `segmentTuples` resolved
+ * the CURRENT tuple to A (from m20) and the head's Anthropic reasoning shipped
+ * to B as same-origin. The gate now compares against the current tuple.
+ */
+describe("restoreModelSwitchMarker x oscillating switches", () => {
+  const ANTHROPIC = { provider: "openrouter", model: "anthropic/claude-opus-5" };
+  const GPT = { provider: "openrouter", model: "openai/gpt-5" };
+  const toGpt = modelSwitchPart({
+    from: ANTHROPIC,
+    to: GPT,
+  }) as unknown as UIMessage["parts"][number];
+  const toAnthropic = modelSwitchPart({
+    from: GPT,
+    to: ANTHROPIC,
+  }) as unknown as UIMessage["parts"][number];
+
+  /** Head: m0..m21 (two surviving markers). The span holding m30's A->B marker
+   *  was archived into `compaction_c1`; m40 ran on the current tuple. */
+  function afterCompaction(): UIMessage[] {
+    return [
+      user("m0", [{ type: "text", text: "start" }]),
+      assistant("m1", [anthropicReasoning, { type: "text", text: "claude one" }]),
+      user("m10", [toGpt, { type: "text", text: "use gpt" }]),
+      assistant("m11", [openaiReasoning, { type: "text", text: "gpt one" }]),
+      user("m20", [toAnthropic, { type: "text", text: "back to claude" }]),
+      assistant("m21", [anthropicReasoning, { type: "text", text: "claude two" }]),
+      {
+        id: "compaction_c1",
+        role: "assistant",
+        parts: [{ type: "text", text: "summary" }],
+      } as UIMessage,
+      assistant("m40", [openaiReasoning, { type: "text", text: "gpt two" }]),
+    ];
+  }
+
+  it("restores even though a surviving marker names the target tuple", () => {
+    const messages = afterCompaction();
+    // The premise: a marker for `to: GPT` survives, yet the transcript's
+    // current tuple is Anthropic — the two answers that used to be conflated.
+    expect(readModelSwitchPart(messages[2]?.parts[0])?.to).toEqual(GPT);
+
+    const restored = restoreModelSwitchMarker(messages, {
+      from: ANTHROPIC,
+      to: GPT,
+      anchorMessageId: "m30",
+    });
+    expect(restored).not.toBe(messages);
+    expect(readModelSwitchPart(restored[6]?.parts[0])).toEqual({ from: ANTHROPIC, to: GPT });
+
+    const sanitized = sanitizeCrossModelReasoning(restored);
+    // Both Anthropic segments are now foreign and stripped...
+    expect(sanitized[1]?.parts).toEqual([{ type: "text", text: "claude one" }]);
+    expect(sanitized[5]?.parts).toEqual([{ type: "text", text: "claude two" }]);
+    // ...while the current tuple's own reasoning still ships.
+    expect(sanitized[7]?.parts).toEqual([openaiReasoning, { type: "text", text: "gpt two" }]);
+  });
+
+  it("still no-ops once the transcript's current tuple IS the origin target", () => {
+    const restored = restoreModelSwitchMarker(afterCompaction(), {
+      from: ANTHROPIC,
+      to: GPT,
+      anchorMessageId: "m30",
+    });
+    // Idempotent: the injected marker is now the last one, so the current
+    // tuple matches and a second pass returns the same array identity.
+    expect(
+      restoreModelSwitchMarker(restored, { from: ANTHROPIC, to: GPT, anchorMessageId: "m30" }),
+    ).toBe(restored);
+  });
+});

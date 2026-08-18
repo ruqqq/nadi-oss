@@ -110,7 +110,8 @@ export interface ModelSwitchOrigin extends ModelSwitchData {
  * the only copy of the origin: this function restores it from DO storage.
  *
  * Injection position, in order of preference:
- *  1. Nothing to do — a surviving marker already names `origin.to`.
+ *  1. Nothing to do — the transcript's CURRENT tuple (the last surviving
+ *     marker's `to`, as `segmentTuples` computes it) is already `origin.to`.
  *  2. The anchor message itself, if it is still in the transcript (covers a
  *     transcript write that never landed, and any pre-existing thread whose
  *     marker was lost some other way).
@@ -135,7 +136,15 @@ export function restoreModelSwitchMarker(
 ): UIMessage[] {
   if (!origin) return messages;
   if (sameModelTuple(origin.from, origin.to)) return messages;
-  if (messages.some((message) => carriesSwitchTo(message, origin.to))) return messages;
+  // "Does the transcript already sit on `origin.to`?" is a question about the
+  // CURRENT tuple, not about whether SOME surviving marker happens to name it.
+  // An oscillating thread (A->B on m10, B->A on m20, A->B on m30) whose last
+  // switch was archived still carries a `to: B` marker on m10 while the last
+  // surviving marker leaves the transcript on A — skipping restoration there
+  // hands the head's A-origin reasoning to B. Reuse `segmentTuples`, the
+  // sanitizer's own notion of "current", so the two cannot disagree.
+  const current = segmentTuples(messages).current;
+  if (current && sameModelTuple(current, origin.to)) return messages;
 
   const index = injectionIndex(messages, origin.anchorMessageId);
   if (index === -1) return messages;
@@ -147,13 +156,6 @@ export function restoreModelSwitchMarker(
   return messages.map((message, at) =>
     at === index ? { ...message, parts: [part, ...message.parts] } : message,
   );
-}
-
-function carriesSwitchTo(message: UIMessage, to: ModelTuple): boolean {
-  return message.parts.some((part) => {
-    const marker = readModelSwitchPart(part);
-    return marker !== null && sameModelTuple(marker.to, to);
-  });
 }
 
 function injectionIndex(messages: UIMessage[], anchorMessageId: string | undefined): number {
