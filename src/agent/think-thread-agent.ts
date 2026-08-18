@@ -299,12 +299,13 @@ const PENDING_MODEL_SWITCH_STORAGE_KEY = "composer:pendingModelSwitch";
 const MODEL_SWITCH_ORIGIN_STORAGE_KEY = "modelSwitch:origin";
 /**
  * "Some queued item may carry a model switch." Cheap gate for the
- * `listSubmissions` + message-id scan in `carriedQueuedModelSwitch`, which
+ * `listSubmissions` + message-id scan in `scanQueuedModelSwitch`, which
  * otherwise runs on EVERY turn of every agent (subagents included) to find
  * nothing. Stale-safe in one direction only: a stale `true` costs one wasted
  * scan, a missing `true` would drop a switch — so it is written whenever a
- * switch is captured onto a queued item and cleared only once a batch has
- * been consulted.
+ * switch is captured onto a queued item and cleared only once a scan has
+ * established that nothing un-consumed (waiting batches included) still
+ * carries one.
  */
 const QUEUED_MODEL_SWITCH_FLAG_KEY = "modelSwitch:queued";
 const FEEDBACK_ACTIVE_INTERVIEW_STORAGE_KEY = "feedback:active-interview";
@@ -6457,7 +6458,7 @@ export class ThinkThreadAgent extends Think<Env> {
    * carried this turn through the queue, if one drove it, or — for a direct,
    * unqueued turn (test probes, automaton runs) where no such item exists —
    * the plain thread-scoped slot, exactly as task 6 left it. See
-   * `carriedQueuedModelSwitch` for why a batch, once found, is authoritative
+   * `scanQueuedModelSwitch` for why a batch, once found, is authoritative
    * even when none of its items carries a switch.
    */
   private async commitPendingModelSwitch(): Promise<ModelSwitchData | null> {
@@ -6469,7 +6470,7 @@ export class ThinkThreadAgent extends Think<Env> {
     const queuedMaybe = await this.hasQueuedModelSwitch();
     if (!slot && !queuedMaybe) return null;
 
-    const carried = await this.carriedQueuedModelSwitch();
+    const { carried, unconsumed } = await this.scanQueuedModelSwitch();
     if (carried !== undefined) {
       // A batch drove this turn: its items are the source of truth. Clear any
       // stray thread-scoped value now, before deciding whether to apply
@@ -6477,11 +6478,14 @@ export class ThinkThreadAgent extends Think<Env> {
       // exactly such a stray value, and it must not leak onto a later,
       // unrelated turn.
       await this.clearPendingModelSwitch();
-      await this.clearQueuedModelSwitchFlag();
-    } else if (!slot) {
-      // The flag was stale: no batch drives this turn and nothing is parked.
-      await this.clearQueuedModelSwitchFlag();
     }
+    // The gate flag is dropped only once the scan has POSITIVELY established
+    // that nothing un-consumed carries a switch — WAITING batches included.
+    // Inferring it from "this turn consulted no batch" was wrong: a waiting
+    // batch is invisible to the carried-switch lookup, so an unrelated turn
+    // cleared the flag and that batch's own turn then returned at the cheap
+    // gate above without ever committing its switch.
+    if (!unconsumed) await this.clearQueuedModelSwitchFlag();
     const pending = carried !== undefined ? carried : slot;
     if (!pending) return null;
 
@@ -6615,33 +6619,58 @@ export class ThinkThreadAgent extends Think<Env> {
   }
 
   /**
-   * The switch carried by the queued submission whose messages ARE this
-   * turn — `null` when a batch drives this turn but none of its items
-   * carries a switch, `undefined` when no batch can be found at all (a
-   * direct, unqueued turn). Only the `undefined` case falls back to the
-   * thread-scoped slot in `commitPendingModelSwitch`.
+   * ONE pass over the queue answering both questions the commit path has.
    *
-   * Finds the batch the same way the queued drain already reaches its
-   * metadata (`listSubmissions` + `queuedBatchFromMetadata`, same as
+   * `carried` — the switch carried by the queued submission whose messages ARE
+   * this turn: `null` when a batch drives this turn but none of its items
+   * carries a switch, `undefined` when no batch can be found at all (a direct,
+   * unqueued turn). Only the `undefined` case falls back to the thread-scoped
+   * slot in `commitPendingModelSwitch`.
+   *
+   * `unconsumed` — whether any still-live batch OTHER than the one driving this
+   * turn carries a switch. That is what the `modelSwitch:queued` gate flag
+   * actually means, and it cannot be inferred from `carried`: a WAITING batch
+   * is invisible to the lookup above, so clearing the flag on a turn that
+   * consulted no batch silently disarmed the gate for that batch's own turn.
+   * Free here — the same submission list answers both.
+   *
+   * Finds the driving batch the same way the queued drain reaches its metadata
+   * (`listSubmissions` + `queuedBatchFromMetadata`, same as
    * `queued-user-messages.ts`'s `findWaitingQueuedBatch`), but looks for
-   * "running" + already-applied rather than "waiting" + not-yet-applied:
-   * by the time `beforeTurn` runs, the triggering submission has been
-   * claimed (running) and its messages are already in `this.messages`.
+   * "running" + already-applied rather than "waiting" + not-yet-applied: by the
+   * time `beforeTurn` runs, the triggering submission has been claimed
+   * (running) and its messages are already in `this.messages`.
    */
-  private async carriedQueuedModelSwitch(): Promise<ThreadModelSnapshotValue | null | undefined> {
+  private async scanQueuedModelSwitch(): Promise<{
+    carried: ThreadModelSnapshotValue | null | undefined;
+    unconsumed: boolean;
+  }> {
     const submissions = await this.listSubmissions({ limit: 50 });
     const applied = new Set(this.messages.map((message) => message.id));
     let active: { items: QueuedUserMessageItem[]; createdAt: number } | null = null;
+    let unconsumed = false;
     for (const submission of submissions) {
-      if (submission.status !== "running") continue;
-      if (typeof submission.createdAt !== "number") continue;
       const batch = queuedBatchFromMetadata(submission.metadata);
-      if (!batch || !isQueuedBatchApplied(batch.items, applied)) continue;
-      if (active && active.createdAt >= submission.createdAt) continue;
-      active = { items: batch.items, createdAt: submission.createdAt };
+      if (!batch) continue;
+      if (
+        submission.status === "running" &&
+        typeof submission.createdAt === "number" &&
+        isQueuedBatchApplied(batch.items, applied)
+      ) {
+        // Already applied and running: this batch IS (or was) a turn, so its
+        // switch is being consulted now rather than waiting.
+        if (!active || active.createdAt < submission.createdAt) {
+          active = { items: batch.items, createdAt: submission.createdAt };
+        }
+        continue;
+      }
+      // Anything else still live is waiting behind the active turn — the same
+      // "pending | running, not yet applied" shape `findWaitingQueuedBatch`
+      // uses. Its switch has not been consumed.
+      const live = submission.status === "pending" || submission.status === "running";
+      if (live && effectiveModelSwitch(batch.items)) unconsumed = true;
     }
-    if (!active) return undefined;
-    return effectiveModelSwitch(active.items);
+    return { carried: active ? effectiveModelSwitch(active.items) : undefined, unconsumed };
   }
 
   /** Test seam: runs the SDK drain loop so a waiting queued batch actually

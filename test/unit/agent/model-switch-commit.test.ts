@@ -244,3 +244,106 @@ describe("commitPendingModelSwitch queue-scan gate", () => {
     expect(map.has("modelSwitch:queued")).toBe(false);
   });
 });
+
+/**
+ * The gate flag says "something queued may carry a switch". Clearing it on any
+ * turn that consulted no batch was wrong: `scanQueuedModelSwitch`'s `carried`
+ * only ever sees the RUNNING, already-applied batch, so a WAITING batch is
+ * invisible to it. An unrelated turn therefore dropped the flag, and when the
+ * waiting batch's own turn finally ran, `commitPendingModelSwitch` returned at
+ * the cheap gate before ever reaching that batch's switch.
+ */
+describe("commitPendingModelSwitch keeps the gate flag for a waiting batch", () => {
+  const queuedSwitch = {
+    provider: "openai",
+    model: "gpt-5",
+    modelInputModalities: ["text"],
+    showReasoning: true,
+    reasoningEffort: "medium" as const,
+    modelSupportsReasoning: true,
+  };
+
+  /** The batch that carries the switch. `status`/`applied` move it between
+   *  "waiting behind the active turn" and "this turn". */
+  function switchBatch(status: string) {
+    return {
+      submissionId: "sub-switch",
+      status,
+      createdAt: 200,
+      metadata: {
+        nadiKind: "queued_user_message",
+        items: [
+          {
+            clientMessageId: "c2",
+            textPreview: "run this on gpt-5",
+            attachmentCount: 0,
+            attachments: [],
+            modelSwitch: queuedSwitch,
+          },
+        ],
+      },
+    };
+  }
+
+  /** An UNRELATED turn: the running batch that IS this turn carries no switch,
+   *  while sub-switch sits behind it, still waiting. */
+  async function unrelatedTurn(storage: unknown) {
+    const applied = [{ id: "c1", role: "user", parts: [{ type: "text", text: "m1" }] }];
+    const a = agent({
+      ctx: { storage },
+      listSubmissions: async () => [
+        {
+          submissionId: "sub-0",
+          status: "running",
+          createdAt: 100,
+          metadata: {
+            nadiKind: "queued_user_message",
+            items: [
+              { clientMessageId: "c1", textPreview: "m1", attachmentCount: 0, attachments: [] },
+            ],
+          },
+        },
+        switchBatch("pending"),
+      ],
+    });
+    Object.defineProperty(a, "messages", { value: applied, configurable: true });
+    return commit(a);
+  }
+
+  it("does not drop the flag on an unrelated turn while the batch still waits", async () => {
+    const { map, storage } = fakeStorage({ "modelSwitch:queued": true });
+
+    await expect(unrelatedTurn(storage)).resolves.toBeNull();
+    expect(map.get("modelSwitch:queued")).toBe(true);
+  });
+
+  it("still commits that batch's switch when its own turn runs", async () => {
+    // Same flag state, one turn later: sub-switch is now running and its
+    // message is applied, so it IS the turn.
+    const applied = [{ id: "c2", role: "user", parts: [{ type: "text", text: "run this" }] }];
+    const { map, storage } = fakeStorage({ "modelSwitch:queued": true });
+    // ...and the unrelated turn above really did run first, so this half
+    // fails too if that turn disarmed the gate.
+    await unrelatedTurn(storage);
+    let resolveCalled = 0;
+    const a = agent({
+      ctx: { storage },
+      resolveRuntimeConfigForThink: async () => {
+        resolveCalled += 1;
+        return { modelConfig: { provider: "anthropic", model: "claude-opus-5" } };
+      },
+      listSubmissions: async () => [switchBatch("running")],
+    });
+    Object.defineProperty(a, "messages", { value: applied, configurable: true });
+
+    // The registry write past this point needs a real D1 (covered in
+    // `model-switch-commit.integration.test.ts`); reaching the runtime-config
+    // read at all is what proves the switch was consumed rather than dropped
+    // at the cheap gate.
+    await commit(a).catch(() => {});
+    expect(resolveCalled).toBe(1);
+    // Its switch has been consumed and nothing else is queued, so the flag
+    // goes away rather than forcing the scan forever.
+    expect(map.has("modelSwitch:queued")).toBe(false);
+  });
+});

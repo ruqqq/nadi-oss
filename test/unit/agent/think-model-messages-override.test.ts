@@ -154,8 +154,8 @@ describe("assembly rebuilds a compacted-away model-switch marker", () => {
     agent._repairTranscriptForProvider = async (m: unknown) => m;
     agent._incompleteToolCallIds = () => [];
     agent._emit = () => {};
-    // No DO storage on a duck-typed `this`; this thread never switched model.
-    agent.currentModelSwitchOrigin = async () => null;
+    // No DO storage on a duck-typed `this`: the durable origin record the
+    // restore reads is stubbed in directly.
     agent.currentModelSwitchOrigin = async () => ({
       from: { provider: "openrouter", model: "anthropic/claude-opus-5" },
       to: { provider: "openrouter", model: "openai/gpt-5" },
