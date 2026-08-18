@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   availableEffortOptions,
+  dialModelFor,
   providerSupportsReasoningEffort,
   reasoningControlsForThreadModel,
   shouldOfferEffortControl,
@@ -153,8 +154,51 @@ describe("availableEffortOptions", () => {
   });
 
   it("treats a token budget as continuous, so our three levels stand", () => {
-    expect(availableEffortOptions([{ type: "budget_tokens", min: 1024 }]).map((o) => o.level)).toEqual(
-      ["off", "low", "medium", "high"],
-    );
+    expect(
+      availableEffortOptions([{ type: "budget_tokens", min: 1024 }]).map((o) => o.level),
+    ).toEqual(["off", "low", "medium", "high"]);
+  });
+});
+
+describe("dialModelFor", () => {
+  const thread = {
+    provider: "openai",
+    model: "gpt-5",
+    modelSupportsReasoning: false as boolean | null,
+  };
+
+  it("uses the thread's committed model when there is no pending switch", () => {
+    expect(dialModelFor(thread, null)).toEqual({
+      provider: "openai",
+      model: "gpt-5",
+      modelSupportsReasoning: false,
+    });
+  });
+
+  it("follows the pending model when one exists, not the committed one", () => {
+    // The thread claims `false` (no reasoning) but the PENDING model claims
+    // `true` — the dial must show the pending model's controls, proving it
+    // isn't just reading the thread's stale fields.
+    const pending = { provider: "anthropic", model: "claude-opus-5", modelSupportsReasoning: true };
+    expect(dialModelFor(thread, pending)).toEqual({
+      provider: "anthropic",
+      model: "claude-opus-5",
+      modelSupportsReasoning: true,
+    });
+  });
+
+  it("treats a pending model's absent modelSupportsReasoning as unknown, never inheriting the thread's value", () => {
+    // The pending switch is a DIFFERENT model than the thread's committed
+    // one. If its own tri-state is unset, that means "unknown for the new
+    // model" — collapsing to the thread's `false` here would wrongly hide
+    // the dial for a model that might well support reasoning.
+    const pending = { provider: "anthropic", model: "claude-opus-5" };
+    expect(dialModelFor(thread, pending).modelSupportsReasoning).toBeNull();
+  });
+
+  it("does not collapse an explicit pending `false` into unknown", () => {
+    const reasoningThread = { ...thread, modelSupportsReasoning: true };
+    const pending = { provider: "openai", model: "gpt-5-mini", modelSupportsReasoning: false };
+    expect(dialModelFor(reasoningThread, pending).modelSupportsReasoning).toBe(false);
   });
 });

@@ -263,6 +263,7 @@ import {
 } from "./lib/new-chat-model";
 import {
   availableEffortOptions,
+  dialModelFor,
   reasoningControlsForThreadModel,
   shouldOfferEffortControl,
 } from "./lib/reasoning-effort";
@@ -5149,6 +5150,15 @@ function ThreadChat({
     ? { provider: thread.provider, model: thread.model }
     : null;
 
+  // The EffortDial must reflect the model the NEXT message actually runs on,
+  // not the one the thread is currently pinned to. Reading thread.{provider,
+  // model,modelSupportsReasoning} directly here (a Task 9 gap, not a Task 9
+  // bug — the plan never routed pendingModel through the dial) leaves the
+  // dial showing the old model's controls after a switch is picked but
+  // before it commits on the next send: a user can set an effort value the
+  // new model doesn't support, or miss one it does.
+  const dialModel = dialModelFor(thread, pendingModel);
+
   const handleModelSwitchSelect = useCallback(
     (tuple: ModelTuple, picked: ProviderModelSearchResult) => {
       const input: {
@@ -5628,15 +5638,19 @@ function ThreadChat({
             feedbackMode ? undefined : (
               <>
                 {shouldOfferEffortControl({
-                  provider: isSettingsProvider(thread.provider) ? thread.provider : null,
-                  modelSupportsReasoning: thread.modelSupportsReasoning,
+                  provider: isSettingsProvider(dialModel.provider) ? dialModel.provider : null,
+                  modelSupportsReasoning: dialModel.modelSupportsReasoning,
                 }) &&
                   onReasoningEffortChange && (
                     <EffortDial
                       triggerId={`thread-effort-${thread.threadId}`}
                       effort={thread.reasoningEffort}
                       options={availableEffortOptions(
-                        reasoningControlsForThreadModel(providers, thread.provider, thread.model),
+                        reasoningControlsForThreadModel(
+                          providers,
+                          dialModel.provider,
+                          dialModel.model,
+                        ),
                       )}
                       onEffortChange={(effort) => onReasoningEffortChange(thread.threadId, effort)}
                       disabled={draftSeed === null || sendingFirstMessage}
