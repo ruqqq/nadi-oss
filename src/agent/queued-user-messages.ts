@@ -289,21 +289,17 @@ export function queuedBatchFromMetadata(metadata: unknown): QueuedUserMessageBat
   return null;
 }
 
-/**
- * All of a batch's messages run in ONE turn, so at most one switch can
- * apply: the last surviving item that carries one — the user's most recent
- * expressed intent. Cancelling that item drops its switch and the previous
- * one takes over, which is what makes per-item cancellation carry the
- * switch away for free (see `queued-user-messages.ts`'s per-item storage
- * note on `QueuedUserMessageItem`).
- */
-export function effectiveModelSwitch(items: QueuedUserMessageItem[]): ModelSwitchRequest | null {
-  for (let i = items.length - 1; i >= 0; i -= 1) {
-    const found = items[i]?.modelSwitch;
-    if (found) return found;
-  }
-  return null;
-}
+// Which switch actually applies out of a flushed batch is decided once, at
+// commit time, by `effectiveModelSwitchRequest` (`model-switch-request.ts`)
+// scanning the trailing run of applied `UIMessage`s in `this.messages` — the
+// same last-surviving-item rule, but over the messages Think actually
+// appended, not this module's own `QueuedUserMessageItem` previews. See that
+// function's doc, and `model-switch-request.test.ts`'s "the LAST trailing
+// user message wins over an earlier one — a flushed queued batch" for the
+// asserted behaviour. This module has no equivalent of its own: an item's
+// `modelSwitch` here is storage/preview only (what `listQueuedUserMessages`
+// renders, and what per-item cancellation carries away — see
+// `QueuedUserMessageItem`'s own doc), never itself the selection logic.
 
 export function isQueuedBatchApplied(
   items: QueuedUserMessageItem[],

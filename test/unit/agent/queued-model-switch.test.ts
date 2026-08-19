@@ -3,7 +3,6 @@ import type { UIMessage } from "ai";
 import { describe, expect, it } from "vitest";
 import {
   cancelQueuedUserMessageFromBatch,
-  effectiveModelSwitch,
   normalizeQueuedUserMessageInput,
   queuedBatchFromMetadata,
   submitQueuedUserMessageBatch,
@@ -86,7 +85,13 @@ function fakePort({
  * the queued message is now the only source (see `model-switch-request.ts`),
  * so this proves `normalizeQueuedUserMessageInput` reads it, the item
  * survives `queuedBatchFromMetadata`'s round trip (or degrades cleanly), and
- * `effectiveModelSwitch`'s last-surviving-item rule. No `ThinkThreadAgent`
+ * a merge/cancel preserves (or drops) each item's OWN switch correctly. This
+ * module stores per-item switches only — it has no selection logic of its
+ * own; WHICH switch out of a flushed batch actually applies is decided once,
+ * at commit time, by `model-switch-request.ts`'s `effectiveModelSwitchRequest`
+ * scanning `this.messages` (see `model-switch-request.test.ts`'s "the LAST
+ * trailing user message wins over an earlier one — a flushed queued batch"
+ * for that rule asserted against the live path). No `ThinkThreadAgent`
  * import here, so this stays in the plain-node `unit` project — the real-DO
  * behaviours (cancellation carrying a switch away end to end, the commit
  * itself) live in `test/integration/queued-model-switch.integration.test.ts`
@@ -153,30 +158,6 @@ describe("queued message model binding", () => {
     expect(batch?.items[0]?.modelSwitch).toBeUndefined();
   });
 
-  it("effectiveModelSwitch: the last surviving item that carries one wins", () => {
-    expect(
-      effectiveModelSwitch([
-        { clientMessageId: "m1", textPreview: "a", attachmentCount: 0, attachments: [] },
-        {
-          clientMessageId: "m2",
-          textPreview: "b",
-          attachmentCount: 0,
-          attachments: [],
-          modelSwitch: snapshot,
-        },
-        { clientMessageId: "m3", textPreview: "c", attachmentCount: 0, attachments: [] },
-      ]),
-    ).toEqual(snapshot);
-  });
-
-  it("effectiveModelSwitch: null when no item carries a switch", () => {
-    expect(
-      effectiveModelSwitch([
-        { clientMessageId: "m1", textPreview: "a", attachmentCount: 0, attachments: [] },
-      ]),
-    ).toBeNull();
-  });
-
   it("cancelling ONE item of a batch removes only that item's switch — THE rule", async () => {
     // "run the tests" queues with no switch asserted; "then summarise" queues
     // with the picker having since chosen a model, so only IT carries one.
@@ -192,7 +173,9 @@ describe("queued message model binding", () => {
 
     const batchBeforeCancel = queuedBatchFromMetadata(latest()?.metadata);
     expect(batchBeforeCancel?.items.map((item) => item.clientMessageId)).toEqual(["m1", "m2"]);
-    expect(effectiveModelSwitch(batchBeforeCancel?.items ?? [])).toEqual(snapshot);
+    expect(
+      batchBeforeCancel?.items.find((item) => item.clientMessageId === "m2")?.modelSwitch,
+    ).toEqual(snapshot);
 
     // Cancel ONLY m2. If the switch had been stored on the BATCH instead of
     // the item, it would outlive m2 and silently apply to the sibling m1
@@ -201,10 +184,10 @@ describe("queued message model binding", () => {
 
     const batchAfterCancel = queuedBatchFromMetadata(latest()?.metadata);
     expect(batchAfterCancel?.items.map((item) => item.clientMessageId)).toEqual(["m1"]);
-    expect(effectiveModelSwitch(batchAfterCancel?.items ?? [])).toBeNull();
+    expect(batchAfterCancel?.items.every((item) => !item.modelSwitch)).toBe(true);
   });
 
-  it("the last surviving switch in a batch wins", async () => {
+  it("a merge preserves each item's own switch — WHICH one is effective is decided downstream", async () => {
     const { port, latest } = fakePort({});
     await submitQueuedUserMessageBatch(
       port,
@@ -217,8 +200,19 @@ describe("queued message model binding", () => {
       }),
     );
 
+    // This module has no selection logic of its own: it stores what each
+    // item carried, unmodified. `effectiveModelSwitchRequest`
+    // (`model-switch-request.ts`) is what later picks "the last surviving
+    // item wins" out of the applied messages at commit time — asserted there
+    // in "the LAST trailing user message wins over an earlier one — a
+    // flushed queued batch".
     const batch = queuedBatchFromMetadata(latest()?.metadata);
     expect(batch?.items.map((item) => item.clientMessageId)).toEqual(["m1", "m2"]);
-    expect(effectiveModelSwitch(batch?.items ?? [])).toEqual(otherSnapshot);
+    expect(batch?.items.find((item) => item.clientMessageId === "m1")?.modelSwitch).toEqual(
+      snapshot,
+    );
+    expect(batch?.items.find((item) => item.clientMessageId === "m2")?.modelSwitch).toEqual(
+      otherSnapshot,
+    );
   });
 });

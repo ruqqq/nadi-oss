@@ -71,10 +71,12 @@ export function modelSwitchRequestFromMessage(message: UIMessage): ModelSwitchRe
  * scan stops at the first non-user message, same trailing-run shape
  * `trailingUserMessageIds` uses elsewhere in `think-thread-agent.ts`.
  *
- * Last one wins: the user's most recent expressed intent — the same rule
- * `queued-user-messages.ts`'s `effectiveModelSwitch` applies within a queued
- * batch, now applied uniformly across BOTH send paths from one scan, since
- * both carry their request the same way (on the message itself).
+ * Last one wins: the user's most recent expressed intent, applied uniformly
+ * across BOTH send paths (direct and flushed-queue) from one scan, since
+ * both carry their request the same way (on the message itself). This is
+ * the ONE place that rule is decided — `queued-user-messages.ts` has no
+ * selection logic of its own; an item's stored `modelSwitch` there is
+ * preview/storage only, read by this scan once Think applies the batch.
  */
 export function effectiveModelSwitchRequest(
   messages: readonly UIMessage[],
