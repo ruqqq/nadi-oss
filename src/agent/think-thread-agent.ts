@@ -102,17 +102,13 @@ import {
 } from "./attachment-extraction";
 import {
   cancelQueuedUserMessageFromBatch,
-  effectiveModelSwitch,
-  isQueuedBatchApplied,
   normalizeQueuedUserMessageInput,
-  queuedBatchFromMetadata,
   serializeQueuedUserMessageSubmissionRows,
   submitQueuedUserMessageBatch,
-  withCapturedModelSwitch,
   type NormalizedQueuedUserMessage,
   type QueuedSubmissionPort,
-  type QueuedUserMessageItem,
 } from "./queued-user-messages";
+import { effectiveModelSwitchRequest } from "./model-switch-request";
 import { runAutomatonTurn } from "./automaton-run";
 import { buildReasoningProviderOptions } from "./reasoning-options";
 import { resolveModelReasoningProfile } from "../providers/model-capabilities";
@@ -204,10 +200,7 @@ import { WorkspacePrivacySettingsRepository } from "../db/repositories/workspace
 import { WorkspaceRepository } from "../db/repositories/workspaces";
 import { ThreadRepository } from "../db/repositories/threads";
 import { hasRegistry, registryBinding, registryDb } from "../db/client";
-import {
-  resolveThreadModelSnapshotValue,
-  type ThreadModelSnapshotValue,
-} from "../settings/thread-model-snapshot";
+import { resolveThreadModelSnapshotValue } from "../settings/thread-model-snapshot";
 import {
   modelSwitchPart,
   readModelSwitchPart,
@@ -284,10 +277,6 @@ const WORKSPACE_TOOL_NAMES = new Set([
 const MCP_DISCOVERY_WAIT_MS = 5_000;
 
 const DRAFT_STORAGE_KEY = "composer:draft";
-/** DO storage key for a model switch chosen but not yet committed. Ephemeral
- *  composer intent, exactly like the draft above — it must NOT reach
- *  `thread_index` until a user message actually runs on it. */
-const PENDING_MODEL_SWITCH_STORAGE_KEY = "composer:pendingModelSwitch";
 /**
  * Where the transcript's CURRENT segment begins — the durable twin of the
  * `data-model-switch` marker. The marker lives in the transcript and the
@@ -297,17 +286,6 @@ const PENDING_MODEL_SWITCH_STORAGE_KEY = "composer:pendingModelSwitch";
  * switched once).
  */
 const MODEL_SWITCH_ORIGIN_STORAGE_KEY = "modelSwitch:origin";
-/**
- * "Some queued item may carry a model switch." Cheap gate for the
- * `listSubmissions` + message-id scan in `scanQueuedModelSwitch`, which
- * otherwise runs on EVERY turn of every agent (subagents included) to find
- * nothing. Stale-safe in one direction only: a stale `true` costs one wasted
- * scan, a missing `true` would drop a switch — so it is written whenever a
- * switch is captured onto a queued item and cleared only once a scan has
- * established that nothing un-consumed (waiting batches included) still
- * carries one.
- */
-const QUEUED_MODEL_SWITCH_FLAG_KEY = "modelSwitch:queued";
 const FEEDBACK_ACTIVE_INTERVIEW_STORAGE_KEY = "feedback:active-interview";
 const FEEDBACK_DRAFT_STORAGE_KEY = "feedback:draft";
 const FEEDBACK_INTERVIEW_BOUNDS_STORAGE_KEY = "feedback:interview-bounds";
@@ -1208,10 +1186,11 @@ export class ThinkThreadAgent extends Think<Env> {
     // resolve is fresh; the onStart burst and idle status reads still share one
     // cached D1 query.
     this._runtimeConfig.invalidate();
-    // Drain any model switch parked mid-conversation BEFORE the resolve below,
-    // so this turn (not the next one) runs on the newly chosen model. See
-    // `commitPendingModelSwitch` for why this position makes the Anthropic
-    // thinking/tool_use ordering rule unreachable.
+    // Commit any model switch the client requested on the message(s) that
+    // triggered this turn, BEFORE the resolve below, so this turn (not the
+    // next one) runs on the newly chosen model. See `commitPendingModelSwitch`
+    // for why this position makes the Anthropic thinking/tool_use ordering
+    // rule unreachable.
     await this.commitPendingModelSwitch();
     // Reset only — draining happens in `beforeStep` (see its comment for why
     // draining here would duplicate messages between the base and injections).
@@ -5806,22 +5785,14 @@ export class ThinkThreadAgent extends Think<Env> {
 
   async submitQueuedUserMessage(input: unknown) {
     await this.assertThreadWritable();
+    // Whatever switch the client asserted rides on the message's own
+    // `metadata` — `normalizeQueuedUserMessageInput` reads it straight off
+    // there onto the item (see `queued-user-messages.ts`). Per-item storage
+    // is what makes cancelling a queued message carry its switch away for
+    // free; a message queued with no switch asserted carries none.
     const normalized = normalizeQueuedUserMessageInput(input);
     return this.serializeQueuedRpc(async () => {
-      // Capture whatever switch is parked mid-conversation onto THIS item,
-      // then empty the thread-scoped slot — per-item storage is what makes
-      // cancelling a queued message carry its switch away for free (see
-      // `queued-user-messages.ts`). A message queued with no pending switch
-      // must carry none; emptying unconditionally (idempotent when already
-      // empty) is what stops a later picker change from retro-editing an
-      // item that already queued.
-      const captured = withCapturedModelSwitch(normalized, await this.getPendingModelSwitch());
-      await this.clearPendingModelSwitch();
-      // Raise the cheap gate `commitPendingModelSwitch` reads: from here the
-      // switch lives only inside submission metadata, which nothing but the
-      // full `listSubmissions` scan can see.
-      if (captured.item.modelSwitch) await this.markQueuedModelSwitch();
-      await submitQueuedUserMessageBatch(this.queuedSubmissionPort(), captured);
+      await submitQueuedUserMessageBatch(this.queuedSubmissionPort(), normalized);
       if (normalized.attachmentIds.length > 0) {
         await new AttachmentRepository(registryBinding(this.env)).markCommitted(
           normalized.attachmentIds,
@@ -6373,85 +6344,12 @@ export class ThinkThreadAgent extends Think<Env> {
   }
 
   /**
-   * Validate and park a model switch chosen mid-conversation. Stored in DO
-   * storage only — exactly like the draft above — so a later task can commit
-   * it onto `thread_index` when the user's next message actually runs on it,
-   * and so an abandoned pick never touches the persisted thread row.
-   */
-  async setPendingModelSwitch(input: {
-    provider: string;
-    model: string;
-    // Both optional: the picker doesn't always know a candidate model's
-    // modalities or reasoning support up front. Omitting either must inherit
-    // the thread's CURRENT value below — never the new model's — because
-    // that's what `resolveThreadModelSnapshotValue` does for an `undefined`
-    // field. Passing them through when known is the fix: without this, a
-    // switch keeps the OLD model's modalities/reasoning flag, which silently
-    // drops attachments (`prepare-attachments.ts`) or mis-declares reasoning
-    // support for the NEW model.
-    modelInputModalities?: string[];
-    modelSupportsReasoning?: boolean | null;
-  }): Promise<{ ok: true; value: ThreadModelSnapshotValue } | { ok: false; error: string }> {
-    await this.assertThreadWritable();
-    const runtimeConfig = await this.resolveRuntimeConfigForThink();
-    const validated = await resolveThreadModelSnapshotValue(
-      this.env,
-      {
-        workspaceId: runtimeConfig.workspaceId,
-        provider: runtimeConfig.modelConfig.provider,
-        model: runtimeConfig.modelConfig.model,
-        modelInputModalities: JSON.stringify(runtimeConfig.modelConfig.modelInputModalities),
-        showReasoning: runtimeConfig.modelConfig.showReasoning,
-        reasoningEffort: runtimeConfig.modelConfig.reasoningEffort,
-        modelSupportsReasoning: runtimeConfig.modelConfig.modelSupportsReasoning ?? null,
-      },
-      {
-        provider: input.provider,
-        model: input.model,
-        // Symmetric with `createThread` (thread-routes.ts): pass through only
-        // when supplied, so an omitted field inherits the target above rather
-        // than being coerced to `undefined` under `exactOptionalPropertyTypes`.
-        ...(input.modelInputModalities !== undefined
-          ? { modelInputModalities: input.modelInputModalities }
-          : {}),
-        ...(input.modelSupportsReasoning !== undefined
-          ? { modelSupportsReasoning: input.modelSupportsReasoning }
-          : {}),
-      },
-      await this.viewerEmailForModelSelection(),
-    );
-    if (!validated.ok) {
-      // Logged, not just returned: a refused switch is invisible in production
-      // otherwise, and the client only renders the code — this is the line that
-      // says WHICH provider/model the workspace refused and why.
-      log.warn("think_thread.model_switch_rejected", {
-        threadId: this.name,
-        workspaceId: runtimeConfig.workspaceId,
-        provider: input.provider,
-        model: input.model,
-        error: validated.error,
-      });
-      return { ok: false, error: validated.error };
-    }
-    await this.ctx.storage.put(PENDING_MODEL_SWITCH_STORAGE_KEY, validated.value);
-    return { ok: true, value: validated.value };
-  }
-
-  async getPendingModelSwitch(): Promise<ThreadModelSnapshotValue | null> {
-    return (
-      (await this.ctx.storage.get<ThreadModelSnapshotValue>(PENDING_MODEL_SWITCH_STORAGE_KEY)) ??
-      null
-    );
-  }
-
-  async clearPendingModelSwitch(): Promise<void> {
-    await this.ctx.storage.delete(PENDING_MODEL_SWITCH_STORAGE_KEY);
-  }
-
-  /**
-   * Drain a pending model switch into `thread_index`. Called at the TOP of
-   * `beforeTurn`, before the turn's runtime config is resolved, so the turn
-   * runs on the new model rather than one turn late.
+   * Commit the model switch the client requested on the message(s) that
+   * triggered THIS turn — read off `UIMessage.metadata`, never stored in DO
+   * storage: picking a model is pure client state (see `App.tsx`) and does
+   * no I/O until the message that asserts it is actually sent. Called at the
+   * TOP of `beforeTurn`, before the turn's runtime config is resolved, so
+   * the turn runs on the new model rather than one turn late.
    *
    * Committing here — after the user message that triggered this turn is
    * already appended — is what makes the Anthropic thinking/tool_use
@@ -6462,44 +6360,27 @@ export class ThinkThreadAgent extends Think<Env> {
    * `tool_use` first — a 400. The last assistant message cannot hold a live
    * tool call at this point in the turn, but the guard below asserts that
    * rather than assuming it (a repair gap upstream could still leave one).
-   * `think-model-messages-override.test.ts` and
-   * `pending-model-switch.test.ts` establish the stub-`this.messages` /
-   * stub-`_incompleteToolCallIds` pattern this guard is tested with.
+   * `think-model-messages-override.test.ts` and `model-switch-commit.test.ts`
+   * establish the stub-`this.messages` / stub-`_incompleteToolCallIds`
+   * pattern this guard is tested with.
    *
-   * The switch itself may come from two places (task 7): the ITEM that
-   * carried this turn through the queue, if one drove it, or — for a direct,
-   * unqueued turn (test probes, automaton runs) where no such item exists —
-   * the plain thread-scoped slot, exactly as task 6 left it. See
-   * `scanQueuedModelSwitch` for why a batch, once found, is authoritative
-   * even when none of its items carries a switch.
+   * `effectiveModelSwitchRequest` scans the TRAILING run of user messages in
+   * `this.messages` for the last one carrying a request — one message for a
+   * direct send, several for a flushed queued batch (Think applies a
+   * submission's whole message array, then runs one turn over it), so this
+   * one scan is both send paths' source with no branching between them.
+   *
+   * Validation is `resolveThreadModelSnapshotValue` — the SAME call
+   * `createThread`/the HTTP model-switch route use — run HERE, at commit
+   * time, against the request the client asserted. That is the only gate: a
+   * client-asserted request is safe precisely because this call still checks
+   * workspace provider config and the whitelist before anything is written.
+   * A refusal is logged and the turn proceeds on the thread's EXISTING
+   * model — it must never abort the user's turn over a rejected switch.
    */
   private async commitPendingModelSwitch(): Promise<ModelSwitchData | null> {
-    // Cheap gate before the `listSubmissions` + message-id scan below: with
-    // nothing parked in the thread slot AND no queued item known to carry a
-    // switch, every branch of this method reaches the same `null`. Two DO
-    // storage reads replace that scan on the overwhelming majority of turns.
-    const slot = await this.getPendingModelSwitch();
-    const queuedMaybe = await this.hasQueuedModelSwitch();
-    if (!slot && !queuedMaybe) return null;
-
-    const { carried, unconsumed } = await this.scanQueuedModelSwitch();
-    if (carried !== undefined) {
-      // A batch drove this turn: its items are the source of truth. Clear any
-      // stray thread-scoped value now, before deciding whether to apply
-      // `carried` — a picker change made AFTER queuing (task-7 brief) leaves
-      // exactly such a stray value, and it must not leak onto a later,
-      // unrelated turn.
-      await this.clearPendingModelSwitch();
-    }
-    // The gate flag is dropped only once the scan has POSITIVELY established
-    // that nothing un-consumed carries a switch — WAITING batches included.
-    // Inferring it from "this turn consulted no batch" was wrong: a waiting
-    // batch is invisible to the carried-switch lookup, so an unrelated turn
-    // cleared the flag and that batch's own turn then returned at the cheap
-    // gate above without ever committing its switch.
-    if (!unconsumed) await this.clearQueuedModelSwitchFlag();
-    const pending = carried !== undefined ? carried : slot;
-    if (!pending) return null;
+    const request = effectiveModelSwitchRequest(this.messages);
+    if (!request) return null;
 
     const incompleteToolCallIds = (
       this as unknown as { _incompleteToolCallIds(messages: UIMessage[]): string[] }
@@ -6517,14 +6398,55 @@ export class ThinkThreadAgent extends Think<Env> {
       provider: runtimeConfig.modelConfig.provider,
       model: runtimeConfig.modelConfig.model,
     };
-    const to = { provider: pending.provider, model: pending.model };
-    if (sameModelTuple(from, to)) {
-      await this.clearPendingModelSwitch();
+    const validated = await resolveThreadModelSnapshotValue(
+      this.env,
+      {
+        workspaceId: runtimeConfig.workspaceId,
+        provider: runtimeConfig.modelConfig.provider,
+        model: runtimeConfig.modelConfig.model,
+        modelInputModalities: JSON.stringify(runtimeConfig.modelConfig.modelInputModalities),
+        showReasoning: runtimeConfig.modelConfig.showReasoning,
+        reasoningEffort: runtimeConfig.modelConfig.reasoningEffort,
+        modelSupportsReasoning: runtimeConfig.modelConfig.modelSupportsReasoning ?? null,
+      },
+      {
+        provider: request.provider,
+        model: request.model,
+        // Pass through only when supplied, so an omitted field inherits the
+        // target above rather than being coerced to `undefined` under
+        // `exactOptionalPropertyTypes` (symmetric with `createThread` in
+        // `thread-routes.ts`).
+        ...(request.modelInputModalities !== undefined
+          ? { modelInputModalities: request.modelInputModalities }
+          : {}),
+        ...(request.modelSupportsReasoning !== undefined
+          ? { modelSupportsReasoning: request.modelSupportsReasoning }
+          : {}),
+      },
+      await this.viewerEmailForModelSelection(),
+    );
+    if (!validated.ok) {
+      // Logged, not returned anywhere the client can read: a refused switch
+      // is invisible in production otherwise — this is the line that says
+      // WHICH provider/model the workspace refused and why. The turn keeps
+      // running on `from`; nothing here aborts it.
+      log.warn("think_thread.model_switch_rejected", {
+        threadId: this.name,
+        workspaceId: runtimeConfig.workspaceId,
+        provider: request.provider,
+        model: request.model,
+        error: validated.error,
+      });
       return null;
     }
 
-    await new ThreadRepository(registryDb(this.env)).updateModelSnapshot(this.name, pending);
-    await this.clearPendingModelSwitch();
+    const to = { provider: validated.value.provider, model: validated.value.model };
+    if (sameModelTuple(from, to)) return null;
+
+    await new ThreadRepository(registryDb(this.env)).updateModelSnapshot(
+      this.name,
+      validated.value,
+    );
     // The config just changed underneath the per-wake cache `beforeTurn`
     // already fetched via the call above — invalidate so the SAME turn's
     // `resolveRuntimeConfigForThink` read (right after this call returns)
@@ -6532,11 +6454,9 @@ export class ThinkThreadAgent extends Think<Env> {
     this._runtimeConfig.invalidate();
     // The transcript's record of the switch, written by the SERVER — the only
     // component that knows a switch actually committed. The client attaches
-    // nothing: a commit can originate from an automaton run, a queued batch,
-    // or a turn whose client never hydrated its pending state, and every one
-    // of those used to commit with no marker at all, leaving the sanitizer to
-    // read the transcript as one segment and replay the old model's signed
-    // reasoning at the new model.
+    // nothing: a commit can originate from an automaton run or either send
+    // path, and the server is the only one of those that can write a marker
+    // every one of them agrees on.
     await this.recordCommittedModelSwitch({ from, to });
     log.info("think_thread.model_switched", { threadId: this.name, from, to });
     return { from, to };
@@ -6616,73 +6536,6 @@ export class ThinkThreadAgent extends Think<Env> {
       (await this.ctx.storage.get<ModelSwitchOrigin>(MODEL_SWITCH_ORIGIN_STORAGE_KEY)) ?? null;
     this._modelSwitchOrigin = stored;
     return stored;
-  }
-
-  private async hasQueuedModelSwitch(): Promise<boolean> {
-    return (await this.ctx.storage.get<boolean>(QUEUED_MODEL_SWITCH_FLAG_KEY)) === true;
-  }
-
-  private async markQueuedModelSwitch(): Promise<void> {
-    await this.ctx.storage.put(QUEUED_MODEL_SWITCH_FLAG_KEY, true);
-  }
-
-  private async clearQueuedModelSwitchFlag(): Promise<void> {
-    await this.ctx.storage.delete(QUEUED_MODEL_SWITCH_FLAG_KEY);
-  }
-
-  /**
-   * ONE pass over the queue answering both questions the commit path has.
-   *
-   * `carried` — the switch carried by the queued submission whose messages ARE
-   * this turn: `null` when a batch drives this turn but none of its items
-   * carries a switch, `undefined` when no batch can be found at all (a direct,
-   * unqueued turn). Only the `undefined` case falls back to the thread-scoped
-   * slot in `commitPendingModelSwitch`.
-   *
-   * `unconsumed` — whether any still-live batch OTHER than the one driving this
-   * turn carries a switch. That is what the `modelSwitch:queued` gate flag
-   * actually means, and it cannot be inferred from `carried`: a WAITING batch
-   * is invisible to the lookup above, so clearing the flag on a turn that
-   * consulted no batch silently disarmed the gate for that batch's own turn.
-   * Free here — the same submission list answers both.
-   *
-   * Finds the driving batch the same way the queued drain reaches its metadata
-   * (`listSubmissions` + `queuedBatchFromMetadata`, same as
-   * `queued-user-messages.ts`'s `findWaitingQueuedBatch`), but looks for
-   * "running" + already-applied rather than "waiting" + not-yet-applied: by the
-   * time `beforeTurn` runs, the triggering submission has been claimed
-   * (running) and its messages are already in `this.messages`.
-   */
-  private async scanQueuedModelSwitch(): Promise<{
-    carried: ThreadModelSnapshotValue | null | undefined;
-    unconsumed: boolean;
-  }> {
-    const submissions = await this.listSubmissions({ limit: 50 });
-    const applied = new Set(this.messages.map((message) => message.id));
-    let active: { items: QueuedUserMessageItem[]; createdAt: number } | null = null;
-    let unconsumed = false;
-    for (const submission of submissions) {
-      const batch = queuedBatchFromMetadata(submission.metadata);
-      if (!batch) continue;
-      if (
-        submission.status === "running" &&
-        typeof submission.createdAt === "number" &&
-        isQueuedBatchApplied(batch.items, applied)
-      ) {
-        // Already applied and running: this batch IS (or was) a turn, so its
-        // switch is being consulted now rather than waiting.
-        if (!active || active.createdAt < submission.createdAt) {
-          active = { items: batch.items, createdAt: submission.createdAt };
-        }
-        continue;
-      }
-      // Anything else still live is waiting behind the active turn — the same
-      // "pending | running, not yet applied" shape `findWaitingQueuedBatch`
-      // uses. Its switch has not been consumed.
-      const live = submission.status === "pending" || submission.status === "running";
-      if (live && effectiveModelSwitch(batch.items)) unconsumed = true;
-    }
-    return { carried: active ? effectiveModelSwitch(active.items) : undefined, unconsumed };
   }
 
   /** Test seam: runs the SDK drain loop so a waiting queued batch actually
@@ -7157,25 +7010,10 @@ callable()(
 );
 callable()(ThinkThreadAgent.prototype.getDraft, null as unknown as ClassMethodDecoratorContext);
 callable()(ThinkThreadAgent.prototype.setDraft, null as unknown as ClassMethodDecoratorContext);
-// Reached from the composer's model picker over the client socket. Registering
-// here is NOT optional bookkeeping: the SDK's `_isCallable` is a WeakMap lookup
-// keyed by the function, so an unregistered public method throws "Method X is
-// not callable" at the wire and never runs. Every unit/integration test invokes
-// these on the prototype directly, which bypasses this registry — so only
-// `pending-model-switch.test.ts`'s callable-registration block can catch a
-// missing entry here.
-callable()(
-  ThinkThreadAgent.prototype.setPendingModelSwitch,
-  null as unknown as ClassMethodDecoratorContext,
-);
-callable()(
-  ThinkThreadAgent.prototype.getPendingModelSwitch,
-  null as unknown as ClassMethodDecoratorContext,
-);
-callable()(
-  ThinkThreadAgent.prototype.clearPendingModelSwitch,
-  null as unknown as ClassMethodDecoratorContext,
-);
+// Picking a model is now pure client state (see `App.tsx`) — no RPC to
+// register. The choice rides on the message that commits it, over the
+// `submitQueuedUserMessage`/normal send wire the callable list already
+// covers below.
 callable()(
   ThinkThreadAgent.prototype.exportHistory,
   null as unknown as ClassMethodDecoratorContext,

@@ -1,9 +1,11 @@
 import type { ThinkSubmissionInspection } from "@cloudflare/think";
 import type { FileUIPart, UIMessage } from "ai";
 import { extractAttachmentIdsFromUiMessages } from "./prepare-attachments";
-import { isReasoningEffort } from "./reasoning-options";
-import { isSupportedAgentProvider, parseModelInputModalities } from "../settings/model-selection";
-import type { ThreadModelSnapshotValue } from "../settings/thread-model-snapshot";
+import {
+  modelSwitchRequestFromMessage,
+  readModelSwitchRequest,
+  type ModelSwitchRequest,
+} from "./model-switch-request";
 import { isSystemReminderMessage, isWatcherCompletionMessage } from "./system-reminder";
 
 export const NADI_QUEUED_USER_MESSAGE_KIND = "queued_user_message";
@@ -29,14 +31,16 @@ export type QueuedUserMessageItem = {
   attachmentCount: number;
   attachments: QueuedAttachmentPreview[];
   /**
-   * The model switch parked mid-conversation at the moment THIS item was
-   * queued (see `think-thread-agent.ts`'s `submitQueuedUserMessage`). Stored
-   * per item, never per batch: the queue holds one waiting submission
+   * The model switch the client asserted on THIS item's message at the
+   * moment it was queued (its `metadata` — see `model-switch-request.ts`).
+   * Stored per item, never per batch: the queue holds one waiting submission
    * carrying every waiting message, and cancellation is per-item, so a
    * batch-level switch would outlive the message that requested it and
-   * silently apply to a sibling the user never chose it for.
+   * silently apply to a sibling the user never chose it for. Unvalidated: it
+   * is only ever resolved through `resolveThreadModelSnapshotValue` once, at
+   * commit time (`effectiveModelSwitchRequest` in `think-thread-agent.ts`).
    */
-  modelSwitch?: ThreadModelSnapshotValue;
+  modelSwitch?: ModelSwitchRequest;
 };
 
 // The queue holds AT MOST ONE waiting submission at a time, carrying every
@@ -144,6 +148,11 @@ export function normalizeQueuedUserMessageInput(input: unknown): NormalizedQueue
     typeof input.clientMessageId === "string" && input.clientMessageId.length > 0
       ? input.clientMessageId
       : message.id;
+  // The ONE place a switch enters the queue: read straight off the message's
+  // own metadata, exactly what a direct send carries. No server-side capture
+  // step — the client is the only source, so a message queued with no switch
+  // asserted on it carries none, never inheriting a sibling's.
+  const modelSwitch = modelSwitchRequestFromMessage(message);
 
   return {
     message,
@@ -152,23 +161,10 @@ export function normalizeQueuedUserMessageInput(input: unknown): NormalizedQueue
       textPreview: textPreview(message),
       attachmentCount: attachments.length,
       attachments,
+      ...(modelSwitch ? { modelSwitch } : {}),
     },
     attachmentIds: extractAttachmentIdsFromUiMessages([message]),
   };
-}
-
-/**
- * Binds a pending model switch onto the item being queued — the ONE place a
- * switch enters the queue, so it travels with this message and no other. A
- * `null` switch (nothing was pending) leaves the item untouched: a message
- * queued with no pending switch must carry none, never inherit a sibling's.
- */
-export function withCapturedModelSwitch(
-  normalized: NormalizedQueuedUserMessage,
-  modelSwitch: ThreadModelSnapshotValue | null,
-): NormalizedQueuedUserMessage {
-  if (!modelSwitch) return normalized;
-  return { ...normalized, item: { ...normalized.item, modelSwitch } };
 }
 
 export function appendToQueuedBatch(
@@ -243,41 +239,15 @@ function isQueuedUserMessageItem(value: unknown): value is QueuedUserMessageItem
   return true;
 }
 
-/**
- * Defensive parse of a captured switch pulled off submission metadata — a
- * client-controlled channel over the wire, same trust level as everything
- * else read here. Anything malformed degrades to `null` ("no switch") rather
- * than rejecting the item: a user's queued text is more valuable than their
- * model choice.
- */
-function readStoredModelSwitch(value: unknown): ThreadModelSnapshotValue | null {
-  if (!isObject(value)) return null;
-  const { provider, model, modelInputModalities, showReasoning, reasoningEffort } = value;
-  if (typeof provider !== "string" || !provider || !isSupportedAgentProvider(provider)) {
-    return null;
-  }
-  if (typeof model !== "string" || !model) return null;
-  const modalities = parseModelInputModalities(modelInputModalities);
-  if (!modalities) return null;
-  if (typeof showReasoning !== "boolean") return null;
-  if (!isReasoningEffort(reasoningEffort)) return null;
-  const modelSupportsReasoning = value.modelSupportsReasoning;
-  if (modelSupportsReasoning !== null && typeof modelSupportsReasoning !== "boolean") return null;
-  return {
-    provider,
-    model,
-    modelInputModalities: modalities,
-    showReasoning,
-    reasoningEffort,
-    modelSupportsReasoning,
-  };
-}
-
 /** Sanitizes a structurally-valid item's `modelSwitch`, degrading a
- *  malformed capture to "no switch" rather than rejecting the item. */
+ *  malformed capture to "no switch" rather than rejecting the item — a
+ *  user's queued text is more valuable than their model choice. Same
+ *  defensive parse `readModelSwitchRequest` applies to a live message's
+ *  metadata, applied here to the JSON that came back off submission
+ *  metadata (a client-controlled wire value either way). */
 function sanitizeQueuedUserMessageItem(value: QueuedUserMessageItem): QueuedUserMessageItem {
   const { clientMessageId, textPreview, attachmentCount, attachments } = value;
-  const modelSwitch = readStoredModelSwitch((value as { modelSwitch?: unknown }).modelSwitch);
+  const modelSwitch = readModelSwitchRequest((value as { modelSwitch?: unknown }).modelSwitch);
   return {
     clientMessageId,
     textPreview,
@@ -327,9 +297,7 @@ export function queuedBatchFromMetadata(metadata: unknown): QueuedUserMessageBat
  * switch away for free (see `queued-user-messages.ts`'s per-item storage
  * note on `QueuedUserMessageItem`).
  */
-export function effectiveModelSwitch(
-  items: QueuedUserMessageItem[],
-): ThreadModelSnapshotValue | null {
+export function effectiveModelSwitch(items: QueuedUserMessageItem[]): ModelSwitchRequest | null {
   for (let i = items.length - 1; i >= 0; i -= 1) {
     const found = items[i]?.modelSwitch;
     if (found) return found;
