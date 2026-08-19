@@ -85,6 +85,11 @@ import { autoNameThread, firstUserText } from "./auto-name-thread";
 import { resolveMemoryIndex } from "./memory-index";
 import { sanitizeOpenAIOAuthMessages } from "./openai-oauth-message-sanitize";
 import {
+  restoreModelSwitchMarker,
+  sanitizeCrossModelReasoning,
+  type ModelSwitchOrigin,
+} from "./cross-model-reasoning-sanitize";
+import {
   extractAttachmentIdsFromModelMessages,
   type ExtractionResult,
   prepareModelMessagesForModel,
@@ -103,6 +108,7 @@ import {
   type NormalizedQueuedUserMessage,
   type QueuedSubmissionPort,
 } from "./queued-user-messages";
+import { effectiveModelSwitchRequest } from "./model-switch-request";
 import { runAutomatonTurn } from "./automaton-run";
 import { buildReasoningProviderOptions } from "./reasoning-options";
 import { resolveModelReasoningProfile } from "../providers/model-capabilities";
@@ -191,8 +197,16 @@ import { runCloudflareComputeSmoke } from "../compute/backends/cloudflare-smoke"
 import { AgentSkillRepository } from "../db/repositories/agent-skills";
 import { FeedbackRepository } from "../db/repositories/feedback";
 import { WorkspacePrivacySettingsRepository } from "../db/repositories/workspace-privacy-settings";
+import { WorkspaceRepository } from "../db/repositories/workspaces";
 import { ThreadRepository } from "../db/repositories/threads";
 import { hasRegistry, registryBinding, registryDb } from "../db/client";
+import { resolveThreadModelSnapshotValue } from "../settings/thread-model-snapshot";
+import {
+  modelSwitchPart,
+  readModelSwitchPart,
+  sameModelTuple,
+  type ModelSwitchData,
+} from "./model-switch";
 import { attachmentsBucket } from "../storage/bucket-binding";
 import { log } from "../log";
 import {
@@ -263,6 +277,15 @@ const WORKSPACE_TOOL_NAMES = new Set([
 const MCP_DISCOVERY_WAIT_MS = 5_000;
 
 const DRAFT_STORAGE_KEY = "composer:draft";
+/**
+ * Where the transcript's CURRENT segment begins — the durable twin of the
+ * `data-model-switch` marker. The marker lives in the transcript and the
+ * transcript is compacted; this record is not, so it is what
+ * `restoreModelSwitchMarker` rebuilds segmentation from. Written on every
+ * commit, never cleared (the thread always has a current segment once it has
+ * switched once).
+ */
+const MODEL_SWITCH_ORIGIN_STORAGE_KEY = "modelSwitch:origin";
 const FEEDBACK_ACTIVE_INTERVIEW_STORAGE_KEY = "feedback:active-interview";
 const FEEDBACK_DRAFT_STORAGE_KEY = "feedback:draft";
 const FEEDBACK_INTERVIEW_BOUNDS_STORAGE_KEY = "feedback:interview-bounds";
@@ -582,6 +605,10 @@ export class ThinkThreadAgent extends Think<Env> {
   private _turnRuntimeConfig: Awaited<
     ReturnType<ThinkThreadAgent["resolveRuntimeConfigForThink"]>
   > | null = null;
+
+  /** Memoized `modelSwitch:origin` record. `undefined` means "not read yet";
+   *  `null` means "read, and this thread has never switched". */
+  private _modelSwitchOrigin: ModelSwitchOrigin | null | undefined = undefined;
 
   /**
    * Usage for the turn in flight. In-memory ONLY: `onStepFinish` runs BETWEEN
@@ -1159,6 +1186,12 @@ export class ThinkThreadAgent extends Think<Env> {
     // resolve is fresh; the onStart burst and idle status reads still share one
     // cached D1 query.
     this._runtimeConfig.invalidate();
+    // Commit any model switch the client requested on the message(s) that
+    // triggered this turn, BEFORE the resolve below, so this turn (not the
+    // next one) runs on the newly chosen model. See `commitPendingModelSwitch`
+    // for why this position makes the Anthropic thinking/tool_use ordering
+    // rule unreachable.
+    await this.commitPendingModelSwitch();
     // Reset only — draining happens in `beforeStep` (see its comment for why
     // draining here would duplicate messages between the base and injections).
     this._activeTurnInjections = [];
@@ -5752,6 +5785,11 @@ export class ThinkThreadAgent extends Think<Env> {
 
   async submitQueuedUserMessage(input: unknown) {
     await this.assertThreadWritable();
+    // Whatever switch the client asserted rides on the message's own
+    // `metadata` — `normalizeQueuedUserMessageInput` reads it straight off
+    // there onto the item (see `queued-user-messages.ts`). Per-item storage
+    // is what makes cancelling a queued message carry its switch away for
+    // free; a message queued with no switch asserted carries none.
     const normalized = normalizeQueuedUserMessageInput(input);
     return this.serializeQueuedRpc(async () => {
       await submitQueuedUserMessageBatch(this.queuedSubmissionPort(), normalized);
@@ -6293,6 +6331,222 @@ export class ThinkThreadAgent extends Think<Env> {
   }
 
   /**
+   * The owning workspace member's email, for the same `required-viewerEmail`
+   * gate `isUsableProviderForWorkspace` enforces elsewhere (see
+   * `automaton-tools.ts`'s `resolveService`, which sources it identically).
+   * `null` when the workspace has no owner row — a provider gated on viewer
+   * email then correctly fails closed instead of being silently offered.
+   */
+  private async viewerEmailForModelSelection(): Promise<string | null> {
+    const { workspaceId } = await this.resolveRuntimeConfigForThink();
+    const workspaces = new WorkspaceRepository(registryDb(this.env));
+    return workspaces.getOwnerEmail(workspaceId);
+  }
+
+  /**
+   * Commit the model switch the client requested on the message(s) that
+   * triggered THIS turn — read off `UIMessage.metadata`, never stored in DO
+   * storage: picking a model is pure client state (see `App.tsx`) and does
+   * no I/O until the message that asserts it is actually sent. Called at the
+   * TOP of `beforeTurn`, before the turn's runtime config is resolved, so
+   * the turn runs on the new model rather than one turn late.
+   *
+   * Committing here — after the user message that triggered this turn is
+   * already appended — is what makes the Anthropic thinking/tool_use
+   * ordering rule unreachable: with extended thinking on, an assistant turn
+   * containing `tool_use` must open with a thinking block, and switching
+   * models while the last assistant message still held a live tool call
+   * would make the sanitizer strip that foreign thinking block and leave
+   * `tool_use` first — a 400. The last assistant message cannot hold a live
+   * tool call at this point in the turn, but the guard below asserts that
+   * rather than assuming it (a repair gap upstream could still leave one).
+   * `think-model-messages-override.test.ts` and `model-switch-commit.test.ts`
+   * establish the stub-`this.messages` / stub-`_incompleteToolCallIds`
+   * pattern this guard is tested with.
+   *
+   * `effectiveModelSwitchRequest` scans the TRAILING run of user messages in
+   * `this.messages` for the last one carrying a request — one message for a
+   * direct send, several for a flushed queued batch (Think applies a
+   * submission's whole message array, then runs one turn over it), so this
+   * one scan is both send paths' source with no branching between them.
+   *
+   * Validation is `resolveThreadModelSnapshotValue` — the SAME call
+   * `createThread`/the HTTP model-switch route use — run HERE, at commit
+   * time, against the request the client asserted. That is the only gate: a
+   * client-asserted request is safe precisely because this call still checks
+   * workspace provider config and the whitelist before anything is written.
+   * A refusal is logged and the turn proceeds on the thread's EXISTING
+   * model — it must never abort the user's turn over a rejected switch.
+   */
+  private async commitPendingModelSwitch(): Promise<ModelSwitchData | null> {
+    const request = effectiveModelSwitchRequest(this.messages);
+    if (!request) return null;
+
+    const incompleteToolCallIds = (
+      this as unknown as { _incompleteToolCallIds(messages: UIMessage[]): string[] }
+    )._incompleteToolCallIds(this.messages);
+    if (incompleteToolCallIds.length > 0) {
+      log.warn("think_thread.model_switch_deferred", {
+        threadId: this.name,
+        reason: "incomplete_tool_calls",
+      });
+      return null;
+    }
+
+    const runtimeConfig = await this.resolveRuntimeConfigForThink();
+    const from = {
+      provider: runtimeConfig.modelConfig.provider,
+      model: runtimeConfig.modelConfig.model,
+    };
+    const validated = await resolveThreadModelSnapshotValue(
+      this.env,
+      {
+        workspaceId: runtimeConfig.workspaceId,
+        provider: runtimeConfig.modelConfig.provider,
+        model: runtimeConfig.modelConfig.model,
+        modelInputModalities: JSON.stringify(runtimeConfig.modelConfig.modelInputModalities),
+        showReasoning: runtimeConfig.modelConfig.showReasoning,
+        reasoningEffort: runtimeConfig.modelConfig.reasoningEffort,
+        modelSupportsReasoning: runtimeConfig.modelConfig.modelSupportsReasoning ?? null,
+      },
+      {
+        provider: request.provider,
+        model: request.model,
+        // Pass through only when supplied, so an omitted field inherits the
+        // target above rather than being coerced to `undefined` under
+        // `exactOptionalPropertyTypes` (symmetric with `createThread` in
+        // `thread-routes.ts`).
+        ...(request.modelInputModalities !== undefined
+          ? { modelInputModalities: request.modelInputModalities }
+          : {}),
+        ...(request.modelSupportsReasoning !== undefined
+          ? { modelSupportsReasoning: request.modelSupportsReasoning }
+          : {}),
+      },
+      await this.viewerEmailForModelSelection(),
+    );
+    if (!validated.ok) {
+      // Logged, not returned anywhere the client can read: a refused switch
+      // is invisible in production otherwise — this is the line that says
+      // WHICH provider/model the workspace refused and why. The turn keeps
+      // running on `from`; nothing here aborts it.
+      log.warn("think_thread.model_switch_rejected", {
+        threadId: this.name,
+        workspaceId: runtimeConfig.workspaceId,
+        provider: request.provider,
+        model: request.model,
+        error: validated.error,
+      });
+      return null;
+    }
+
+    const to = { provider: validated.value.provider, model: validated.value.model };
+    if (sameModelTuple(from, to)) return null;
+
+    await new ThreadRepository(registryDb(this.env)).updateModelSnapshot(
+      this.name,
+      validated.value,
+    );
+    // The config just changed underneath the per-wake cache `beforeTurn`
+    // already fetched via the call above — invalidate so the SAME turn's
+    // `resolveRuntimeConfigForThink` read (right after this call returns)
+    // sees the committed switch instead of replaying the stale `from` value.
+    this._runtimeConfig.invalidate();
+    // The transcript's record of the switch, written by the SERVER — the only
+    // component that knows a switch actually committed. The client attaches
+    // nothing: a commit can originate from an automaton run or either send
+    // path, and the server is the only one of those that can write a marker
+    // every one of them agrees on.
+    await this.recordCommittedModelSwitch({ from, to });
+    log.info("think_thread.model_switched", { threadId: this.name, from, to });
+    return { from, to };
+  }
+
+  /**
+   * Record a committed switch in BOTH places it has to exist.
+   *
+   * 1. DO storage (`modelSwitch:origin`) — the durable copy. The transcript
+   *    marker sits inside a message and compaction archives messages, so the
+   *    transcript alone cannot be trusted to still hold it;
+   *    `restoreModelSwitchMarker` rebuilds the marker from this record during
+   *    model-message assembly.
+   * 2. The transcript itself, as a `data-model-switch` part prepended to the
+   *    message the switch commits against (the turn's triggering user
+   *    message). This is what the UI renders the divider from, and it keeps
+   *    the divider exactly where the client used to put it.
+   *
+   * The transcript write is best-effort — it must never fail a turn — which is
+   * safe precisely because (1) is the copy the sanitizer can always fall back
+   * to. Idempotent: a message already carrying a marker for this `to` (an
+   * older client that still attaches its own) is left alone, so one switch can
+   * never render two dividers.
+   */
+  private async recordCommittedModelSwitch(data: ModelSwitchData): Promise<void> {
+    const anchor = this.modelSwitchAnchorMessage();
+    const origin: ModelSwitchOrigin = {
+      ...data,
+      ...(anchor ? { anchorMessageId: anchor.id } : {}),
+    };
+    await this.ctx.storage.put(MODEL_SWITCH_ORIGIN_STORAGE_KEY, origin);
+    this._modelSwitchOrigin = origin;
+    if (!anchor) return;
+    const alreadyMarked = anchor.parts.some((part) => {
+      const marker = readModelSwitchPart(part);
+      return marker !== null && sameModelTuple(marker.to, data.to);
+    });
+    if (alreadyMarked) return;
+    try {
+      await this.addMessages(
+        [
+          {
+            ...anchor,
+            parts: [
+              modelSwitchPart(data) as unknown as UIMessage["parts"][number],
+              ...anchor.parts,
+            ],
+          },
+        ],
+        { mode: "upsert" },
+      );
+    } catch (error) {
+      log.warn("think_thread.model_switch_marker_write_failed", {
+        threadId: this.name,
+        error: String(error),
+      });
+    }
+  }
+
+  /** The message a committed switch hangs its marker on: the turn's
+   *  triggering user message (the commit runs after it is appended), so the
+   *  divider renders above it — the placement the client used to produce. */
+  private modelSwitchAnchorMessage(): UIMessage | undefined {
+    const messages = this.messages;
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const message = messages[i];
+      if (message && message.role === "user") return message;
+    }
+    return messages[messages.length - 1];
+  }
+
+  /** The durable current-segment record, memoized per instance (assembly runs
+   *  on every step, and the record only changes when a commit rewrites it). */
+  private async currentModelSwitchOrigin(): Promise<ModelSwitchOrigin | null> {
+    if (this._modelSwitchOrigin !== undefined) return this._modelSwitchOrigin;
+    const stored =
+      (await this.ctx.storage.get<ModelSwitchOrigin>(MODEL_SWITCH_ORIGIN_STORAGE_KEY)) ?? null;
+    this._modelSwitchOrigin = stored;
+    return stored;
+  }
+
+  /** Test seam: runs the SDK drain loop so a waiting queued batch actually
+   *  executes its turn, following the `_test*`/`ForTest` naming already used
+   *  in this class. Thin wrapper over Think's own (unsafe-cast) drain hook,
+   *  same seam `queued-user-messages` integration coverage already uses. */
+  async drainQueuedUserMessagesForTest(): Promise<void> {
+    await (this as unknown as { _drainThinkSubmissions(): Promise<void> })._drainThinkSubmissions();
+  }
+
+  /**
    * Return this thread's FULL persisted transcript. The archive routine calls
    * this over RPC to snapshot history to D1 before destroying the DO.
    *
@@ -6570,12 +6824,23 @@ async function assembleWindowScaledModelMessages(
     messages: UIMessage[];
     currentContextBudget(): Promise<ContextBudget>;
     _repairTranscriptForProvider(messages: UIMessage[]): Promise<UIMessage[]>;
+    currentModelSwitchOrigin(): Promise<ModelSwitchOrigin | null>;
     _incompleteToolCallIds(messages: UIMessage[]): string[];
     _emit(event: string, payload: Record<string, unknown>): void;
   };
   const budget = await self.currentContextBudget();
   const repaired = await self._repairTranscriptForProvider(self.messages);
-  const truncated = truncateOlderMessages(repaired, truncationOptionsFor(budget));
+  // Rebuild the segmentation marker from DO storage when the transcript no
+  // longer carries it — compaction archives whole spans of messages, marker
+  // included, and a marker-less transcript reads as one same-origin segment.
+  // See `restoreModelSwitchMarker`.
+  const segmented = restoreModelSwitchMarker(repaired, await self.currentModelSwitchOrigin());
+  // Cross-model reasoning is dropped BEFORE truncation: a reasoning block that
+  // will not be sent must not consume the truncation budget. Markers are still
+  // present here and are gone after convertToModelMessages, so this is the only
+  // seam where the segment origins are readable.
+  const sanitized = sanitizeCrossModelReasoning(segmented);
+  const truncated = truncateOlderMessages(sanitized, truncationOptionsFor(budget));
   // Same post-repair diagnostic Think's own _assembleModelMessages runs: a
   // survivor here means _repairToolTranscriptParts has a gap, even though
   // ignoreIncompleteToolCalls keeps the turn itself safe.
@@ -6745,6 +7010,10 @@ callable()(
 );
 callable()(ThinkThreadAgent.prototype.getDraft, null as unknown as ClassMethodDecoratorContext);
 callable()(ThinkThreadAgent.prototype.setDraft, null as unknown as ClassMethodDecoratorContext);
+// Picking a model is now pure client state (see `App.tsx`) — no RPC to
+// register. The choice rides on the message that commits it, over the
+// `submitQueuedUserMessage`/normal send wire the callable list already
+// covers below.
 callable()(
   ThinkThreadAgent.prototype.exportHistory,
   null as unknown as ClassMethodDecoratorContext,

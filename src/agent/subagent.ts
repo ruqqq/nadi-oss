@@ -2,9 +2,18 @@ import { getAgentByName } from "agents";
 import type { StepContext, TurnConfig, TurnContext } from "@cloudflare/think";
 import { ThinkThreadAgent, type SubagentContext } from "./think-thread-agent";
 import { resolveThreadRuntimeConfigForAgent } from "./thread-agent-config";
+import { sameModelTuple, type ModelTuple } from "./model-switch";
 import type { WorkProgress } from "./work-ledger";
 import type { BackendReference } from "../compute/backend";
 import type { UsageSource } from "./usage-recorder";
+
+/**
+ * DO storage key for this run's frozen `(provider, model)` tuple. Lives on the
+ * FACET's own storage — it is per-RUN state, not per-thread state, and a
+ * facet's storage is exactly the thing that survives for the run's lifetime
+ * and no longer.
+ */
+const MODEL_PIN_STORAGE_KEY = "subagent:modelPin";
 
 /** System-context notice injected for a subagent (see {@link SubAgent.sessionRoleContext}). */
 const SUBAGENT_ROLE_PROMPT =
@@ -140,12 +149,49 @@ export class SubAgent extends ThinkThreadAgent {
     return this._subagentContext;
   }
 
-  /** Identity is the PARENT's; the facet name is a run id, not a thread id. */
+  /**
+   * Identity is the PARENT's; the facet name is a run id, not a thread id.
+   *
+   * The parent's row is read fresh on every turn — that keeps project context,
+   * background-work flags and the system prompt live — but `(provider, model)`
+   * is resolved from the parent ONCE and then PINNED on this facet's own
+   * storage for the rest of the run.
+   *
+   * Without the pin, a parent's mid-thread model switch would swap a running
+   * subagent's model between turns: its context window and tool-step budget
+   * would change underneath a plan that assumed neither. Worse, a subagent's
+   * transcript carries none of the switch markers the parent's does (those are
+   * written onto the PARENT's transcript by the switch tool), so the
+   * cross-model sanitizer would read the subagent's transcript as one
+   * same-origin segment and replay the old model's (possibly signed) reasoning
+   * at the new model — under OpenRouter, an Anthropic thinking block handed to
+   * a GPT model.
+   *
+   * A subagent spawned AFTER a switch has no pin yet, so its first call here
+   * pins the new model — inheritance stays automatic, no extra machinery.
+   */
   override async resolveRuntimeConfigForThink() {
     const ctx = await this.subagentContext();
     const config = await resolveThreadRuntimeConfigForAgent(this.env, ctx.parentThreadId);
     if (!config) throw new Error(`subagent_parent_not_registered:${ctx.parentThreadId}`);
-    return config;
+
+    const live: ModelTuple = {
+      provider: config.modelConfig.provider,
+      model: config.modelConfig.model,
+    };
+    const pin = await this.ctx.storage.get<ModelTuple>(MODEL_PIN_STORAGE_KEY);
+    if (!pin) {
+      await this.ctx.storage.put(MODEL_PIN_STORAGE_KEY, live);
+      return config;
+    }
+    if (sameModelTuple(pin, live)) return config;
+
+    // Pinned model differs from the parent's current row: keep the pin, let
+    // everything else (project context, flags, system prompt) stay live.
+    return {
+      ...config,
+      modelConfig: { ...config.modelConfig, provider: pin.provider, model: pin.model },
+    };
   }
 
   /**

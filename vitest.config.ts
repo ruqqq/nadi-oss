@@ -33,8 +33,12 @@ const integrationGroupedIsolatedFiles = [
   "test/integration/injection-buffer.test.ts",
   "test/integration/injection-drain.test.ts",
   "test/integration/kv-oauth-provider.integration.test.ts",
+  "test/integration/model-switch-commit.integration.test.ts",
+  "test/integration/model-switch-send-path.integration.test.ts",
+  "test/integration/queued-model-switch.integration.test.ts",
   "test/integration/skill-script-runner-gating.integration.test.ts",
   "test/integration/subagent-detached-injection.test.ts",
+  "test/integration/subagent-model-pin.integration.test.ts",
   "test/integration/subagent.integration.test.ts",
   "test/integration/think-thread-agent.integration.test.ts",
   "test/integration/thread-draft.integration.test.ts",
@@ -85,6 +89,7 @@ const integrationSharedIsolateFiles = [
   "test/unit/agent/tool-call-timing-store.test.ts",
   "test/unit/agent/work-delivery-ownership.test.ts",
   "test/unit/agent/workbench-switch-commit-wiring.test.ts",
+  "test/unit/agent/model-switch-commit.test.ts",
 ];
 
 // Every `test/unit/**` file above runs under the workers pool instead of the

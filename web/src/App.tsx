@@ -263,6 +263,7 @@ import {
 } from "./lib/new-chat-model";
 import {
   availableEffortOptions,
+  dialModelFor,
   reasoningControlsForThreadModel,
   shouldOfferEffortControl,
 } from "./lib/reasoning-effort";
@@ -325,6 +326,12 @@ import { Label } from "./components/ui/label";
 import { Alert, AlertDescription } from "./components/ui/alert";
 import { ModelPicker } from "./components/model/ModelPicker";
 import { ThreadModelBadge } from "./components/model/ThreadModelBadge";
+import { ComposerModelPicker, type ModelTuple } from "./components/model/ComposerModelPicker";
+import { toModelPickerProviders } from "./lib/model-picker";
+import {
+  buildModelSwitchMetadata,
+  type PendingModelSwitchValue,
+} from "./lib/model-switch-metadata";
 import { Spinner } from "./components/ui/spinner";
 import { ScrollArea } from "./components/ui/scroll-area";
 import { Separator } from "./components/ui/separator";
@@ -1674,6 +1681,7 @@ export function ChatApp({
     messageId: string;
     text: string;
     files: FileUIPart[];
+    provider: SettingsProvider;
     model: string;
   } | null>(null);
   const [loading, setLoading] = useState(true);
@@ -2380,7 +2388,13 @@ export function ChatApp({
       setDraftText(text);
       setDraftFiles(files);
       const messageId = `msg_${crypto.randomUUID()}`;
-      setPendingThreadCreation({ messageId, text, files, model: newChatModel });
+      setPendingThreadCreation({
+        messageId,
+        text,
+        files,
+        provider: selectedProvider,
+        model: newChatModel,
+      });
       const selectedProjectId =
         newChatProjectId !== "none" && projects.some((project) => project.id === newChatProjectId)
           ? newChatProjectId
@@ -3280,6 +3294,7 @@ export function ChatApp({
                 leading={threadNav}
                 text={pendingThreadCreation.text}
                 files={pendingThreadCreation.files}
+                provider={pendingThreadCreation.provider}
                 model={pendingThreadCreation.model}
               />
             ) : draft ? (
@@ -4095,11 +4110,7 @@ export function NewChatView({
                   variant="composer"
                   triggerId="new-chat-model"
                   triggerLabel="New chat model"
-                  providers={providers.map((entry) => ({
-                    value: entry.provider,
-                    label: entry.displayName,
-                    whitelistModels: entry.whitelistModels ?? null,
-                  }))}
+                  providers={toModelPickerProviders(providers)}
                   provider={provider}
                   model={model}
                   placeholder={SETTINGS_PROVIDER_MODEL_PLACEHOLDERS[provider]}
@@ -4121,13 +4132,21 @@ function PendingNewThreadView({
   leading,
   text,
   files,
+  provider,
   model,
 }: {
   leading: React.ReactNode;
   text: string;
   files: FileUIPart[];
+  provider?: SettingsProvider;
   model?: string;
 }) {
+  // Same trigger, wrapped instead of the plain badge, so this footer slot
+  // reads identically whether the composer is live or (as here) disabled
+  // while the thread is still being created — no relayout on the swap. It
+  // can't be operated: the picker's own `disabled` blocks the popover, and
+  // there is no thread yet to carry a pending switch.
+  const tuple: ModelTuple | null = provider && model ? { provider, model } : null;
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <Topbar
@@ -4146,7 +4165,13 @@ function PendingNewThreadView({
           disabled
           sendBlocked
           safeAreaBottom
-          footerTrailing={model ? <ThreadModelBadge model={model} /> : undefined}
+          footerTrailing={
+            tuple ? (
+              <ComposerModelPicker value={tuple} providers={[]} disabled onSelect={() => {}} />
+            ) : model ? (
+              <ThreadModelBadge model={model} />
+            ) : undefined
+          }
         />
       </div>
     </div>
@@ -4279,6 +4304,7 @@ function ThreadChatSkeleton({
   title,
   threadId,
   leading,
+  provider,
   model,
   statusHint,
   pendingBubble,
@@ -4287,6 +4313,7 @@ function ThreadChatSkeleton({
   title: string;
   threadId: string;
   leading: React.ReactNode;
+  provider?: SettingsProvider;
   model?: string;
   statusHint?: string;
   /** The optimistic first message, when this skeleton is the history-loading
@@ -4299,6 +4326,10 @@ function ThreadChatSkeleton({
   } | null;
   onRetryFirstMessage?: () => void;
 }) {
+  // Same rationale as PendingNewThreadView: wrap in the picker purely to keep
+  // the footer slot's geometry identical to the live composer. It renders
+  // disabled — history/socket aren't up yet, so there is nothing to switch.
+  const tuple: ModelTuple | null = provider && model ? { provider, model } : null;
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <Topbar
@@ -4329,7 +4360,13 @@ function ThreadChatSkeleton({
           sendBlocked
           statusHint={statusHint}
           safeAreaBottom
-          footerTrailing={model ? <ThreadModelBadge model={model} /> : undefined}
+          footerTrailing={
+            tuple ? (
+              <ComposerModelPicker value={tuple} providers={[]} disabled onSelect={() => {}} />
+            ) : model ? (
+              <ThreadModelBadge model={model} />
+            ) : undefined
+          }
         />
       </div>
     </div>
@@ -4462,6 +4499,7 @@ function ThreadChatConnected({
             title={thread.title}
             threadId={thread.threadId}
             leading={leading}
+            provider={isSettingsProvider(thread.provider) ? thread.provider : undefined}
             model={thread.model}
             pendingBubble={pendingBubble}
             onRetryFirstMessage={onRetryFirstMessage}
@@ -4744,6 +4782,16 @@ function ThreadChat({
     return () => {
       active = false;
     };
+  }, [thread.threadId]);
+
+  // Picking a model is pure client state — no server hydration. Reset on
+  // thread change so a switched-to thread doesn't inherit a stale pick, and
+  // a hard refresh honestly reverts the picker to the thread's actual model
+  // (there is nothing server-side to hydrate: picking does no I/O until the
+  // message that asserts it is actually sent).
+  const [pendingModel, setPendingModel] = useState<PendingModelSwitchValue | null>(null);
+  useEffect(() => {
+    setPendingModel(null);
   }, [thread.threadId]);
 
   useEffect(() => {
@@ -5060,6 +5108,47 @@ function ThreadChat({
   // them above it). Cover the create → deliver → stream-start gap here.
   const showOptimisticTyping = !!bubble && bubble.status !== "failed";
   const showTyping = streamTyping && !bubble;
+
+  // The thread's actual committed model. Kept separate from `pendingModel`
+  // even though only one of the two is ever displayed (see
+  // ComposerModelPicker's "no pending affordance" doc) — Task 10's transcript
+  // divider needs this as the switch's `from` value once it lands.
+  const committedModel: ModelTuple | null = isSettingsProvider(thread.provider)
+    ? { provider: thread.provider, model: thread.model }
+    : null;
+
+  // The EffortDial must reflect the model the NEXT message actually runs on,
+  // not the one the thread is currently pinned to. Reading thread.{provider,
+  // model,modelSupportsReasoning} directly here (a Task 9 gap, not a Task 9
+  // bug — the plan never routed pendingModel through the dial) leaves the
+  // dial showing the old model's controls after a switch is picked but
+  // before it commits on the next send: a user can set an effort value the
+  // new model doesn't support, or miss one it does.
+  const dialModel = dialModelFor(thread, pendingModel);
+
+  // Picking a model does NO I/O — it only sets local state. The choice
+  // takes effect on the NEXT send, which stamps it onto the outgoing
+  // message's `metadata` (see `handleSend` below); the server is the only
+  // party that validates it, at commit time. A page refresh honestly loses
+  // an unsent pick — see the reset effect above.
+  const handleModelSwitchSelect = useCallback(
+    (tuple: ModelTuple, picked: ProviderModelSearchResult) => {
+      setPendingModel({
+        provider: tuple.provider,
+        model: tuple.model,
+        ...(picked.inputModalities ? { modelInputModalities: picked.inputModalities } : {}),
+        // Tri-state: only an explicit true/false is a real claim about
+        // reasoning support. `undefined` means unknown and must NOT be
+        // coerced to false (that would withhold reasoning from a model that
+        // can do it) or collapsed away with `??`/truthiness.
+        ...(typeof picked.reasoning === "boolean"
+          ? { modelSupportsReasoning: picked.reasoning }
+          : {}),
+      });
+    },
+    [],
+  );
+
   const handleSend = useCallback(
     async (text: string, files: FileUIPart[], opts?: { steer?: boolean }) => {
       if (feedbackMode) {
@@ -5120,6 +5209,27 @@ function ThreadChat({
       const hasContent = text.trim().length > 0 || files.length > 0;
       if (hasContent) setCompactionNotice("none");
 
+      // NOTE: the client does NOT write the `data-model-switch` marker. It
+      // used to, and that made the marker conditional on this exact code path
+      // running: an automaton run and the feedback branch both bypass this
+      // function, and two queued sends drew two dividers for one switch (only
+      // the last of them ever runs). The server writes it from the commit it
+      // actually performs (`recordCommittedModelSwitch`), which is the only
+      // place that knows what committed.
+      //
+      // What the client DOES attach: the REQUEST, in `metadata` — a distinct
+      // channel from the marker part above. `pendingModel` is pure local
+      // state (see `handleModelSwitchSelect`), so this is the ONLY place it
+      // ever reaches the server: riding on the message that commits it.
+      // Built by `buildModelSwitchMetadata` (in `./lib/model-switch-metadata`)
+      // so `test/unit/web/model-switch-parity.test.ts` can feed the object
+      // this code path actually constructs through the server's real
+      // `readModelSwitchRequest`. Mirrors `src/agent/model-switch-request.ts`'s
+      // `ModelSwitchRequest` server-side (see that file's doc for why this
+      // REQUEST channel stays distinct from the server-written
+      // `data-model-switch` MARKER part).
+      const modelSwitchMetadata = buildModelSwitchMetadata(pendingModel);
+
       // Steer: interject the running turn (see the user-steering-message spec).
       // Meaningful only while a turn is in flight; text-only (no attachment
       // support), so a steer carrying files falls through to the queue path,
@@ -5156,6 +5266,7 @@ function ThreadChat({
           id: crypto.randomUUID(),
           role: "user",
           parts: [...(text ? [{ type: "text" as const, text }] : []), ...files],
+          ...(modelSwitchMetadata ? { metadata: modelSwitchMetadata } : {}),
         };
         try {
           // The server merges every waiting message into one batch submission
@@ -5165,6 +5276,11 @@ function ThreadChat({
             { message, clientMessageId: message.id },
           ])) as QueuedMessage[];
           setQueuedMessages((current) => mergeQueuedMessages(current, rows));
+          // The switch now rides on the queued message itself (its
+          // `metadata`), so the queue strip's own row is the only echo of it
+          // from here — keep showing it via `thread`/history once it commits
+          // rather than this local pick.
+          setPendingModel(null);
         } catch {
           toast.error("Couldn't queue the message. Please try again.");
           return;
@@ -5179,7 +5295,11 @@ function ThreadChat({
         return;
       }
 
-      sendMessage({ text, files });
+      sendMessage({
+        text,
+        files,
+        ...(modelSwitchMetadata ? { metadata: modelSwitchMetadata } : {}),
+      });
       trackThreadEvent("message_sent", {
         thread_id: thread.threadId,
         length: text.length,
@@ -5189,10 +5309,15 @@ function ThreadChat({
       // keeps no failed-send restore, so we clear the saved draft on submit.
       saveDraft.cancel();
       void (agentRef.current.call("setDraft", [""]) as Promise<unknown>).catch(() => {});
+      // The turn this starts commits the switch server-side
+      // (`commitPendingModelSwitch`, reading it off the message just sent) —
+      // the local pick has done its job.
+      setPendingModel(null);
     },
     [
       busy,
       compactionPhase,
+      pendingModel,
       refreshSteers,
       saveDraft,
       sendMessage,
@@ -5451,21 +5576,42 @@ function ThreadChat({
             feedbackMode ? undefined : (
               <>
                 {shouldOfferEffortControl({
-                  provider: isSettingsProvider(thread.provider) ? thread.provider : null,
-                  modelSupportsReasoning: thread.modelSupportsReasoning,
+                  provider: isSettingsProvider(dialModel.provider) ? dialModel.provider : null,
+                  modelSupportsReasoning: dialModel.modelSupportsReasoning,
                 }) &&
                   onReasoningEffortChange && (
                     <EffortDial
                       triggerId={`thread-effort-${thread.threadId}`}
                       effort={thread.reasoningEffort}
                       options={availableEffortOptions(
-                        reasoningControlsForThreadModel(providers, thread.provider, thread.model),
+                        reasoningControlsForThreadModel(
+                          providers,
+                          dialModel.provider,
+                          dialModel.model,
+                        ),
                       )}
                       onEffortChange={(effort) => onReasoningEffortChange(thread.threadId, effort)}
                       disabled={draftSeed === null || sendingFirstMessage}
                     />
                   )}
-                <ThreadModelBadge model={thread.model} />
+                {(() => {
+                  // Pending, when this thread has one, always wins over the
+                  // committed model — see ComposerModelPicker's doc: the two
+                  // render identically, so there is nothing else to signal
+                  // here beyond which value is current.
+                  const displayModel = pendingModel ?? committedModel;
+                  return displayModel ? (
+                    <ComposerModelPicker
+                      value={displayModel}
+                      providers={toModelPickerProviders(providers)}
+                      disabled={draftSeed === null || sendingFirstMessage}
+                      currentUsageTokens={thread.lastContextTokens}
+                      onSelect={handleModelSwitchSelect}
+                    />
+                  ) : (
+                    <ThreadModelBadge model={thread.model} />
+                  );
+                })()}
               </>
             )
           }

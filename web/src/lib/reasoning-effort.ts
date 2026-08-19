@@ -71,6 +71,43 @@ export function reasoningControlsForThreadModel(
   return entry?.whitelistModels?.find((item) => item.id === model)?.reasoningControls;
 }
 
+/** What the EffortDial needs to know: which model the NEXT message will
+ *  actually run on, and whether that model can reason. */
+export interface DialModel {
+  provider: string;
+  model: string;
+  /** `null` = unknown — the same tri-state as `ThreadSummary.modelSupportsReasoning`. */
+  modelSupportsReasoning: boolean | null;
+}
+
+/**
+ * The model the EffortDial should read controls for: the pending switch when
+ * one exists, otherwise the thread's committed model.
+ *
+ * A pending switch's `modelSupportsReasoning` is its OWN claim about the
+ * model it points at — when absent that means "unknown for the new model",
+ * not "fall back to what the thread's old model claimed". Reusing the
+ * thread's value here would silently show/hide the dial based on a model
+ * that isn't the one about to run.
+ */
+export function dialModelFor(
+  thread: { provider: string; model: string; modelSupportsReasoning: boolean | null },
+  pendingModel: { provider: string; model: string; modelSupportsReasoning?: boolean } | null,
+): DialModel {
+  if (pendingModel === null) {
+    return {
+      provider: thread.provider,
+      model: thread.model,
+      modelSupportsReasoning: thread.modelSupportsReasoning,
+    };
+  }
+  return {
+    provider: pendingModel.provider,
+    model: pendingModel.model,
+    modelSupportsReasoning: pendingModel.modelSupportsReasoning ?? null,
+  };
+}
+
 export interface EffortOption {
   level: ReasoningEffort;
   /** The model's own word for this setting where it has one. */

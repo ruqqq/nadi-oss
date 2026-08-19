@@ -1,4 +1,5 @@
 import type { ProviderModelSearchResult, ProviderSettingsView } from "@/settings-api";
+import type { ModelPickerProviderOption } from "@/components/model/ModelPicker";
 
 /**
  * The rules for turning a provider's curated list into what the picker shows.
@@ -9,6 +10,19 @@ import type { ProviderModelSearchResult, ProviderSettingsView } from "@/settings
 /** Curated means the workspace has chosen a list, even an empty one. */
 export function isCuratedProvider(provider: ProviderSettingsView | undefined): boolean {
   return Array.isArray(provider?.whitelistModels);
+}
+
+/** The `ModelPicker`/`ComposerModelPicker` provider-option shape, from the
+ *  workspace's settings response. Shared so every composer-footer picker
+ *  agrees on the mapping instead of re-deriving it at each call site. */
+export function toModelPickerProviders(
+  providers: ProviderSettingsView[],
+): ModelPickerProviderOption[] {
+  return providers.map((entry) => ({
+    value: entry.provider,
+    label: entry.displayName,
+    whitelistModels: entry.whitelistModels ?? null,
+  }));
 }
 
 export function curatedModels(
@@ -81,9 +95,7 @@ export function visibleProviders<T extends { value: string; whitelistModels?: un
   providers: T[],
   currentProvider: string | null,
 ): T[] {
-  return providers.filter(
-    (entry) => hasOfferableModels(entry) || entry.value === currentProvider,
-  );
+  return providers.filter((entry) => hasOfferableModels(entry) || entry.value === currentProvider);
 }
 
 /**

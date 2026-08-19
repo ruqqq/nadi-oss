@@ -1,6 +1,11 @@
 import type { ThinkSubmissionInspection } from "@cloudflare/think";
 import type { FileUIPart, UIMessage } from "ai";
 import { extractAttachmentIdsFromUiMessages } from "./prepare-attachments";
+import {
+  modelSwitchRequestFromMessage,
+  readModelSwitchRequest,
+  type ModelSwitchRequest,
+} from "./model-switch-request";
 import { isSystemReminderMessage, isWatcherCompletionMessage } from "./system-reminder";
 
 export const NADI_QUEUED_USER_MESSAGE_KIND = "queued_user_message";
@@ -25,6 +30,17 @@ export type QueuedUserMessageItem = {
   textPreview: string;
   attachmentCount: number;
   attachments: QueuedAttachmentPreview[];
+  /**
+   * The model switch the client asserted on THIS item's message at the
+   * moment it was queued (its `metadata` — see `model-switch-request.ts`).
+   * Stored per item, never per batch: the queue holds one waiting submission
+   * carrying every waiting message, and cancellation is per-item, so a
+   * batch-level switch would outlive the message that requested it and
+   * silently apply to a sibling the user never chose it for. Unvalidated: it
+   * is only ever resolved through `resolveThreadModelSnapshotValue` once, at
+   * commit time (`effectiveModelSwitchRequest` in `think-thread-agent.ts`).
+   */
+  modelSwitch?: ModelSwitchRequest;
 };
 
 // The queue holds AT MOST ONE waiting submission at a time, carrying every
@@ -65,6 +81,9 @@ export type QueuedUserMessageSubmission = {
   attachmentCount: number;
   clientMessageId: string;
   attachments: QueuedAttachmentPreview[];
+  /** The model this item will (or did) run on, so the queued chip can show
+   *  it. Absent when the item carries no captured switch. */
+  model?: string;
 };
 
 export type QueuedUserMessageInput = {
@@ -129,6 +148,11 @@ export function normalizeQueuedUserMessageInput(input: unknown): NormalizedQueue
     typeof input.clientMessageId === "string" && input.clientMessageId.length > 0
       ? input.clientMessageId
       : message.id;
+  // The ONE place a switch enters the queue: read straight off the message's
+  // own metadata, exactly what a direct send carries. No server-side capture
+  // step — the client is the only source, so a message queued with no switch
+  // asserted on it carries none, never inheriting a sibling's.
+  const modelSwitch = modelSwitchRequestFromMessage(message);
 
   return {
     message,
@@ -137,6 +161,7 @@ export function normalizeQueuedUserMessageInput(input: unknown): NormalizedQueue
       textPreview: textPreview(message),
       attachmentCount: attachments.length,
       attachments,
+      ...(modelSwitch ? { modelSwitch } : {}),
     },
     attachmentIds: extractAttachmentIdsFromUiMessages([message]),
   };
@@ -214,6 +239,24 @@ function isQueuedUserMessageItem(value: unknown): value is QueuedUserMessageItem
   return true;
 }
 
+/** Sanitizes a structurally-valid item's `modelSwitch`, degrading a
+ *  malformed capture to "no switch" rather than rejecting the item — a
+ *  user's queued text is more valuable than their model choice. Same
+ *  defensive parse `readModelSwitchRequest` applies to a live message's
+ *  metadata, applied here to the JSON that came back off submission
+ *  metadata (a client-controlled wire value either way). */
+function sanitizeQueuedUserMessageItem(value: QueuedUserMessageItem): QueuedUserMessageItem {
+  const { clientMessageId, textPreview, attachmentCount, attachments } = value;
+  const modelSwitch = readModelSwitchRequest((value as { modelSwitch?: unknown }).modelSwitch);
+  return {
+    clientMessageId,
+    textPreview,
+    attachmentCount,
+    attachments,
+    ...(modelSwitch ? { modelSwitch } : {}),
+  };
+}
+
 function isStoredUiMessage(value: unknown): value is UIMessage {
   return isObject(value) && typeof value.id === "string" && Array.isArray(value.parts);
 }
@@ -223,7 +266,7 @@ export function queuedBatchFromMetadata(metadata: unknown): QueuedUserMessageBat
 
   if (Array.isArray(metadata.items)) {
     if (metadata.items.length === 0 || !metadata.items.every(isQueuedUserMessageItem)) return null;
-    const items = metadata.items;
+    const items = metadata.items.map(sanitizeQueuedUserMessageItem);
     const messages =
       Array.isArray(metadata.messages) &&
       metadata.messages.length === items.length &&
@@ -234,7 +277,8 @@ export function queuedBatchFromMetadata(metadata: unknown): QueuedUserMessageBat
   }
 
   // Legacy v1 shape (single message, previews at the top level, no stored
-  // messages): listable and cancellable-whole, but never merged into.
+  // messages): listable and cancellable-whole, but never merged into. Legacy
+  // items never carried a `modelSwitch`, so this reads as "no switch".
   if (isQueuedUserMessageItem(metadata)) {
     const { clientMessageId, textPreview: preview, attachmentCount, attachments } = metadata;
     return {
@@ -244,6 +288,18 @@ export function queuedBatchFromMetadata(metadata: unknown): QueuedUserMessageBat
   }
   return null;
 }
+
+// Which switch actually applies out of a flushed batch is decided once, at
+// commit time, by `effectiveModelSwitchRequest` (`model-switch-request.ts`)
+// scanning the trailing run of applied `UIMessage`s in `this.messages` — the
+// same last-surviving-item rule, but over the messages Think actually
+// appended, not this module's own `QueuedUserMessageItem` previews. See that
+// function's doc, and `model-switch-request.test.ts`'s "the LAST trailing
+// user message wins over an earlier one — a flushed queued batch" for the
+// asserted behaviour. This module has no equivalent of its own: an item's
+// `modelSwitch` here is storage/preview only (what `listQueuedUserMessages`
+// renders, and what per-item cancellation carries away — see
+// `QueuedUserMessageItem`'s own doc), never itself the selection logic.
 
 export function isQueuedBatchApplied(
   items: QueuedUserMessageItem[],
@@ -304,6 +360,7 @@ export function serializeQueuedUserMessageSubmissionRows(
       attachments: item.attachments,
     };
     if (storedMessage) row.text = fullMessageText(storedMessage);
+    if (item.modelSwitch) row.model = item.modelSwitch.model;
     if (submission.requestId !== undefined) row.requestId = submission.requestId;
     if (submission.error !== undefined) row.error = submission.error;
     if (submission.startedAt !== undefined) row.startedAt = submission.startedAt;
