@@ -67,6 +67,7 @@ const integrationPristineRegistryFiles = [
   "test/unit/agent/alarm-rearm.test.ts",
   "test/unit/agent/work-terminal-funnel.test.ts",
   "test/unit/agent/subagent-ledger-wiring.test.ts",
+  "test/unit/agent/subagent-stop-attribution.test.ts",
   // Pins SDK prototype methods, so it must observe an unshared module graph.
   "test/unit/agent/think-sdk-contract.test.ts",
 ];

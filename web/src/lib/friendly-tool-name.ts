@@ -17,6 +17,7 @@ const FRIENDLY_TOOL_NAMES: Record<string, string> = {
   web_fetch_read: "Read fetched page",
   web_fetch_grep: "Search fetched page",
   spawn_subagent: "Start subagent",
+  stop_subagent: "Stopped subagent",
   check_subagents: "Check subagents",
   read_file: "Read file",
   write_file: "Write file",

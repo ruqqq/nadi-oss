@@ -47,6 +47,7 @@ const VERBS: Record<string, Verb> = {
   forget_memory: { past: "Forgot", noun: "memory", nounPlural: "memories" },
   search_memories: { past: "Searched", noun: "memory", nounPlural: "memories", uncountable: true },
   spawn_subagent: { past: "Started", noun: "subagent", nounPlural: "subagents" },
+  stop_subagent: { past: "Stopped", noun: "subagent", nounPlural: "subagents" },
   activate_skill: { past: "Used", noun: "skill", nounPlural: "skills" },
 };
 

@@ -1,5 +1,6 @@
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
+import type { WorkStopActor } from "./work-ledger";
 
 const SPAWN_DESCRIPTION = [
   "Delegate a self-contained task to a subagent that runs in the BACKGROUND on",
@@ -66,6 +67,45 @@ const RUNNING_NOTE = [
   "do something independent in the meantime.",
 ].join(" ");
 
+const STOP_DESCRIPTION = [
+  "Stop a subagent you spawned in this thread, by runId. Use it when the work is",
+  "no longer wanted — the task turned out to be unnecessary, you got the answer",
+  "another way, or you gave it the wrong task and want to re-spawn a corrected",
+  "one. It is not a way to hurry a run along: a stopped subagent's work is lost,",
+  "and stopping one that is nearly done wastes everything it did.",
+  "The runId comes from `spawn_subagent` or `check_subagents`.",
+].join(" ");
+
+const STOPPING_NOTE = [
+  "Stop requested. The run still reports its own terminal message shortly — that",
+  "message is the confirmation, so do not call this again or poll for it. Its",
+  "work is discarded: anything it had half-finished is not available to you, and",
+  "if you still need the task done, spawn a fresh subagent for it.",
+].join(" ");
+
+const STOP_REJECTED_NOTE = [
+  "Nothing was stopped — the run had already finished, or that runId is not one",
+  "of this thread's subagents. If it already finished, its result either has",
+  "arrived or is about to; check `check_subagents` rather than retrying this.",
+].join(" ");
+
+/** Line appended to a stopped run's completion, per {@link WorkStopActor}. */
+const STOP_ATTRIBUTION: Record<WorkStopActor, string> = {
+  user: [
+    "Stopped by the user, not by a failure. They chose to end this work: do not",
+    "restart it, re-spawn the same task, or take it over yourself unless they ask.",
+  ].join(" "),
+  agent: [
+    "You stopped this subagent. Its work is gone — if you still need the task,",
+    "spawn a fresh subagent with corrected instructions.",
+  ].join(" "),
+  system: [
+    "Stopped automatically (its time budget, or the machine it ran on went away)",
+    "— nobody chose to end this work, and it is incomplete. Re-spawn a narrower",
+    "task if you still need the result.",
+  ].join(" "),
+};
+
 export interface SubagentRunStatus {
   runId: string;
   label?: string;
@@ -83,6 +123,8 @@ export function createSubagentTools(deps: {
   }) => Promise<{ runId: string } | { error: string }>;
   /** Lists this parent's subagent runs with their current status/summary. */
   list: () => Promise<SubagentRunStatus[]>;
+  /** Cancels one of this parent's runs, attributed to the model (`"agent"`). */
+  stop: (runId: string) => Promise<{ ok: true } | { error: string }>;
 }): ToolSet {
   return {
     spawn_subagent: tool({
@@ -104,6 +146,18 @@ export function createSubagentTools(deps: {
         if ("error" in result)
           return { status: "rejected", error: result.error, note: REJECTED_NOTE };
         return { runId: result.runId, status: "started", note: STARTED_NOTE };
+      },
+    }),
+    stop_subagent: tool({
+      description: STOP_DESCRIPTION,
+      inputSchema: z.object({
+        runId: z.string().min(1).describe("Run id of the subagent to stop."),
+      }),
+      execute: async ({ runId }) => {
+        const result = await deps.stop(runId);
+        if ("error" in result)
+          return { runId, status: "rejected", error: result.error, note: STOP_REJECTED_NOTE };
+        return { runId, status: "stopping", note: STOPPING_NOTE };
       },
     }),
     check_subagents: tool({
@@ -145,6 +199,14 @@ export function formatSubagentCompletion(args: {
   status: string;
   summary?: string;
   error?: string;
+  /**
+   * Who asked for an `"aborted"` run to stop. Ignored for every other status:
+   * a completed run was not stopped by anyone, so claiming an actor there
+   * would be a plain lie. Omitted when the cancel carried no attribution (an
+   * abort that reached us through a path that never recorded one), in which
+   * case the model gets the status alone rather than a guessed actor.
+   */
+  actor?: WorkStopActor;
 }): string {
   // Strip `"` before wrapping: this string is later parsed back out by the
   // client's `SUBAGENT_COMPLETION_RE` (web/src/lib/subagent-runs.ts), which
@@ -161,7 +223,12 @@ export function formatSubagentCompletion(args: {
   const MAX = 4000;
   const body = args.error ? `Error: ${args.error}` : (args.summary ?? "(no summary returned)");
   const clipped = body.length > MAX ? `${body.slice(0, MAX)}\n…[truncated]` : body;
-  return `<system-reminder>\n${head}\n${clipped}\n</system-reminder>`;
+  // Clipping first, then appending: the attribution is what tells the model
+  // whether to leave this work alone or replace it, so it must survive a
+  // 4000-char summary rather than be the thing the clip eats.
+  const attribution = args.status === "aborted" && args.actor ? STOP_ATTRIBUTION[args.actor] : "";
+  const tail = attribution ? `${clipped}\n${attribution}` : clipped;
+  return `<system-reminder>\n${head}\n${tail}\n</system-reminder>`;
 }
 
 /**

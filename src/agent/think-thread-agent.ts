@@ -177,6 +177,7 @@ import {
   type WorkOutcome,
   type WorkReason,
   type WorkRow,
+  type WorkStopActor,
   type WorkTerminal,
 } from "./work-ledger";
 import { buildSystemReminderMessage, buildWatcherCompletionMessage } from "./system-reminder";
@@ -587,6 +588,8 @@ export class ThinkThreadAgent extends Think<Env> {
   }
   private _injectionBuffer?: InjectionBuffer;
   private workLedgerInstance?: WorkLedgerStore;
+  /** Stop attributions awaiting their SDK terminal; see `cancelSubagentRun`. */
+  private pendingStopActors?: Map<string, WorkStopActor>;
   private toolCallTimingInstance?: ToolCallTimingStore;
   /** One-shot legacy lease migration; see `ensureLegacySubagentBackfill`. */
   private legacyBackfillPromise?: Promise<void>;
@@ -1387,6 +1390,7 @@ export class ThinkThreadAgent extends Think<Env> {
         ? createSubagentTools({
             spawn: (input) => this.spawnSubagent(input),
             list: () => this.listSubagentRuns(),
+            stop: (runId) => this.stopSubagentRun(runId),
           })
         : {};
     const subagentToolNames = Object.keys(subagentTools);
@@ -2484,6 +2488,12 @@ export class ThinkThreadAgent extends Think<Env> {
     // lie the taxonomy forbids: it would license reading a partial result as
     // the finished one. The raw SDK status rides along in `detail` either way.
     const stopped = result.status === "aborted";
+    // WHO asked. `cancelSubagentRun` is the only path that can know, and it
+    // recorded the answer on its way into the SDK; an abort with no pending
+    // entry is one nobody here asked for (the SDK's own budget), which is
+    // exactly what `"system"` means to the model. Consumed here so the map
+    // cannot grow with the thread.
+    const actor: WorkStopActor | undefined = stopped ? this.takeStopActor(run.runId) : undefined;
     await this.serializeLeaseMutation(async () => {
       const at = Date.now();
       const closed = this.workLedger.terminalize(run.runId, {
@@ -2491,6 +2501,7 @@ export class ThinkThreadAgent extends Think<Env> {
         reason: stopped ? "process_stopped" : "process_exit",
         at,
         detail: result.status,
+        ...(actor ? { actor } : {}),
       });
       // Declare that the sweep owes this row nothing: the `_deliverDetachedTerminal`
       // override reports this run's terminal (with its real summary), so a retry
@@ -2545,8 +2556,78 @@ export class ThinkThreadAgent extends Think<Env> {
    * unknown or already-terminal run id. The aborted terminal fires
    * {@link onAgentToolFinish}, releasing the shared-machine lease.
    */
-  async cancelSubagentRun(runId: string): Promise<void> {
+  async cancelSubagentRun(runId: string, actor: WorkStopActor = "system"): Promise<void> {
+    this.stopActors().set(runId, actor);
+    // Bounded: a cancel whose `finish` never arrives (the run was already gone)
+    // leaves its entry behind, and this map lives as long as the thread. The
+    // cap is generous next to any realistic number of in-flight cancels, and
+    // dropping the OLDEST is right — the newest cancel is the one whose
+    // terminal is still coming.
+    const actors = this.stopActors();
+    while (actors.size > 64) {
+      const oldest = actors.keys().next().value;
+      if (oldest === undefined) break;
+      actors.delete(oldest);
+    }
     await this.cancelAgentTool(runId);
+  }
+
+  /**
+   * Pending stop attributions, keyed by run id. Lazily created so the
+   * duck-typed `this` the unit tests drive these methods over need not know
+   * about the field (same style as the other prototype-driven methods).
+   */
+  private stopActors(): Map<string, WorkStopActor> {
+    return (this.pendingStopActors ??= new Map<string, WorkStopActor>());
+  }
+
+  /** Reads and clears the pending attribution for a run. */
+  private takeStopActor(runId: string): WorkStopActor {
+    const actors = this.stopActors();
+    const actor = actors.get(runId);
+    actors.delete(runId);
+    return actor ?? "system";
+  }
+
+  /**
+   * The actor to report for a run's stop, for the completion the model reads.
+   *
+   * Reads the LEDGER, not the pending map: `onAgentToolFinish` consumes the
+   * pending entry when it writes the terminal, and the completion is delivered
+   * by a separate SDK callback whose ordering against that write is not ours to
+   * choose. The row is the durable record either way — a redelivery after a
+   * reconcile (or after the DO was evicted) still finds it there.
+   *
+   * Public only because `_deliverDetachedTerminal` is installed on the
+   * prototype as a module-level function and so cannot reach a private member
+   * (see that override's doc). Not part of any RPC surface. `undefined` for a
+   * run that was not stopped, or one stopped before this was recorded — the
+   * model is then told the status alone rather than a guessed actor.
+   */
+  stopActorFor(runId: string): WorkStopActor | undefined {
+    try {
+      const terminal = this.workLedger.get(runId)?.terminal;
+      return terminal?.outcome === "stopped" ? terminal.actor : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * `stop_subagent`: the MODEL cancelling a subagent it spawned. Distinct from
+   * `cancelBackgroundWork` (the sheet's stop button, attributed to the user)
+   * only in the attribution and in what it refuses — the model addresses runs
+   * by id from its own tool results, so a stale or wrong id must come back as a
+   * plain reason it can act on rather than a silent no-op. The ledger row is
+   * the authority for "is this one of mine, and is it still running".
+   */
+  async stopSubagentRun(runId: string): Promise<{ ok: true } | { error: string }> {
+    const row = this.workLedger.get(runId);
+    if (!row) return { error: "unknown_run" };
+    if (row.kind !== "subagent") return { error: "not_a_subagent" };
+    if (row.terminal) return { error: "already_terminal" };
+    await this.cancelSubagentRun(runId, "agent");
+    return { ok: true };
   }
 
   // ---------------------------------------------------------------------------
@@ -5482,7 +5563,9 @@ export class ThinkThreadAgent extends Think<Env> {
       if (!row) return { ok: false, reason: "unknown_id" };
       if (row.terminal) return { ok: false, reason: "already_terminal" };
       if (row.kind === "subagent") {
-        await this.cancelSubagentRun(id);
+        // The sheet's stop button is a HUMAN ending the work — the one
+        // attribution the model must not read as "something went wrong".
+        await this.cancelSubagentRun(id, "user");
         return { ok: true };
       }
       const resolved = await resolveComputeService(this.sandboxHostDeps(admission));
@@ -7096,6 +7179,7 @@ function buildSubagentCompletionMessage(
   runId: string,
   result: AgentToolLifecycleResult,
   label?: string,
+  actor?: WorkStopActor,
 ): UIMessage {
   const text = formatSubagentCompletion({
     runId,
@@ -7103,6 +7187,7 @@ function buildSubagentCompletionMessage(
     status: result.status,
     ...(result.summary ? { summary: result.summary } : {}),
     ...(result.error ? { error: result.error } : {}),
+    ...(actor ? { actor } : {}),
   });
   return { id: `subagent_${runId}_finish`, role: "user", parts: [{ type: "text", text }] };
 }
@@ -7184,7 +7269,10 @@ const deliverDetachedTerminalOverride: DeliverDetachedTerminal = async function 
     this.deliverInjection({
       dedupeKey: `subagent:${runId}:${kind}`,
       kind: "subagent-completion",
-      message: buildSubagentCompletionMessage(runId, result, label),
+      // An `aborted` run reads identically whether a human pressed stop, the
+      // model called `stop_subagent`, or a budget ran out — and those imply
+      // opposite next moves. The row is where the answer was recorded.
+      message: buildSubagentCompletionMessage(runId, result, label, this.stopActorFor(runId)),
     });
   }
   // `give_up` (budget-exceeded) is intentionally NOT surfaced here: the

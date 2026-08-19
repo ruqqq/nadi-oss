@@ -116,6 +116,12 @@ async function withParent(
       deliverWorkTerminal: proto.deliverWorkTerminal,
       terminalizeWork: proto.terminalizeWork,
       reaperAlreadyReported: proto.reaperAlreadyReported,
+      // Stop attribution — `onAgentToolFinish` consumes a pending actor, and the
+      // detached-terminal delivery reads the recorded one back off the row
+      // (see subagent-stop-attribution.test.ts for what they carry).
+      stopActors: proto.stopActors,
+      takeStopActor: proto.takeStopActor,
+      stopActorFor: proto.stopActorFor,
       ensureLegacySubagentBackfill: proto.ensureLegacySubagentBackfill,
       backfillLegacySubagentRuns: proto.backfillLegacySubagentRuns,
     };
