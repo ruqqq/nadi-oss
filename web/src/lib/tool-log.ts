@@ -82,6 +82,7 @@ const GUTTERS: Record<string, string> = {
   forget_memory: "forget",
   search_memories: "search",
   spawn_subagent: "spawn",
+  stop_subagent: "stop",
   check_subagents: "check",
   activate_skill: "skill",
   create_skill: "skill",

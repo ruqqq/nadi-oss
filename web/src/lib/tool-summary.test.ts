@@ -97,6 +97,13 @@ describe("getSingleToolLine", () => {
     ).toEqual([{ text: "Started a subagent" }, { text: "· Audit migrations", tone: "faint" }]);
   });
 
+  it("reads a stop as 'Stopped a subagent'", () => {
+    expect(
+      getSingleToolLine("stop_subagent", part({ runId: "sub_1" }, { status: "stopping" }), "x")
+        .segments,
+    ).toEqual([{ text: "Stopped a subagent" }]);
+  });
+
   it("falls back to the friendly label for tools without a verb", () => {
     expect(getSingleToolLine("tool_s1_search_docs", part({}), "Markdump · search").segments).toEqual([
       { text: "Markdump · search" },

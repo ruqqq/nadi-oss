@@ -1,7 +1,7 @@
-import type { WorkKind, WorkProgress, WorkRow, WorkTerminal } from "./work-ledger";
+import type { WorkKind, WorkProgress, WorkRow, WorkStopActor, WorkTerminal } from "./work-ledger";
 
 const WORK_LEDGER_SCHEMA = "agent_work_ledger";
-const WORK_LEDGER_SCHEMA_VERSION = 4;
+const WORK_LEDGER_SCHEMA_VERSION = 5;
 
 /**
  * The surface the compute layer is handed (see `WorkLedgerSink` in
@@ -70,6 +70,7 @@ interface WorkLedgerRow extends Record<string, string | number | null> {
   terminal_at: number | null;
   terminal_detail: string | null;
   terminal_exit_code: number | null;
+  terminal_actor: string | null;
   delivered_at: number | null;
   cleared_at: number | null;
   progress_message: string | null;
@@ -98,6 +99,11 @@ function toWorkRow(row: WorkLedgerRow): WorkRow {
             // built before this column existed passing a straight `toEqual`
             // against a `WorkTerminal` literal with no `exitCode` key at all.
             ...(row.terminal_exit_code === null ? {} : { exitCode: row.terminal_exit_code }),
+            // Same omission convention, and the same reason as `exitCode`: an
+            // abort nobody claimed (every row written before this column, plus
+            // the SDK's own budget aborts) must keep comparing equal to a
+            // terminal literal with no `actor` key.
+            ...(row.terminal_actor === null ? {} : { actor: row.terminal_actor as WorkStopActor }),
           } as WorkTerminal),
     // Rows written before schema v2 have no column at all; the migration
     // backfills them, so a NULL here always means a genuinely owed delivery.
@@ -184,6 +190,13 @@ export class WorkLedgerStore implements WorkLedgerSink {
       }
       if (!columns.some((column) => column.name === "cleared_at")) {
         this.storage.sql.exec("ALTER TABLE background_work ADD COLUMN cleared_at integer");
+      }
+      // v4 -> v5, additive: WHO asked for a stop. NULL-defaulted with no
+      // backfill — a pre-existing `stopped` row genuinely has no attribution
+      // (the cancel path did not record one), and NULL is how the model is told
+      // "stopped automatically" rather than being fed a guess.
+      if (!columns.some((column) => column.name === "terminal_actor")) {
+        this.storage.sql.exec("ALTER TABLE background_work ADD COLUMN terminal_actor text");
       }
       // v3 -> v4, additive: the last progress signal a subagent's child pushed
       // (see `WorkRow.progress` for why the parent stores it instead of asking
@@ -365,13 +378,14 @@ export class WorkLedgerStore implements WorkLedgerSink {
     this.storage.sql.exec(
       `UPDATE background_work
          SET terminal_outcome = ?, terminal_reason = ?, terminal_at = ?, terminal_detail = ?,
-             terminal_exit_code = ?
+             terminal_exit_code = ?, terminal_actor = ?
        WHERE id = ? AND terminal_outcome IS NULL`,
       terminal.outcome,
       terminal.reason,
       terminal.at,
       terminal.detail,
       terminal.exitCode ?? null,
+      terminal.actor ?? null,
       id,
     );
     return (

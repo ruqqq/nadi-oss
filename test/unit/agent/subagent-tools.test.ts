@@ -115,10 +115,16 @@ async function call(tool: any, args: unknown) {
 }
 
 const noRuns = async () => [];
+/** Most tests here are not about stopping; this keeps their deps object honest. */
+const noStop = async () => ({ error: "unknown_run" }) as const;
 
 describe("spawn_subagent tool", () => {
   it("returns a started runId on success", async () => {
-    const tools = createSubagentTools({ spawn: async () => ({ runId: "run-1" }), list: noRuns });
+    const tools = createSubagentTools({
+      spawn: async () => ({ runId: "run-1" }),
+      list: noRuns,
+      stop: noStop,
+    });
     const out = await call(tools.spawn_subagent, { task: "investigate the failing test" });
     expect(out).toMatchObject({ runId: "run-1", status: "started" });
     // The result carries the follow-up instructions: the model must not redo the
@@ -130,6 +136,7 @@ describe("spawn_subagent tool", () => {
     const tools = createSubagentTools({
       spawn: async () => ({ error: "too_many_active_subagents" }),
       list: noRuns,
+      stop: noStop,
     });
     const out = await call(tools.spawn_subagent, { task: "do a thing" });
     expect(out).toMatchObject({ status: "rejected", error: "too_many_active_subagents" });
@@ -145,6 +152,7 @@ describe("spawn_subagent tool", () => {
         return { runId: "run-1" };
       },
       list: noRuns,
+      stop: noStop,
     });
     // `call` invokes execute with `{ toolCallId: "t1", messages: [] }`.
     await call(tools.spawn_subagent, { task: "do a thing", label: "L" });
@@ -161,6 +169,7 @@ describe("check_subagents tool", () => {
     const tools = createSubagentTools({
       spawn: async () => ({ runId: "x" }),
       list: async () => runs,
+      stop: noStop,
     });
     const out = await call(tools.check_subagents, {});
     // One run is still running, so the result also tells the model not to poll.
@@ -172,13 +181,86 @@ describe("check_subagents tool", () => {
     const tools = createSubagentTools({
       spawn: async () => ({ runId: "x" }),
       list: async () => runs,
+      stop: noStop,
     });
     expect(await call(tools.check_subagents, {})).toEqual({ runs });
   });
 
   it("returns an explanatory note when there are no runs", async () => {
-    const tools = createSubagentTools({ spawn: async () => ({ runId: "x" }), list: noRuns });
+    const tools = createSubagentTools({
+      spawn: async () => ({ runId: "x" }),
+      list: noRuns,
+      stop: noStop,
+    });
     const out = await call(tools.check_subagents, {});
     expect(out).toEqual({ runs: [], note: expect.stringContaining("No subagents") });
+  });
+});
+
+describe("formatSubagentCompletion stop attribution", () => {
+  const base = { runId: "sub_9", label: "probe", status: "aborted" as const };
+
+  it("tells the model the user stopped the run, and not to restart it unasked", () => {
+    const text = formatSubagentCompletion({ ...base, actor: "user" });
+    expect(SUBAGENT_COMPLETION_RE.test(text)).toBe(true);
+    expect(text).toMatch(/stopped by the user/i);
+    expect(text).toMatch(/do not (re-?start|re-?spawn)/i);
+  });
+
+  it("reminds the model that it was the one who stopped the run", () => {
+    const text = formatSubagentCompletion({ ...base, actor: "agent" });
+    expect(text).toMatch(/you stopped/i);
+  });
+
+  it("says an unattributed abort was automatic, so the model can re-spawn", () => {
+    const text = formatSubagentCompletion({ ...base, actor: "system" });
+    expect(text).toMatch(/stopped automatically/i);
+    // The system did not choose to stop it for a reason the model must respect —
+    // re-spawning a narrower task is the right follow-up.
+    expect(text).toMatch(/re-?spawn/i);
+  });
+
+  it("omits attribution entirely for a run that was not stopped", () => {
+    const text = formatSubagentCompletion({
+      runId: "sub_9",
+      status: "completed",
+      summary: "done",
+      actor: "user",
+    });
+    expect(text).not.toMatch(/stopped by the user/i);
+  });
+
+  it("falls back to no attribution line when the actor is unknown", () => {
+    const text = formatSubagentCompletion(base);
+    expect(text).not.toMatch(/stopped by the user|you stopped|stopped automatically/i);
+  });
+});
+
+describe("stop_subagent tool", () => {
+  const deps = (stop: (runId: string) => Promise<{ ok: true } | { error: string }>) => ({
+    spawn: async () => ({ runId: "x" }),
+    list: noRuns,
+    stop,
+  });
+
+  it("stops the named run and says the terminal still arrives as a message", async () => {
+    let stopped: string | undefined;
+    const tools = createSubagentTools(
+      deps(async (runId) => {
+        stopped = runId;
+        return { ok: true };
+      }),
+    );
+    const out = await call(tools.stop_subagent, { runId: "sub_1" });
+    expect(stopped).toBe("sub_1");
+    expect(out).toMatchObject({ runId: "sub_1", status: "stopping" });
+    expect((out as { note: string }).note).toMatch(/terminal message/i);
+  });
+
+  it("surfaces the reason when the run cannot be stopped", async () => {
+    const tools = createSubagentTools(deps(async () => ({ error: "already_terminal" })));
+    const out = await call(tools.stop_subagent, { runId: "sub_1" });
+    expect(out).toMatchObject({ status: "rejected", error: "already_terminal" });
+    expect((out as { note: string }).note).toMatch(/already finished|nothing was stopped/i);
   });
 });

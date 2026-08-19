@@ -118,6 +118,21 @@ export type WorkReason =
   | "no_liveness";
 
 /**
+ * WHO asked for a `stopped` terminal. Recorded because the row alone cannot say:
+ * a human pressing stop in the sheet, the parent model calling `stop_subagent`,
+ * and the SDK's own budget abort all land as
+ * `outcome:"stopped", reason:"process_stopped", detail:"aborted"`. The three
+ * imply different next moves for the model — leave it alone, own the decision,
+ * or re-spawn something narrower — so the distinction has to be captured at the
+ * cancel entry point, which is the only place it exists.
+ *
+ * `"system"` is the honest default for an abort nobody claimed, NOT a fourth
+ * "unknown" state: the model is told it stopped automatically, which is what an
+ * unattributed abort means in practice.
+ */
+export type WorkStopActor = "user" | "agent" | "system";
+
+/**
  * The reasons the reaper infers from a row alone. NARROWLY scoped, and the
  * scope is the whole point: this set is sound ONLY as the SUBAGENT-row question
  * `reaperAlreadyReported` asks of it.
@@ -161,6 +176,13 @@ export interface WorkTerminal {
   reason: WorkReason;
   at: number;
   detail: string;
+  /**
+   * Who asked for a `"stopped"` outcome — see {@link WorkStopActor}. Omitted
+   * for every other outcome (nobody asked) and for rows written before this
+   * field existed, which read as "unattributed" and are reported to the model
+   * as an automatic stop.
+   */
+  actor?: WorkStopActor;
   /**
    * Structured exit status for a `process` row's `"exited"` outcome — the
    * dock cannot tone a chip on failure from `outcome` alone, since `"exited"`

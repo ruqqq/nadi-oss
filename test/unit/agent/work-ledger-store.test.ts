@@ -769,3 +769,37 @@ describe("runWorkLedgerSweep (the reaper retries an undelivered terminal)", () =
     });
   });
 });
+
+describe("WorkLedgerStore: stop attribution", () => {
+  it("round-trips who asked for a stop", async () => {
+    await withStore((store) => {
+      store.register(row());
+      store.terminalize("p1", {
+        outcome: "stopped",
+        reason: "process_stopped",
+        at: 7_000,
+        detail: "aborted",
+        actor: "user",
+      });
+      expect(store.get("p1")?.terminal?.actor).toBe("user");
+    });
+  });
+
+  it("omits the actor for a stop nobody claimed, so legacy rows compare equal", async () => {
+    await withStore((store) => {
+      store.register(row());
+      store.terminalize("p1", {
+        outcome: "stopped",
+        reason: "process_stopped",
+        at: 7_000,
+        detail: "aborted",
+      });
+      expect(store.get("p1")?.terminal).toEqual({
+        outcome: "stopped",
+        reason: "process_stopped",
+        at: 7_000,
+        detail: "aborted",
+      });
+    });
+  });
+});

@@ -16,6 +16,7 @@ import {
   mintArtifactViewUrl,
   type MessageArtifactPart,
 } from "@/lib/message-artifact-parts";
+import { openMintedUrlInNewTab } from "@/lib/open-minted-url";
 import { useMediaQuery } from "@/lib/use-media-query";
 import { useVisualViewportInset } from "@/lib/use-visual-viewport-inset";
 
@@ -77,8 +78,14 @@ export function ArtifactChip({ artifact, nowMs }: { artifact: MessageArtifactPar
     if (expired || openBusy) return;
     setOpenBusy(true);
     try {
-      const url = await mintArtifactViewUrl(artifact.url);
-      window.open(url, "_blank", "noopener,noreferrer");
+      // The tab is claimed inside this click (see openMintedUrlInNewTab) —
+      // minting first and opening after the await is what made this button do
+      // nothing at all on iOS Safari while working on desktop Chrome.
+      const result = await openMintedUrlInNewTab(() => mintArtifactViewUrl(artifact.url));
+      // A browser that refuses the tab anyway (iOS "Block Pop-ups", a locked
+      // down PWA) still has somewhere to go: the in-app preview renders the
+      // same artifact without leaving the conversation.
+      if (result.status === "blocked") setPreviewOpen(true);
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : "Couldn't open this preview.";
       toast.error(message);

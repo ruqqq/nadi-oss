@@ -11,6 +11,12 @@ describe("friendlyToolName", () => {
     expect(friendlyToolName("apply_patch")).toBe("Apply patch");
   });
 
+  it("names the subagent stop tool rather than humanizing it to 'Stop subagent'", () => {
+    // Curated because the generic humanizer would read "Stop subagent" as an
+    // instruction; the card describes what happened.
+    expect(friendlyToolName("stop_subagent")).toBe("Stopped subagent");
+  });
+
   it("humanizes an unmapped snake_case tool", () => {
     expect(friendlyToolName("some_new_tool")).toBe("Some new tool");
   });
