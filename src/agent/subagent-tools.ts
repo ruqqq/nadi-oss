@@ -43,6 +43,29 @@ const CHECK_DESCRIPTION = [
   "more often cannot reveal anything new.",
 ].join(" ");
 
+const STARTED_NOTE = [
+  "Subagent launched and now working in the background. Its result does NOT come",
+  "back through this tool — you will be notified automatically when it finishes,",
+  "as a separate message quoting this runId.",
+  "Do not duplicate its work: don't redo the task yourself, and avoid editing the",
+  "same files while it runs (you share one machine).",
+  "If you need its result to continue, stop that line of work — end your turn, or",
+  "start something INDEPENDENT — and pick it up when the completion message",
+  "arrives. `check_subagents` reports status on demand; never poll it in a loop.",
+].join(" ");
+
+const REJECTED_NOTE = [
+  "No subagent was launched: nothing is running and no completion message will",
+  "arrive, so do not wait for one. Either resolve the reason above (e.g. let an",
+  "active subagent finish, then retry) or do the task yourself in this thread.",
+].join(" ");
+
+const RUNNING_NOTE = [
+  "Some subagents are still running; their results arrive on their own as",
+  "messages. Do not call this tool in a loop to wait for them — end your turn, or",
+  "do something independent in the meantime.",
+].join(" ");
+
 export interface SubagentRunStatus {
   runId: string;
   label?: string;
@@ -78,8 +101,9 @@ export function createSubagentTools(deps: {
       }),
       execute: async ({ task, label }, { toolCallId }) => {
         const result = await deps.spawn({ task, ...(label ? { label } : {}), toolCallId });
-        if ("error" in result) return { status: "rejected", error: result.error };
-        return { runId: result.runId, status: "started" };
+        if ("error" in result)
+          return { status: "rejected", error: result.error, note: REJECTED_NOTE };
+        return { runId: result.runId, status: "started", note: STARTED_NOTE };
       },
     }),
     check_subagents: tool({
@@ -88,6 +112,7 @@ export function createSubagentTools(deps: {
       execute: async () => {
         const runs = await deps.list();
         if (runs.length === 0) return { runs: [], note: "No subagents have been spawned yet." };
+        if (runs.some((r) => r.status === "running")) return { runs, note: RUNNING_NOTE };
         return { runs };
       },
     }),

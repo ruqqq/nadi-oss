@@ -120,7 +120,10 @@ describe("spawn_subagent tool", () => {
   it("returns a started runId on success", async () => {
     const tools = createSubagentTools({ spawn: async () => ({ runId: "run-1" }), list: noRuns });
     const out = await call(tools.spawn_subagent, { task: "investigate the failing test" });
-    expect(out).toEqual({ runId: "run-1", status: "started" });
+    expect(out).toMatchObject({ runId: "run-1", status: "started" });
+    // The result carries the follow-up instructions: the model must not redo the
+    // work, and the real result arrives later as its own message.
+    expect((out as { note: string }).note).toMatch(/does NOT come back through this tool/);
   });
 
   it("surfaces a wait message when dispatch is rejected (cap exceeded)", async () => {
@@ -129,7 +132,9 @@ describe("spawn_subagent tool", () => {
       list: noRuns,
     });
     const out = await call(tools.spawn_subagent, { task: "do a thing" });
-    expect(out).toEqual({ status: "rejected", error: "too_many_active_subagents" });
+    expect(out).toMatchObject({ status: "rejected", error: "too_many_active_subagents" });
+    // Rejected means nothing is running — tell the model not to wait for a result.
+    expect((out as { note: string }).note).toMatch(/No subagent was launched/);
   });
 
   it("forwards the tool call id to spawn (so the run can bind to the tool call)", async () => {
@@ -158,7 +163,17 @@ describe("check_subagents tool", () => {
       list: async () => runs,
     });
     const out = await call(tools.check_subagents, {});
-    expect(out).toEqual({ runs });
+    // One run is still running, so the result also tells the model not to poll.
+    expect(out).toEqual({ runs, note: expect.stringContaining("Do not call this tool in a loop") });
+  });
+
+  it("omits the keep-waiting note once every run has finished", async () => {
+    const runs = [{ runId: "sub_2", label: "build", status: "completed", summary: "PR opened" }];
+    const tools = createSubagentTools({
+      spawn: async () => ({ runId: "x" }),
+      list: async () => runs,
+    });
+    expect(await call(tools.check_subagents, {})).toEqual({ runs });
   });
 
   it("returns an explanatory note when there are no runs", async () => {
