@@ -35,6 +35,10 @@ function agent(storage: ReturnType<typeof fakeStorage>): Record<string, unknown>
   const a = Object.create(ThinkThreadAgent.prototype) as Record<string, unknown>;
   a.ctx = { storage };
   a.env = {};
+  // `name` is a base-class getter backed by DO internals this duck-typed `this`
+  // does not have; the rejection path logs the thread id, so define it the same
+  // way `workbench-switch-commit-wiring.test.ts` does.
+  Object.defineProperty(a, "name", { value: "thr_1", configurable: true });
   a.assertThreadWritable = async () => {};
   a.resolveRuntimeConfigForThink = async () => ({
     workspaceId: "ws_1",

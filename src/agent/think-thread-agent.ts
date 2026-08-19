@@ -6420,7 +6420,19 @@ export class ThinkThreadAgent extends Think<Env> {
       },
       await this.viewerEmailForModelSelection(),
     );
-    if (!validated.ok) return { ok: false, error: validated.error };
+    if (!validated.ok) {
+      // Logged, not just returned: a refused switch is invisible in production
+      // otherwise, and the client only renders the code — this is the line that
+      // says WHICH provider/model the workspace refused and why.
+      log.warn("think_thread.model_switch_rejected", {
+        threadId: this.name,
+        workspaceId: runtimeConfig.workspaceId,
+        provider: input.provider,
+        model: input.model,
+        error: validated.error,
+      });
+      return { ok: false, error: validated.error };
+    }
     await this.ctx.storage.put(PENDING_MODEL_SWITCH_STORAGE_KEY, validated.value);
     return { ok: true, value: validated.value };
   }

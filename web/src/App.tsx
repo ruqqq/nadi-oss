@@ -15,6 +15,7 @@
  *     3. The Worker must CORS-allow the Vite origin for WebSocket upgrade
  */
 
+import { modelSwitchErrorMessage, modelSwitchUnreachableMessage } from "./lib/model-switch-error";
 import {
   Suspense,
   createContext,
@@ -5193,11 +5194,15 @@ function ThreadChat({
                 : {}),
             });
           } else {
-            toast.error("Couldn't switch models. Please try again.");
+            toast.error(modelSwitchErrorMessage(result.error));
           }
         })
-        .catch(() => {
-          toast.error("Couldn't switch models. Please try again.");
+        .catch((error: unknown) => {
+          // Distinct from a rejection on purpose: the first live failure of this
+          // feature was an unregistered `callable()`, which lands HERE, and a
+          // shared message hid that it was never a validation problem.
+          console.error("setPendingModelSwitch failed", error);
+          toast.error(modelSwitchUnreachableMessage());
         });
     },
     [],
