@@ -2,55 +2,30 @@ import { describe, expect, it } from "vitest";
 import { ThinkThreadAgent } from "../../../src/agent/think-thread-agent";
 
 /**
- * `commitPendingModelSwitch` is a DO-storage-backed private method, same
- * class of seam as `onChatResponse`'s workbench-switch commit
- * (`workbench-switch-commit-wiring.test.ts`). This drives the real prototype
- * method over a narrow duck-typed `this` for the two branches that return
- * BEFORE touching the registry DB — nothing pending, and the incomplete-
- * tool-call guard — so no D1/DO is needed here.
+ * `commitPendingModelSwitch` is a private method reading its request off
+ * `this.messages` (see `model-switch-request.ts`'s `effectiveModelSwitchRequest`)
+ * rather than any DO storage slot — picking a model is now pure client state
+ * that rides on the message that commits it. This drives the real prototype
+ * method over a narrow duck-typed `this` (no DO, no env, no registry) for the
+ * two branches that return BEFORE touching the registry DB: nothing to
+ * commit, and the incomplete-tool-call guard.
  *
- * The branches that DO write to `thread_index` (six columns committed, the
- * `updatedAt` non-bump guarantee, and same-model-tuple clearing without a
- * write) need a real registry DB and are proven in
- * `test/integration/model-switch-commit.integration.test.ts` instead — same
- * split `pending-model-switch.test.ts` / `pending-model-switch.integration.test.ts`
- * uses for the RPCs this method consumes.
- *
- * Task 7 added a `listSubmissions` lookup (`carriedQueuedModelSwitch`) at the
- * TOP of `commitPendingModelSwitch`, ahead of everything asserted here —
- * stubbed to return no submissions so it falls straight through to the
- * thread-scoped `getPendingModelSwitch` path this file exercises, same as an
- * unqueued/direct turn (no batch found) in production.
+ * Every branch that DOES reach the registry — `resolveThreadModelSnapshotValue`
+ * (workspace/provider validation), the six-column `thread_index` write, the
+ * `updatedAt` non-bump guarantee, same-model-tuple no-op, and the transcript
+ * marker — needs a real registry DB and Durable Object, and is proven in
+ * `test/integration/model-switch-commit.integration.test.ts` and
+ * `test/integration/model-switch-send-path.integration.test.ts` instead.
+ * `model-switch-request.test.ts` covers the pure request-parsing/last-item-
+ * wins rule this method's first line depends on.
  */
-
-/** Minimal stand-in for `this.ctx.storage`: the commit path reads the
- *  queued-switch gate flag off it and writes the origin record to it. */
-function fakeStorage(initial: Record<string, unknown> = {}) {
-  const map = new Map(Object.entries(initial));
-  return {
-    map,
-    storage: {
-      get: async (key: string) => map.get(key),
-      put: async (key: string, value: unknown) => {
-        map.set(key, value);
-      },
-      delete: async (key: string) => {
-        map.delete(key);
-      },
-    },
-  };
-}
 
 function agent(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   const a = Object.create(ThinkThreadAgent.prototype) as Record<string, unknown>;
   Object.defineProperty(a, "name", { value: "thr_1", configurable: true });
   Object.defineProperty(a, "messages", { value: [], configurable: true });
   a.env = {};
-  a.ctx = { storage: fakeStorage().storage };
-  a.getPendingModelSwitch = async () => null;
-  a.clearPendingModelSwitch = async () => {};
   a._incompleteToolCallIds = () => [];
-  a.listSubmissions = async () => [];
   Object.assign(a, overrides);
   return a;
 }
@@ -64,22 +39,43 @@ async function commit(a: Record<string, unknown>) {
 }
 
 describe("commitPendingModelSwitch", () => {
-  it("is a no-op when nothing is pending", async () => {
+  it("is a no-op when the trailing messages carry no switch request", async () => {
     const a = agent();
-    let clearCalled = false;
-    a.clearPendingModelSwitch = async () => {
-      clearCalled = true;
-    };
+    Object.defineProperty(a, "messages", {
+      value: [{ id: "u1", role: "user", parts: [{ type: "text", text: "hi" }] }],
+      configurable: true,
+    });
 
     await expect(commit(a)).resolves.toBeNull();
-    expect(clearCalled).toBe(false);
+  });
+
+  it("is a no-op on an empty transcript", async () => {
+    await expect(commit(agent())).resolves.toBeNull();
+  });
+
+  it("is a no-op when the trailing user message's metadata is malformed", async () => {
+    const a = agent();
+    Object.defineProperty(a, "messages", {
+      value: [
+        {
+          id: "u1",
+          role: "user",
+          parts: [{ type: "text", text: "hi" }],
+          metadata: { provider: "not-a-real-provider", model: "x" },
+        },
+      ],
+      configurable: true,
+    });
+
+    await expect(commit(a)).resolves.toBeNull();
   });
 
   it("defers and leaves the switch parked when an incomplete tool call survives", async () => {
-    // A live tool call (input-available, no settled result) on the last
-    // assistant message — exactly the shape that would let a foreign
+    // A live tool call (input-available, no settled result) on an earlier
+    // assistant message, with a fresh user message (carrying the request)
+    // appended after it — exactly the shape that would let a foreign
     // thinking block get sanitized off the front of a tool_use turn.
-    const liveToolCall = [
+    const messages = [
       {
         id: "a1",
         role: "assistant",
@@ -92,258 +88,33 @@ describe("commitPendingModelSwitch", () => {
           },
         ],
       },
-    ];
-    let clearCalled = false;
-    const a = agent({
-      getPendingModelSwitch: async () => ({
-        provider: "openai",
-        model: "gpt-5",
-        modelInputModalities: ["text"],
-        showReasoning: true,
-        reasoningEffort: "medium",
-        modelSupportsReasoning: true,
-      }),
-      clearPendingModelSwitch: async () => {
-        clearCalled = true;
+      {
+        id: "u1",
+        role: "user",
+        parts: [{ type: "text", text: "keep going" }],
+        metadata: { provider: "mock-tool-call", model: "mock-model-2" },
       },
+    ];
+    let resolveCalled = 0;
+    const a = agent({
       // Real `_incompleteToolCallIds` (installed on Think's prototype) reads
       // `state`/`toolCallId` off UIMessage parts exactly like this — see
       // `think-model-messages-override.test.ts` for the same stub-vs-real
       // split. Stubbed directly here (rather than relying on the real
       // implementation) because reaching it requires no other Think setup.
-      _incompleteToolCallIds: (messages: unknown[]) =>
-        messages === liveToolCall ? ["call_1"] : [],
+      _incompleteToolCallIds: (given: unknown[]) => (given === messages ? ["call_1"] : []),
+      resolveRuntimeConfigForThink: async () => {
+        resolveCalled += 1;
+        return { modelConfig: { provider: "mock", model: "mock" } };
+      },
     });
-    Object.defineProperty(a, "messages", { value: liveToolCall, configurable: true });
+    Object.defineProperty(a, "messages", { value: messages, configurable: true });
     // Reaching the registry would throw against `env = {}`; that failure
-    // would itself prove the guard didn't hold, so no separate spy is needed
-    // on `resolveRuntimeConfigForThink`/`ThreadRepository`.
+    // would itself prove the guard didn't hold, so no separate spy is needed.
 
     await expect(commit(a)).resolves.toBeNull();
-    expect(clearCalled).toBe(false);
-  });
-});
-
-/**
- * The `undefined` vs `null` tri-state of `carriedQueuedModelSwitch` is what
- * makes a model switch bind to the queued item that carried it. `undefined`
- * means "no batch drove this turn" and only THAT falls back to the
- * thread-scoped slot; `null` means "a batch drove this turn and none of its
- * items carried a switch", which must apply nothing and clear the stray slot.
- *
- * Nothing pinned the difference: collapsing the two comparisons in
- * `commitPendingModelSwitch` to `carried != null` left every model-switch
- * suite green while making a queued message run on a model the user chose
- * AFTER queueing it — the exact bug per-item binding exists to prevent.
- */
-describe("commitPendingModelSwitch tri-state", () => {
-  const strayPending = {
-    provider: "openai",
-    model: "gpt-5",
-    modelInputModalities: ["text"],
-    showReasoning: true,
-    reasoningEffort: "medium" as const,
-    modelSupportsReasoning: true,
-  };
-
-  it("applies nothing and clears the slot when the running batch carries no switch", async () => {
-    // m1 was queued with nothing pending; the picker was changed to gpt-5
-    // afterwards, leaving a stray thread-scoped value. m1's turn is running
-    // now (its message id is in `this.messages`, so the batch is "applied").
-    const applied = [{ id: "c1", role: "user", parts: [{ type: "text", text: "m1" }] }];
-    let clearCalled = 0;
-    let resolveCalled = 0;
-    const a = agent({
-      getPendingModelSwitch: async () => strayPending,
-      clearPendingModelSwitch: async () => {
-        clearCalled += 1;
-      },
-      resolveRuntimeConfigForThink: async () => {
-        resolveCalled += 1;
-        return { modelConfig: { provider: "mock", model: "mock" } };
-      },
-      listSubmissions: async () => [
-        {
-          submissionId: "sub-0",
-          status: "running",
-          createdAt: 100,
-          metadata: {
-            nadiKind: "queued_user_message",
-            items: [
-              { clientMessageId: "c1", textPreview: "m1", attachmentCount: 0, attachments: [] },
-            ],
-            messages: applied,
-          },
-        },
-      ],
-    });
-    Object.defineProperty(a, "messages", { value: applied, configurable: true });
-
-    await expect(commit(a)).resolves.toBeNull();
-    // The batch is authoritative even carrying nothing: the stray slot is
-    // dropped, and the turn is NOT re-resolved to commit anything.
-    expect(clearCalled).toBe(1);
+    // The guard returns before the runtime config (and therefore the
+    // registry) is ever touched.
     expect(resolveCalled).toBe(0);
-  });
-
-  it("falls back to the thread slot when NO batch drove the turn", async () => {
-    // The mirror case, so the test above cannot be satisfied by a variant
-    // that simply ignores the thread slot entirely.
-    let resolveCalled = 0;
-    const a = agent({
-      getPendingModelSwitch: async () => strayPending,
-      resolveRuntimeConfigForThink: async () => {
-        resolveCalled += 1;
-        return { modelConfig: { provider: "mock", model: "mock" } };
-      },
-      listSubmissions: async () => [],
-    });
-
-    await commit(a).catch(() => {});
-    expect(resolveCalled).toBe(1);
-  });
-});
-
-/**
- * `carriedQueuedModelSwitch` runs `listSubmissions({ limit: 50 })` plus a full
- * `this.messages` id scan. It sat unconditionally at the top of every turn of
- * every agent — subagent turns included — overwhelmingly to find nothing. The
- * gate is two DO storage reads: the thread-scoped slot, and a flag raised when
- * a queued item captures a switch (the only way a switch can exist that the
- * slot cannot see).
- */
-describe("commitPendingModelSwitch queue-scan gate", () => {
-  it("does not scan submissions when nothing is parked anywhere", async () => {
-    let scans = 0;
-    const a = agent({
-      listSubmissions: async () => {
-        scans += 1;
-        return [];
-      },
-    });
-
-    await expect(commit(a)).resolves.toBeNull();
-    expect(scans).toBe(0);
-  });
-
-  it("scans when a queued item is known to carry a switch", async () => {
-    let scans = 0;
-    const { map, storage } = fakeStorage({ "modelSwitch:queued": true });
-    const a = agent({
-      ctx: { storage },
-      listSubmissions: async () => {
-        scans += 1;
-        return [];
-      },
-    });
-
-    await expect(commit(a)).resolves.toBeNull();
-    expect(scans).toBe(1);
-    // The flag was stale (no batch, nothing parked), so it is dropped rather
-    // than left to force the scan on every subsequent turn forever.
-    expect(map.has("modelSwitch:queued")).toBe(false);
-  });
-});
-
-/**
- * The gate flag says "something queued may carry a switch". Clearing it on any
- * turn that consulted no batch was wrong: `scanQueuedModelSwitch`'s `carried`
- * only ever sees the RUNNING, already-applied batch, so a WAITING batch is
- * invisible to it. An unrelated turn therefore dropped the flag, and when the
- * waiting batch's own turn finally ran, `commitPendingModelSwitch` returned at
- * the cheap gate before ever reaching that batch's switch.
- */
-describe("commitPendingModelSwitch keeps the gate flag for a waiting batch", () => {
-  const queuedSwitch = {
-    provider: "openai",
-    model: "gpt-5",
-    modelInputModalities: ["text"],
-    showReasoning: true,
-    reasoningEffort: "medium" as const,
-    modelSupportsReasoning: true,
-  };
-
-  /** The batch that carries the switch. `status`/`applied` move it between
-   *  "waiting behind the active turn" and "this turn". */
-  function switchBatch(status: string) {
-    return {
-      submissionId: "sub-switch",
-      status,
-      createdAt: 200,
-      metadata: {
-        nadiKind: "queued_user_message",
-        items: [
-          {
-            clientMessageId: "c2",
-            textPreview: "run this on gpt-5",
-            attachmentCount: 0,
-            attachments: [],
-            modelSwitch: queuedSwitch,
-          },
-        ],
-      },
-    };
-  }
-
-  /** An UNRELATED turn: the running batch that IS this turn carries no switch,
-   *  while sub-switch sits behind it, still waiting. */
-  async function unrelatedTurn(storage: unknown) {
-    const applied = [{ id: "c1", role: "user", parts: [{ type: "text", text: "m1" }] }];
-    const a = agent({
-      ctx: { storage },
-      listSubmissions: async () => [
-        {
-          submissionId: "sub-0",
-          status: "running",
-          createdAt: 100,
-          metadata: {
-            nadiKind: "queued_user_message",
-            items: [
-              { clientMessageId: "c1", textPreview: "m1", attachmentCount: 0, attachments: [] },
-            ],
-          },
-        },
-        switchBatch("pending"),
-      ],
-    });
-    Object.defineProperty(a, "messages", { value: applied, configurable: true });
-    return commit(a);
-  }
-
-  it("does not drop the flag on an unrelated turn while the batch still waits", async () => {
-    const { map, storage } = fakeStorage({ "modelSwitch:queued": true });
-
-    await expect(unrelatedTurn(storage)).resolves.toBeNull();
-    expect(map.get("modelSwitch:queued")).toBe(true);
-  });
-
-  it("still commits that batch's switch when its own turn runs", async () => {
-    // Same flag state, one turn later: sub-switch is now running and its
-    // message is applied, so it IS the turn.
-    const applied = [{ id: "c2", role: "user", parts: [{ type: "text", text: "run this" }] }];
-    const { map, storage } = fakeStorage({ "modelSwitch:queued": true });
-    // ...and the unrelated turn above really did run first, so this half
-    // fails too if that turn disarmed the gate.
-    await unrelatedTurn(storage);
-    let resolveCalled = 0;
-    const a = agent({
-      ctx: { storage },
-      resolveRuntimeConfigForThink: async () => {
-        resolveCalled += 1;
-        return { modelConfig: { provider: "anthropic", model: "claude-opus-5" } };
-      },
-      listSubmissions: async () => [switchBatch("running")],
-    });
-    Object.defineProperty(a, "messages", { value: applied, configurable: true });
-
-    // The registry write past this point needs a real D1 (covered in
-    // `model-switch-commit.integration.test.ts`); reaching the runtime-config
-    // read at all is what proves the switch was consumed rather than dropped
-    // at the cheap gate.
-    await commit(a).catch(() => {});
-    expect(resolveCalled).toBe(1);
-    // Its switch has been consumed and nothing else is queued, so the flag
-    // goes away rather than forcing the scan forever.
-    expect(map.has("modelSwitch:queued")).toBe(false);
   });
 });

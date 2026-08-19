@@ -7,7 +7,6 @@ import {
   normalizeQueuedUserMessageInput,
   queuedBatchFromMetadata,
   submitQueuedUserMessageBatch,
-  withCapturedModelSwitch,
   type QueuedSubmissionPort,
 } from "../../../src/agent/queued-user-messages";
 
@@ -15,8 +14,6 @@ const snapshot = {
   provider: "mock-tool-call",
   model: "mock-model-2",
   modelInputModalities: ["text"],
-  showReasoning: true,
-  reasoningEffort: "medium" as const,
   modelSupportsReasoning: true,
 };
 
@@ -25,8 +22,17 @@ const otherSnapshot = {
   model: "mock-model-3",
 };
 
-function textMessage(text: string, id: string): UIMessage {
-  return { id, role: "user", parts: [{ type: "text", text }] };
+/** A queued message the client asserts a switch on, exactly the shape a
+ *  direct send carries — `metadata` is the ONE channel a switch enters the
+ *  queue through now (see `queued-user-messages.ts`'s
+ *  `normalizeQueuedUserMessageInput`, which reads it straight off here). */
+function textMessage(text: string, id: string, modelSwitch?: typeof snapshot): UIMessage {
+  return {
+    id,
+    role: "user",
+    parts: [{ type: "text", text }],
+    ...(modelSwitch ? { metadata: modelSwitch } : {}),
+  };
 }
 
 function inspection(
@@ -76,18 +82,31 @@ function fakePort({
 }
 
 /**
- * Pure-module coverage of the per-item model-switch binding (task 7):
- * `queuedBatchFromMetadata` parsing a captured switch on an item, degrading a
- * malformed one, and `effectiveModelSwitch`'s last-surviving-item rule. No
- * `ThinkThreadAgent` import here, so this stays in the plain-node `unit`
- * project — the real-DO behaviours (capture on queue, cancellation carrying
- * a switch away, the same rule proven end to end) live in
- * `test/integration/queued-model-switch.integration.test.ts` instead, same
- * split `queued-user-messages.test.ts` already uses for everything else in
- * this module.
+ * Pure-module coverage of the per-item model-switch binding: `metadata` on
+ * the queued message is now the only source (see `model-switch-request.ts`),
+ * so this proves `normalizeQueuedUserMessageInput` reads it, the item
+ * survives `queuedBatchFromMetadata`'s round trip (or degrades cleanly), and
+ * `effectiveModelSwitch`'s last-surviving-item rule. No `ThinkThreadAgent`
+ * import here, so this stays in the plain-node `unit` project — the real-DO
+ * behaviours (cancellation carrying a switch away end to end, the commit
+ * itself) live in `test/integration/queued-model-switch.integration.test.ts`
+ * instead, same split `queued-user-messages.test.ts` already uses for
+ * everything else in this module.
  */
 describe("queued message model binding", () => {
-  it("round-trips a captured switch on the item", () => {
+  it("normalizeQueuedUserMessageInput captures the switch off the message's own metadata", () => {
+    const normalized = normalizeQueuedUserMessageInput({
+      message: textMessage("hi", "m1", snapshot),
+    });
+    expect(normalized.item.modelSwitch).toEqual(snapshot);
+  });
+
+  it("a message with no metadata carries no switch", () => {
+    const normalized = normalizeQueuedUserMessageInput({ message: textMessage("hi", "m1") });
+    expect(normalized.item.modelSwitch).toBeUndefined();
+  });
+
+  it("round-trips a captured switch through queuedBatchFromMetadata", () => {
     const batch = queuedBatchFromMetadata({
       nadiKind: "queued_user_message",
       items: [
@@ -159,22 +178,16 @@ describe("queued message model binding", () => {
   });
 
   it("cancelling ONE item of a batch removes only that item's switch — THE rule", async () => {
-    // "run the tests" queues with no switch pending; "then summarise" queues
-    // after a picker change, so only IT carries a switch.
+    // "run the tests" queues with no switch asserted; "then summarise" queues
+    // with the picker having since chosen a model, so only IT carries one.
     const { port, latest } = fakePort({});
     await submitQueuedUserMessageBatch(
       port,
-      withCapturedModelSwitch(
-        normalizeQueuedUserMessageInput({ message: textMessage("run the tests", "m1") }),
-        null,
-      ),
+      normalizeQueuedUserMessageInput({ message: textMessage("run the tests", "m1") }),
     );
     await submitQueuedUserMessageBatch(
       port,
-      withCapturedModelSwitch(
-        normalizeQueuedUserMessageInput({ message: textMessage("then summarise", "m2") }),
-        snapshot,
-      ),
+      normalizeQueuedUserMessageInput({ message: textMessage("then summarise", "m2", snapshot) }),
     );
 
     const batchBeforeCancel = queuedBatchFromMetadata(latest()?.metadata);
@@ -195,17 +208,13 @@ describe("queued message model binding", () => {
     const { port, latest } = fakePort({});
     await submitQueuedUserMessageBatch(
       port,
-      withCapturedModelSwitch(
-        normalizeQueuedUserMessageInput({ message: textMessage("first", "m1") }),
-        snapshot,
-      ),
+      normalizeQueuedUserMessageInput({ message: textMessage("first", "m1", snapshot) }),
     );
     await submitQueuedUserMessageBatch(
       port,
-      withCapturedModelSwitch(
-        normalizeQueuedUserMessageInput({ message: textMessage("second", "m2") }),
-        otherSnapshot,
-      ),
+      normalizeQueuedUserMessageInput({
+        message: textMessage("second", "m2", otherSnapshot),
+      }),
     );
 
     const batch = queuedBatchFromMetadata(latest()?.metadata);

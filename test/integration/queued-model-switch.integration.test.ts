@@ -15,8 +15,13 @@ async function readThreadIndexRow(threadId: string) {
     .first<{ model_provider: string | null; model: string | null }>();
 }
 
-function userMessage(id: string, text: string) {
-  return { id, role: "user" as const, parts: [{ type: "text" as const, text }] };
+function userMessage(id: string, text: string, modelSwitch?: { provider: string; model: string }) {
+  return {
+    id,
+    role: "user" as const,
+    parts: [{ type: "text" as const, text }],
+    ...(modelSwitch ? { metadata: modelSwitch } : {}),
+  };
 }
 
 /**
@@ -39,67 +44,68 @@ async function waitForModelCommit(threadId: string): Promise<void> {
 }
 
 /**
- * Real-DO, real-D1 coverage of task 7. `queued-model-switch.test.ts` (unit)
- * covers the pure parsing/degrading, the last-surviving-item rule, and —
- * over the fake `QueuedSubmissionPort` harness `queued-user-messages.test.ts`
- * already uses — the rule this task exists for: cancelling one item removes
- * only that item's switch. That harness is deliberately used for the
- * merge/cancel machinery instead of a real DO here: a real DO's automatic
- * submission drain can complete a waiting message's turn before the next one
- * is even queued (see `think-thread-agent.integration.test.ts`'s "timing
- * tolerant" merge test), which would make an assertion about which switch a
- * *merged* real batch ends up carrying flaky by construction.
+ * Real-DO, real-D1 coverage of the queued send path's model binding. A
+ * switch no longer enters the queue through any server-side capture step —
+ * the client asserts it directly on the queued message's own `metadata`
+ * (see `queued-user-messages.ts`'s `normalizeQueuedUserMessageInput`), so
+ * there is no `setPendingModelSwitch`/`getPendingModelSwitch` anywhere in
+ * this file any more; those RPCs are gone. `queued-model-switch.test.ts`
+ * (unit) covers the pure parsing/degrading and the last-surviving-item rule
+ * over a fake `QueuedSubmissionPort`; the full send-path commit, with the
+ * transcript marker, is proven end to end (both direct and queued) in
+ * `model-switch-send-path.integration.test.ts` instead.
  *
- * What THIS file proves instead — things only a real DO and a real registry
- * DB can show:
- *  - capturing at queue time actually empties the real `PENDING_MODEL_SWITCH`
- *    storage slot, not just a modelled one;
- *  - a later `setPendingModelSwitch` call genuinely does not reach back into
- *    an already-queued item's stored metadata;
- *  - `commitPendingModelSwitch`'s new `carriedQueuedModelSwitch` lookup (task
- *    7's wiring into `beforeTurn`) actually finds the running submission and
- *    writes ITS switch to `thread_index`, end to end, for the single-item
- *    case where no merge race is in play.
+ * What THIS file proves that only a real DO and a real registry DB can show:
+ *  - `listQueuedUserMessages` surfaces the per-item switch it read off the
+ *    message's metadata (the row the queued strip actually renders);
+ *  - queuing a second message with a different (or no) switch does not
+ *    retro-edit an already-queued item's own metadata — it can't, since the
+ *    switch lives on the message itself rather than in any mutable slot;
+ *  - the switch carried by a queued item commits to `thread_index`, end to
+ *    end, when its turn actually runs.
  */
 describe("queued message model binding (integration)", () => {
   beforeAll(async () => {
     await applyRegistryTestSchema(env.REGISTRY_DB);
   });
 
-  it("queuing captures the pending switch and empties the thread slot", async () => {
+  it("listQueuedUserMessages surfaces the switch read off the message's own metadata", async () => {
     const { threadId } = await seedRegistryThread(env.REGISTRY_DB, { threadId: "thr_qms_capture" });
     const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
 
-    const result = await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
-      await agent.setPendingModelSwitch({ provider: "mock-tool-call", model: "mock-model-2" });
-      await agent.submitQueuedUserMessage({ message: userMessage("m1", "later") });
-      const pendingAfter = await agent.getPendingModelSwitch();
-      const listed = (await agent.listQueuedUserMessages()) as QueuedRow[];
-      return { pendingAfter, listed };
+    const listed = await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
+      await agent.submitQueuedUserMessage({
+        message: userMessage("m1", "later", { provider: "mock-tool-call", model: "mock-model-2" }),
+      });
+      return (await agent.listQueuedUserMessages()) as QueuedRow[];
     });
 
-    expect(result.pendingAfter).toBeNull();
-    const row = result.listed.find((r) => r.clientMessageId === "m1");
+    const row = listed.find((r) => r.clientMessageId === "m1");
     expect(row?.model).toBe("mock-model-2");
   });
 
-  it("a later picker change does not retro-edit an already-queued item", async () => {
+  it("queuing a second message does not retro-edit an already-queued item's switch", async () => {
     const { threadId } = await seedRegistryThread(env.REGISTRY_DB, {
       threadId: "thr_qms_no_retro",
     });
     const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
 
     const listed = await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
-      await agent.setPendingModelSwitch({ provider: "mock-tool-call", model: "mock-model-2" });
-      await agent.submitQueuedUserMessage({ message: userMessage("m1", "later") });
-      // Changing the picker again AFTER m1 is queued must not touch m1's
-      // already-captured switch — it belongs to m1 alone.
-      await agent.setPendingModelSwitch({ provider: "mock-tool-call", model: "mock-model-3" });
+      await agent.submitQueuedUserMessage({
+        message: userMessage("m1", "later", { provider: "mock-tool-call", model: "mock-model-2" }),
+      });
+      // A second message queued with a DIFFERENT switch must not touch m1's
+      // already-sent metadata — it belongs to m1 alone.
+      await agent.submitQueuedUserMessage({
+        message: userMessage("m2", "then", { provider: "mock-tool-call", model: "mock-model-3" }),
+      });
       return (await agent.listQueuedUserMessages()) as QueuedRow[];
     });
 
-    const row = listed.find((r) => r.clientMessageId === "m1");
-    expect(row?.model).toBe("mock-model-2");
+    const m1 = listed.find((r) => r.clientMessageId === "m1");
+    const m2 = listed.find((r) => r.clientMessageId === "m2");
+    expect(m1?.model).toBe("mock-model-2");
+    expect(m2?.model).toBe("mock-model-3");
   });
 
   it("a switch carried by the queued item commits when its turn actually runs", async () => {
@@ -110,19 +116,16 @@ describe("queued message model binding (integration)", () => {
 
     await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
       await (agent as DrainableAgent).__unsafe_ensureInitialized();
-      await agent.setPendingModelSwitch({ provider: "mock-tool-call", model: "mock-model-2" });
-      await agent.submitQueuedUserMessage({ message: userMessage("m1", "hello") });
-      // The pending slot is already empty by the time the submission is
-      // even created (see the "captures... and empties" test above), so any
-      // later commit MUST be reading the switch off the running submission's
-      // item, not off a thread-scoped value.
+      await agent.submitQueuedUserMessage({
+        message: userMessage("m1", "hello", { provider: "mock-tool-call", model: "mock-model-2" }),
+      });
       await (agent as DrainableAgent).drainQueuedUserMessagesForTest();
       await waitForModelCommit(threadId);
     });
 
     // The seeded default is "mock"/"mock" (see `seedRegistryThread`), so this
     // assertion is non-vacuous: it can only pass if `commitPendingModelSwitch`
-    // genuinely found and applied the switch carried by m1's submission.
+    // genuinely found and applied the switch carried by m1's message.
     const row = await readThreadIndexRow(threadId);
     expect(row?.model_provider).toBe("mock-tool-call");
     expect(row?.model).toBe("mock-model-2");
