@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import * as server from "../../../src/agent/model-switch";
 import * as web from "../../../web/src/lib/model-switch";
+import { readModelSwitchRequest } from "../../../src/agent/model-switch-request";
+import { buildModelSwitchMetadata } from "../../../web/src/lib/model-switch-metadata";
 
 /**
  * `web/src/lib/model-switch.ts` hand-duplicates `src/agent/model-switch.ts`
@@ -107,5 +109,53 @@ describe("the client never writes the marker", () => {
       fs.readFileSync("web/src/App.tsx", "utf8"),
     );
     expect(source).not.toContain("modelSwitchPart(");
+  });
+});
+
+/**
+ * The other half of the wire: `buildModelSwitchMetadata` is the REAL
+ * function `App.tsx` calls to build `UIMessage.metadata` on send (see that
+ * file's `handleSend`, and `model-switch-metadata.ts`'s own doc on why the
+ * construction was extracted there). `readModelSwitchRequest` is the REAL
+ * server-side parser (`src/agent/model-switch-request.ts`). Feeding one into
+ * the other — rather than a hand-copied object literal standing in for
+ * either side — is what pins the contract: a rename of a field in either
+ * function breaks this test, not a rename in a copy of it. This is the gap
+ * the reviewer demonstrated: renaming the client's emitted key left every
+ * OTHER test (both suites, both typechecks, all e2e) green because nothing
+ * else routes the client's actual output through the server's actual
+ * parser.
+ */
+describe("client metadata parses on the server", () => {
+  it("a full pending switch round-trips through the real parser", () => {
+    const metadata = buildModelSwitchMetadata({
+      provider: "anthropic",
+      model: "claude-opus-5",
+      modelInputModalities: ["text", "image"],
+      modelSupportsReasoning: true,
+    });
+    expect(readModelSwitchRequest(metadata)).toEqual({
+      provider: "anthropic",
+      model: "claude-opus-5",
+      modelInputModalities: ["text", "image"],
+      modelSupportsReasoning: true,
+    });
+  });
+
+  it("a minimal pending switch (no modality/reasoning info) round-trips", () => {
+    const metadata = buildModelSwitchMetadata({
+      provider: "openai",
+      model: "gpt-5",
+    });
+    expect(readModelSwitchRequest(metadata)).toEqual({
+      provider: "openai",
+      model: "gpt-5",
+    });
+  });
+
+  it("no pending switch produces no metadata key and no request", () => {
+    const metadata = buildModelSwitchMetadata(null);
+    expect(metadata).toBeUndefined();
+    expect(readModelSwitchRequest(metadata)).toBeNull();
   });
 });

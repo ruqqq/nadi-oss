@@ -328,6 +328,10 @@ import { ModelPicker } from "./components/model/ModelPicker";
 import { ThreadModelBadge } from "./components/model/ThreadModelBadge";
 import { ComposerModelPicker, type ModelTuple } from "./components/model/ComposerModelPicker";
 import { toModelPickerProviders } from "./lib/model-picker";
+import {
+  buildModelSwitchMetadata,
+  type PendingModelSwitchValue,
+} from "./lib/model-switch-metadata";
 import { Spinner } from "./components/ui/spinner";
 import { ScrollArea } from "./components/ui/scroll-area";
 import { Separator } from "./components/ui/separator";
@@ -4508,17 +4512,6 @@ function ThreadChatConnected({
   );
 }
 
-/** A locally-held pending model switch: the tuple plus whatever the picker
- *  knew about the new model's modalities / reasoning support, so a re-render
- *  (or a repeated switch to the same model) doesn't have to re-derive them.
- *  `modelInputModalities`/`modelSupportsReasoning` are the same tri-state
- *  contract as `ThreadModelSnapshotValue` server-side: absent means inherit,
- *  never coerce to a default. */
-type PendingModelSwitchValue = ModelTuple & {
-  modelInputModalities?: string[];
-  modelSupportsReasoning?: boolean;
-};
-
 function ThreadChat({
   agent,
   consentWorkspaceId,
@@ -5228,24 +5221,14 @@ function ThreadChat({
       // channel from the marker part above. `pendingModel` is pure local
       // state (see `handleModelSwitchSelect`), so this is the ONLY place it
       // ever reaches the server: riding on the message that commits it.
-      // Same wire shape as `PendingModelSwitchValue` — the tuple plus
-      // whatever the picker knew about modalities/reasoning support — since
-      // this IS that local pick, unmodified, riding as the request. Mirrors
-      // `src/agent/model-switch-request.ts`'s `ModelSwitchRequest`
-      // server-side (see that file's doc for why this REQUEST channel stays
-      // distinct from the server-written `data-model-switch` MARKER part).
-      const modelSwitchMetadata: PendingModelSwitchValue | undefined = pendingModel
-        ? {
-            provider: pendingModel.provider,
-            model: pendingModel.model,
-            ...(pendingModel.modelInputModalities
-              ? { modelInputModalities: pendingModel.modelInputModalities }
-              : {}),
-            ...(typeof pendingModel.modelSupportsReasoning === "boolean"
-              ? { modelSupportsReasoning: pendingModel.modelSupportsReasoning }
-              : {}),
-          }
-        : undefined;
+      // Built by `buildModelSwitchMetadata` (in `./lib/model-switch-metadata`)
+      // so `test/unit/web/model-switch-parity.test.ts` can feed the object
+      // this code path actually constructs through the server's real
+      // `readModelSwitchRequest`. Mirrors `src/agent/model-switch-request.ts`'s
+      // `ModelSwitchRequest` server-side (see that file's doc for why this
+      // REQUEST channel stays distinct from the server-written
+      // `data-model-switch` MARKER part).
+      const modelSwitchMetadata = buildModelSwitchMetadata(pendingModel);
 
       // Steer: interject the running turn (see the user-steering-message spec).
       // Meaningful only while a turn is in flight; text-only (no attachment
