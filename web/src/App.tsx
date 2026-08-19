@@ -15,7 +15,6 @@
  *     3. The Worker must CORS-allow the Vite origin for WebSocket upgrade
  */
 
-import { modelSwitchErrorMessage, modelSwitchUnreachableMessage } from "./lib/model-switch-error";
 import {
   Suspense,
   createContext,
@@ -4520,20 +4519,6 @@ type PendingModelSwitchValue = ModelTuple & {
   modelSupportsReasoning?: boolean;
 };
 
-/** Narrows the `getPendingModelSwitch` RPC's `unknown` result. Only the two
- *  fields this component actually renders are required; the rest ride along
- *  if present. */
-function isPendingModelSwitchValue(value: unknown): value is PendingModelSwitchValue {
-  if (!value || typeof value !== "object") return false;
-  const candidate = value as Record<string, unknown>;
-  return (
-    typeof candidate.provider === "string" &&
-    isSettingsProvider(candidate.provider) &&
-    typeof candidate.model === "string" &&
-    candidate.model.length > 0
-  );
-}
-
 function ThreadChat({
   agent,
   consentWorkspaceId,
@@ -4806,25 +4791,14 @@ function ThreadChat({
     };
   }, [thread.threadId]);
 
-  // Hydrate a pending model switch on mount / thread change, same
-  // cancellation-guard shape as the draft load above. Not optional: without
-  // it, a hard refresh would show the committed model while the server still
-  // holds a pending switch, and the next send would silently apply a switch
-  // the UI never displayed.
+  // Picking a model is pure client state — no server hydration. Reset on
+  // thread change so a switched-to thread doesn't inherit a stale pick, and
+  // a hard refresh honestly reverts the picker to the thread's actual model
+  // (there is nothing server-side to hydrate: picking does no I/O until the
+  // message that asserts it is actually sent).
   const [pendingModel, setPendingModel] = useState<PendingModelSwitchValue | null>(null);
   useEffect(() => {
     setPendingModel(null);
-    let active = true;
-    (agentRef.current.call("getPendingModelSwitch", []) as Promise<unknown>)
-      .then((value) => {
-        if (active) setPendingModel(isPendingModelSwitchValue(value) ? value : null);
-      })
-      .catch(() => {
-        if (active) setPendingModel(null);
-      });
-    return () => {
-      active = false;
-    };
   }, [thread.threadId]);
 
   useEffect(() => {
@@ -5159,17 +5133,17 @@ function ThreadChat({
   // new model doesn't support, or miss one it does.
   const dialModel = dialModelFor(thread, pendingModel);
 
+  // Picking a model does NO I/O — it only sets local state. The choice
+  // takes effect on the NEXT send, which stamps it onto the outgoing
+  // message's `metadata` (see `handleSend` below); the server is the only
+  // party that validates it, at commit time. A page refresh honestly loses
+  // an unsent pick — see the reset effect above.
   const handleModelSwitchSelect = useCallback(
     (tuple: ModelTuple, picked: ProviderModelSearchResult) => {
-      const input: {
-        provider: string;
-        model: string;
-        modelInputModalities?: string[];
-        modelSupportsReasoning?: boolean;
-      } = {
+      setPendingModel({
         provider: tuple.provider,
         model: tuple.model,
-        modelInputModalities: picked.inputModalities,
+        ...(picked.inputModalities ? { modelInputModalities: picked.inputModalities } : {}),
         // Tri-state: only an explicit true/false is a real claim about
         // reasoning support. `undefined` means unknown and must NOT be
         // coerced to false (that would withhold reasoning from a model that
@@ -5177,33 +5151,7 @@ function ThreadChat({
         ...(typeof picked.reasoning === "boolean"
           ? { modelSupportsReasoning: picked.reasoning }
           : {}),
-      };
-      void (
-        agentRef.current.call("setPendingModelSwitch", [input]) as Promise<
-          { ok: true; value: unknown } | { ok: false; error: string }
-        >
-      )
-        .then((result) => {
-          if (result.ok) {
-            setPendingModel({
-              provider: tuple.provider,
-              model: tuple.model,
-              ...(picked.inputModalities ? { modelInputModalities: picked.inputModalities } : {}),
-              ...(typeof picked.reasoning === "boolean"
-                ? { modelSupportsReasoning: picked.reasoning }
-                : {}),
-            });
-          } else {
-            toast.error(modelSwitchErrorMessage(result.error));
-          }
-        })
-        .catch((error: unknown) => {
-          // Distinct from a rejection on purpose: the first live failure of this
-          // feature was an unregistered `callable()`, which lands HERE, and a
-          // shared message hid that it was never a validation problem.
-          console.error("setPendingModelSwitch failed", error);
-          toast.error(modelSwitchUnreachableMessage());
-        });
+      });
     },
     [],
   );
@@ -5270,12 +5218,34 @@ function ThreadChat({
 
       // NOTE: the client does NOT write the `data-model-switch` marker. It
       // used to, and that made the marker conditional on this exact code path
-      // running: an automaton run, a failed `getPendingModelSwitch` hydration
-      // and the feedback branch all committed switches with no marker, and
-      // two queued sends drew two dividers for one switch (only the last of
-      // them ever runs). The server writes it from the commit it actually
-      // performs (`recordCommittedModelSwitch`), which is the only place that
-      // knows what committed.
+      // running: an automaton run and the feedback branch both bypass this
+      // function, and two queued sends drew two dividers for one switch (only
+      // the last of them ever runs). The server writes it from the commit it
+      // actually performs (`recordCommittedModelSwitch`), which is the only
+      // place that knows what committed.
+      //
+      // What the client DOES attach: the REQUEST, in `metadata` — a distinct
+      // channel from the marker part above. `pendingModel` is pure local
+      // state (see `handleModelSwitchSelect`), so this is the ONLY place it
+      // ever reaches the server: riding on the message that commits it.
+      // Same wire shape as `PendingModelSwitchValue` — the tuple plus
+      // whatever the picker knew about modalities/reasoning support — since
+      // this IS that local pick, unmodified, riding as the request. Mirrors
+      // `src/agent/model-switch-request.ts`'s `ModelSwitchRequest`
+      // server-side (see that file's doc for why this REQUEST channel stays
+      // distinct from the server-written `data-model-switch` MARKER part).
+      const modelSwitchMetadata: PendingModelSwitchValue | undefined = pendingModel
+        ? {
+            provider: pendingModel.provider,
+            model: pendingModel.model,
+            ...(pendingModel.modelInputModalities
+              ? { modelInputModalities: pendingModel.modelInputModalities }
+              : {}),
+            ...(typeof pendingModel.modelSupportsReasoning === "boolean"
+              ? { modelSupportsReasoning: pendingModel.modelSupportsReasoning }
+              : {}),
+          }
+        : undefined;
 
       // Steer: interject the running turn (see the user-steering-message spec).
       // Meaningful only while a turn is in flight; text-only (no attachment
@@ -5313,6 +5283,7 @@ function ThreadChat({
           id: crypto.randomUUID(),
           role: "user",
           parts: [...(text ? [{ type: "text" as const, text }] : []), ...files],
+          ...(modelSwitchMetadata ? { metadata: modelSwitchMetadata } : {}),
         };
         try {
           // The server merges every waiting message into one batch submission
@@ -5322,10 +5293,10 @@ function ThreadChat({
             { message, clientMessageId: message.id },
           ])) as QueuedMessage[];
           setQueuedMessages((current) => mergeQueuedMessages(current, rows));
-          // The server captures the pending switch into the queued batch on
-          // submit (see `withCapturedModelSwitch`), so it now owns it — keep
-          // showing it via `thread`/history once it commits rather than this
-          // local echo.
+          // The switch now rides on the queued message itself (its
+          // `metadata`), so the queue strip's own row is the only echo of it
+          // from here — keep showing it via `thread`/history once it commits
+          // rather than this local pick.
           setPendingModel(null);
         } catch {
           toast.error("Couldn't queue the message. Please try again.");
@@ -5341,7 +5312,11 @@ function ThreadChat({
         return;
       }
 
-      sendMessage({ text, files });
+      sendMessage({
+        text,
+        files,
+        ...(modelSwitchMetadata ? { metadata: modelSwitchMetadata } : {}),
+      });
       trackThreadEvent("message_sent", {
         thread_id: thread.threadId,
         length: text.length,
@@ -5351,8 +5326,9 @@ function ThreadChat({
       // keeps no failed-send restore, so we clear the saved draft on submit.
       saveDraft.cancel();
       void (agentRef.current.call("setDraft", [""]) as Promise<unknown>).catch(() => {});
-      // The turn this starts drains the pending switch server-side
-      // (`commitPendingModelSwitch`) — the server now owns it.
+      // The turn this starts commits the switch server-side
+      // (`commitPendingModelSwitch`, reading it off the message just sent) —
+      // the local pick has done its job.
       setPendingModel(null);
     },
     [
