@@ -30,7 +30,7 @@ const MARKER_PREFIX = "\n… [truncated ";
 const MARKER_SUFFIX = " chars] …\n";
 /** Widest the digit run can ever be — bounds the marker without measuring it. */
 const MARKER_MAX_DIGITS = 20;
-const MARKER_MAX_CHARS = MARKER_PREFIX.length + MARKER_MAX_DIGITS + MARKER_SUFFIX.length;
+export const MARKER_MAX_CHARS = MARKER_PREFIX.length + MARKER_MAX_DIGITS + MARKER_SUFFIX.length;
 
 const marker = (dropped: number) => `${MARKER_PREFIX}${dropped}${MARKER_SUFFIX}`;
 

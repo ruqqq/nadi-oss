@@ -14,6 +14,7 @@ import {
   isCompactionMessage,
 } from "agents/experimental/memory/utils";
 import { CHARS_PER_TOKEN, type ContextBudget } from "./context-budget";
+import { boundText, MARKER_MAX_CHARS } from "./transcript-bounding";
 
 type ThreadMessages = Parameters<typeof estimateMessageTokens>[0];
 type ThreadMessage = ThreadMessages[number];
@@ -22,11 +23,15 @@ export type CompactionResult = {
   fromMessageId: string;
   toMessageId: string;
   summary: string;
+  /** Set only by the last-resort reset, which discards the whole span between
+   *  the head and the current prompt rather than a converging middle. */
+  reset?: true;
 };
 
 export type CompactionOutcome =
   | { status: "shortened"; summarizedMessages: number; summaryTokens: number }
   | { status: "retried"; attempt: number; reason: string }
+  | { status: "reset"; discardedMessages: number; reason: string }
   | { status: "noop"; reason: string }
   | { status: "failed"; error: string };
 
@@ -167,6 +172,52 @@ function findTailCut(messages: ThreadMessages, headEnd: number, budget: ContextB
   return alignBoundaryBackward(messages, minCut >= headEnd ? Math.min(cut, minCut) : cut);
 }
 
+/**
+ * The last rung: discard everything between the head and the current prompt.
+ *
+ * Modelled on buzz's `handoff.rs`, which clears history and re-pushes the
+ * summary plus the current prompt — a shape that also cannot orphan a tool
+ * result, because the assistant turns that owned them are gone.
+ *
+ * It bounds its own summary rather than validating it. Every other rung may
+ * decline; this one runs precisely when they all did, so it has to succeed, and
+ * an unbounded checkpoint here would recreate the floor it exists to collapse.
+ */
+function reset(
+  messages: ThreadMessages,
+  start: number,
+  summary: string,
+  reason: string,
+  budget: ContextBudget,
+  onOutcome: (outcome: CompactionOutcome) => void,
+): CompactionResult | null {
+  // The trailing user message is the prompt being answered right now; buzz
+  // re-pushes it after the handoff for the same reason.
+  const last = messages[messages.length - 1];
+  const endExclusive = last?.role === "user" ? messages.length - 1 : messages.length;
+  const span = messages.slice(start, endExclusive).filter((m) => !isCompactionMessage(m));
+  const first = span[0];
+  const lastSummarized = span[span.length - 1];
+  if (!first || !lastSummarized) {
+    onOutcome({ status: "failed", error: reason });
+    return null;
+  }
+  // Strictly within the summary budget: the marker's own width counts, or the
+  // reset overshoots the very floor it exists to collapse.
+  const bounded = boundText(
+    summary,
+    Math.max(1, budget.maxSummaryTokens * CHARS_PER_TOKEN - MARKER_MAX_CHARS),
+    0,
+  );
+  onOutcome({ status: "reset", discardedMessages: span.length, reason });
+  return {
+    fromMessageId: first.id,
+    toMessageId: lastSummarized.id,
+    summary: bounded,
+    reset: true,
+  };
+}
+
 export function createNadiCompactFunction(opts: {
   budget: ContextBudget;
   summarize: (prompt: string) => Promise<string>;
@@ -267,8 +318,9 @@ export function createNadiCompactFunction(opts: {
           onOutcome({ status: "retried", attempt: attempt + 1, reason: tooLarge });
           continue;
         }
-        onOutcome({ status: "failed", error: tooLarge });
-        return null;
+        // Every converging span has been tried. Fall through to the reset —
+        // the rung that always succeeds because it bounds its own output.
+        return reset(messages, start, summary, tooLarge, budget, onOutcome);
       }
 
       onOutcome({

@@ -1940,11 +1940,12 @@ describe("ThinkThreadAgent spike", () => {
   // compaction through the real Session and real DO storage.
   //
   // Fixture sizing (window 32_000 → resolveContextBudget): compactAfterTokens
-  // 17_920, tailTokenBudget 4_480 (25% of it), protectHead 3, minTailMessages 2.
+  // 20_160 (input budget 22_400 minus a 2_240 late reserve), tailTokenBudget
+  // 5_120 (16% of the window), head = the first user message, minTailMessages 2.
   // `findTailCut` walks backward and protects everything it can afford, so a
   // transcript smaller than the tail budget leaves an EMPTY middle and compaction
   // legitimately no-ops. 50 turn pairs at ~900 chars each is ~12k tokens: well
-  // over the 4_480-token tail (so the middle is large) and well under the 17_920
+  // over the 5_120-token tail (so the middle is large) and well under the 20_160
   // trigger (so seeding does not auto-compact and manual compaction is the driver).
   it("compacts a tool-heavy thread: history shortens and the summary sees tool outputs", async () => {
     await seedRegistryThread(env.REGISTRY_DB, {
@@ -1976,7 +1977,17 @@ describe("ThinkThreadAgent spike", () => {
             chunkDelayInMs: null,
             chunks: [
               { type: "text-start" as const, id: "s" },
-              { type: "text-delta" as const, id: "s", delta: `SUMMARY OF: ${prompt}` },
+              // Deliberately SHORT, but DERIVED from what was streamed in.
+              // Compaction now rejects a summary that does not shrink its
+              // source (see compaction.ts), so echoing the prompt back gets
+              // rejected and runs the ladder. Quoting one real path keeps the
+              // stored-summary assertions below honest — they still fail if the
+              // summarizer is fed "[object Object]".
+              {
+                type: "text-delta" as const,
+                id: "s",
+                delta: `SUMMARY: read ${/src\/file-\d+\.ts/.exec(prompt)?.[0] ?? "nothing"}`,
+              },
               { type: "text-end" as const, id: "s" },
               {
                 type: "finish" as const,
@@ -2229,7 +2240,9 @@ describe("ThinkThreadAgent spike", () => {
   it("arms the model's budget-derived compaction trigger before any turn runs", async () => {
     const window = 32_000;
     const expected = resolveContextBudget(window).compactAfterTokens;
-    expect(expected).toBe(17_920);
+    // 22_400 input budget minus a 2_240 late reserve (10% of it, the small-window
+    // clamp on pi's 16_384). Was 17_920 under the old 0.8-of-input-budget rule.
+    expect(expected).toBe(20_160);
 
     await seedRegistryThread(env.REGISTRY_DB, {
       workspaceId: "workspace-think-compact-seed",

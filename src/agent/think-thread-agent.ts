@@ -766,7 +766,11 @@ export class ThinkThreadAgent extends Think<Env> {
     // `proactiveInputTokens` IS the trigger the budget derived, so headroom is 1.
     this.contextOverflow = {
       reactive: true,
-      proactive: { maxInputTokens: budget.proactiveInputTokens, headroom: 1, maxCompactions: 1 },
+      // 2, not 1: the compaction ladder can spend an attempt on a span that
+      // fails the shrink check before the reset lands, and a later trigger puts
+      // more compactions inside a turn. At 1 the guard aborts the ladder at its
+      // first rung, which is the case the reset exists to survive.
+      proactive: { maxInputTokens: budget.proactiveInputTokens, headroom: 1, maxCompactions: 2 },
     };
     return budget;
   }
@@ -1099,6 +1103,14 @@ export class ThinkThreadAgent extends Think<Env> {
                     log.info("think_thread.compacted", {
                       ...base,
                       outcome: outcome.status,
+                      reason: outcome.reason,
+                    });
+                  } else if (outcome.status === "reset") {
+                    // A reset DISCARDS transcript the model was still using. It
+                    // is recoverable but lossy, so it must never pass silently.
+                    log.warn("think_thread.compaction_reset", {
+                      ...base,
+                      discardedMessages: outcome.discardedMessages,
                       reason: outcome.reason,
                     });
                   } else if (outcome.status === "retried") {

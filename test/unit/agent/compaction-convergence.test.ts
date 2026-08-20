@@ -43,8 +43,13 @@ describe("runtime convergence", () => {
 
     const result = await compact(makeThread(40));
 
-    expect(result).toBeNull();
-    expect(outcomes.at(-1)).toMatchObject({ status: "failed" });
+    // Rejected as a normal compaction, then the ladder runs to its last rung.
+    expect(outcomes.some((o) => o.status === "shortened")).toBe(false);
+    expect(outcomes.at(-1)).toMatchObject({
+      status: "reset",
+      reason: "summary did not shrink its source",
+    });
+    expect(result!.reset).toBe(true);
   });
 
   it("retries once when the first summary does not shrink the span", async () => {
@@ -77,8 +82,12 @@ describe("runtime convergence", () => {
 
     const result = await compact(makeThread(200));
 
-    expect(result).toBeNull();
-    expect(outcomes.at(-1)).toMatchObject({ status: "failed" });
+    expect(outcomes.some((o) => o.status === "shortened")).toBe(false);
+    expect(outcomes.at(-1)).toMatchObject({
+      status: "reset",
+      reason: "summary exceeded the summary budget",
+    });
+    expect(result!.reset).toBe(true);
   });
 
   it("accepts a normal summary without retrying", async () => {
@@ -99,5 +108,68 @@ describe("runtime convergence", () => {
     expect(result).not.toBeNull();
     expect(outcomes.some((o) => o.status === "retried")).toBe(false);
     expect(outcomes.at(-1)).toMatchObject({ status: "shortened" });
+  });
+});
+
+/**
+ * The last rung. Modelled on buzz's `handoff.rs`, which clears history and
+ * re-pushes the summary plus the current prompt as user messages — which also
+ * sidesteps orphan tool results by construction.
+ */
+describe("reset", () => {
+  it("resets when no span can converge, keeping the head and the current prompt", async () => {
+    const outcomes: { status: string }[] = [];
+    const compact = createNadiCompactFunction({
+      budget,
+      // Never shrinks, at any width.
+      summarize: async () => "S".repeat(40_000_000),
+      onOutcome: (o) => outcomes.push(o as { status: string }),
+    });
+
+    // 41 messages so the LAST one is a user turn — the shape compaction
+    // actually meets, firing while a user prompt is being answered.
+    const messages = makeThread(41);
+    const result = await compact(messages);
+
+    expect(outcomes.at(-1)).toMatchObject({ status: "reset" });
+    expect(result).not.toBeNull();
+    expect(result!.reset).toBe(true);
+    // The head — the original task — is never inside the summarized range.
+    expect(result!.fromMessageId).toBe("m1");
+    // The final user message is the current prompt and survives verbatim.
+    expect(result!.toMessageId).toBe("m39");
+  });
+
+  // The reset must ALWAYS produce a bounded checkpoint: it is the rung that
+  // runs when everything else failed, so it cannot itself blow the floor.
+  it("bounds the reset summary to the summary budget", async () => {
+    const compact = createNadiCompactFunction({
+      budget,
+      summarize: async () => "S".repeat(40_000_000),
+      onOutcome: () => {},
+    });
+
+    const result = await compact(makeThread(40));
+
+    expect(result!.summary.length).toBeLessThanOrEqual(budget.maxSummaryTokens * 4);
+  });
+
+  // A summarizer that is broken (throws, or returns nothing) is not evidence
+  // that the transcript must be discarded.
+  it("does not reset when the summarizer itself is broken", async () => {
+    const outcomes: { status: string }[] = [];
+    const compact = createNadiCompactFunction({
+      budget,
+      summarize: async () => {
+        throw new Error("provider down");
+      },
+      onOutcome: (o) => outcomes.push(o as { status: string }),
+    });
+
+    const result = await compact(makeThread(40));
+
+    expect(result).toBeNull();
+    expect(outcomes.at(-1)).toMatchObject({ status: "failed" });
+    expect(outcomes.some((o) => o.status === "reset")).toBe(false);
   });
 });
