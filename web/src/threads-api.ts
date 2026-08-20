@@ -205,6 +205,9 @@ export async function dismissThreadOutcome(
 
 export interface CompactThreadResult {
   compacted: boolean;
+  /** Why nothing was compacted. Absent on success, and absent from older
+   *  server builds — treat that as "not-needed". */
+  reason?: "declined" | "not-needed";
   message: string;
 }
 

@@ -1915,7 +1915,7 @@ describe("ThinkThreadAgent spike", () => {
       await (instance as InitializableAgent).__unsafe_ensureInitialized();
       const compactable = instance as ThinkThreadAgent & {
         getCompactionStatus(): { phase: "idle" | "compacting" };
-        compactThread(): Promise<{ compacted: boolean; message: string }>;
+        compactThread(): Promise<{ compacted: boolean; reason?: string; message: string }>;
       };
       const before = compactable.getCompactionStatus();
       const compacted = await compactable.compactThread();
@@ -1927,6 +1927,7 @@ describe("ThinkThreadAgent spike", () => {
       before: { phase: "idle" },
       compacted: {
         compacted: false,
+        reason: "not-needed",
         message: "Nothing to compact yet.",
       },
       after: { phase: "idle" },
@@ -2017,7 +2018,7 @@ describe("ThinkThreadAgent spike", () => {
             getHistory(): Promise<{ id: string; parts: unknown[] }[]>;
             getCompactions(): Promise<{ summary: string }[]>;
           };
-          compactThread(): Promise<{ compacted: boolean; message: string }>;
+          compactThread(): Promise<{ compacted: boolean; reason?: string; message: string }>;
         };
         // The mock model has no catalog window; this is how the thread's budget
         // gets a small, hand-computable one. Set BEFORE initialization: onStart
@@ -2159,7 +2160,7 @@ describe("ThinkThreadAgent spike", () => {
             getHistory(): Promise<{ id: string; parts: unknown[] }[]>;
             getCompactions(): Promise<{ summary: string }[]>;
           };
-          compactThread(): Promise<{ compacted: boolean; message: string }>;
+          compactThread(): Promise<{ compacted: boolean; reason?: string; message: string }>;
         };
         const previousWindow = agent.env.THINK_COMPACT_AFTER_TOKENS;
         agent.env.THINK_COMPACT_AFTER_TOKENS = "32000";
@@ -2201,9 +2202,13 @@ describe("ThinkThreadAgent spike", () => {
         }
       });
 
-      // A decline, not a failure and not "nothing to compact".
+      // A decline, not a failure and not "nothing to compact". `reason` is what
+      // lets the client label the divider without parsing the prose — without
+      // it the transcript reads "No compaction needed" while the toast says the
+      // opposite.
       expect(result.compacted).toEqual({
         compacted: false,
+        reason: "declined",
         message: "Couldn't compact further without discarding history.",
       });
       // Nothing was discarded and no checkpoint was written.

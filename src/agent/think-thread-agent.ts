@@ -350,6 +350,18 @@ type CompactionSource = "append" | "proactive" | "reactive" | "manual";
  * through this seam stops a revert or a bad merge from silently restoring it.
  * See `test/unit/agent/thread-compaction-wiring.test.ts`.
  */
+/**
+ * The manual-compaction result. `reason` exists so the client can label the
+ * divider without parsing `message`: a decline and a genuine no-op both report
+ * `compacted: false`, and collapsing them made the divider read "No compaction
+ * needed" while the toast said the opposite.
+ */
+export type CompactThreadOutcome = {
+  compacted: boolean;
+  reason?: "declined" | "not-needed";
+  message: string;
+};
+
 export function createThreadCompaction(deps: {
   budget: ContextBudget;
   summarize: (prompt: string) => Promise<string>;
@@ -6429,7 +6441,7 @@ export class ThinkThreadAgent extends Think<Env> {
       .map((e) => ({ clientMessageId: e.message.id, text: steeredMessageText(e.message) }));
   }
 
-  async compactThread(): Promise<{ compacted: boolean; message: string }> {
+  async compactThread(): Promise<CompactThreadOutcome> {
     await this.assertThreadWritable();
     const stable = await this.waitUntilStable({ timeout: MANUAL_COMPACT_STABLE_TIMEOUT_MS });
     if (!stable) {
@@ -6465,10 +6477,11 @@ export class ThinkThreadAgent extends Think<Env> {
       if (outcome?.status === "declined") {
         return {
           compacted: false,
+          reason: "declined",
           message: "Couldn't compact further without discarding history.",
         };
       }
-      return { compacted: false, message: "Nothing to compact yet." };
+      return { compacted: false, reason: "not-needed", message: "Nothing to compact yet." };
     }
     return { compacted: true, message: "Thread compacted." };
   }

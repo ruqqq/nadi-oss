@@ -17,7 +17,11 @@
 export function compactionTriggerTokens(contextWindow: number): number {
   const reservedOutput = Math.min(32_000, contextWindow * 0.2);
   const inputBudgetTokens = Math.floor(contextWindow - reservedOutput - contextWindow * 0.1);
-  return Math.floor(inputBudgetTokens * 0.8);
+  // pi's `reserveTokens`, scaled down on small windows exactly as the server
+  // does. Was `inputBudgetTokens * 0.8`; keep this in step with
+  // `resolveContextBudget` or the picker warns at the wrong point.
+  const lateReserve = Math.min(16_384, Math.floor(inputBudgetTokens * 0.1));
+  return inputBudgetTokens - lateReserve;
 }
 
 /**
