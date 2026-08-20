@@ -29,6 +29,14 @@ import {
   type ContextBudget,
 } from "./context-budget";
 import { boundTranscript } from "./transcript-bounding";
+import {
+  boundContinuity,
+  EMPTY_CONTINUITY,
+  extractContinuity,
+  mergeContinuity,
+  renderContinuity,
+  type ContinuityIndex,
+} from "./continuity-index";
 import { resolveContextWindow } from "./context-window";
 import {
   flushThreadUsage,
@@ -289,6 +297,10 @@ const DRAFT_STORAGE_KEY = "composer:draft";
  */
 const MODEL_SWITCH_ORIGIN_STORAGE_KEY = "modelSwitch:origin";
 const FEEDBACK_ACTIVE_INTERVIEW_STORAGE_KEY = "feedback:active-interview";
+/** Merged continuity index, carried forward across every compaction of a
+ *  thread. DO storage, not D1: it is per-thread model context, and it dies with
+ *  the thread the same way the transcript does. */
+const CONTINUITY_STORAGE_KEY = "compaction:continuity";
 const FEEDBACK_DRAFT_STORAGE_KEY = "feedback:draft";
 const FEEDBACK_INTERVIEW_BOUNDS_STORAGE_KEY = "feedback:interview-bounds";
 const FEEDBACK_DISPATCHED_MESSAGE_IDS_STORAGE_KEY = "feedback:dispatched-message-ids";
@@ -342,6 +354,7 @@ export function createThreadCompaction(deps: {
   budget: ContextBudget;
   summarize: (prompt: string) => Promise<string>;
   onOutcome: (outcome: CompactionOutcome) => void;
+  continuityBlock?: string;
 }) {
   return createNadiCompactFunction(deps);
 }
@@ -1038,8 +1051,27 @@ export class ThinkThreadAgent extends Think<Env> {
               const config = await this.resolveRuntimeConfigForThink();
               const budget = await this.currentContextBudget();
               const source = this._compactionSource;
+              // Computed, never generated: a summarizer under context pressure
+              // drops bookkeeping first, and bookkeeping is what stops the next
+              // turn redoing finished work. Extracted from the FULL history the
+              // SDK handed us — not the selected middle — so a span already
+              // shadowed by an earlier checkpoint still contributes, and merged
+              // with what previous checkpoints knew (pi's CompactionDetails).
+              const continuity = boundContinuity(
+                mergeContinuity(
+                  (await this.ctx.storage.get<ContinuityIndex>(CONTINUITY_STORAGE_KEY)) ??
+                    EMPTY_CONTINUITY,
+                  extractContinuity(messages as unknown as { parts?: unknown }[]),
+                ),
+                // A quarter of the summary budget: the block lives INSIDE the
+                // post-compaction floor, so it cannot be allowed to grow with
+                // the thread.
+                Math.floor((budget.maxSummaryTokens * CHARS_PER_TOKEN) / 4),
+              );
+              await this.ctx.storage.put(CONTINUITY_STORAGE_KEY, continuity);
               const compact = createThreadCompaction({
                 budget,
+                continuityBlock: renderContinuity(continuity),
                 summarize: async (prompt) => {
                   // Streams, and falls back to a keyless Workers AI model if the
                   // thread's own model cannot serve the call. A summarizer that

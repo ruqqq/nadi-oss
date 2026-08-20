@@ -111,7 +111,51 @@ function renderMessage(message: ThreadMessage): string {
   return `[${message.role}]\n${text}${tools ? `\n${tools}` : ""}`;
 }
 
-function buildPrompt(
+/**
+ * deepseek's checkpoint preamble: name the checkpoint as settled context so the
+ * model builds on it instead of narrating it back or re-deriving it.
+ */
+/** Must match `renderContinuity`'s heading in continuity-index.ts. */
+const CONTINUITY_HEADING = "## Work already done";
+
+const CHECKPOINT_PREAMBLE =
+  "This is an automatically generated checkpoint condensing an earlier span of this thread to free up context. Treat the captured context as established background and build on it without restating it. Continue the task directly from the messages that follow, without acknowledging this checkpoint.";
+
+/**
+ * The text the checkpoint actually carries: preamble, the COMPUTED continuity
+ * block, then the model-written prose.
+ *
+ * The continuity block goes first and is not model-written, because a
+ * summarizer under context pressure drops bookkeeping first — and bookkeeping
+ * is what stops the next turn redoing finished work.
+ */
+export function buildCheckpointText(summary: string, continuityBlock: string): string {
+  const blocks = [CHECKPOINT_PREAMBLE];
+  if (continuityBlock.trim() !== "") blocks.push(continuityBlock.trim());
+  blocks.push(stripCheckpointFraming(summary));
+  return blocks.join("\n\n");
+}
+
+/**
+ * Remove framing this module added on a previous cycle.
+ *
+ * The previous checkpoint is handed to the summarizer as the summary to UPDATE,
+ * so it can echo the preamble and the continuity block back in its output.
+ * Re-framing that verbatim stacks a second preamble on every compaction, and
+ * the model reads the same instruction twice — the compounding-waste shape the
+ * overlay-persistence bug already had once.
+ */
+export function stripCheckpointFraming(text: string): string {
+  let out = text.trim();
+  if (out.startsWith(CHECKPOINT_PREAMBLE)) out = out.slice(CHECKPOINT_PREAMBLE.length).trim();
+  if (out.startsWith(CONTINUITY_HEADING)) {
+    const nextBlock = out.indexOf("\n\n");
+    out = nextBlock >= 0 ? out.slice(nextBlock).trim() : "";
+  }
+  return out;
+}
+
+export function buildPrompt(
   middle: ThreadMessages,
   previousSummary: string | null,
   targetTokens: number,
@@ -128,7 +172,10 @@ function buildPrompt(
     "[What has been done, what is in progress]",
     "",
     "## Open Items",
-    "[Unresolved questions, pending tasks, next steps]",
+    "[Unresolved questions, pending tasks]",
+    "",
+    "## Next Action",
+    "[State exactly one concrete next action — the single thing to do next, not a list]",
   ].join("\n");
   const tail = `Target ~${targetTokens} tokens. Be factual — only include information explicitly present above. Do NOT invent file paths, commands, or details. Write only the summary body.`;
 
@@ -189,6 +236,7 @@ function reset(
   summary: string,
   reason: string,
   budget: ContextBudget,
+  continuityBlock: string,
   onOutcome: (outcome: CompactionOutcome) => void,
 ): CompactionResult | null {
   // The trailing user message is the prompt being answered right now; buzz
@@ -202,18 +250,23 @@ function reset(
     onOutcome({ status: "failed", error: reason });
     return null;
   }
-  // Strictly within the summary budget: the marker's own width counts, or the
+  // The WHOLE checkpoint must fit the summary budget, not just the prose: the
+  // preamble and the continuity block are sent to the model too. Bound the
+  // prose by what the framing leaves, minus the marker's own width, or the
   // reset overshoots the very floor it exists to collapse.
+  const framingChars = buildCheckpointText("", continuityBlock).length;
   const bounded = boundText(
     summary,
-    Math.max(1, budget.maxSummaryTokens * CHARS_PER_TOKEN - MARKER_MAX_CHARS),
+    Math.max(1, budget.maxSummaryTokens * CHARS_PER_TOKEN - framingChars - MARKER_MAX_CHARS),
     0,
   );
   onOutcome({ status: "reset", discardedMessages: span.length, reason });
   return {
     fromMessageId: first.id,
     toMessageId: lastSummarized.id,
-    summary: bounded,
+    // The reset retains NO tail, so it is the path that most needs the
+    // computed continuity block — without it a reset guarantees a redo.
+    summary: buildCheckpointText(bounded, continuityBlock),
     reset: true,
   };
 }
@@ -222,8 +275,12 @@ export function createNadiCompactFunction(opts: {
   budget: ContextBudget;
   summarize: (prompt: string) => Promise<string>;
   onOutcome: (outcome: CompactionOutcome) => void;
+  /** Rendered continuity block (see continuity-index.ts), carried above the
+   *  prose in every checkpoint this function produces. */
+  continuityBlock?: string;
 }) {
   const { budget, summarize, onOutcome } = opts;
+  const continuityBlock = opts.continuityBlock ?? "";
 
   // The SDK hands this function a `context.tokenCounter` and we deliberately do
   // not take it: `findTailCut` uses the raw per-message estimator instead. The
@@ -248,10 +305,12 @@ export function createNadiCompactFunction(opts: {
 
     const existing = messages.find(isCompactionMessage);
     const previousSummary = existing
-      ? (existing.parts as unknown as { type: string; text?: string }[])
-          .filter((p) => p.type === "text")
-          .map((p) => p.text ?? "")
-          .join("\n")
+      ? stripCheckpointFraming(
+          (existing.parts as unknown as { type: string; text?: string }[])
+            .filter((p) => p.type === "text")
+            .map((p) => p.text ?? "")
+            .join("\n"),
+        )
       : null;
 
     // Widen INTO the tail on each retry, halving the remaining distance and
@@ -320,7 +379,7 @@ export function createNadiCompactFunction(opts: {
         }
         // Every converging span has been tried. Fall through to the reset —
         // the rung that always succeeds because it bounds its own output.
-        return reset(messages, start, summary, tooLarge, budget, onOutcome);
+        return reset(messages, start, summary, tooLarge, budget, continuityBlock, onOutcome);
       }
 
       onOutcome({
@@ -332,7 +391,7 @@ export function createNadiCompactFunction(opts: {
       return {
         fromMessageId: first.id,
         toMessageId: last.id,
-        summary,
+        summary: buildCheckpointText(summary, continuityBlock),
       };
     }
 

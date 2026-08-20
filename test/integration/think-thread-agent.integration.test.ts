@@ -2086,6 +2086,15 @@ describe("ThinkThreadAgent spike", () => {
       const summary = result.overlays[0].summary;
       expect(summary).not.toContain("[object Object]");
       expect(summary).toContain("src/file-");
+
+      // The checkpoint is FRAMED and carries the COMPUTED continuity block, not
+      // just the model's prose. This is the end-to-end proof that the index is
+      // extracted from the real transcript and reaches the stored overlay —
+      // the unit tests only cover the pure functions.
+      expect(summary).toContain("established background");
+      expect(summary).toContain("## Work already done");
+      expect(summary).toContain("Files read:");
+      expect(summary).toContain("src/file-49.ts");
     } finally {
       modelSpy.mockRestore();
     }
