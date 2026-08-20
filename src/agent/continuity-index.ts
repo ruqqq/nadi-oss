@@ -134,3 +134,94 @@ export function extractContinuity(messages: readonly LooseMessage[]): Continuity
 
   return index;
 }
+
+function mergeUnique(previous: readonly string[], next: readonly string[]): string[] {
+  const merged = [...previous];
+  for (const value of next) if (!merged.includes(value)) merged.push(value);
+  return merged;
+}
+
+/**
+ * Fold a newly extracted index into the one the last checkpoint carried.
+ *
+ * A second compaction summarizes a span that no longer holds the first span's
+ * tool calls, so without this the index forgets everything the previous
+ * checkpoint knew. A later scalar wins, but an absent one never CLEARS a known
+ * value — a span with no sandbox call is not evidence the sandbox went away.
+ */
+export function mergeContinuity(previous: ContinuityIndex, next: ContinuityIndex): ContinuityIndex {
+  const subagents = [...previous.subagents];
+  for (const run of next.subagents) {
+    const at = subagents.findIndex((s) => s.runId === run.runId);
+    // A later index reports a finished run the earlier one saw as "started".
+    if (at >= 0) subagents[at] = run;
+    else subagents.push(run);
+  }
+  const artifacts = [...previous.artifacts];
+  for (const artifact of next.artifacts) {
+    if (!artifacts.some((a) => a.url === artifact.url)) artifacts.push(artifact);
+  }
+  const sandboxId = next.sandboxId ?? previous.sandboxId;
+  const workbenchId = next.workbenchId ?? previous.workbenchId;
+  const branch = next.branch ?? previous.branch;
+  return {
+    filesRead: mergeUnique(previous.filesRead, next.filesRead),
+    filesWritten: mergeUnique(previous.filesWritten, next.filesWritten),
+    subagents,
+    artifacts,
+    ...(sandboxId !== undefined ? { sandboxId } : {}),
+    ...(workbenchId !== undefined ? { workbenchId } : {}),
+    ...(branch !== undefined ? { branch } : {}),
+  };
+}
+
+/**
+ * Shrink the index until it renders within `maxChars`.
+ *
+ * Drops the OLDEST file entries first — recent files are what the next turn
+ * needs — then the oldest artifacts. Subagent entries are never dropped: they
+ * are the smallest rows and the most load-bearing, because a forgotten subagent
+ * run is precisely how the same work gets done twice.
+ */
+export function boundContinuity(index: ContinuityIndex, maxChars: number): ContinuityIndex {
+  let current = index;
+  while (renderContinuity(current).length > maxChars) {
+    if (current.filesRead.length > 0) {
+      current = { ...current, filesRead: current.filesRead.slice(1) };
+      continue;
+    }
+    if (current.filesWritten.length > 0) {
+      current = { ...current, filesWritten: current.filesWritten.slice(1) };
+      continue;
+    }
+    if (current.artifacts.length > 0) {
+      current = { ...current, artifacts: current.artifacts.slice(1) };
+      continue;
+    }
+    // Only subagents (and the scalars) remain: keep them and accept the size.
+    break;
+  }
+  return current;
+}
+
+/** Compact markdown. Returns "" for an empty index so no hollow block is sent. */
+export function renderContinuity(index: ContinuityIndex): string {
+  const lines: string[] = [];
+  const env = [
+    index.branch !== undefined ? `branch ${index.branch}` : null,
+    index.workbenchId !== undefined ? `workbench ${index.workbenchId}` : null,
+    index.sandboxId !== undefined ? `sandbox ${index.sandboxId}` : null,
+  ].filter((v): v is string => v !== null);
+  if (env.length > 0) lines.push(`- Environment: ${env.join(", ")}`);
+  if (index.filesRead.length > 0) lines.push(`- Files read: ${index.filesRead.join(", ")}`);
+  if (index.filesWritten.length > 0) {
+    lines.push(`- Files written: ${index.filesWritten.join(", ")}`);
+  }
+  for (const run of index.subagents) {
+    lines.push(`- Subagent "${run.label}" (${run.runId}): ${run.outcome}`);
+  }
+  for (const artifact of index.artifacts) {
+    lines.push(`- Artifact "${artifact.title}": ${artifact.url}`);
+  }
+  return lines.length === 0 ? "" : `## Work already done\n${lines.join("\n")}`;
+}

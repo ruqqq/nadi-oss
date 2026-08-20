@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { EMPTY_CONTINUITY, extractContinuity } from "../../../src/agent/continuity-index";
+import {
+  boundContinuity,
+  EMPTY_CONTINUITY,
+  extractContinuity,
+  mergeContinuity,
+  renderContinuity,
+} from "../../../src/agent/continuity-index";
 
 const tool = (name: string, input: unknown, output: unknown, id = name) => ({
   id: `m-${id}`,
@@ -111,5 +117,105 @@ describe("extractContinuity", () => {
         { parts: undefined as unknown as [] },
       ]),
     ).not.toThrow();
+  });
+});
+
+describe("mergeContinuity", () => {
+  // A second compaction summarizes a span that no longer holds the first
+  // span's tool calls. Without a merge the index forgets everything the
+  // previous checkpoint knew — the failure pi's CompactionDetails merge exists
+  // to prevent.
+  it("merges a later index over an earlier one without losing the earlier entries", () => {
+    const first = {
+      ...EMPTY_CONTINUITY,
+      filesRead: ["/a"],
+      subagents: [{ runId: "s1", label: "one", outcome: "completed" }],
+    };
+    const second = { ...EMPTY_CONTINUITY, filesRead: ["/b"], filesWritten: ["/c"] };
+
+    const merged = mergeContinuity(first, second);
+
+    expect(merged.filesRead).toEqual(["/a", "/b"]);
+    expect(merged.filesWritten).toEqual(["/c"]);
+    expect(merged.subagents).toHaveLength(1);
+  });
+
+  it("de-duplicates across the merge", () => {
+    const merged = mergeContinuity(
+      { ...EMPTY_CONTINUITY, filesRead: ["/a"] },
+      { ...EMPTY_CONTINUITY, filesRead: ["/a", "/b"] },
+    );
+    expect(merged.filesRead).toEqual(["/a", "/b"]);
+  });
+
+  it("lets a later scalar win but never clears one with undefined", () => {
+    expect(
+      mergeContinuity(
+        { ...EMPTY_CONTINUITY, branch: "main" },
+        { ...EMPTY_CONTINUITY, branch: "feature" },
+      ).branch,
+    ).toBe("feature");
+    expect(mergeContinuity({ ...EMPTY_CONTINUITY, branch: "main" }, EMPTY_CONTINUITY).branch).toBe(
+      "main",
+    );
+  });
+
+  it("updates a subagent's outcome when a later index reports it finished", () => {
+    const merged = mergeContinuity(
+      { ...EMPTY_CONTINUITY, subagents: [{ runId: "s1", label: "one", outcome: "started" }] },
+      { ...EMPTY_CONTINUITY, subagents: [{ runId: "s1", label: "one", outcome: "completed" }] },
+    );
+    expect(merged.subagents).toEqual([{ runId: "s1", label: "one", outcome: "completed" }]);
+  });
+});
+
+describe("boundContinuity", () => {
+  // The index sits inside the post-compaction floor. Unbounded, it recreates
+  // the bug plan A just fixed.
+  it("bounds the rendered index by dropping the OLDEST file entries first", () => {
+    const many = {
+      ...EMPTY_CONTINUITY,
+      filesRead: Array.from({ length: 500 }, (_, i) => `/f${i}`),
+    };
+
+    const bounded = boundContinuity(many, 400);
+
+    expect(renderContinuity(bounded).length).toBeLessThanOrEqual(400);
+    // Recent files are what the next turn needs.
+    expect(bounded.filesRead.at(-1)).toBe("/f499");
+  });
+
+  it("keeps subagent entries even under pressure", () => {
+    const index = {
+      ...EMPTY_CONTINUITY,
+      filesRead: Array.from({ length: 500 }, (_, i) => `/f${i}`),
+      subagents: [{ runId: "s1", label: "mapped the PR", outcome: "completed" }],
+    };
+
+    const bounded = boundContinuity(index, 300);
+
+    expect(bounded.subagents).toHaveLength(1);
+    expect(renderContinuity(bounded)).toContain("mapped the PR");
+  });
+});
+
+describe("renderContinuity", () => {
+  it("renders nothing for an empty index, so no empty block reaches the model", () => {
+    expect(renderContinuity(EMPTY_CONTINUITY)).toBe("");
+  });
+
+  it("names what was read, written, delegated, and published", () => {
+    const text = renderContinuity({
+      filesRead: ["/a"],
+      filesWritten: ["/b"],
+      branch: "feature",
+      subagents: [{ runId: "s1", label: "map the PR", outcome: "completed" }],
+      artifacts: [{ title: "Explain diff", url: "/api/artifacts/art_1" }],
+    });
+    expect(text).toContain("/a");
+    expect(text).toContain("/b");
+    expect(text).toContain("feature");
+    expect(text).toContain("map the PR");
+    expect(text).toContain("/api/artifacts/art_1");
   });
 });
