@@ -1,5 +1,5 @@
 import { streamText } from "ai";
-import type { LanguageModel } from "ai";
+import type { LanguageModel, ModelMessage } from "ai";
 import { log } from "../log";
 import { buildModel } from "../providers/model-factory";
 import type { Env } from "../env";
@@ -75,12 +75,16 @@ async function collectStream(input: {
   model: LanguageModel;
   system: string;
   prompt: string;
+  /** When present, sent INSTEAD of `prompt`. Replaying the caller's own
+   *  conversation keeps the provider's prefix cache warm; a rendered string
+   *  shares no prefix with anything and misses it every time. */
+  messages?: ModelMessage[];
   maxOutputTokens?: number;
 }): Promise<{ text: string; usage: StepUsage; error?: unknown }> {
   const result = streamText({
     model: input.model,
     system: input.system,
-    prompt: input.prompt,
+    ...(input.messages === undefined ? { prompt: input.prompt } : { messages: input.messages }),
     ...(input.maxOutputTokens === undefined ? {} : { maxOutputTokens: input.maxOutputTokens }),
   });
   let text = "";
@@ -128,6 +132,8 @@ export async function generateInternalText(input: {
   primaryModel: string;
   system: string;
   prompt: string;
+  /** Sent instead of `prompt` when present — see `collectStream`. */
+  messages?: ModelMessage[];
   maxOutputTokens?: number;
 }): Promise<InternalTextResult> {
   const primaryLabel = `${input.primaryProvider}/${input.primaryModel}`;
@@ -143,6 +149,7 @@ export async function generateInternalText(input: {
       model: await input.buildPrimary(),
       system: input.system,
       prompt: input.prompt,
+      ...(input.messages === undefined ? {} : { messages: input.messages }),
       ...(input.maxOutputTokens === undefined ? {} : { maxOutputTokens: input.maxOutputTokens }),
     });
     record(input.primaryProvider, input.primaryModel, usage);
@@ -197,6 +204,7 @@ export async function generateInternalText(input: {
       model: fallback,
       system: input.system,
       prompt: input.prompt,
+      ...(input.messages === undefined ? {} : { messages: input.messages }),
       ...(input.maxOutputTokens === undefined ? {} : { maxOutputTokens: input.maxOutputTokens }),
     });
     record("workers-ai", INTERNAL_FALLBACK_MODEL, usage);

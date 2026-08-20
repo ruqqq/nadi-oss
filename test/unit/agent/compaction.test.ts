@@ -1,8 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  createNadiCompactFunction,
-  serializeToolOutputForSummary,
-} from "../../../src/agent/compaction";
+import { createNadiCompactFunction, type SummarizeRequest } from "../../../src/agent/compaction";
 import { resolveContextBudget } from "../../../src/agent/context-budget";
 
 const budget = resolveContextBudget(200_000);
@@ -21,27 +18,11 @@ function history(n: number, chars = 6_000) {
   })) as never;
 }
 
-describe("serializeToolOutputForSummary", () => {
-  // THE bug: the SDK does String(output) -> "[object Object]" for every
-  // object-shaped tool output, and Nadi's capToolOutput preserves object shape.
-  it("renders an object tool output as JSON, never [object Object]", () => {
-    const text = serializeToolOutputForSummary({ file: "a.ts", lines: 12 }, 500);
-    expect(text).not.toContain("[object Object]");
-    expect(text).toContain("a.ts");
-    expect(text).toContain("12");
-  });
-
-  it("truncates to the cap", () => {
-    const text = serializeToolOutputForSummary("q".repeat(5_000), 100);
-    expect(text.slice(0, 100)).toBe("q".repeat(100));
-    expect(text).toContain("truncated 5000 chars");
-  });
-
-  it("renders null/undefined as empty, not the string 'undefined'", () => {
-    expect(serializeToolOutputForSummary(undefined, 500)).toBe("");
-    expect(serializeToolOutputForSummary(null, 500)).toBe("");
-  });
-});
+// `serializeToolOutputForSummary` and its suite are gone with `renderMessage`.
+// The summarizer is now sent the span as MESSAGES, so nothing stringifies a
+// tool output into the prompt and the "[object Object]" bug they guarded has no
+// code path left. The equivalent guard now lives below: the messages handed to
+// the summarizer still carry the real outputs.
 
 describe("createNadiCompactFunction", () => {
   it("summarizes the middle and reports 'shortened'", async () => {
@@ -62,7 +43,7 @@ describe("createNadiCompactFunction", () => {
   // The same bug, seen end to end: the prompt the summarizer actually receives
   // must show the tool's real result, not "[object Object]".
   it("shows object-shaped tool outputs to the summarizer", async () => {
-    const summarize = vi.fn(async (_prompt: string) => "ok");
+    const summarize = vi.fn(async (_request: SummarizeRequest) => "ok");
     const messages = history(60) as unknown as {
       id: string;
       role: string;
@@ -86,11 +67,15 @@ describe("createNadiCompactFunction", () => {
     const compact = createNadiCompactFunction({ budget, summarize, onOutcome: () => {} });
     await compact(messages as never);
 
-    const prompt = summarize.mock.calls[0]?.[0] ?? "";
-    expect(prompt).not.toContain("[object Object]");
-    expect(prompt).toContain("read_file");
-    expect(prompt).toContain("export const answer = 42;");
-    expect(prompt).toContain("src/agent/compaction.ts");
+    // The span reaches the summarizer as real messages carrying real outputs —
+    // the successor to the "[object Object]" guard, which protected a rendered
+    // string that no longer exists.
+    const request = summarize.mock.calls[0]?.[0] as SummarizeRequest;
+    const rendered = JSON.stringify(request.messages);
+    expect(rendered).not.toContain("[object Object]");
+    expect(rendered).toContain("read_file");
+    expect(rendered).toContain("export const answer = 42;");
+    expect(rendered).toContain("src/agent/compaction.ts");
   });
 
   it("reports 'noop' — not 'failed' — when there is nothing to compact", async () => {
@@ -127,7 +112,7 @@ describe("createNadiCompactFunction", () => {
   });
 
   it("caps the summary budget it asks for", async () => {
-    const summarize = vi.fn(async (_prompt: string) => "ok");
+    const summarize = vi.fn(async (_request: SummarizeRequest) => "ok");
     const compact = createNadiCompactFunction({ budget, summarize, onOutcome: () => {} });
 
     // Big enough that the SDK's unbounded `contentTokens * 0.2` would ask for
@@ -135,8 +120,9 @@ describe("createNadiCompactFunction", () => {
     // clamp is removed.
     await compact(history(120, 8_000));
 
-    const prompt = summarize.mock.calls[0]?.[0] ?? "";
-    const asked = Number(/~(\d+) tokens/.exec(prompt)?.[1] ?? "0");
+    const instruction =
+      (summarize.mock.calls[0]?.[0] as SummarizeRequest | undefined)?.instruction ?? "";
+    const asked = Number(/~(\d+) tokens/.exec(instruction)?.[1] ?? "0");
     expect(asked).toBeGreaterThan(0);
     expect(asked).toBeLessThanOrEqual(budget.maxSummaryTokens);
     // The unclamped ask here is well above the cap, so the clamp must be what
@@ -180,11 +166,11 @@ describe("head selection", () => {
       userMsg("u4", `again ${"x".repeat(6_000)}`),
       userMsg("u5", `and again ${"x".repeat(6_000)}`),
     ];
-    const seen: string[] = [];
+    const seen: SummarizeRequest[] = [];
     const compact = createNadiCompactFunction({
       budget: resolveContextBudget(272_000),
-      summarize: async (prompt) => {
-        seen.push(prompt);
+      summarize: async (request) => {
+        seen.push(request);
         return "SUMMARY";
       },
       onOutcome: () => {},
@@ -195,7 +181,7 @@ describe("head selection", () => {
     expect(result).not.toBeNull();
     expect(result!.fromMessageId).toBe("u1");
     // The summarizer must actually see the delegated turn's tool calls.
-    expect(seen[0]).toContain("[Tool: exec]");
+    expect(JSON.stringify(seen[0]!.messages)).toContain("tool-exec");
   });
 
   it("never summarizes the first user message", async () => {

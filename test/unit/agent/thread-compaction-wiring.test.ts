@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createThreadCompaction } from "../../../src/agent/think-thread-agent";
 import { resolveContextBudget } from "../../../src/agent/context-budget";
+import type { SummarizeRequest } from "../../../src/agent/compaction";
 
 /**
  * The construction site, not the algorithm.
@@ -31,7 +32,7 @@ function history(n: number, chars = 6_000) {
 
 describe("createThreadCompaction (the function the agent registers with onCompaction)", () => {
   it("shows object-shaped tool outputs to the summarizer, never [object Object]", async () => {
-    const summarize = vi.fn(async (_prompt: string) => "## Topic\nok");
+    const summarize = vi.fn(async (_request: SummarizeRequest) => "## Topic\nok");
     const messages = history(60);
     // Index 12 is outside the protected head (3) and, at ~1.5k tokens/message,
     // far outside the token-budgeted tail.
@@ -58,10 +59,13 @@ describe("createThreadCompaction (the function the agent registers with onCompac
     const result = await compact(messages as never);
 
     expect(result).not.toBeNull();
-    const prompt = summarize.mock.calls[0]?.[0] ?? "";
-    expect(prompt).not.toContain("[object Object]");
-    expect(prompt).toContain("a.ts");
-    expect(prompt).toContain("read_file");
+    // The seam hands the span over as MESSAGES carrying real tool outputs, so
+    // the SDK's String(output) -> "[object Object]" path cannot come back.
+    const request = summarize.mock.calls[0]?.[0] as SummarizeRequest;
+    const rendered = JSON.stringify(request.messages);
+    expect(rendered).not.toContain("[object Object]");
+    expect(rendered).toContain("a.ts");
+    expect(rendered).toContain("read_file");
   });
 
   it("reports a summarizer failure as 'failed', not as a no-op", async () => {
