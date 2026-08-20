@@ -171,6 +171,82 @@ describe("composeSystemPrompt", () => {
     }
   });
 
+  // The same rules already sit in the spawn tool's description and in its
+  // result `note`, and a live thread ignored both -- a tool RESULT is the
+  // lowest-trust channel there is. The system prompt is the one with standing.
+  it("appends subagent guidance when subagents are available", () => {
+    const out = composeSystemPrompt({
+      systemPrompt: "You are Nadi.",
+      subagentsAvailable: true,
+    });
+    expect(out).toContain("Subagent policy");
+    expect(out).toContain("spawn_subagent");
+    expect(out).toContain("check_subagents");
+    // The positive model: what delegation is FOR.
+    expect(out).toContain("INDEPENDENT of what you do next");
+    expect(out).toContain("not a way to do the next step of your own plan faster");
+    // The failure this exists to prevent.
+    expect(out).toContain("the task is no longer yours");
+    expect(out).toContain("end your turn");
+    expect(out).toContain("Ending the turn to wait is the intended behaviour");
+    expect(out).toContain("never a way to wait");
+    expect(out).toContain("complete, standalone task");
+  });
+
+  it("omits subagent guidance when subagents are unavailable", () => {
+    for (const input of [
+      { systemPrompt: "You are Nadi." },
+      { systemPrompt: "You are Nadi.", subagentsAvailable: false },
+    ]) {
+      const out = composeSystemPrompt(input);
+      expect(out).not.toContain("Subagent policy");
+      expect(out).not.toContain("spawn_subagent");
+    }
+  });
+
+  // Sandbox and subagents are independently gated: a workspace can have exec
+  // without background work, and the policies must not ride on each other.
+  it("gates the subagent policy independently of the sandbox policies", () => {
+    const sandboxOnly = composeSystemPrompt({
+      systemPrompt: "You are Nadi.",
+      sandboxAvailable: true,
+    });
+    expect(sandboxOnly).toContain("Workspace file tools policy");
+    expect(sandboxOnly).not.toContain("Subagent policy");
+
+    const subagentsOnly = composeSystemPrompt({
+      systemPrompt: "You are Nadi.",
+      subagentsAvailable: true,
+    });
+    expect(subagentsOnly).toContain("Subagent policy");
+    expect(subagentsOnly).not.toContain("Workspace file tools policy");
+    expect(subagentsOnly).not.toContain("GitHub auth in the sandbox");
+  });
+
+  // Prompt-cache friendliness: the volatile memory index stays last, so every
+  // policy block must land before it.
+  it("orders the subagent policy before project context and the memory index", () => {
+    const out = composeSystemPrompt({
+      systemPrompt: "You are Nadi.",
+      sandboxAvailable: true,
+      subagentsAvailable: true,
+      projectContext: {
+        name: "Nadi",
+        description: "",
+        instructions: "",
+        repositories: [],
+      },
+      memoryIndex: {
+        total: 1,
+        entries: [{ id: "mem_1", kind: "project", hook: "Box has ~3.8GB RAM" }],
+      },
+    });
+
+    expect(out.indexOf("GitHub auth in the sandbox")).toBeLessThan(out.indexOf("Subagent policy"));
+    expect(out.indexOf("Subagent policy")).toBeLessThan(out.indexOf("Project context:"));
+    expect(out.indexOf("Project context:")).toBeLessThan(out.indexOf("Memory index"));
+  });
+
   it("does not steer the model toward manual attachment OCR", () => {
     const out = composeSystemPrompt({
       systemPrompt: "You are Nadi.",

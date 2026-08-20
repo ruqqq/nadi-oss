@@ -1371,11 +1371,15 @@ export class ThinkThreadAgent extends Think<Env> {
       return undefined;
     });
 
+    // Hoisted above composeSystemPrompt: the subagent policy must not describe
+    // tools this turn will not expose, and the tool set itself is built below.
+    const subagentsAvailable = runtimeConfig.subagentsEnabled && this.subagentSpawnEnabled();
     // Composed after sandboxTools: an empty tool set is the "sandbox unavailable"
     // signal, and the OCR policy is meaningless without exec_*.
     const system = composeSystemPrompt({
       systemPrompt: runtimeConfig.modelConfig.systemPrompt,
       sandboxAvailable: sandboxToolNames.length > 0,
+      subagentsAvailable,
       ...(runtimeConfig.projectContext ? { projectContext: runtimeConfig.projectContext } : {}),
       ...(memoryIndex ? { memoryIndex } : {}),
     });
@@ -1385,14 +1389,13 @@ export class ThinkThreadAgent extends Think<Env> {
     const { createWebTools } = await import("./web-tools");
     const webTools = await createWebTools(this.webHostDeps());
     const webToolNames = Object.keys(webTools);
-    const subagentTools =
-      runtimeConfig.subagentsEnabled && this.subagentSpawnEnabled()
-        ? createSubagentTools({
-            spawn: (input) => this.spawnSubagent(input),
-            list: () => this.listSubagentRuns(),
-            stop: (runId) => this.stopSubagentRun(runId),
-          })
-        : {};
+    const subagentTools = subagentsAvailable
+      ? createSubagentTools({
+          spawn: (input) => this.spawnSubagent(input),
+          list: () => this.listSubagentRuns(),
+          stop: (runId) => this.stopSubagentRun(runId),
+        })
+      : {};
     const subagentToolNames = Object.keys(subagentTools);
     // Backstop: `onStart` only kicks MCP warm-up in the background, so the first
     // turn must wait for it here before reading `this.mcp.getAITools()`. Usually
