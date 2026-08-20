@@ -13,25 +13,11 @@ import {
   estimateMessageTokens,
   isCompactionMessage,
 } from "agents/experimental/memory/utils";
-import { boundingOptionsFor, CHARS_PER_TOKEN, type ContextBudget } from "./context-budget";
-import { boundText, boundTranscript, MARKER_MAX_CHARS } from "./transcript-bounding";
+import { CHARS_PER_TOKEN, type ContextBudget } from "./context-budget";
+import { boundText, MARKER_MAX_CHARS } from "./transcript-bounding";
 
 type ThreadMessages = Parameters<typeof estimateMessageTokens>[0];
-
-/**
- * What the summarizer is asked for.
- *
- * `messages` are the span itself, bounded EXACTLY as the model-facing assembly
- * bounds them, so the provider sees a prefix it has already cached. Rendering
- * them into a bespoke string — which this used to do — shares no prefix with
- * the thread's own requests and misses the cache on every compaction, at ~196k
- * of input. deepseek replays the conversation's own messages for exactly this
- * reason and appends the instruction last.
- */
-export type SummarizeRequest = {
-  messages: ThreadMessages;
-  instruction: string;
-};
+type ThreadMessage = ThreadMessages[number];
 
 export type CompactionResult = {
   fromMessageId: string;
@@ -52,13 +38,36 @@ export type CompactionOutcome =
   | { status: "declined"; reason: string }
   | { status: "noop"; reason: string }
   | { status: "failed"; error: string };
+
+/** How much of a tool's input/output the summarizer is shown. The output
+ * allowance is deliberately larger than the SDK's 500 — a summarizer that cannot
+ * see the result cannot preserve it. */
+const SUMMARY_INPUT_CHARS = 500;
+const SUMMARY_OUTPUT_CHARS = 2_000;
+
 /**
- * Tool outputs are no longer rendered into a summarizer prompt: the span is sent
- * as MESSAGES (see `SummarizeRequest`), so the provider serializes them itself.
- * That retires `renderMessage` / `serializeToolOutputForSummary` and with them
- * the "[object Object]" class of bug they existed to prevent — the SDK's
- * `String(output)` path is no longer on the map at all.
+ * Tool outputs, serialized for the summarizer.
+ *
+ * The SDK's buildSummaryPrompt does `String(output).slice(0, 500)`. Nadi's
+ * capToolOutput deliberately preserves object shape and most Nadi tools return
+ * objects — so the summarizer read the literal string "[object Object]" for
+ * every one of them, and wrote every summary blind to what the tools did.
  */
+export function serializeToolOutputForSummary(output: unknown, maxChars: number): string {
+  if (output === null || output === undefined) return "";
+  const text = typeof output === "string" ? output : safeStringify(output);
+  return text.length > maxChars
+    ? `${text.slice(0, maxChars)}... [truncated ${text.length} chars]`
+    : text;
+}
+
+function safeStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
 
 /** Collapse concurrent compaction attempts onto one run: a DO is
  * single-threaded but await points are not, so two turns can both observe the
@@ -73,6 +82,37 @@ export function createInFlightGuard(): <T>(work: () => Promise<T>) => Promise<T>
     inFlight = run;
     return run;
   };
+}
+
+type RenderablePart = {
+  type: string;
+  text?: string;
+  toolName?: string;
+  input?: unknown;
+  output?: unknown;
+};
+
+function isToolPart(part: RenderablePart): boolean {
+  return part.type.startsWith("tool-") || part.type === "dynamic-tool";
+}
+
+function renderMessage(message: ThreadMessage): string {
+  const parts = message.parts as unknown as RenderablePart[];
+  const text = parts
+    .filter((part) => part.type === "text")
+    .map((part) => part.text ?? "")
+    .join("\n");
+  const tools = parts
+    .filter(isToolPart)
+    .map((part) =>
+      [
+        `[Tool: ${part.toolName ?? "unknown"}]`,
+        `Input: ${serializeToolOutputForSummary(part.input, SUMMARY_INPUT_CHARS)}`,
+        `Output: ${serializeToolOutputForSummary(part.output, SUMMARY_OUTPUT_CHARS)}`,
+      ].join("\n"),
+    )
+    .join("\n");
+  return `[${message.role}]\n${text}${tools ? `\n${tools}` : ""}`;
 }
 
 /**
@@ -119,19 +159,12 @@ export function stripCheckpointFraming(text: string): string {
   return out;
 }
 
-/**
- * The protected head is the FIRST USER MESSAGE and nothing else.
- *
- * `protectHead = 3` protected three messages regardless of what they held; on
- * thr_ba1be632 the third was a single assistant turn of 23 tool calls, 96.7% of
- * the thread, permanently uncompactable. All four surveyed harnesses compact the
- * head; buzz alone preserves the original task, bounded, which is what this is.
- *
- * Size is not this function's job — `boundTranscript` enforces `headMaxChars` on
- * the way to the model. Here the head is a POSITION: the original task, kept so
- * a summarizer can never paraphrase it.
- */
-export function buildInstruction(previousSummary: string | null, targetTokens: number): string {
+export function buildPrompt(
+  middle: ThreadMessages,
+  previousSummary: string | null,
+  targetTokens: number,
+): string {
+  const content = middle.map(renderMessage).join("\n\n---\n\n");
   const structure = [
     "## Topic",
     "[What the conversation is about]",
@@ -151,11 +184,23 @@ export function buildInstruction(previousSummary: string | null, targetTokens: n
   const tail = `Target ~${targetTokens} tokens. Be factual — only include information explicitly present above. Do NOT invent file paths, commands, or details. Write only the summary body.`;
 
   if (previousSummary) {
-    return `Summarize the conversation above for future context. A previous summary exists; new turns have occurred since and need to be incorporated.\n\nPREVIOUS SUMMARY:\n${previousSummary}\n\nUpdate the summary. PRESERVE existing information that is still relevant. ADD new information. Remove information only if clearly obsolete.\n\n${structure}\n\n${tail}`;
+    return `You are updating a conversation summary. A previous summary exists below. New turns have occurred since and need to be incorporated.\n\nPREVIOUS SUMMARY:\n${previousSummary}\n\nNEW TURNS TO INCORPORATE:\n${content}\n\nUpdate the summary. PRESERVE existing information that is still relevant. ADD new information. Remove information only if clearly obsolete.\n\n${structure}\n\n${tail}`;
   }
-  return `Summarize the conversation above, preserving the important information for future context.\n\n${structure}\n\n${tail}`;
+  return `Create a concise summary of this conversation that preserves the important information for future context.\n\nCONVERSATION TO SUMMARIZE:\n${content}\n\n${structure}\n\n${tail}`;
 }
 
+/**
+ * The protected head is the FIRST USER MESSAGE and nothing else.
+ *
+ * `protectHead = 3` protected three messages regardless of what they held; on
+ * thr_ba1be632 the third was a single assistant turn of 23 tool calls, 96.7% of
+ * the thread, permanently uncompactable. All four surveyed harnesses compact the
+ * head; buzz alone preserves the original task, bounded, which is what this is.
+ *
+ * Size is not this function's job — `boundTranscript` enforces `headMaxChars` on
+ * the way to the model. Here the head is a POSITION: the original task, kept so
+ * a summarizer can never paraphrase it.
+ */
 function selectHeadEnd(messages: ThreadMessages): number {
   const firstUser = messages.findIndex((m) => m.role === "user");
   if (firstUser < 0) return 0;
@@ -232,7 +277,7 @@ function reset(
 
 export function createNadiCompactFunction(opts: {
   budget: ContextBudget;
-  summarize: (request: SummarizeRequest) => Promise<string>;
+  summarize: (prompt: string) => Promise<string>;
   onOutcome: (outcome: CompactionOutcome) => void;
   /** Rendered continuity block (see continuity-index.ts), carried above the
    *  prose in every checkpoint this function produces. */
@@ -312,19 +357,7 @@ export function createNadiCompactFunction(opts: {
 
       let summary: string;
       try {
-        summary = await summarize({
-          // Bounded with the ASSEMBLY's options, not tighter summarizer-only
-          // ones: a differently-bounded prefix is a DIFFERENT prefix, and the
-          // cache misses anyway. minTailMessages 0 because every message in
-          // this span is outside the assembly's retained tail, and headMaxChars
-          // is lifted because index 0 of the SPAN is not the thread's head.
-          messages: boundTranscript(middle, {
-            ...boundingOptionsFor(budget),
-            minTailMessages: 0,
-            headMaxChars: Number.MAX_SAFE_INTEGER,
-          }) as ThreadMessages,
-          instruction: buildInstruction(previousSummary, targetTokens),
-        });
+        summary = await summarize(buildPrompt(middle, previousSummary, targetTokens));
       } catch (error) {
         // A failed summarizer must NOT masquerade as "nothing to compact" —
         // which is exactly what the user saw, because Session.compact()

@@ -19,7 +19,6 @@ import {
   createInFlightGuard,
   createNadiCompactFunction,
   type CompactionOutcome,
-  type SummarizeRequest,
 } from "./compaction";
 import { estimateTruncatedThreadTokens } from "./thread-history-truncation";
 import {
@@ -353,7 +352,7 @@ type CompactionSource = "append" | "proactive" | "reactive" | "manual";
  */
 export function createThreadCompaction(deps: {
   budget: ContextBudget;
-  summarize: (request: SummarizeRequest) => Promise<string>;
+  summarize: (prompt: string) => Promise<string>;
   onOutcome: (outcome: CompactionOutcome) => void;
   continuityBlock?: string;
   allowReset?: boolean;
@@ -1079,7 +1078,7 @@ export class ThinkThreadAgent extends Think<Env> {
                 // automatic pressure — where the alternative is a failed turn —
                 // may fall through to the reset.
                 allowReset: source !== "manual",
-                summarize: async (request) => {
+                summarize: async (prompt) => {
                   // Streams, and falls back to a keyless Workers AI model if the
                   // thread's own model cannot serve the call. A summarizer that
                   // cannot run means a thread that can never compact — it just
@@ -1097,19 +1096,7 @@ export class ThinkThreadAgent extends Think<Env> {
                       ),
                     system:
                       "Compact this Nadi thread for future model context. Preserve key facts, decisions, open tasks, tool outcomes, current user intent, and the next likely action. Do not invent details.",
-                    // The span replayed as MESSAGES with the instruction last,
-                    // so the provider sees a prefix it has already cached. The
-                    // old bespoke prompt string shared a prefix with nothing and
-                    // missed the cache on every compaction, at ~196k of input.
-                    // `prompt` stays as the degenerate fallback for a provider
-                    // that rejects the messages form.
-                    prompt: request.instruction,
-                    messages: [
-                      ...(await convertToModelMessages(request.messages as unknown as UIMessage[], {
-                        ignoreIncompleteToolCalls: true,
-                      })),
-                      { role: "user" as const, content: request.instruction },
-                    ],
+                    prompt,
                     // Bounded: this runs MID-TURN on the thread's own model.
                     maxOutputTokens: budget.maxSummaryTokens,
                   });
