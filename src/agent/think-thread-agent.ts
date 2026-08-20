@@ -1101,6 +1101,15 @@ export class ThinkThreadAgent extends Think<Env> {
                       outcome: outcome.status,
                       reason: outcome.reason,
                     });
+                  } else if (outcome.status === "retried") {
+                    // Not a failure: the first span's summary did not shrink it,
+                    // so the range widened and the summarizer ran again. Visible
+                    // because it is a second billed call on the thread's model.
+                    log.info("think_thread.compaction_retried", {
+                      ...base,
+                      attempt: outcome.attempt,
+                      reason: outcome.reason,
+                    });
                   } else {
                     log.info("think_thread.compacted", {
                       ...base,

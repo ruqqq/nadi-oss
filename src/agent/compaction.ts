@@ -26,6 +26,7 @@ export type CompactionResult = {
 
 export type CompactionOutcome =
   | { status: "shortened"; summarizedMessages: number; summaryTokens: number }
+  | { status: "retried"; attempt: number; reason: string }
   | { status: "noop"; reason: string }
   | { status: "failed"; error: string };
 
@@ -194,14 +195,6 @@ export function createNadiCompactFunction(opts: {
       return null;
     }
 
-    const middle = messages.slice(start, end).filter((m) => !isCompactionMessage(m));
-    const first = middle[0];
-    const last = middle[middle.length - 1];
-    if (!first || !last) {
-      onOutcome({ status: "noop", reason: "middle is already compacted" });
-      return null;
-    }
-
     const existing = messages.find(isCompactionMessage);
     const previousSummary = existing
       ? (existing.parts as unknown as { type: string; text?: string }[])
@@ -210,44 +203,88 @@ export function createNadiCompactFunction(opts: {
           .join("\n")
       : null;
 
-    // The SDK asks for 20% of the compressed content with NO upper bound (its
-    // docstring claims a 2K-8K clamp that the code does not implement), so a
-    // large middle asks for an enormous summary — which then inflates the
-    // post-compaction floor it is supposed to shrink.
-    const targetTokens = Math.max(
-      100,
-      Math.min(Math.floor(estimateMessageTokens(middle) * 0.2), budget.maxSummaryTokens),
-    );
+    // Widen INTO the tail on each retry, halving the remaining distance and
+    // never taking the last `minTailMessages`. A wider span is a bigger source,
+    // so a summary that failed the shrink check against a small span can clear
+    // it against a larger one — and it reclaims more, which is the point.
+    const maxEnd = Math.max(start + 1, messages.length - budget.minTailMessages);
+    let attemptEnd = end;
 
-    let summary: string;
-    try {
-      summary = await summarize(buildPrompt(middle, previousSummary, targetTokens));
-    } catch (error) {
-      // A failed summarizer must NOT masquerade as "nothing to compact" — which
-      // is exactly what the user sees today, because Session.compact() swallows
-      // the throw and returns null.
+    for (let attempt = 0; attempt <= budget.compactionRetries; attempt++) {
+      const middle = messages.slice(start, attemptEnd).filter((m) => !isCompactionMessage(m));
+      const first = middle[0];
+      const last = middle[middle.length - 1];
+      if (!first || !last) {
+        onOutcome({ status: "noop", reason: "middle is already compacted" });
+        return null;
+      }
+
+      const spanTokens = estimateMessageTokens(middle);
+      // The SDK asks for 20% of the compressed content with NO upper bound (its
+      // docstring claims a 2K-8K clamp that the code does not implement), so a
+      // large middle asks for an enormous summary — which then inflates the
+      // post-compaction floor it is supposed to shrink.
+      const targetTokens = Math.max(
+        100,
+        Math.min(Math.floor(spanTokens * 0.2), budget.maxSummaryTokens),
+      );
+
+      let summary: string;
+      try {
+        summary = await summarize(buildPrompt(middle, previousSummary, targetTokens));
+      } catch (error) {
+        // A failed summarizer must NOT masquerade as "nothing to compact" —
+        // which is exactly what the user saw, because Session.compact()
+        // swallows the throw and returns null.
+        onOutcome({
+          status: "failed",
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return null;
+      }
+
+      if (!summary.trim()) {
+        onOutcome({ status: "failed", error: "summarizer returned an empty summary" });
+        return null;
+      }
+
+      const summaryTokens = Math.ceil(summary.length / CHARS_PER_TOKEN);
+      // Runtime convergence, replacing a construction-time assertion that
+      // modelled a head shape the code never enforced. deepseek's rule: reject
+      // a summary that does not shrink its source.
+      const tooLarge =
+        summaryTokens >= spanTokens
+          ? "summary did not shrink its source"
+          : summaryTokens > budget.maxSummaryTokens
+            ? "summary exceeded the summary budget"
+            : null;
+      if (tooLarge) {
+        if (attempt < budget.compactionRetries && attemptEnd < maxEnd) {
+          attemptEnd = alignBoundaryForward(
+            messages,
+            Math.min(maxEnd, attemptEnd + Math.ceil((maxEnd - attemptEnd) / 2)),
+          );
+          onOutcome({ status: "retried", attempt: attempt + 1, reason: tooLarge });
+          continue;
+        }
+        onOutcome({ status: "failed", error: tooLarge });
+        return null;
+      }
+
       onOutcome({
-        status: "failed",
-        error: error instanceof Error ? error.message : String(error),
+        status: "shortened",
+        summarizedMessages: middle.length,
+        summaryTokens,
       });
-      return null;
+
+      return {
+        fromMessageId: first.id,
+        toMessageId: last.id,
+        summary,
+      };
     }
 
-    if (!summary.trim()) {
-      onOutcome({ status: "failed", error: "summarizer returned an empty summary" });
-      return null;
-    }
-
-    onOutcome({
-      status: "shortened",
-      summarizedMessages: middle.length,
-      summaryTokens: Math.ceil(summary.length / CHARS_PER_TOKEN),
-    });
-
-    return {
-      fromMessageId: first.id,
-      toMessageId: last.id,
-      summary,
-    };
+    onOutcome({ status: "failed", error: "compaction retries exhausted" });
+    return null;
   };
 }
