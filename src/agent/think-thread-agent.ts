@@ -14,7 +14,7 @@ import {
 } from "@cloudflare/think";
 import type { SkillScriptRequest, SkillScriptRunner } from "agents/skills";
 import { callable, getAgentByName } from "agents";
-import { estimateMessageTokens, truncateOlderMessages } from "agents/experimental/memory/utils";
+import { estimateMessageTokens } from "agents/experimental/memory/utils";
 import {
   createInFlightGuard,
   createNadiCompactFunction,
@@ -22,12 +22,13 @@ import {
 } from "./compaction";
 import { estimateTruncatedThreadTokens } from "./thread-history-truncation";
 import {
+  boundingOptionsFor,
   CHARS_PER_TOKEN,
   DEFAULT_CONTEXT_WINDOW,
   resolveContextBudget,
-  truncationOptionsFor,
   type ContextBudget,
 } from "./context-budget";
+import { boundTranscript } from "./transcript-bounding";
 import { resolveContextWindow } from "./context-window";
 import {
   flushThreadUsage,
@@ -1444,8 +1445,9 @@ export class ThinkThreadAgent extends Think<Env> {
       model: runtimeConfig.modelConfig.model,
       contextWindow: contextBudget.contextWindow,
       compactAfterTokens: contextBudget.compactAfterTokens,
-      keepRecent: contextBudget.keepRecent,
-      maxToolOutputChars: contextBudget.maxToolOutputChars,
+      partHeadChars: contextBudget.partHeadChars,
+      partTailChars: contextBudget.partTailChars,
+      headMaxChars: contextBudget.headMaxChars,
       maxSteps,
       hasWorkbench,
     });
@@ -6884,6 +6886,10 @@ async function sourceHash(raw: unknown): Promise<string> {
  * 32k one. There is no config knob for it, which is why this reaches for a
  * method Think declares `private`.
  *
+ * Nadi bounds per PART instead of per recency: the SDK's `keepRecent` exempts
+ * whole recent messages, which meant a short thread whose opening turn held 23
+ * tool calls was never bounded at all. See `transcript-bounding.ts`.
+ *
  * Why this seam and not `TurnConfig.messages` (which IS public, and which we
  * already use): the proactive context guard rebuilds its head by calling
  * `_assembleModelMessages` internally. Overriding only the public seam would
@@ -6923,7 +6929,7 @@ async function assembleWindowScaledModelMessages(
   // present here and are gone after convertToModelMessages, so this is the only
   // seam where the segment origins are readable.
   const sanitized = sanitizeCrossModelReasoning(segmented);
-  const truncated = truncateOlderMessages(sanitized, truncationOptionsFor(budget));
+  const truncated = boundTranscript(sanitized, boundingOptionsFor(budget)) as typeof sanitized;
   // Same post-repair diagnostic Think's own _assembleModelMessages runs: a
   // survivor here means _repairToolTranscriptParts has a gap, even though
   // ignoreIncompleteToolCalls keeps the turn itself safe.

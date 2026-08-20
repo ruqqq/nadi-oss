@@ -227,7 +227,7 @@ describe("assembly order", () => {
       fs.readFileSync("src/agent/think-thread-agent.ts", "utf8"),
     );
     const sanitizeAt = source.indexOf("sanitizeCrossModelReasoning(");
-    const truncateAt = source.indexOf("truncateOlderMessages(sanitized");
+    const truncateAt = source.indexOf("boundTranscript(sanitized");
     expect(sanitizeAt).toBeGreaterThan(-1);
     expect(truncateAt).toBeGreaterThan(-1);
     expect(sanitizeAt).toBeLessThan(truncateAt);
@@ -284,7 +284,11 @@ describe("sanitizer x compaction", () => {
     // The switch itself, mid-transcript — the marker rides the user message
     // whose turn committed it.
     messages.push(user("m40", [SWITCH, { type: "text", text: `switch here ${filler}` }]));
-    for (let i = 41; i < 60; i += 1) {
+    // Enough post-switch turns that m40 is genuinely archived. The retained
+    // tail is `retainRatio` 0.16 of the WINDOW (32,000 tokens at 200k), which
+    // is wider than the old 25%-of-trigger tail — with only 19 turns after the
+    // switch the marker now survives compaction and the premise below fails.
+    for (let i = 41; i < 80; i += 1) {
       messages.push(
         (i % 2 === 0 ? user : assistant)(`m${i}`, [{ type: "text", text: `turn ${i} ${filler}` }]),
       );

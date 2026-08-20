@@ -32,6 +32,11 @@ export type CompactionOutcome =
 /** How much of a tool's input/output the summarizer is shown. The output
  * allowance is deliberately larger than the SDK's 500 — a summarizer that cannot
  * see the result cannot preserve it. */
+/** Temporarily local: `protectHead` left `ContextBudget` with the bounding
+ *  rewrite, and the head-selection rewrite that replaces it lands next. Keeping
+ *  the old value here changes no behaviour in this commit. */
+const LEGACY_PROTECT_HEAD = 3;
+
 const SUMMARY_INPUT_CHARS = 500;
 const SUMMARY_OUTPUT_CHARS = 2_000;
 
@@ -164,12 +169,12 @@ export function createNadiCompactFunction(opts: {
   // session counter would grow the protected tail and could push the floor back
   // above the trigger.
   return async (messages: ThreadMessages): Promise<CompactionResult | null> => {
-    if (messages.length <= budget.protectHead + budget.minTailMessages) {
+    if (messages.length <= LEGACY_PROTECT_HEAD + budget.minTailMessages) {
       onOutcome({ status: "noop", reason: "history shorter than the protected span" });
       return null;
     }
 
-    const start = alignBoundaryForward(messages, budget.protectHead);
+    const start = alignBoundaryForward(messages, LEGACY_PROTECT_HEAD);
     const end = findTailCut(messages, start, budget);
     if (end <= start) {
       onOutcome({ status: "noop", reason: "nothing between the protected head and tail" });
