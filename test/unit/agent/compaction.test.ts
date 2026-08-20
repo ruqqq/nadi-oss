@@ -144,3 +144,77 @@ describe("createNadiCompactFunction", () => {
     expect(asked).toBe(budget.maxSummaryTokens);
   });
 });
+
+/**
+ * Head selection. `protectHead = 3` protected three MESSAGES regardless of what
+ * they held; on thr_ba1be632 the third was one assistant turn of 23 tool calls
+ * — 96.7% of the thread, permanently uncompactable. All four surveyed harnesses
+ * compact the head; buzz alone preserves the original task, bounded.
+ */
+describe("head selection", () => {
+  const userMsg = (id: string, text: string) => ({
+    id,
+    role: "user" as const,
+    parts: [{ type: "text", text }],
+  });
+  const bigAssistant = (id: string, calls: number) => ({
+    id,
+    role: "assistant" as const,
+    parts: Array.from({ length: calls }, (_, i) => ({
+      type: "tool-exec",
+      toolName: "exec",
+      toolCallId: `${id}-${i}`,
+      state: "output-available",
+      input: {},
+      output: "x".repeat(13_000),
+    })),
+  });
+
+  // The exact shape of thr_ba1be632.
+  it("summarizes a huge opening assistant turn instead of protecting it", async () => {
+    const messages = [
+      userMsg("u0", "explain-diff for PR 1414"),
+      userMsg("u1", "<system-reminder>clock</system-reminder>"),
+      bigAssistant("a2", 23),
+      userMsg("u3", `republish ${"x".repeat(6_000)}`),
+      userMsg("u4", `again ${"x".repeat(6_000)}`),
+      userMsg("u5", `and again ${"x".repeat(6_000)}`),
+    ];
+    const seen: string[] = [];
+    const compact = createNadiCompactFunction({
+      budget: resolveContextBudget(272_000),
+      summarize: async (prompt) => {
+        seen.push(prompt);
+        return "SUMMARY";
+      },
+      onOutcome: () => {},
+    });
+
+    const result = await compact(messages as never);
+
+    expect(result).not.toBeNull();
+    expect(result!.fromMessageId).toBe("u1");
+    // The summarizer must actually see the delegated turn's tool calls.
+    expect(seen[0]).toContain("[Tool: exec]");
+  });
+
+  it("never summarizes the first user message", async () => {
+    const messages = [
+      userMsg("u0", "the original task"),
+      bigAssistant("a1", 23),
+      userMsg("u2", `next ${"x".repeat(6_000)}`),
+      userMsg("u3", `next ${"x".repeat(6_000)}`),
+    ];
+    const compact = createNadiCompactFunction({
+      budget: resolveContextBudget(272_000),
+      summarize: async () => "SUMMARY",
+      onOutcome: () => {},
+    });
+
+    const result = await compact(messages as never);
+
+    expect(result).not.toBeNull();
+    expect(result!.fromMessageId).not.toBe("u0");
+    expect(result!.fromMessageId).toBe("a1");
+  });
+});

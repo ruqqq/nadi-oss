@@ -32,11 +32,6 @@ export type CompactionOutcome =
 /** How much of a tool's input/output the summarizer is shown. The output
  * allowance is deliberately larger than the SDK's 500 — a summarizer that cannot
  * see the result cannot preserve it. */
-/** Temporarily local: `protectHead` left `ContextBudget` with the bounding
- *  rewrite, and the head-selection rewrite that replaces it lands next. Keeping
- *  the old value here changes no behaviour in this commit. */
-const LEGACY_PROTECT_HEAD = 3;
-
 const SUMMARY_INPUT_CHARS = 500;
 const SUMMARY_OUTPUT_CHARS = 2_000;
 
@@ -137,6 +132,24 @@ function buildPrompt(
   return `Create a concise summary of this conversation that preserves the important information for future context.\n\nCONVERSATION TO SUMMARIZE:\n${content}\n\n${structure}\n\n${tail}`;
 }
 
+/**
+ * The protected head is the FIRST USER MESSAGE and nothing else.
+ *
+ * `protectHead = 3` protected three messages regardless of what they held; on
+ * thr_ba1be632 the third was a single assistant turn of 23 tool calls, 96.7% of
+ * the thread, permanently uncompactable. All four surveyed harnesses compact the
+ * head; buzz alone preserves the original task, bounded, which is what this is.
+ *
+ * Size is not this function's job — `boundTranscript` enforces `headMaxChars` on
+ * the way to the model. Here the head is a POSITION: the original task, kept so
+ * a summarizer can never paraphrase it.
+ */
+function selectHeadEnd(messages: ThreadMessages): number {
+  const firstUser = messages.findIndex((m) => m.role === "user");
+  if (firstUser < 0) return 0;
+  return alignBoundaryForward(messages, firstUser + 1);
+}
+
 /** Walk backward from the leaf accumulating tokens until the tail budget is
  * spent; everything from the returned index onward is protected. */
 function findTailCut(messages: ThreadMessages, headEnd: number, budget: ContextBudget): number {
@@ -169,12 +182,12 @@ export function createNadiCompactFunction(opts: {
   // session counter would grow the protected tail and could push the floor back
   // above the trigger.
   return async (messages: ThreadMessages): Promise<CompactionResult | null> => {
-    if (messages.length <= LEGACY_PROTECT_HEAD + budget.minTailMessages) {
+    if (messages.length <= 1 + budget.minTailMessages) {
       onOutcome({ status: "noop", reason: "history shorter than the protected span" });
       return null;
     }
 
-    const start = alignBoundaryForward(messages, LEGACY_PROTECT_HEAD);
+    const start = selectHeadEnd(messages);
     const end = findTailCut(messages, start, budget);
     if (end <= start) {
       onOutcome({ status: "noop", reason: "nothing between the protected head and tail" });
