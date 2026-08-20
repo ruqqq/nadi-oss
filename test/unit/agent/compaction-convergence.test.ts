@@ -154,6 +154,30 @@ describe("reset", () => {
     expect(result!.summary.length).toBeLessThanOrEqual(budget.maxSummaryTokens * 4);
   });
 
+  // The reset earns its place under automatic pressure, where the alternative
+  // is a failed turn and the user never sees the choice. A MANUAL compaction is
+  // a button press (the hidden `/compact` command) meaning "shrink my thread";
+  // silently discarding it is far more than that asks for. deepseek draws the
+  // same line — compactNow() "writes nothing when no useful span exists".
+  it("declines instead of resetting when compaction was triggered manually", async () => {
+    const outcomes: { status: string }[] = [];
+    const compact = createNadiCompactFunction({
+      budget,
+      allowReset: false,
+      summarize: async () => "S".repeat(40_000_000),
+      onOutcome: (o) => outcomes.push(o as { status: string }),
+    });
+
+    const result = await compact(makeThread(41));
+
+    expect(result).toBeNull();
+    expect(outcomes.some((o) => o.status === "reset")).toBe(false);
+    expect(outcomes.at(-1)).toMatchObject({
+      status: "declined",
+      reason: "summary did not shrink its source",
+    });
+  });
+
   // A summarizer that is broken (throws, or returns nothing) is not evidence
   // that the transcript must be discarded.
   it("does not reset when the summarizer itself is broken", async () => {

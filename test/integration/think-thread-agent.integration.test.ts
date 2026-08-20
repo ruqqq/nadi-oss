@@ -2100,6 +2100,120 @@ describe("ThinkThreadAgent spike", () => {
     }
   });
 
+  // A MANUAL compaction must never discard the transcript. The reset rung
+  // exists for automatic pressure, where the alternative is a failed turn and
+  // the user never sees the choice; the hidden `/compact` command means "shrink
+  // my thread", not "lose it". The unit test covers the pure function — this
+  // covers the WIRING, which a mutation of `allowReset` otherwise survives.
+  it("declines a manual compaction rather than resetting when nothing converges", async () => {
+    await seedRegistryThread(env.REGISTRY_DB, {
+      workspaceId: "workspace-think-manual-noreset",
+      agentId: "agent-think-manual-noreset",
+      threadId: "think-manual-noreset",
+      runtime: "think",
+      provider: "mock",
+      model: "mock",
+    });
+
+    // Echoes its own input, so the summary can never shrink its source and
+    // every rung of the ladder rejects it.
+    const modelSpy = vi.spyOn(threadAgentModule, "buildThreadModelForWorkspace").mockResolvedValue({
+      specificationVersion: "v3",
+      provider: "fake",
+      modelId: "fake-summarizer",
+      supportedUrls: {},
+      doStream: async (options: { prompt: unknown }) => {
+        const echoed = JSON.stringify(options.prompt);
+        return {
+          stream: simulateReadableStream({
+            initialDelayInMs: null,
+            chunkDelayInMs: null,
+            chunks: [
+              { type: "text-start" as const, id: "s" },
+              { type: "text-delta" as const, id: "s", delta: echoed },
+              { type: "text-end" as const, id: "s" },
+              {
+                type: "finish" as const,
+                finishReason: { unified: "stop" as const, raw: "stop" },
+                usage: {
+                  inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+                  outputTokens: { total: 5, text: 5, reasoning: 0 },
+                },
+              },
+            ],
+          }),
+        };
+      },
+    } as never);
+
+    try {
+      const stub = env.THINK_THREAD_AGENT.get(
+        env.THINK_THREAD_AGENT.idFromName("think-manual-noreset"),
+      );
+
+      const result = await runInThinkDo(stub, async (instance: any) => {
+        const agent = instance as InitializableAgent & {
+          env: { THINK_COMPACT_AFTER_TOKENS?: string | undefined };
+          session: {
+            appendMessage(message: unknown): Promise<void>;
+            getHistory(): Promise<{ id: string; parts: unknown[] }[]>;
+            getCompactions(): Promise<{ summary: string }[]>;
+          };
+          compactThread(): Promise<{ compacted: boolean; message: string }>;
+        };
+        const previousWindow = agent.env.THINK_COMPACT_AFTER_TOKENS;
+        agent.env.THINK_COMPACT_AFTER_TOKENS = "32000";
+        try {
+          await agent.__unsafe_ensureInitialized();
+          for (let i = 0; i < 50; i++) {
+            await agent.session.appendMessage({
+              id: `u${i}`,
+              role: "user",
+              parts: [{ type: "text", text: `step ${i}: read the config` }],
+            });
+            await agent.session.appendMessage({
+              id: `a${i}`,
+              role: "assistant",
+              parts: [
+                {
+                  type: "tool-read_file",
+                  toolName: "read_file",
+                  toolCallId: `call-${i}`,
+                  state: "output-available",
+                  input: { path: `src/file-${i}.ts` },
+                  output: { path: `src/file-${i}.ts`, content: `${"// filler\n".repeat(80)}` },
+                },
+              ],
+            });
+          }
+
+          const before = await agent.session.getHistory();
+          const compacted = await agent.compactThread();
+          const after = await agent.session.getHistory();
+          const overlays = await agent.session.getCompactions();
+          return { compacted, beforeLen: before.length, afterLen: after.length, overlays };
+        } finally {
+          if (previousWindow === undefined) {
+            delete agent.env.THINK_COMPACT_AFTER_TOKENS;
+          } else {
+            agent.env.THINK_COMPACT_AFTER_TOKENS = previousWindow;
+          }
+        }
+      });
+
+      // A decline, not a failure and not "nothing to compact".
+      expect(result.compacted).toEqual({
+        compacted: false,
+        message: "Couldn't compact further without discarding history.",
+      });
+      // Nothing was discarded and no checkpoint was written.
+      expect(result.afterLen).toBe(result.beforeLen);
+      expect(result.overlays).toHaveLength(0);
+    } finally {
+      modelSpy.mockRestore();
+    }
+  });
+
   // A thread compacts MORE THAN ONCE as it keeps growing. Every compaction writes
   // a new overlay row, and the SDK is supposed to anchor each new row at the FIRST
   // row's `fromMessageId` so they collapse to a single summary when history is

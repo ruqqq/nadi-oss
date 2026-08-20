@@ -46,6 +46,10 @@ export type CompactionOutcome =
   | { status: "shortened"; summarizedMessages: number; summaryTokens: number }
   | { status: "retried"; attempt: number; reason: string }
   | { status: "reset"; discardedMessages: number; reason: string }
+  /** No span converged and the reset was not permitted (a manual trigger).
+   *  Distinct from `failed`: nothing broke and the transcript is intact — the
+   *  thread simply cannot shrink further without discarding history. */
+  | { status: "declined"; reason: string }
   | { status: "noop"; reason: string }
   | { status: "failed"; error: string };
 /**
@@ -233,9 +237,21 @@ export function createNadiCompactFunction(opts: {
   /** Rendered continuity block (see continuity-index.ts), carried above the
    *  prose in every checkpoint this function produces. */
   continuityBlock?: string;
+  /**
+   * Whether the last-resort reset may run. Defaults to true.
+   *
+   * False for a MANUAL compaction. The reset earns its place under automatic
+   * pressure, where the alternative is a failed turn and the user never sees
+   * the choice; a button press (the hidden `/compact` command) means "shrink my
+   * thread", and silently discarding the transcript is far more than that asks
+   * for. deepseek draws the same line — `compactNow()` "writes nothing when no
+   * useful span exists", while `compactIfNeeded()` may force a reduction.
+   */
+  allowReset?: boolean;
 }) {
   const { budget, summarize, onOutcome } = opts;
   const continuityBlock = opts.continuityBlock ?? "";
+  const allowReset = opts.allowReset ?? true;
 
   // The SDK hands this function a `context.tokenCounter` and we deliberately do
   // not take it: `findTailCut` uses the raw per-message estimator instead. The
@@ -344,8 +360,13 @@ export function createNadiCompactFunction(opts: {
           onOutcome({ status: "retried", attempt: attempt + 1, reason: tooLarge });
           continue;
         }
-        // Every converging span has been tried. Fall through to the reset —
-        // the rung that always succeeds because it bounds its own output.
+        // Every converging span has been tried.
+        if (!allowReset) {
+          onOutcome({ status: "declined", reason: tooLarge });
+          return null;
+        }
+        // Fall through to the reset — the rung that always succeeds because it
+        // bounds its own output.
         return reset(messages, start, summary, tooLarge, budget, continuityBlock, onOutcome);
       }
 

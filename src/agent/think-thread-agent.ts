@@ -356,6 +356,7 @@ export function createThreadCompaction(deps: {
   summarize: (request: SummarizeRequest) => Promise<string>;
   onOutcome: (outcome: CompactionOutcome) => void;
   continuityBlock?: string;
+  allowReset?: boolean;
 }) {
   return createNadiCompactFunction(deps);
 }
@@ -1073,6 +1074,11 @@ export class ThinkThreadAgent extends Think<Env> {
               const compact = createThreadCompaction({
                 budget,
                 continuityBlock: renderContinuity(continuity),
+                // A manual `/compact` must never discard the transcript: the
+                // user asked to shrink the thread, not to lose it. Only
+                // automatic pressure — where the alternative is a failed turn —
+                // may fall through to the reset.
+                allowReset: source !== "manual",
                 summarize: async (request) => {
                   // Streams, and falls back to a keyless Workers AI model if the
                   // thread's own model cannot serve the call. A summarizer that
@@ -1148,6 +1154,13 @@ export class ThinkThreadAgent extends Think<Env> {
                     log.info("think_thread.compacted", {
                       ...base,
                       outcome: outcome.status,
+                      reason: outcome.reason,
+                    });
+                  } else if (outcome.status === "declined") {
+                    // Not a failure and not a no-op: a manual compaction that
+                    // would only have converged by discarding history.
+                    log.info("think_thread.compaction_declined", {
+                      ...base,
                       reason: outcome.reason,
                     });
                   } else if (outcome.status === "reset") {
@@ -6458,6 +6471,15 @@ export class ThinkThreadAgent extends Think<Env> {
       const outcome = this.takeLastCompactionOutcome();
       if (outcome?.status === "failed") {
         throw new Error(`thread_compaction_failed: ${outcome.error}`);
+      }
+      // A decline is not "nothing to compact": there IS a middle, but every
+      // span that would fit needs history thrown away, and a manual trigger
+      // never does that. Say so, rather than implying the thread is small.
+      if (outcome?.status === "declined") {
+        return {
+          compacted: false,
+          message: "Couldn't compact further without discarding history.",
+        };
       }
       return { compacted: false, message: "Nothing to compact yet." };
     }
