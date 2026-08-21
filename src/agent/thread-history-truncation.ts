@@ -1,10 +1,7 @@
-import {
-  estimateMessageTokens,
-  estimateStringTokens,
-  truncateOlderMessages,
-} from "agents/experimental/memory/utils";
+import { estimateMessageTokens, estimateStringTokens } from "agents/experimental/memory/utils";
 import type { ContextBudget } from "./context-budget";
-import { truncationOptionsFor } from "./context-budget";
+import { boundingOptionsFor } from "./context-budget";
+import { boundTranscript } from "./transcript-bounding";
 
 /**
  * Message-history helpers that keep Think auto-compaction from thrashing.
@@ -16,8 +13,10 @@ import { truncationOptionsFor } from "./context-budget";
  * above the threshold even though the protected mass is un-compressible, so
  * compaction fires every turn and never shortens anything.
  *
- * This closes that loop by counting tool outputs at the SAME truncated size the
- * model actually receives, so the trigger reflects the real payload.
+ * This closes that loop by counting the transcript at the SAME bounding the model
+ * actually receives, so the trigger reflects the real payload. Both this and
+ * `assembleWindowScaledModelMessages` go through `boundingOptionsFor`; if they
+ * ever diverge the runaway reopens in a new form.
  */
 
 type ThreadMessages = Parameters<typeof estimateMessageTokens>[0];
@@ -37,7 +36,7 @@ export function estimateTruncatedThreadTokens(input: {
 }): number {
   return (
     estimateMessageTokens(
-      truncateOlderMessages(input.messages, truncationOptionsFor(input.budget)),
+      boundTranscript(input.messages, boundingOptionsFor(input.budget)) as typeof input.messages,
     ) + estimateStringTokens(input.systemPrompt)
   );
 }

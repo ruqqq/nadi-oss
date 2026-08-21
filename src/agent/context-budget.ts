@@ -5,6 +5,8 @@
  * with each other the way three independently-tuned constants did.
  */
 
+import type { BoundingOptions } from "./transcript-bounding";
+
 /** The SDK's token estimator assumes ~4 chars/token; we mirror it so our
  * char-denominated caps and its token-denominated estimates line up. */
 export const CHARS_PER_TOKEN = 4;
@@ -19,19 +21,41 @@ export type ContextBudget = {
   inputBudgetTokens: number;
   compactAfterTokens: number;
   proactiveInputTokens: number;
-  keepRecent: number;
-  maxToolOutputChars: number;
-  maxTextChars: number;
-  protectHead: number;
+  /** Hard ceiling on the first user message — the only message compaction never
+   *  summarizes, so the only one whose whole size must be capped outright. */
+  headMaxChars: number;
   tailTokenBudget: number;
   minTailMessages: number;
   maxSummaryTokens: number;
+  partHeadChars: number;
+  partTailChars: number;
+  maxRetainedMessageChars: number;
   maxToolOutputCapChars: number;
   systemPromptReserveTokens: number;
+  compactionRetries: number;
 };
 
-const clamp = (value: number, min: number, max: number): number =>
-  Math.min(Math.max(Math.floor(value), min), max);
+/** pi's `reserveTokens`: how far below the input budget compaction fires. A
+ *  later trigger means fewer compactions, and each one is a lossy generation. */
+const LATE_RESERVE_TOKENS = 16_384;
+/** deepseek's `retainRatio`. */
+const RETAIN_RATIO = 0.16;
+/** Absolute, never a fraction of the window: a fraction makes the permanent
+ *  floor grow with the model, which is backwards. opencode 4096; deepseek and
+ *  buzz 8192. */
+const MAX_SUMMARY_TOKENS = 8_192;
+const PART_HEAD_CHARS = 4_096;
+const PART_TAIL_CHARS = 1_024;
+/** buzz's HANDOFF_ORIGINAL_TASK_MAX_BYTES. */
+const HEAD_MAX_CHARS = 16_384;
+const MAX_RETAINED_MESSAGE_CHARS = 65_536;
+const WRITE_CAP_CHARS = 32_768;
+const COMPACTION_RETRIES = 1;
+/** Below this a summary cannot carry a thread's state, so compaction is
+ *  theatre: it converges arithmetically and loses everything. deepseek warns
+ *  that too-small thresholds cause compaction loops; Anthropic's compact API
+ *  refuses thresholds under 50k for the same reason. */
+const MIN_USEFUL_SUMMARY_TOKENS = 256;
 
 export function resolveContextBudget(contextWindow: number): ContextBudget {
   // Reserve room for the model's own output plus a safety margin — the token
@@ -39,39 +63,30 @@ export function resolveContextBudget(contextWindow: number): ContextBudget {
   const reservedOutput = Math.min(32_000, contextWindow * 0.2);
   const inputBudgetTokens = Math.floor(contextWindow - reservedOutput - contextWindow * 0.1);
 
-  const compactAfterTokens = Math.floor(inputBudgetTokens * 0.8);
-  const proactiveInputTokens = Math.floor(inputBudgetTokens * 0.9);
+  // Scaled down on small windows so an 8k model still has headroom.
+  const lateReserve = Math.min(LATE_RESERVE_TOKENS, Math.floor(inputBudgetTokens * 0.1));
+  const compactAfterTokens = inputBudgetTokens - lateReserve;
+  // Must sit strictly BETWEEN the append trigger and the input budget. It used
+  // to be a flat 0.9 of the budget, which collides with the late trigger the
+  // moment `lateReserve` clamps to 10% — at a 200k window both landed on
+  // 133,200 and the proactive guard stopped being a second line of defence.
+  const proactiveInputTokens =
+    compactAfterTokens + Math.floor((inputBudgetTokens - compactAfterTokens) / 2);
   const inputBudgetChars = inputBudgetTokens * CHARS_PER_TOKEN;
 
-  const keepRecent = clamp(inputBudgetTokens / 10_000, 4, 32);
-  const maxToolOutputChars = clamp(inputBudgetChars * 0.02, 500, 20_000);
-  const maxTextChars = clamp(inputBudgetChars * 0.05, 10_000, 100_000);
-
-  const protectHead = 3;
   const minTailMessages = 2;
-  const tailTokenBudget = Math.floor(compactAfterTokens * 0.25);
-  const maxSummaryTokens = Math.floor(compactAfterTokens * 0.1);
+  const tailTokenBudget = Math.floor(contextWindow * RETAIN_RATIO);
+  const headMaxChars = Math.min(HEAD_MAX_CHARS, Math.floor(inputBudgetChars * 0.05));
+  const maxSummaryTokens = Math.min(MAX_SUMMARY_TOKENS, Math.floor(compactAfterTokens * 0.1));
 
-  // The protected tail is replayed at full fidelity, so a single pathological
-  // tool result would otherwise pin the floor above the trigger — which is
-  // exactly how the tool-heavy runaway happened. Scaling the WRITE-time cap to
-  // the window is what bounds it.
-  //
-  // 10% is not arbitrary: `minTailMessages` outputs at this cap cost
-  // `2 * 0.10 * inputBudgetTokens` tokens, which is exactly `tailTokenBudget`
-  // (25% of the 80% trigger = 20% of the input budget). At any larger fraction
-  // the write-time cap — not the tail budget — dictates the protected tail, and
-  // the floor grows without a compensating rise in the trigger. 10% is the
-  // largest cap at which the tail budget stays the binding constraint.
-  const maxToolOutputCapChars = Math.floor(inputBudgetChars * 0.1);
-
-  // The compaction trigger is compared against an estimate that INCLUDES the
-  // system prompt (see estimateTruncatedThreadTokens), but the protected floor
-  // is messages-only — so the real message budget is `compactAfterTokens` minus
-  // the system prompt. Nadi's system prompt is soul + a memory block capped at
-  // 2k tokens + role + skills: realistically 1k-4k tokens, which is invisible at
-  // a 200k window and larger than the entire headroom at 8k. A flat 4k reserve
-  // would make an 8k window uncompactable, so it scales down with the budget.
+  // Clamped so `minTailMessages` retained messages can never exceed the tail
+  // budget. This is what makes the floor's tail term provable rather than
+  // assumed — the mistake the old assertion made about the head.
+  const maxRetainedMessageChars = Math.min(
+    MAX_RETAINED_MESSAGE_CHARS,
+    Math.floor((tailTokenBudget * CHARS_PER_TOKEN) / minTailMessages),
+  );
+  const maxToolOutputCapChars = Math.min(WRITE_CAP_CHARS, maxRetainedMessageChars);
   const systemPromptReserveTokens = Math.min(4_000, Math.floor(inputBudgetTokens * 0.25));
 
   const budget: ContextBudget = {
@@ -79,59 +94,63 @@ export function resolveContextBudget(contextWindow: number): ContextBudget {
     inputBudgetTokens,
     compactAfterTokens,
     proactiveInputTokens,
-    keepRecent,
-    maxToolOutputChars,
-    maxTextChars,
-    protectHead,
+    headMaxChars,
     tailTokenBudget,
     minTailMessages,
     maxSummaryTokens,
+    partHeadChars: PART_HEAD_CHARS,
+    partTailChars: PART_TAIL_CHARS,
+    maxRetainedMessageChars,
     maxToolOutputCapChars,
     systemPromptReserveTokens,
+    compactionRetries: COMPACTION_RETRIES,
   };
-
   assertConverges(budget);
   return budget;
 }
 
-/** The exact options Think's `truncateOlderMessages` takes, derived from the
- * budget. Shared by the model-facing assembly and the compaction token counter
- * so the trigger measures precisely what the model is sent. */
-export function truncationOptionsFor(budget: ContextBudget): {
-  keepRecent: number;
-  maxToolOutputChars: number;
-  maxTextChars: number;
-} {
+/** Project the budget onto exactly what `boundTranscript` needs. Both the
+ *  model-facing assembly and the compaction trigger go through this, so the
+ *  trigger can never measure a different transcript than the one we send. */
+export function boundingOptionsFor(budget: ContextBudget): BoundingOptions {
   return {
-    keepRecent: budget.keepRecent,
-    maxToolOutputChars: budget.maxToolOutputChars,
-    maxTextChars: budget.maxTextChars,
+    partHeadChars: budget.partHeadChars,
+    partTailChars: budget.partTailChars,
+    minTailMessages: budget.minTailMessages,
+    maxRetainedMessageChars: budget.maxRetainedMessageChars,
+    headMaxChars: budget.headMaxChars,
   };
 }
 
 /**
- * Compaction can only summarize the MIDDLE of the transcript. If the parts it
- * cannot touch — the protected head, the protected tail, the summary it writes,
- * and the system prompt that is measured against the same trigger — already
- * exceed the trigger, compaction fires on every append and never shortens
- * anything. That is not a tuning wart; it is an unrecoverable loop. Assert it
- * away at construction so a future tuning change fails loudly here instead of
- * silently re-creating the runaway in production.
+ * Compaction can only summarize the middle. If the parts it cannot touch
+ * already exceed the trigger, it fires on every append and shortens nothing.
+ *
+ * The previous version asserted over `protectHead * maxToolOutputChars` — one
+ * truncated tool output per protected message. Cost is per PART, and a single
+ * assistant turn was measured at 23 tool calls and 75,283 tokens: 5.9x the
+ * asserted head. The assertion passed at construction and was false at runtime.
+ * Every term here is one the pipeline enforces.
  */
 function assertConverges(b: ContextBudget): void {
-  const headTokens = b.protectHead * (b.maxToolOutputChars / CHARS_PER_TOKEN);
+  if (b.maxSummaryTokens < MIN_USEFUL_SUMMARY_TOKENS) {
+    throw new Error(
+      `Context window ${b.contextWindow} is too small to compact within: summary budget ` +
+        `${b.maxSummaryTokens} < ${MIN_USEFUL_SUMMARY_TOKENS} tokens. Every budget term scales ` +
+        `with the window, so this converges arithmetically while summarizing nothing useful.`,
+    );
+  }
+  const headTokens = b.headMaxChars / CHARS_PER_TOKEN;
+  // `maxRetainedMessageChars` is clamped so this can never exceed the budget.
   const tailTokens = Math.max(
     b.tailTokenBudget,
-    b.minTailMessages * (b.maxToolOutputCapChars / CHARS_PER_TOKEN),
+    (b.minTailMessages * b.maxRetainedMessageChars) / CHARS_PER_TOKEN,
   );
-  // The system prompt belongs in the floor because the trigger is compared
-  // against a total that includes it, while none of compaction's levers can
-  // shrink it.
   const floor = headTokens + tailTokens + b.maxSummaryTokens + b.systemPromptReserveTokens;
   if (floor >= b.compactAfterTokens) {
     throw new Error(
       `Context window ${b.contextWindow} yields a non-convergent compaction budget: ` +
-        `protected floor ${Math.ceil(floor)} (incl. ${b.systemPromptReserveTokens} system-prompt ` +
+        `enforced floor ${Math.ceil(floor)} (incl. ${b.systemPromptReserveTokens} system-prompt ` +
         `reserve) >= trigger ${b.compactAfterTokens}. ` +
         `Compaction would fire every turn and never shorten history.`,
     );

@@ -65,14 +65,25 @@ export function shouldQueueSubmitForThreadState({
   return shouldUseQueuedSubmit({ busy: busy || manualCompacting, hasContent });
 }
 
-export type CompactionNotice = "none" | "not-needed";
+export type CompactionNotice = "none" | "not-needed" | "declined";
 
+/**
+ * A decline is not a no-op. There IS a middle; it just cannot shrink without
+ * discarding history, which a manual `/compact` never does. Both report
+ * `compacted: false`, so collapsing them left the divider saying "No compaction
+ * needed" while the toast said the opposite.
+ *
+ * Keyed on the server's `reason`, never on the prose, and defaulting to
+ * "not-needed" so an older server build reads exactly as it used to.
+ */
 export function manualCompactionNoticeForResult(result: CompactThreadResult): CompactionNotice {
-  return result.compacted ? "none" : "not-needed";
+  if (result.compacted) return "none";
+  return result.reason === "declined" ? "declined" : "not-needed";
 }
 
 export function compactionNoticeLabel(notice: CompactionNotice): string | null {
   if (notice === "not-needed") return "No compaction needed";
+  if (notice === "declined") return "Couldn't compact further";
   return null;
 }
 

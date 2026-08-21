@@ -30,9 +30,12 @@ const MIXED_WINDOW_CATALOG: ProviderModelSearchResult[] = [
     contextLength: 1_000_000,
     source: "live",
   },
-  // Window (500k) is LARGER than the 400k thread, so the old raw-window
-  // comparison stayed silent — but its compaction trigger is 334,400, so the
+  // Window (500k) is LARGER than the 420k thread, so the old raw-window
+  // comparison stayed silent — but its compaction trigger is 401,616, so the
   // very next send compacts. This row is the mainline case the warning missed.
+  // (The trigger was 334,400 under the 0.8-of-input-budget rule; the late
+  // reserve moved it up, so the fixture's usage moved with it to keep the row
+  // straddling the threshold rather than sitting under it.)
   {
     id: "gpt-5-wide",
     name: "GPT-5 wide",
@@ -157,7 +160,7 @@ describe("ComposerModelPicker", () => {
       <ComposerModelPicker
         value={{ provider: "openai", model: "gpt-5" }}
         providers={providers}
-        currentUsageTokens={400_000}
+        currentUsageTokens={420_000}
         onSelect={vi.fn()}
       />,
     );
@@ -193,7 +196,7 @@ describe("ComposerModelPicker", () => {
       <ComposerModelPicker
         value={{ provider: "openai", model: "gpt-5" }}
         providers={providers}
-        currentUsageTokens={400_000}
+        currentUsageTokens={420_000}
         onSelect={onSelect}
       />,
     );

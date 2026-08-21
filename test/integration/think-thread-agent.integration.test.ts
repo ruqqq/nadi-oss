@@ -1920,7 +1920,7 @@ describe("ThinkThreadAgent spike", () => {
       await (instance as InitializableAgent).__unsafe_ensureInitialized();
       const compactable = instance as ThinkThreadAgent & {
         getCompactionStatus(): { phase: "idle" | "compacting" };
-        compactThread(): Promise<{ compacted: boolean; message: string }>;
+        compactThread(): Promise<{ compacted: boolean; reason?: string; message: string }>;
       };
       const before = compactable.getCompactionStatus();
       const compacted = await compactable.compactThread();
@@ -1932,6 +1932,7 @@ describe("ThinkThreadAgent spike", () => {
       before: { phase: "idle" },
       compacted: {
         compacted: false,
+        reason: "not-needed",
         message: "Nothing to compact yet.",
       },
       after: { phase: "idle" },
@@ -1945,11 +1946,12 @@ describe("ThinkThreadAgent spike", () => {
   // compaction through the real Session and real DO storage.
   //
   // Fixture sizing (window 32_000 → resolveContextBudget): compactAfterTokens
-  // 17_920, tailTokenBudget 4_480 (25% of it), protectHead 3, minTailMessages 2.
+  // 20_160 (input budget 22_400 minus a 2_240 late reserve), tailTokenBudget
+  // 5_120 (16% of the window), head = the first user message, minTailMessages 2.
   // `findTailCut` walks backward and protects everything it can afford, so a
   // transcript smaller than the tail budget leaves an EMPTY middle and compaction
   // legitimately no-ops. 50 turn pairs at ~900 chars each is ~12k tokens: well
-  // over the 4_480-token tail (so the middle is large) and well under the 17_920
+  // over the 5_120-token tail (so the middle is large) and well under the 20_160
   // trigger (so seeding does not auto-compact and manual compaction is the driver).
   it("compacts a tool-heavy thread: history shortens and the summary sees tool outputs", async () => {
     await seedRegistryThread(env.REGISTRY_DB, {
@@ -1981,7 +1983,17 @@ describe("ThinkThreadAgent spike", () => {
             chunkDelayInMs: null,
             chunks: [
               { type: "text-start" as const, id: "s" },
-              { type: "text-delta" as const, id: "s", delta: `SUMMARY OF: ${prompt}` },
+              // Deliberately SHORT, but DERIVED from what was streamed in.
+              // Compaction now rejects a summary that does not shrink its
+              // source (see compaction.ts), so echoing the prompt back gets
+              // rejected and runs the ladder. Quoting one real path keeps the
+              // stored-summary assertions below honest — they still fail if the
+              // summarizer is fed "[object Object]".
+              {
+                type: "text-delta" as const,
+                id: "s",
+                delta: `SUMMARY: read ${/src\/file-\d+\.ts/.exec(prompt)?.[0] ?? "nothing"}`,
+              },
               { type: "text-end" as const, id: "s" },
               {
                 type: "finish" as const,
@@ -2011,7 +2023,7 @@ describe("ThinkThreadAgent spike", () => {
             getHistory(): Promise<{ id: string; parts: unknown[] }[]>;
             getCompactions(): Promise<{ summary: string }[]>;
           };
-          compactThread(): Promise<{ compacted: boolean; message: string }>;
+          compactThread(): Promise<{ compacted: boolean; reason?: string; message: string }>;
         };
         // The mock model has no catalog window; this is how the thread's budget
         // gets a small, hand-computable one. Set BEFORE initialization: onStart
@@ -2080,6 +2092,133 @@ describe("ThinkThreadAgent spike", () => {
       const summary = result.overlays[0].summary;
       expect(summary).not.toContain("[object Object]");
       expect(summary).toContain("src/file-");
+
+      // The checkpoint is FRAMED and carries the COMPUTED continuity block, not
+      // just the model's prose. This is the end-to-end proof that the index is
+      // extracted from the real transcript and reaches the stored overlay —
+      // the unit tests only cover the pure functions.
+      expect(summary).toContain("established background");
+      expect(summary).toContain("## Work already done");
+      expect(summary).toContain("Files read:");
+      expect(summary).toContain("src/file-49.ts");
+    } finally {
+      modelSpy.mockRestore();
+    }
+  });
+
+  // A MANUAL compaction must never discard the transcript. The reset rung
+  // exists for automatic pressure, where the alternative is a failed turn and
+  // the user never sees the choice; the hidden `/compact` command means "shrink
+  // my thread", not "lose it". The unit test covers the pure function — this
+  // covers the WIRING, which a mutation of `allowReset` otherwise survives.
+  it("declines a manual compaction rather than resetting when nothing converges", async () => {
+    await seedRegistryThread(env.REGISTRY_DB, {
+      workspaceId: "workspace-think-manual-noreset",
+      agentId: "agent-think-manual-noreset",
+      threadId: "think-manual-noreset",
+      runtime: "think",
+      provider: "mock",
+      model: "mock",
+    });
+
+    // Echoes its own input, so the summary can never shrink its source and
+    // every rung of the ladder rejects it.
+    const modelSpy = vi.spyOn(threadAgentModule, "buildThreadModelForWorkspace").mockResolvedValue({
+      specificationVersion: "v3",
+      provider: "fake",
+      modelId: "fake-summarizer",
+      supportedUrls: {},
+      doStream: async (options: { prompt: unknown }) => {
+        const echoed = JSON.stringify(options.prompt);
+        return {
+          stream: simulateReadableStream({
+            initialDelayInMs: null,
+            chunkDelayInMs: null,
+            chunks: [
+              { type: "text-start" as const, id: "s" },
+              { type: "text-delta" as const, id: "s", delta: echoed },
+              { type: "text-end" as const, id: "s" },
+              {
+                type: "finish" as const,
+                finishReason: { unified: "stop" as const, raw: "stop" },
+                usage: {
+                  inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+                  outputTokens: { total: 5, text: 5, reasoning: 0 },
+                },
+              },
+            ],
+          }),
+        };
+      },
+    } as never);
+
+    try {
+      const stub = env.THINK_THREAD_AGENT.get(
+        env.THINK_THREAD_AGENT.idFromName("think-manual-noreset"),
+      );
+
+      const result = await runInThinkDo(stub, async (instance: any) => {
+        const agent = instance as InitializableAgent & {
+          env: { THINK_COMPACT_AFTER_TOKENS?: string | undefined };
+          session: {
+            appendMessage(message: unknown): Promise<void>;
+            getHistory(): Promise<{ id: string; parts: unknown[] }[]>;
+            getCompactions(): Promise<{ summary: string }[]>;
+          };
+          compactThread(): Promise<{ compacted: boolean; reason?: string; message: string }>;
+        };
+        const previousWindow = agent.env.THINK_COMPACT_AFTER_TOKENS;
+        agent.env.THINK_COMPACT_AFTER_TOKENS = "32000";
+        try {
+          await agent.__unsafe_ensureInitialized();
+          for (let i = 0; i < 50; i++) {
+            await agent.session.appendMessage({
+              id: `u${i}`,
+              role: "user",
+              parts: [{ type: "text", text: `step ${i}: read the config` }],
+            });
+            await agent.session.appendMessage({
+              id: `a${i}`,
+              role: "assistant",
+              parts: [
+                {
+                  type: "tool-read_file",
+                  toolName: "read_file",
+                  toolCallId: `call-${i}`,
+                  state: "output-available",
+                  input: { path: `src/file-${i}.ts` },
+                  output: { path: `src/file-${i}.ts`, content: `${"// filler\n".repeat(80)}` },
+                },
+              ],
+            });
+          }
+
+          const before = await agent.session.getHistory();
+          const compacted = await agent.compactThread();
+          const after = await agent.session.getHistory();
+          const overlays = await agent.session.getCompactions();
+          return { compacted, beforeLen: before.length, afterLen: after.length, overlays };
+        } finally {
+          if (previousWindow === undefined) {
+            delete agent.env.THINK_COMPACT_AFTER_TOKENS;
+          } else {
+            agent.env.THINK_COMPACT_AFTER_TOKENS = previousWindow;
+          }
+        }
+      });
+
+      // A decline, not a failure and not "nothing to compact". `reason` is what
+      // lets the client label the divider without parsing the prose — without
+      // it the transcript reads "No compaction needed" while the toast says the
+      // opposite.
+      expect(result.compacted).toEqual({
+        compacted: false,
+        reason: "declined",
+        message: "Couldn't compact further without discarding history.",
+      });
+      // Nothing was discarded and no checkpoint was written.
+      expect(result.afterLen).toBe(result.beforeLen);
+      expect(result.overlays).toHaveLength(0);
     } finally {
       modelSpy.mockRestore();
     }
@@ -2234,7 +2373,9 @@ describe("ThinkThreadAgent spike", () => {
   it("arms the model's budget-derived compaction trigger before any turn runs", async () => {
     const window = 32_000;
     const expected = resolveContextBudget(window).compactAfterTokens;
-    expect(expected).toBe(17_920);
+    // 22_400 input budget minus a 2_240 late reserve (10% of it, the small-window
+    // clamp on pi's 16_384). Was 17_920 under the old 0.8-of-input-budget rule.
+    expect(expected).toBe(20_160);
 
     await seedRegistryThread(env.REGISTRY_DB, {
       workspaceId: "workspace-think-compact-seed",

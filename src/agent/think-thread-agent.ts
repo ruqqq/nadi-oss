@@ -14,7 +14,7 @@ import {
 } from "@cloudflare/think";
 import type { SkillScriptRequest, SkillScriptRunner } from "agents/skills";
 import { callable, getAgentByName } from "agents";
-import { estimateMessageTokens, truncateOlderMessages } from "agents/experimental/memory/utils";
+import { estimateMessageTokens } from "agents/experimental/memory/utils";
 import {
   createInFlightGuard,
   createNadiCompactFunction,
@@ -22,12 +22,21 @@ import {
 } from "./compaction";
 import { estimateTruncatedThreadTokens } from "./thread-history-truncation";
 import {
+  boundingOptionsFor,
   CHARS_PER_TOKEN,
   DEFAULT_CONTEXT_WINDOW,
   resolveContextBudget,
-  truncationOptionsFor,
   type ContextBudget,
 } from "./context-budget";
+import { boundTranscript } from "./transcript-bounding";
+import {
+  boundContinuity,
+  EMPTY_CONTINUITY,
+  extractContinuity,
+  mergeContinuity,
+  renderContinuity,
+  type ContinuityIndex,
+} from "./continuity-index";
 import { resolveContextWindow } from "./context-window";
 import {
   flushThreadUsage,
@@ -288,6 +297,10 @@ const DRAFT_STORAGE_KEY = "composer:draft";
  */
 const MODEL_SWITCH_ORIGIN_STORAGE_KEY = "modelSwitch:origin";
 const FEEDBACK_ACTIVE_INTERVIEW_STORAGE_KEY = "feedback:active-interview";
+/** Merged continuity index, carried forward across every compaction of a
+ *  thread. DO storage, not D1: it is per-thread model context, and it dies with
+ *  the thread the same way the transcript does. */
+const CONTINUITY_STORAGE_KEY = "compaction:continuity";
 const FEEDBACK_DRAFT_STORAGE_KEY = "feedback:draft";
 const FEEDBACK_INTERVIEW_BOUNDS_STORAGE_KEY = "feedback:interview-bounds";
 const FEEDBACK_DISPATCHED_MESSAGE_IDS_STORAGE_KEY = "feedback:dispatched-message-ids";
@@ -337,10 +350,24 @@ type CompactionSource = "append" | "proactive" | "reactive" | "manual";
  * through this seam stops a revert or a bad merge from silently restoring it.
  * See `test/unit/agent/thread-compaction-wiring.test.ts`.
  */
+/**
+ * The manual-compaction result. `reason` exists so the client can label the
+ * divider without parsing `message`: a decline and a genuine no-op both report
+ * `compacted: false`, and collapsing them made the divider read "No compaction
+ * needed" while the toast said the opposite.
+ */
+export type CompactThreadOutcome = {
+  compacted: boolean;
+  reason?: "declined" | "not-needed";
+  message: string;
+};
+
 export function createThreadCompaction(deps: {
   budget: ContextBudget;
   summarize: (prompt: string) => Promise<string>;
   onOutcome: (outcome: CompactionOutcome) => void;
+  continuityBlock?: string;
+  allowReset?: boolean;
 }) {
   return createNadiCompactFunction(deps);
 }
@@ -765,7 +792,11 @@ export class ThinkThreadAgent extends Think<Env> {
     // `proactiveInputTokens` IS the trigger the budget derived, so headroom is 1.
     this.contextOverflow = {
       reactive: true,
-      proactive: { maxInputTokens: budget.proactiveInputTokens, headroom: 1, maxCompactions: 1 },
+      // 2, not 1: the compaction ladder can spend an attempt on a span that
+      // fails the shrink check before the reset lands, and a later trigger puts
+      // more compactions inside a turn. At 1 the guard aborts the ladder at its
+      // first rung, which is the case the reset exists to survive.
+      proactive: { maxInputTokens: budget.proactiveInputTokens, headroom: 1, maxCompactions: 2 },
     };
     return budget;
   }
@@ -1033,8 +1064,32 @@ export class ThinkThreadAgent extends Think<Env> {
               const config = await this.resolveRuntimeConfigForThink();
               const budget = await this.currentContextBudget();
               const source = this._compactionSource;
+              // Computed, never generated: a summarizer under context pressure
+              // drops bookkeeping first, and bookkeeping is what stops the next
+              // turn redoing finished work. Extracted from the FULL history the
+              // SDK handed us — not the selected middle — so a span already
+              // shadowed by an earlier checkpoint still contributes, and merged
+              // with what previous checkpoints knew (pi's CompactionDetails).
+              const continuity = boundContinuity(
+                mergeContinuity(
+                  (await this.ctx.storage.get<ContinuityIndex>(CONTINUITY_STORAGE_KEY)) ??
+                    EMPTY_CONTINUITY,
+                  extractContinuity(messages as unknown as { parts?: unknown }[]),
+                ),
+                // A quarter of the summary budget: the block lives INSIDE the
+                // post-compaction floor, so it cannot be allowed to grow with
+                // the thread.
+                Math.floor((budget.maxSummaryTokens * CHARS_PER_TOKEN) / 4),
+              );
+              await this.ctx.storage.put(CONTINUITY_STORAGE_KEY, continuity);
               const compact = createThreadCompaction({
                 budget,
+                continuityBlock: renderContinuity(continuity),
+                // A manual `/compact` must never discard the transcript: the
+                // user asked to shrink the thread, not to lose it. Only
+                // automatic pressure — where the alternative is a failed turn —
+                // may fall through to the reset.
+                allowReset: source !== "manual",
                 summarize: async (prompt) => {
                   // Streams, and falls back to a keyless Workers AI model if the
                   // thread's own model cannot serve the call. A summarizer that
@@ -1098,6 +1153,30 @@ export class ThinkThreadAgent extends Think<Env> {
                     log.info("think_thread.compacted", {
                       ...base,
                       outcome: outcome.status,
+                      reason: outcome.reason,
+                    });
+                  } else if (outcome.status === "declined") {
+                    // Not a failure and not a no-op: a manual compaction that
+                    // would only have converged by discarding history.
+                    log.info("think_thread.compaction_declined", {
+                      ...base,
+                      reason: outcome.reason,
+                    });
+                  } else if (outcome.status === "reset") {
+                    // A reset DISCARDS transcript the model was still using. It
+                    // is recoverable but lossy, so it must never pass silently.
+                    log.warn("think_thread.compaction_reset", {
+                      ...base,
+                      discardedMessages: outcome.discardedMessages,
+                      reason: outcome.reason,
+                    });
+                  } else if (outcome.status === "retried") {
+                    // Not a failure: the first span's summary did not shrink it,
+                    // so the range widened and the summarizer ran again. Visible
+                    // because it is a second billed call on the thread's model.
+                    log.info("think_thread.compaction_retried", {
+                      ...base,
+                      attempt: outcome.attempt,
                       reason: outcome.reason,
                     });
                   } else {
@@ -1447,8 +1526,9 @@ export class ThinkThreadAgent extends Think<Env> {
       model: runtimeConfig.modelConfig.model,
       contextWindow: contextBudget.contextWindow,
       compactAfterTokens: contextBudget.compactAfterTokens,
-      keepRecent: contextBudget.keepRecent,
-      maxToolOutputChars: contextBudget.maxToolOutputChars,
+      partHeadChars: contextBudget.partHeadChars,
+      partTailChars: contextBudget.partTailChars,
+      headMaxChars: contextBudget.headMaxChars,
       maxSteps,
       hasWorkbench,
     });
@@ -6364,7 +6444,7 @@ export class ThinkThreadAgent extends Think<Env> {
       .map((e) => ({ clientMessageId: e.message.id, text: steeredMessageText(e.message) }));
   }
 
-  async compactThread(): Promise<{ compacted: boolean; message: string }> {
+  async compactThread(): Promise<CompactThreadOutcome> {
     await this.assertThreadWritable();
     const stable = await this.waitUntilStable({ timeout: MANUAL_COMPACT_STABLE_TIMEOUT_MS });
     if (!stable) {
@@ -6394,7 +6474,17 @@ export class ThinkThreadAgent extends Think<Env> {
       if (outcome?.status === "failed") {
         throw new Error(`thread_compaction_failed: ${outcome.error}`);
       }
-      return { compacted: false, message: "Nothing to compact yet." };
+      // A decline is not "nothing to compact": there IS a middle, but every
+      // span that would fit needs history thrown away, and a manual trigger
+      // never does that. Say so, rather than implying the thread is small.
+      if (outcome?.status === "declined") {
+        return {
+          compacted: false,
+          reason: "declined",
+          message: "Couldn't compact further without discarding history.",
+        };
+      }
+      return { compacted: false, reason: "not-needed", message: "Nothing to compact yet." };
     }
     return { compacted: true, message: "Thread compacted." };
   }
@@ -6887,6 +6977,10 @@ async function sourceHash(raw: unknown): Promise<string> {
  * 32k one. There is no config knob for it, which is why this reaches for a
  * method Think declares `private`.
  *
+ * Nadi bounds per PART instead of per recency: the SDK's `keepRecent` exempts
+ * whole recent messages, which meant a short thread whose opening turn held 23
+ * tool calls was never bounded at all. See `transcript-bounding.ts`.
+ *
  * Why this seam and not `TurnConfig.messages` (which IS public, and which we
  * already use): the proactive context guard rebuilds its head by calling
  * `_assembleModelMessages` internally. Overriding only the public seam would
@@ -6926,7 +7020,7 @@ async function assembleWindowScaledModelMessages(
   // present here and are gone after convertToModelMessages, so this is the only
   // seam where the segment origins are readable.
   const sanitized = sanitizeCrossModelReasoning(segmented);
-  const truncated = truncateOlderMessages(sanitized, truncationOptionsFor(budget));
+  const truncated = boundTranscript(sanitized, boundingOptionsFor(budget)) as typeof sanitized;
   // Same post-repair diagnostic Think's own _assembleModelMessages runs: a
   // survivor here means _repairToolTranscriptParts has a gap, even though
   // ignoreIncompleteToolCalls keeps the turn itself safe.

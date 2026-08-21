@@ -52,7 +52,7 @@ interface ThreadDeletionStub {
 }
 
 interface ThreadCompactionStub {
-  compactThread(): Promise<{ compacted: boolean; message: string }>;
+  compactThread(): Promise<{ compacted: boolean; reason?: string; message: string }>;
   getCompactionStatus(): Promise<{ phase: "idle" | "compacting" }>;
 }
 
@@ -273,7 +273,7 @@ async function compactThread(req: Request, env: Env, threadId: string): Promise<
     env.THINK_THREAD_AGENT,
     threadId,
   )) as unknown as ThreadCompactionStub;
-  let result: { compacted: boolean; message: string };
+  let result: { compacted: boolean; reason?: string; message: string };
   try {
     result = await stub.compactThread();
   } catch (error) {

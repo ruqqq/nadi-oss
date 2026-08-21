@@ -227,7 +227,7 @@ describe("assembly order", () => {
       fs.readFileSync("src/agent/think-thread-agent.ts", "utf8"),
     );
     const sanitizeAt = source.indexOf("sanitizeCrossModelReasoning(");
-    const truncateAt = source.indexOf("truncateOlderMessages(sanitized");
+    const truncateAt = source.indexOf("boundTranscript(sanitized");
     expect(sanitizeAt).toBeGreaterThan(-1);
     expect(truncateAt).toBeGreaterThan(-1);
     expect(sanitizeAt).toBeLessThan(truncateAt);
@@ -270,10 +270,15 @@ describe("sanitizer x compaction", () => {
 
   function longTranscript(): UIMessage[] {
     const filler = "x".repeat(6_000);
+    // The protected head is now the first USER message and everything before
+    // it, so an assistant turn can only survive it by preceding that message.
+    // That is the shape a transcript takes after an earlier archive, and it is
+    // the only shape in which foreign reasoning still reaches the head — which
+    // is precisely what these two tests are here to pin down.
     const messages: UIMessage[] = [
-      user("m0", [{ type: "text", text: `opening ${filler}` }]),
       // The signed Anthropic thinking block that must never reach gpt-5.
-      assistant("m1", [anthropicReasoning, { type: "text", text: `claude turn ${filler}` }]),
+      assistant("m0", [anthropicReasoning, { type: "text", text: `claude turn ${filler}` }]),
+      user("m1", [{ type: "text", text: `opening ${filler}` }]),
       user("m2", [{ type: "text", text: `more ${filler}` }]),
     ];
     for (let i = 3; i < 40; i += 1) {
@@ -284,7 +289,11 @@ describe("sanitizer x compaction", () => {
     // The switch itself, mid-transcript — the marker rides the user message
     // whose turn committed it.
     messages.push(user("m40", [SWITCH, { type: "text", text: `switch here ${filler}` }]));
-    for (let i = 41; i < 60; i += 1) {
+    // Enough post-switch turns that m40 is genuinely archived. The retained
+    // tail is `retainRatio` 0.16 of the WINDOW (32,000 tokens at 200k), which
+    // is wider than the old 25%-of-trigger tail — with only 19 turns after the
+    // switch the marker now survives compaction and the premise below fails.
+    for (let i = 41; i < 80; i += 1) {
       messages.push(
         (i % 2 === 0 ? user : assistant)(`m${i}`, [{ type: "text", text: `turn ${i} ${filler}` }]),
       );
@@ -304,10 +313,10 @@ describe("sanitizer x compaction", () => {
 
     const after = applyCompaction(before, result!);
     expect(isCompactionMessage(after.find((m) => m.id === "compaction_c1") as never)).toBe(true);
-    // The premise: the marker really is gone, and message 1's Anthropic
+    // The premise: the marker really is gone, and message 0's Anthropic
     // reasoning really did survive in the protected head.
     expect(after.some((m) => m.parts.some((p) => readModelSwitchPart(p)))).toBe(false);
-    expect(after[1]?.parts).toContain(anthropicReasoning);
+    expect(after[0]?.parts).toContain(anthropicReasoning);
     // ... and with no marker the sanitizer alone is a no-op, so the signed
     // Anthropic block would be replayed at gpt-5.
     expect(sanitizeCrossModelReasoning(after)).toBe(after);
@@ -330,11 +339,11 @@ describe("sanitizer x compaction", () => {
     const sanitized = sanitizeCrossModelReasoning(restored);
 
     // The head is pre-switch again, so its signed Anthropic block is dropped.
-    expect(sanitized[1]?.parts).toEqual([before[1]!.parts[1]]);
+    expect(sanitized[0]?.parts).toEqual([before[0]!.parts[1]]);
     // The marker lands on the summary message (the anchor was archived), so
     // everything after it stays attributed to the current tuple.
-    expect(readModelSwitchPart(sanitized[3]?.parts[0])).toEqual({ from: ANTHROPIC, to: GPT });
-    expect(sanitized[3]?.id).toBe("compaction_c1");
+    expect(readModelSwitchPart(sanitized[2]?.parts[0])).toEqual({ from: ANTHROPIC, to: GPT });
+    expect(sanitized[2]?.id).toBe("compaction_c1");
     // Deterministic: a second pass over an already-restored transcript is a
     // no-op, which is what keeps prompt caching to one miss per switch.
     expect(restoreModelSwitchMarker(restored, { from: ANTHROPIC, to: GPT })).toBe(restored);

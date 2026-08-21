@@ -375,10 +375,14 @@ describe("ThinkThreadAgent turn-usage wiring", () => {
       const result = await (
         ThinkThreadAgent.prototype.compactThread as unknown as (
           this: unknown,
-        ) => Promise<{ compacted: boolean; message: string }>
+        ) => Promise<{ compacted: boolean; message: string; reason?: string }>
       ).call(a);
 
-      expect(result).toEqual({ compacted: false, message: "Nothing to compact yet." });
+      expect(result).toEqual({
+        compacted: false,
+        message: "Nothing to compact yet.",
+        reason: "not-needed",
+      });
       expect(h.db.written.inserts).toEqual([]);
       expect(h.db.written.batches).toBe(0);
     });

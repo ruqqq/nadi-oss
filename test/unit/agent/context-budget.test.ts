@@ -1,57 +1,74 @@
 import { describe, expect, it } from "vitest";
-import { CHARS_PER_TOKEN, resolveContextBudget } from "../../../src/agent/context-budget";
+import {
+  boundingOptionsFor,
+  CHARS_PER_TOKEN,
+  resolveContextBudget,
+} from "../../../src/agent/context-budget";
+
+/** Every term the pipeline actually enforces. Mirrors `assertConverges`. */
+const enforcedFloor = (b: ReturnType<typeof resolveContextBudget>): number =>
+  b.headMaxChars / CHARS_PER_TOKEN +
+  Math.max(b.tailTokenBudget, (b.minTailMessages * b.maxRetainedMessageChars) / CHARS_PER_TOKEN) +
+  b.maxSummaryTokens +
+  b.systemPromptReserveTokens;
 
 describe("resolveContextBudget", () => {
-  it("scales truncation to the window instead of the SDK's fixed 4/500", () => {
-    const small = resolveContextBudget(32_000);
-    const large = resolveContextBudget(200_000);
-
-    // The SDK hardcodes keepRecent: 4, maxToolOutputChars: 500 for every model.
-    expect(large.keepRecent).toBeGreaterThan(small.keepRecent);
-    expect(large.maxToolOutputChars).toBeGreaterThan(small.maxToolOutputChars);
-    expect(large.maxToolOutputChars).toBeGreaterThan(500);
+  // The exact numbers the rewrite spec commits to for gpt-5.6-luna.
+  it("derives the documented budget at a 272k window", () => {
+    const b = resolveContextBudget(272_000);
+    expect(b.inputBudgetTokens).toBe(212_800);
+    expect(b.compactAfterTokens).toBe(196_416);
+    expect(b.headMaxChars).toBe(16_384);
+    expect(b.tailTokenBudget).toBe(43_520);
+    expect(b.maxSummaryTokens).toBe(8_192);
+    expect(b.partHeadChars).toBe(4_096);
+    expect(b.partTailChars).toBe(1_024);
+    expect(b.maxRetainedMessageChars).toBe(65_536);
+    expect(b.maxToolOutputCapChars).toBe(32_768);
   });
 
-  it("keeps a small model at SDK parity floors", () => {
-    const tiny = resolveContextBudget(8_000);
-    expect(tiny.keepRecent).toBe(4);
-    expect(tiny.maxToolOutputChars).toBe(500);
+  // The old assertion modelled a term the code did not enforce: the head as
+  // `protectHead * maxToolOutputChars`, one truncated tool output per protected
+  // message. The real head on thr_ba1be632 was 5.9x that. Every term here is
+  // now enforced — by `boundTranscript` or by range selection.
+  it("keeps the enforced floor far under the trigger at 272k", () => {
+    const b = resolveContextBudget(272_000);
+    expect(enforcedFloor(b)).toBe(59_808);
+    expect(enforcedFloor(b)).toBeLessThan(b.compactAfterTokens * 0.35);
   });
 
-  it("trips the proactive guard later than the append threshold", () => {
-    const budget = resolveContextBudget(200_000);
-    expect(budget.proactiveInputTokens).toBeGreaterThan(budget.compactAfterTokens);
-    expect(budget.proactiveInputTokens).toBeLessThan(budget.inputBudgetTokens);
-  });
-
-  // The runaway, encoded. Compaction can only summarize the MIDDLE; if the
-  // protected head + protected tail + summary + the system prompt already exceed
-  // the trigger, it fires on every append and never shortens anything. This is
-  // the regression that the stored-history strip pass was originally bolted on
-  // to mask.
-  it.each([8_000, 16_000, 32_000, 128_000, 200_000, 400_000, 1_000_000])(
-    "guarantees the protected floor fits under the trigger at a %i window",
+  it.each([8_000, 16_000, 32_000, 128_000, 200_000, 272_000, 400_000, 1_000_000])(
+    "stays convergent at a %i window",
     (window) => {
       const b = resolveContextBudget(window);
-      const headTokens = b.protectHead * (b.maxToolOutputChars / CHARS_PER_TOKEN);
-      // Tail messages are inside keepRecent, so they are replayed at FULL
-      // fidelity — their size is bounded only by the write-time cap.
-      const tailTokens = Math.max(
-        b.tailTokenBudget,
-        b.minTailMessages * (b.maxToolOutputCapChars / CHARS_PER_TOKEN),
-      );
-      // The trigger is compared against a total that INCLUDES the system prompt
-      // (estimateTruncatedThreadTokens adds it), and compaction cannot shrink
-      // it — so it is part of the floor, not free headroom.
       expect(b.systemPromptReserveTokens).toBeGreaterThan(0);
-      const floor = headTokens + tailTokens + b.maxSummaryTokens + b.systemPromptReserveTokens;
-      expect(floor).toBeLessThan(b.compactAfterTokens);
+      expect(enforcedFloor(b)).toBeLessThan(b.compactAfterTokens);
     },
   );
 
-  // A reserve that never binds is not a reserve: it must be big enough to cover
-  // a real system prompt (soul + a 2k-token memory block + role + skills) once
-  // the window is large enough to afford one.
+  it("triggers later than the old 0.8-of-input-budget rule", () => {
+    const b = resolveContextBudget(272_000);
+    expect(b.compactAfterTokens).toBeGreaterThan(Math.floor(b.inputBudgetTokens * 0.8));
+  });
+
+  it("trips the proactive guard later than the append threshold", () => {
+    const b = resolveContextBudget(200_000);
+    expect(b.proactiveInputTokens).toBeGreaterThan(b.compactAfterTokens);
+    expect(b.proactiveInputTokens).toBeLessThan(b.inputBudgetTokens);
+  });
+
+  // `maxRetainedMessageChars` is clamped so `minTailMessages` retained messages
+  // can never outgrow the tail budget. Without the clamp the tail term is
+  // assumed rather than proved — the mistake the head term made.
+  it("clamps the retained-message ceiling so the tail term is provable", () => {
+    for (const window of [8_000, 32_000, 272_000, 1_000_000]) {
+      const b = resolveContextBudget(window);
+      expect((b.minTailMessages * b.maxRetainedMessageChars) / CHARS_PER_TOKEN).toBeLessThanOrEqual(
+        b.tailTokenBudget,
+      );
+    }
+  });
+
   it("reserves room for the system prompt, scaled down only where the window cannot afford it", () => {
     expect(resolveContextBudget(200_000).systemPromptReserveTokens).toBe(4_000);
     expect(resolveContextBudget(1_000_000).systemPromptReserveTokens).toBe(4_000);
@@ -60,7 +77,38 @@ describe("resolveContextBudget", () => {
     expect(tiny.systemPromptReserveTokens).toBeGreaterThan(0);
   });
 
-  it("rejects a window too small to compact within", () => {
-    expect(() => resolveContextBudget(1_000)).toThrow(/context window/i);
+  // Every term now scales with the window, so a tiny window converges
+  // arithmetically. The guard that remains is about usefulness, not arithmetic.
+  it("rejects a window too small to summarize anything useful", () => {
+    expect(() => resolveContextBudget(1_000)).toThrow(/too small to compact within/i);
+    expect(() => resolveContextBudget(1_000)).toThrow(/summary budget/i);
+  });
+
+  it("keeps the proactive guard strictly between the trigger and the budget", () => {
+    for (const window of [8_000, 32_000, 200_000, 272_000, 1_000_000]) {
+      const b = resolveContextBudget(window);
+      expect(b.proactiveInputTokens).toBeGreaterThan(b.compactAfterTokens);
+      expect(b.proactiveInputTokens).toBeLessThan(b.inputBudgetTokens);
+    }
+  });
+
+  it("no longer exposes the message-counted head or the recency window", () => {
+    const b = resolveContextBudget(272_000) as unknown as Record<string, unknown>;
+    expect(b.protectHead).toBeUndefined();
+    expect(b.keepRecent).toBeUndefined();
+    expect(b.maxToolOutputChars).toBeUndefined();
+    expect(b.maxTextChars).toBeUndefined();
+  });
+});
+
+describe("boundingOptionsFor", () => {
+  it("projects exactly the fields the bounding module needs", () => {
+    expect(boundingOptionsFor(resolveContextBudget(272_000))).toEqual({
+      partHeadChars: 4_096,
+      partTailChars: 1_024,
+      minTailMessages: 2,
+      maxRetainedMessageChars: 65_536,
+      headMaxChars: 16_384,
+    });
   });
 });

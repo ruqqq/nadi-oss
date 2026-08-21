@@ -22,8 +22,10 @@ describe("compaction-trigger parity", () => {
   it("warns on the mainline case the raw-window comparison missed", () => {
     // 128k window, 100k of conversation: the window is bigger than the usage,
     // so the old `contextLength < currentUsageTokens` test said nothing — but
-    // the trigger sits at 71,680 and the very next send compacts.
-    expect(compactionTriggerTokens(128_000)).toBe(71_680);
+    // the trigger sits at 80,640 and the very next send compacts. (Was 71,680
+    // under the 0.8-of-input-budget rule; the late reserve moved it up, and the
+    // warning still fires because 80,640 < 100,000.)
+    expect(compactionTriggerTokens(128_000)).toBe(80_640);
     expect(willCompactOnSwitch(128_000, 100_000)).toBe(true);
     expect(128_000 < 100_000).toBe(false);
   });

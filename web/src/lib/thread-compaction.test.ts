@@ -126,6 +126,24 @@ describe("manualCompactionNoticeForResult", () => {
     expect(compactionNoticeLabel("not-needed")).toBe("No compaction needed");
   });
 
+  // A declined compaction is NOT "no compaction needed": there is a middle, it
+  // just cannot shrink without discarding history. Collapsing both to one label
+  // made the divider contradict the toast.
+  it("distinguishes a declined compaction from one that was not needed", () => {
+    expect(
+      manualCompactionNoticeForResult({
+        compacted: false,
+        reason: "declined",
+        message: "Couldn't compact further without discarding history.",
+      }),
+    ).toBe("declined");
+    expect(compactionNoticeLabel("declined")).toBe("Couldn't compact further");
+  });
+
+  it("falls back to not-needed when the server sends no reason", () => {
+    expect(manualCompactionNoticeForResult({ compacted: false, message: "x" })).toBe("not-needed");
+  });
+
   it("does not add a local divider when the SDK will add a compaction overlay", () => {
     expect(
       manualCompactionNoticeForResult({

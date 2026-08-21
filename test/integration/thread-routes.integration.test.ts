@@ -2630,6 +2630,7 @@ describe("thread routes", () => {
     await expect(res?.json()).resolves.toEqual({
       compacted: false,
       message: "Nothing to compact yet.",
+      reason: "not-needed",
     });
   });
 

@@ -16,14 +16,13 @@ import { resolveContextBudget } from "../../../src/agent/context-budget";
  * that some function exists.
  */
 describe("ThinkThreadAgent._assembleModelMessages override", () => {
-  it("applies window-scaled truncation instead of the SDK's fixed 4-message/500-char cut", async () => {
-    // For a 200k window: keepRecent = clamp(148_000 / 10_000, 4, 32) = 14;
-    // maxToolOutputChars = clamp(592_000 * 0.02, 500, 20_000) = 11_840. Every
-    // fixture number below is sized off those two real values, not the SDK's
-    // defaults (keepRecent 4, maxToolOutputChars 500) — a fixture that only
-    // clears the SDK defaults can't tell "the override ran" from "it silently
-    // fell back to Think's own method".
-    const bigOutput = "x".repeat(20_000); // > 11_840, so the real cap actually fires
+  it("applies Nadi's part bounding instead of the SDK's fixed 4-message/500-char cut", async () => {
+    // Sized off the REAL budget, not the SDK defaults. For any window the part
+    // bound is partHead 4_096 + marker + partTail 1_024, and the retained tail
+    // is minTailMessages = 2. A fixture that only clears the SDK defaults
+    // (keepRecent 4, maxToolOutputChars 500) cannot tell "the override ran"
+    // from "it silently fell back to Think's own method".
+    const bigOutput = "x".repeat(20_000);
     const history = Array.from({ length: 20 }, (_, i) => ({
       id: `m${i}`,
       role: "assistant",
@@ -62,22 +61,22 @@ describe("ThinkThreadAgent._assembleModelMessages override", () => {
     const toolMessages = out.filter((m) => m.role === "tool");
     const outputSize = (i: number) => JSON.stringify(toolMessages[i]?.content[0]?.output).length;
 
-    // Message 0 is outside `keepRecent` (14) under the real budget, so its
-    // 20_000-char output gets cut to the window-scaled cap (11_840). This
-    // distinguishes "the cap ran" (order of magnitude above the SDK's fixed
-    // ~500-char cut, and clearly below the untouched 20_000) from a broken
-    // `maxToolOutputChars` — e.g. a regression that always returned 500 or 1
-    // would fail this bound even though `keepRecent` stayed correct.
-    expect(outputSize(0)).toBeGreaterThan(9_000);
-    expect(outputSize(0)).toBeLessThan(14_000);
+    // Message 0 is bounded: an order of magnitude above the SDK's fixed ~500
+    // cut, and clearly below the untouched 20,000. A regression that always
+    // returned 500 or 1 fails this bound.
+    expect(outputSize(0)).toBeGreaterThan(4_000);
+    expect(outputSize(0)).toBeLessThan(8_000);
 
-    // Message 10 is inside `keepRecent` (14) under the real budget — untouched
-    // — but would fall OUTSIDE the SDK default `keepRecent` (4) and get
-    // truncated to the cap. This is what actually exercises `keepRecent`: the
-    // message-0 check above is truncated either way (aged under both the real
-    // and the SDK-default window) and can't tell a `keepRecent` regression
-    // apart from correct behavior.
-    expect(outputSize(10)).toBeGreaterThan(18_000);
+    // Message 16 is what actually proves OUR options ran. Under the SDK default
+    // `keepRecent` of 4 it sits inside the protected window and comes back at
+    // full 20,000; under Nadi's `minTailMessages` of 2 it is outside the
+    // retained tail and gets bounded. Message 0 is truncated under both
+    // policies and cannot make that distinction.
+    expect(outputSize(16)).toBeLessThan(8_000);
+
+    // The last two messages ARE the retained tail, and each is under
+    // `maxRetainedMessageChars`, so they are replayed verbatim.
+    expect(outputSize(19)).toBeGreaterThan(18_000);
   });
 });
 
