@@ -11,9 +11,6 @@ importers:
       '@ai-sdk/anthropic':
         specifier: ^3.0.88
         version: 3.0.88(zod@4.4.3)
-      '@ai-sdk/deepseek':
-        specifier: ^2.0.51
-        version: 2.0.51(zod@4.4.3)
       '@ai-sdk/openai':
         specifier: ^3.0.76
         version: 3.0.76(zod@4.4.3)
@@ -288,12 +285,6 @@ packages:
 
   '@ai-sdk/anthropic@3.0.88':
     resolution: {integrity: sha512-2IqL7Auu0XW3BnulsHJUb7C4lQKXmWQ7MU2Osq+tfJ79in2P0Li2sX2j45HJMenGJL/JhSyunsYhyv63qMRxWQ==}
-    engines: {node: '>=18'}
-    peerDependencies:
-      zod: ^3.25.76 || ^4.1.8
-
-  '@ai-sdk/deepseek@2.0.51':
-    resolution: {integrity: sha512-WqeQDA8HTFRa2RB9dYYMgZ2KxXdICmSV+UPJrspVUcJQPetAJKBH3Ys/ZEmgaGnjqMZEw/EyIYSe09xFETxfZg==}
     engines: {node: '>=18'}
     peerDependencies:
       zod: ^3.25.76 || ^4.1.8
@@ -1329,11 +1320,11 @@ packages:
 
   '@esbuild-kit/core-utils@3.3.2':
     resolution: {integrity: sha512-sPRAnw9CdSsRmEtnsl2WXWdyquogVpB3yZ3dgwJfe8zrOzTsV7cJvmwrKVa+0ma5BoiGJ+BoqkMvawbayKUsqQ==}
-    deprecated: 'Merged into tsx: https://tsx.is'
+    deprecated: 'Merged into tsx: https://tsx.hirok.io'
 
   '@esbuild-kit/esm-loader@2.6.5':
     resolution: {integrity: sha512-FxEMIkJKnodyA1OaCUoEvbYRkoZlLZ4d/eXFu9Fh8CbBBgP5EmZxrfTRyN0qpXZ4vOvqnE5YdRdcrmUUXuU+dA==}
-    deprecated: 'Merged into tsx: https://tsx.is'
+    deprecated: 'Merged into tsx: https://tsx.hirok.io'
 
   '@esbuild/aix-ppc64@0.25.12':
     resolution: {integrity: sha512-Hhmwd6CInZ3dwpuGTF8fJG6yoWmsToE+vYgD4nytZVxcu1ulHpUQRAB1UJ8+N1Am3Mz4+xOByoQoSZf4D+CpkA==}
@@ -7586,12 +7577,6 @@ snapshots:
     dependencies:
       '@ai-sdk/provider': 3.0.12
       '@ai-sdk/provider-utils': 4.0.32(zod@4.4.3)
-      zod: 4.4.3
-
-  '@ai-sdk/deepseek@2.0.51(zod@4.4.3)':
-    dependencies:
-      '@ai-sdk/provider': 3.0.14
-      '@ai-sdk/provider-utils': 4.0.41(zod@4.4.3)
       zod: 4.4.3
 
   '@ai-sdk/gateway@3.0.138(zod@4.4.3)':

@@ -51,6 +51,7 @@ import type { AgentMcpOAuthProvider, AgentToolLifecycleResult, AgentToolRunInfo 
 import {
   APICallError,
   convertToModelMessages,
+  generateText,
   type LanguageModel,
   type ModelMessage,
   type ToolSet,
@@ -4095,6 +4096,86 @@ export class ThinkThreadAgent extends Think<Env> {
       compacted: result != null,
       outcome,
     };
+  }
+
+  /**
+   * One real turn against the thread's OWN resolved provider/model with an
+   * attachment attached, reporting what the provider said and what it warned
+   * about. Unit tests can prove our adapter emits `image_url`; only a live call
+   * proves the provider accepts it and that the model can read it — the vendor
+   * DeepSeek adapter dropped every image while every test stayed green.
+   *
+   * Deliberately outside the thread's history: `generateText`, not the chat
+   * session, so a probe never persists messages or triggers compaction.
+   */
+  async debugVisionProbe(input: { attachmentId: string; prompt?: string }): Promise<{
+    provider: string;
+    model: string;
+    inlined: boolean;
+    text: string;
+    warnings: string[];
+    usage: unknown;
+    error?: string;
+  }> {
+    const runtimeConfig = await this.resolveRuntimeConfigForThink();
+    const { provider, model: modelId } = runtimeConfig.modelConfig;
+    const repo = new AttachmentRepository(registryBinding(this.env));
+    const row = await repo.getByIdInThread(input.attachmentId, this.name);
+    if (!row) throw new Error(`attachment_not_in_thread:${input.attachmentId}`);
+
+    // The same prepare path a real turn takes, so the probe exercises what the
+    // model would actually be sent — including whether the attachment survives
+    // as a file part or is replaced by extraction text.
+    const messages = await this.prepareModelMessagesForThink(
+      [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: input.prompt ?? "Describe this image. Transcribe any text." },
+            {
+              type: "file",
+              mediaType: row.mimeType,
+              data: `/api/attachments/${input.attachmentId}`,
+              ...(row.filename ? { filename: row.filename } : {}),
+            },
+          ],
+        } as ModelMessage,
+      ],
+      runtimeConfig.modelConfig,
+    );
+    const inlined = messages.some(
+      (message) =>
+        Array.isArray(message.content) &&
+        message.content.some((part) => (part as { type?: string }).type === "file"),
+    );
+
+    const languageModel = await buildThreadModelForWorkspace(
+      this.env,
+      runtimeConfig.modelConfig,
+      runtimeConfig.workspaceId,
+    );
+
+    try {
+      const result = await generateText({ model: languageModel, messages });
+      return {
+        provider,
+        model: modelId,
+        inlined,
+        text: result.text,
+        warnings: (result.warnings ?? []).map((warning) => JSON.stringify(warning)),
+        usage: result.usage,
+      };
+    } catch (error) {
+      return {
+        provider,
+        model: modelId,
+        inlined,
+        text: "",
+        warnings: [],
+        usage: null,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
   }
 
   async debugReadMessages(limit = 12): Promise<Array<{ id: string; role: string; text: string }>> {

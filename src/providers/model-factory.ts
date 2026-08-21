@@ -6,6 +6,7 @@ import type { LanguageModel } from "ai";
 import { simulateReadableStream } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
 import type { ProviderEndpointConfig } from "../db/repositories/provider-configs";
+import { withProviderWarningLogging } from "./log-warnings";
 import { createOpenAICompatibleModel } from "./openai-compatible";
 import { createOpenAIOAuthModel } from "./openai-oauth";
 import type { OpenAIOAuthAuthManager } from "./openai-oauth";
@@ -29,6 +30,14 @@ export function buildModel(input: {
     binding: Ai;
   };
 }): LanguageModel {
+  return withProviderWarningLogging(buildProviderModel(input), {
+    provider: input.provider,
+    model: input.model,
+  });
+}
+
+/** The provider switch itself. Wrapped by `buildModel`, never called directly. */
+function buildProviderModel(input: Parameters<typeof buildModel>[0]): LanguageModel {
   const { provider, model, apiKey } = input;
 
   if (provider === "openai") {

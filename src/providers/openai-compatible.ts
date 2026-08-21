@@ -1,4 +1,3 @@
-import { createDeepSeek } from "@ai-sdk/deepseek";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import type { LanguageModel } from "ai";
 import {
@@ -6,6 +5,7 @@ import {
   type ProviderConfigJsonValue,
   type ProviderEndpointConfig,
 } from "../db/repositories/provider-configs";
+import { createDeepSeekModel } from "./deepseek";
 import { applyProxyGateHeader, stripEgressHeaders } from "./egress-proxy";
 
 /**
@@ -48,16 +48,17 @@ export function createOpenAICompatibleModel(input: {
   if (input.proxy !== undefined) fetchOptions.proxyToken = input.proxy.token;
   const wrappedFetch = createOpenAICompatibleFetch(fetchOptions);
 
-  // DeepSeek has an official adapter on our provider spec version, so it gets
-  // the native one (usage cache-token metadata, model ids). The rest have no
-  // adapter that works against ai@6 — the community qwen/zhipu packages are one
-  // and two majors behind — so they use the generic compatible adapter.
+  // DeepSeek gets the generic adapter too, configured in `deepseek.ts`. Its
+  // official package is text-only — the converter drops image parts — so the
+  // native adapter cost us vision on `deepseek-v4-flash-vision-exp`.
   if (input.provider === "deepseek") {
-    return createDeepSeek({
+    const deepseekInput: Parameters<typeof createDeepSeekModel>[0] = {
+      model: input.model,
       apiKey,
       baseURL,
       fetch: wrappedFetch,
-    })(input.model) as LanguageModel;
+    };
+    return createDeepSeekModel(deepseekInput);
   }
 
   return createOpenAICompatible({

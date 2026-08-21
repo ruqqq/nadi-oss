@@ -47,6 +47,15 @@ import { runSpritesSmoke } from "../compute/backends/sprites-smoke";
 /** RPC surface of ThinkThreadAgent's DEBUG-only methods (token-gated routes). */
 interface DebugThreadStub {
   debugExecStart(command: string): Promise<{ processId: string; status: string }>;
+  debugVisionProbe(input: { attachmentId: string; prompt?: string }): Promise<{
+    provider: string;
+    model: string;
+    inlined: boolean;
+    text: string;
+    warnings: string[];
+    usage: unknown;
+    error?: string;
+  }>;
   debugFileTools(): Promise<{ steps: Array<{ step: string; ok: boolean; detail: string }> }>;
   debugThreadKnowledgeTools(): Promise<{
     steps: Array<{
@@ -1020,6 +1029,29 @@ export async function routeDebug(req: Request, env: Env): Promise<Response | nul
       const stub = await threadStub(env, threadId);
       return raw ? stub.debugReadMessageParts(limit) : stub.debugReadMessages(limit);
     });
+  }
+
+  // POST /api/debug/vision-probe {threadId, attachmentId, prompt?} — send one
+  // real turn carrying an existing attachment through the thread's OWN resolved
+  // provider/model, and report the answer, the SDK warnings, and whether the
+  // image survived as a file part. The only check that can tell "our adapter
+  // emits image_url" from "the model actually saw the image".
+  // ⚠️ A real, billed model call. No message is persisted to the thread.
+  if (url.pathname === "/api/debug/vision-probe" && req.method === "POST") {
+    const body = (await req.json().catch(() => ({}))) as {
+      threadId?: string;
+      attachmentId?: string;
+      prompt?: string;
+    };
+    if (!body.threadId || !body.attachmentId) {
+      return new Response("threadId and attachmentId required", { status: 400 });
+    }
+    return tryJson(async () =>
+      (await threadStub(env, body.threadId!)).debugVisionProbe({
+        attachmentId: body.attachmentId!,
+        ...(body.prompt ? { prompt: body.prompt } : {}),
+      }),
+    );
   }
 
   // POST /api/debug/run-backstop {threadId} — run the turn-end backstop sweep
