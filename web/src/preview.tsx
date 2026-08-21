@@ -20,6 +20,7 @@ import { RootErrorBoundary } from "@/components/RootErrorBoundary";
 import type { ProjectSummary } from "@/projects-api";
 
 import { Conversation, ConversationContent } from "@/components/ai-elements/conversation";
+import { ChatLog } from "@/components/chat/ChatLog";
 import { Message, MessageContent, MessageResponse } from "@/components/ai-elements/message";
 import {
   Tool,
@@ -821,8 +822,49 @@ const screen = params.get("screen");
 // which runs the real shell, routing, and components against MSW. What remains
 // here is the set of transient component states no backend mock can drive:
 //   composer-states, attachment-overflow, toast, edge-swipe, watcher-completion,
-//   tool-cards, history-error (offline copy only), stale-bundle, landing, og.
+//   tool-cards, history-error (offline copy only), stale-bundle, landing, og,
+//   turn-error.
 // default → mock chat Phone.
+
+// ── Turn error with a long URL (screen=turn-error) ─────────────────────────
+// Stream failures from the SDK land as ChatLog's destructive Alert. Provider
+// messages often embed a balance/usage URL with no spaces; this screen is the
+// overflow case that wrapping has to contain at phone width.
+function TurnErrorPreview() {
+  const error = new Error(
+    "Failed after 3 attempts. Last error: Weekly usage limit reached. To continue using this model now, enable usage from balance: https://opencode.ai/workspace/wrk_01KX2X3PFE4YJHPJWABCDEFGHIJKLMNOPQRSTUVWXYZ",
+  );
+  const messages = [
+    {
+      id: "m1",
+      role: "user",
+      parts: [{ type: "text", text: "What do you see?" }],
+    },
+  ] as UIMessage[];
+  // No overflow-hidden: leftover unwrapped tokens must be able to paint past
+  // the 390px column so a screenshot can still show the bug.
+  const phone = (
+    <div className="flex h-[640px] w-[390px] flex-col rounded-[28px] border border-border bg-background shadow-2xl">
+      <header className="flex items-center justify-between border-border border-b bg-card px-4 py-3">
+        <span className="font-display font-semibold text-sm">Asking about visual perception</span>
+      </header>
+      <ChatLog
+        messages={messages}
+        addToolApprovalResponse={() => undefined}
+        busy={false}
+        showTyping={false}
+        servers={[]}
+        error={error}
+      />
+    </div>
+  );
+  return (
+    <div className="flex min-h-screen flex-col items-center gap-6 bg-muted/30 p-4 sm:p-8">
+      <ToggleTheme />
+      {phone}
+    </div>
+  );
+}
 
 // ── Watcher completion card (screen=watcher-completion) ────────────────────
 // Every tone the transcript card can render, side by side, from real
@@ -974,6 +1016,8 @@ const node =
     <StaleBundlePreview />
   ) : screen === "watcher-completion" ? (
     <WatcherCompletionPreview />
+  ) : screen === "turn-error" ? (
+    <TurnErrorPreview />
   ) : (
     <div className="flex min-h-screen flex-col items-center gap-4 bg-muted/30 p-6">
       <ToggleTheme />
