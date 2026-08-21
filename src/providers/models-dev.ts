@@ -178,7 +178,7 @@ export function findModelProfile(
   const exact = models[modelId];
   if (exact) return exact;
 
-  const bare = modelId.includes("/") ? (modelId.split("/").pop() ?? modelId) : modelId;
+  const bare = bareModelId(modelId);
   if (models[bare]) return models[bare];
 
   // Longest matching prefix, so `claude-sonnet-5-20260630` resolves to
@@ -189,4 +189,23 @@ export function findModelProfile(
     if (!best || id.length > best.id.length) best = { id, profile };
   }
   return best?.profile ?? null;
+}
+
+/**
+ * Temporary until models.dev lists the id. An exact catalog row wins; delete
+ * the entry once parseModelsDevPayload starts returning inputModalities for it.
+ *
+ * Prefix matching otherwise maps `deepseek-v4-flash-vision-exp` onto
+ * `deepseek-v4-flash` (text-only) and hides image attach.
+ */
+export const MODELS_DEV_MODALITY_OVERRIDES: Record<string, ModelInputModality[]> = {
+  "deepseek-v4-flash-vision-exp": ["text", "image"],
+};
+
+export function modelsDevModalityOverride(modelId: string): ModelInputModality[] | undefined {
+  return MODELS_DEV_MODALITY_OVERRIDES[bareModelId(modelId)];
+}
+
+function bareModelId(modelId: string): string {
+  return modelId.includes("/") ? (modelId.split("/").pop() ?? modelId) : modelId;
 }

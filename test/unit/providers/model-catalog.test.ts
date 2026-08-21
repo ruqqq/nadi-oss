@@ -204,4 +204,73 @@ describe("applyModelsDevProfiles", () => {
     ];
     expect(applyModelsDevProfiles(models, null, "opencode-zen")).toEqual(models);
   });
+
+  it("keeps image attach on deepseek-v4-flash-vision-exp until models.dev lists it", () => {
+    // models.dev has flash (text-only) and not vision-exp. Prefix matching
+    // otherwise resolves vision-exp to flash and overwrites image with text.
+    const catalog: ModelsDevCatalog = {
+      deepseek: {
+        "deepseek-v4-flash": { reasoning: true, controls: [], inputModalities: ["text"] },
+        "deepseek-v4-pro": { reasoning: true, controls: [], inputModalities: ["text"] },
+      },
+      "opencode-go": {
+        "deepseek-v4-flash": { reasoning: true, controls: [], inputModalities: ["text"] },
+      },
+    };
+    const models: ProviderModelSearchResult[] = [
+      { id: "deepseek-v4-flash", inputModalities: ["text"], source: "live" },
+      { id: "deepseek-v4-flash-vision-exp", inputModalities: ["text"], source: "live" },
+    ];
+
+    const deepseek = new Map(
+      applyModelsDevProfiles(models, catalog, "deepseek").map((model) => [model.id, model]),
+    );
+    expect(deepseek.get("deepseek-v4-flash")?.inputModalities).toEqual(["text"]);
+    expect(deepseek.get("deepseek-v4-flash-vision-exp")?.inputModalities).toEqual([
+      "text",
+      "image",
+    ]);
+
+    const go = applyModelsDevProfiles(
+      [{ id: "deepseek-v4-flash-vision-exp", inputModalities: ["text"], source: "live" }],
+      catalog,
+      "opencode-go",
+    );
+    expect(go[0]?.inputModalities).toEqual(["text", "image"]);
+
+    // Still applies when models.dev is unreachable.
+    const offline = applyModelsDevProfiles(
+      [{ id: "deepseek-v4-flash-vision-exp", inputModalities: ["text"], source: "live" }],
+      null,
+      "deepseek",
+    );
+    expect(offline[0]?.inputModalities).toEqual(["text", "image"]);
+
+    // Prefixed gateway ids still hit the same hole-fill.
+    const prefixed = applyModelsDevProfiles(
+      [{ id: "deepseek/deepseek-v4-flash-vision-exp", inputModalities: ["text"], source: "live" }],
+      catalog,
+      "deepseek",
+    );
+    expect(prefixed[0]?.inputModalities).toEqual(["text", "image"]);
+  });
+
+  it("lets an exact models.dev listing replace the vision-exp override", () => {
+    const catalog: ModelsDevCatalog = {
+      deepseek: {
+        "deepseek-v4-flash": { reasoning: true, controls: [], inputModalities: ["text"] },
+        "deepseek-v4-flash-vision-exp": {
+          reasoning: true,
+          controls: [],
+          inputModalities: ["text", "image", "file"],
+        },
+      },
+    };
+    const [model] = applyModelsDevProfiles(
+      [{ id: "deepseek-v4-flash-vision-exp", inputModalities: ["text"], source: "live" }],
+      catalog,
+      "deepseek",
+    );
+    expect(model?.inputModalities).toEqual(["text", "image", "file"]);
+  });
 });

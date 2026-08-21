@@ -12,7 +12,7 @@ import type {
 } from "../db/repositories/provider-configs";
 import { loadProviderModels, type ProviderModelSearchResult } from "./model-search";
 import { getModelCapabilityCatalog } from "./model-capabilities";
-import { findModelProfile, type ModelsDevCatalog } from "./models-dev";
+import { findModelProfile, modelsDevModalityOverride, type ModelsDevCatalog } from "./models-dev";
 
 /**
  * The cached provider catalog, with stale-while-revalidate.
@@ -113,27 +113,52 @@ export async function getProviderCatalog(input: GetProviderCatalogInput): Promis
  *
  * Reasoning already came from here. Input modalities follow the same rule:
  * models.dev outranks the static table, a miss leaves whatever we already had
- * (live architecture, or the vision-id heuristic). So a model models.dev has
- * not listed yet — DeepSeek's vision-exp the day it shipped — still works.
+ * (live architecture, or the vision-id heuristic).
+ *
+ * One exception: `MODELS_DEV_MODALITY_OVERRIDES` fills ids models.dev has not
+ * listed yet. That has to beat prefix matching — otherwise vision-exp inherits
+ * flash's text-only modalities and the composer hides attach.
  */
 export function applyModelsDevProfiles(
   models: ProviderModelSearchResult[],
   catalog: ModelsDevCatalog | null,
   provider: string,
 ): ProviderModelSearchResult[] {
-  if (!catalog) return models;
   return models.map((model) => {
-    const profile = findModelProfile(catalog, provider, model.id);
-    if (!profile) return model;
+    const profile = catalog ? findModelProfile(catalog, provider, model.id) : null;
+    const inputModalities = resolveInputModalities(profile, catalog, provider, model);
+    if (!profile) {
+      return inputModalities === model.inputModalities ? model : { ...model, inputModalities };
+    }
     return {
       ...model,
       reasoning: profile.reasoning,
       ...(profile.controls.length > 0 ? { reasoningControls: profile.controls } : {}),
-      ...(profile.inputModalities && profile.inputModalities.length > 0
-        ? { inputModalities: profile.inputModalities }
-        : {}),
+      inputModalities,
     };
   });
+}
+
+function resolveInputModalities(
+  profile: { inputModalities?: ProviderModelSearchResult["inputModalities"] } | null,
+  catalog: ModelsDevCatalog | null,
+  provider: string,
+  model: ProviderModelSearchResult,
+): ProviderModelSearchResult["inputModalities"] {
+  const exact = catalog?.[provider]?.[model.id] ?? catalog?.[provider]?.[bareModelId(model.id)];
+  if (exact?.inputModalities && exact.inputModalities.length > 0) {
+    return exact.inputModalities;
+  }
+  const override = modelsDevModalityOverride(model.id);
+  if (override) return override;
+  if (profile?.inputModalities && profile.inputModalities.length > 0) {
+    return profile.inputModalities;
+  }
+  return model.inputModalities;
+}
+
+function bareModelId(modelId: string): string {
+  return modelId.includes("/") ? (modelId.split("/").pop() ?? modelId) : modelId;
 }
 
 async function enrichWithReasoningCapability(
