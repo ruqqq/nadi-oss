@@ -232,6 +232,14 @@ export const STATIC_MODELS: Record<ProviderConfigProvider, ProviderModelSearchRe
       reasoning: true,
       source: "static",
     },
+    {
+      id: "deepseek-v4-flash-vision-exp",
+      name: "DeepSeek V4 Flash Vision Exp",
+      contextLength: 1000000,
+      inputModalities: ["text", "image"],
+      reasoning: true,
+      source: "static",
+    },
   ],
   zai: [
     {
@@ -754,7 +762,18 @@ function mergeStaticMetadata(
 }
 
 function staticModalitiesFor(provider: ProviderConfigProvider, id: string): ModelInputModality[] {
-  return STATIC_MODELS[provider]?.find((model) => model.id === id)?.inputModalities ?? ["text"];
+  const curated = STATIC_MODELS[provider]?.find((model) => model.id === id)?.inputModalities;
+  if (curated && curated.length > 0) return curated;
+  // DeepSeek (and others whose /models is ids-only) never publish architecture.
+  // A "vision" token in the id is the one signal we get; defaulting those to
+  // text hides the composer attach control on a model that accepts images.
+  if (modelIdImpliesVision(id)) return ["text", "image"];
+  return ["text"];
+}
+
+/** Token match, not substring: "revision" / "envision" must not trip this. */
+function modelIdImpliesVision(id: string): boolean {
+  return /(^|[-_/.])vision($|[-_/.])/i.test(id);
 }
 
 /**

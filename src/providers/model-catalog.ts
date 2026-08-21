@@ -12,7 +12,7 @@ import type {
 } from "../db/repositories/provider-configs";
 import { loadProviderModels, type ProviderModelSearchResult } from "./model-search";
 import { getModelCapabilityCatalog } from "./model-capabilities";
-import { findModelProfile } from "./models-dev";
+import { findModelProfile, modelsDevModalityOverride, type ModelsDevCatalog } from "./models-dev";
 
 /**
  * The cached provider catalog, with stale-while-revalidate.
@@ -108,6 +108,59 @@ export async function getProviderCatalog(input: GetProviderCatalogInput): Promis
   };
 }
 
+/**
+ * Overlay models.dev onto a provider catalog.
+ *
+ * Reasoning already came from here. Input modalities follow the same rule:
+ * models.dev outranks the static table, a miss leaves whatever we already had
+ * (live architecture, or the vision-id heuristic).
+ *
+ * One exception: `MODELS_DEV_MODALITY_OVERRIDES` fills ids models.dev has not
+ * listed yet. That has to beat prefix matching — otherwise vision-exp inherits
+ * flash's text-only modalities and the composer hides attach.
+ */
+export function applyModelsDevProfiles(
+  models: ProviderModelSearchResult[],
+  catalog: ModelsDevCatalog | null,
+  provider: string,
+): ProviderModelSearchResult[] {
+  return models.map((model) => {
+    const profile = catalog ? findModelProfile(catalog, provider, model.id) : null;
+    const inputModalities = resolveInputModalities(profile, catalog, provider, model);
+    if (!profile) {
+      return inputModalities === model.inputModalities ? model : { ...model, inputModalities };
+    }
+    return {
+      ...model,
+      reasoning: profile.reasoning,
+      ...(profile.controls.length > 0 ? { reasoningControls: profile.controls } : {}),
+      inputModalities,
+    };
+  });
+}
+
+function resolveInputModalities(
+  profile: { inputModalities?: ProviderModelSearchResult["inputModalities"] } | null,
+  catalog: ModelsDevCatalog | null,
+  provider: string,
+  model: ProviderModelSearchResult,
+): ProviderModelSearchResult["inputModalities"] {
+  const exact = catalog?.[provider]?.[model.id] ?? catalog?.[provider]?.[bareModelId(model.id)];
+  if (exact?.inputModalities && exact.inputModalities.length > 0) {
+    return exact.inputModalities;
+  }
+  const override = modelsDevModalityOverride(model.id);
+  if (override) return override;
+  if (profile?.inputModalities && profile.inputModalities.length > 0) {
+    return profile.inputModalities;
+  }
+  return model.inputModalities;
+}
+
+function bareModelId(modelId: string): string {
+  return modelId.includes("/") ? (modelId.split("/").pop() ?? modelId) : modelId;
+}
+
 async function enrichWithReasoningCapability(
   env: GetProviderCatalogInput["env"],
   provider: string,
@@ -117,16 +170,7 @@ async function enrichWithReasoningCapability(
     log.warn("provider.capability_lookup_failed", { provider, error: String(error) });
     return null;
   });
-  if (!capabilities) return models;
-  return models.map((model) => {
-    const profile = findModelProfile(capabilities, provider, model.id);
-    if (!profile) return model;
-    return {
-      ...model,
-      reasoning: profile.reasoning,
-      ...(profile.controls.length > 0 ? { reasoningControls: profile.controls } : {}),
-    };
-  });
+  return applyModelsDevProfiles(models, capabilities, provider);
 }
 
 async function refreshCatalog(
@@ -140,10 +184,11 @@ async function refreshCatalog(
       secret: input.secret,
       endpointConfig: input.endpointConfig,
     });
-    // models.dev knows per-model reasoning capability for every provider we
-    // support, including the ones whose own /models returns bare ids. Its answer
-    // outranks the static table; a miss leaves whatever we already had, so an
-    // outage degrades to the previous behaviour rather than to "nothing reasons".
+    // models.dev knows per-model reasoning and input modalities for every
+    // provider we support, including the ones whose own /models returns bare
+    // ids. Its answer outranks the static table; a miss leaves whatever we
+    // already had, so an outage degrades to the previous behaviour rather than
+    // to "nothing reasons" / "everything is text-only".
     const models = await enrichWithReasoningCapability(input.env, input.provider, rawModels);
     if (isMaxStoredCatalogModelsExceeded(models.length)) {
       // Truncation that isn't logged reads as a complete list.

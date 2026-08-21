@@ -77,6 +77,17 @@ describe("model-search", () => {
       expect.arrayContaining(["qwen3.7-max", "qwen3.7-plus", "qwen3.6-flash"]),
     );
 
+    const deepseek = getStaticProviderModels("deepseek");
+    expect(deepseek.find((model) => model.id === "deepseek-v4-flash-vision-exp")).toMatchObject({
+      name: "DeepSeek V4 Flash Vision Exp",
+      contextLength: 1000000,
+      inputModalities: ["text", "image"],
+      reasoning: true,
+    });
+    expect(deepseek.find((model) => model.id === "deepseek-v4-flash")).toMatchObject({
+      inputModalities: ["text"],
+    });
+
     const opencodeGo = getStaticProviderModels("opencode-go");
     expect(opencodeGo.map((model) => model.id)).toEqual(
       expect.arrayContaining(["glm-5.2", "kimi-k2.7-code", "deepseek-v4-flash"]),
@@ -261,8 +272,58 @@ describe("model-search", () => {
 
     expect(result.source).toBe("static");
     expect(result.models.map((model) => model.id)).toEqual(
-      expect.arrayContaining(["deepseek-v4-pro", "deepseek-v4-flash"]),
+      expect.arrayContaining([
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+        "deepseek-v4-flash-vision-exp",
+      ]),
     );
+  });
+
+  it("overlays image modality onto DeepSeek live ids that only return a name", async () => {
+    // DeepSeek's /models is ids-only (no architecture.input_modalities). The
+    // vision-exp model would otherwise default to ["text"] and the composer
+    // would refuse images a model that accepts them.
+    const fetchImpl = vi.fn(async () => {
+      return Response.json({
+        data: [
+          { id: "deepseek-v4-pro" },
+          { id: "deepseek-v4-flash" },
+          { id: "deepseek-v4-flash-vision-exp" },
+          { id: "deepseek-v4-pro-vision" },
+          { id: "deepseek-revision" },
+        ],
+      });
+    });
+
+    const result = await searchProviderModels({
+      provider: "deepseek",
+      query: "",
+      limit: 20,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      secret: "sk-test",
+      endpointConfig: {
+        baseUrl: "https://api.deepseek.com",
+        proxyUrl: "",
+        auth: "bearer",
+        body: {},
+      },
+    });
+
+    expect(result.source).toBe("live");
+    const byId = new Map(result.models.map((model) => [model.id, model]));
+    expect(byId.get("deepseek-v4-pro")?.inputModalities).toEqual(["text"]);
+    expect(byId.get("deepseek-v4-flash")?.inputModalities).toEqual(["text"]);
+    expect(byId.get("deepseek-v4-flash-vision-exp")).toMatchObject({
+      name: "DeepSeek V4 Flash Vision Exp",
+      contextLength: 1000000,
+      inputModalities: ["text", "image"],
+      reasoning: true,
+    });
+    // A live id we have not curated still has "vision" in the name — that is
+    // enough to know it takes images. Defaulting it to text is the bug.
+    expect(byId.get("deepseek-v4-pro-vision")?.inputModalities).toEqual(["text", "image"]);
+    expect(byId.get("deepseek-revision")?.inputModalities).toEqual(["text"]);
   });
 
   it("lists OpenCode Go live models from its OpenAI-compatible endpoint", async () => {

@@ -50,6 +50,48 @@ describe("parseModelsDevPayload", () => {
     expect(catalog["opencode-go"]?.["not-a-thinker"]).toEqual({ reasoning: false, controls: [] });
   });
 
+  it("reads input modalities and maps pdf onto file", () => {
+    // models.dev publishes `modalities.input` for every provider, including the
+    // ones whose own /models is ids-only (DeepSeek, OpenCode Go/Zen). Hardcoding
+    // those in STATIC_MODELS is what drifted the moment a vision model shipped.
+    const catalog = parseModelsDevPayload({
+      anthropic: {
+        models: {
+          "claude-sonnet-5": {
+            id: "claude-sonnet-5",
+            reasoning: true,
+            modalities: { input: ["text", "image", "pdf"], output: ["text"] },
+          },
+        },
+      },
+      "opencode-go": {
+        models: {
+          "kimi-k2.7-code": {
+            id: "kimi-k2.7-code",
+            reasoning: true,
+            modalities: { input: ["text", "image", "video"], output: ["text"] },
+          },
+          "glm-5.2": {
+            id: "glm-5.2",
+            reasoning: true,
+            modalities: { input: ["text"], output: ["text"] },
+          },
+        },
+      },
+    });
+    expect(catalog.anthropic?.["claude-sonnet-5"]?.inputModalities).toEqual([
+      "text",
+      "image",
+      "file",
+    ]);
+    expect(catalog["opencode-go"]?.["kimi-k2.7-code"]?.inputModalities).toEqual([
+      "text",
+      "image",
+      "video",
+    ]);
+    expect(catalog["opencode-go"]?.["glm-5.2"]?.inputModalities).toEqual(["text"]);
+  });
+
   it("drops an effort control that declares no values", () => {
     // It would tell us nothing actionable, and an empty values array would make
     // the level mapper return null for every level.
