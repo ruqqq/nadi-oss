@@ -28,6 +28,21 @@ const FILE_TOOLS_POLICY = `\n\nWorkspace file tools policy: ${FILE_TOOLS_GUIDANC
 const GITHUB_AUTH_POLICY =
   "\n\nGitHub auth in the sandbox: a short-lived `GH_TOKEN` environment variable (a Nadi-managed GitHub App token scoped to the workspace's authorized repositories) may be present. `git` does NOT use it automatically. To clone or push private GitHub repos over HTTPS, put it in the URL — `git clone https://x-access-token:$GH_TOKEN@github.com/OWNER/REPO.git` — because a bare `https://github.com/...` URL sends no credentials and fails on private repos. The `gh` CLI reads `GH_TOKEN` on its own, so `gh` commands need no extra flags. If `GH_TOKEN` is not set, GitHub access is not configured for this workspace — say so rather than guessing at credentials. Never print or commit the token.";
 
+// Only appended when subagents are enabled. The same rules live in
+// `SPAWN_DESCRIPTION` and in the spawn tool's `STARTED_NOTE`, and both were
+// observed being ignored: a live thread (gpt-5.6-luna) spawned a subagent to
+// summarize a PR's architecture, then re-ran that exact investigation itself
+// across ~20 tool calls and used the subagent's late result only to say "no
+// changes needed". Tool RESULTS are the lowest-trust channel a model has --
+// they are the prompt-injection surface -- so behavioural rules delivered
+// there are discounted by design; the tool DESCRIPTION is trusted but is read
+// when deciding whether to spawn, long before the moment of temptation. The
+// system prompt is the only channel with standing, so the rule belongs here
+// too, phrased as the positive model of what delegation is for rather than as
+// one more prohibition.
+const SUBAGENT_POLICY =
+  "\n\nSubagent policy: `spawn_subagent` runs a task in the background on the same machine as you and returns immediately; the subagent's result arrives LATER as its own message, never as that tool's return value. Delegate work that is INDEPENDENT of what you do next — a probe, an investigation, or a build whose answer you do not need in order to keep making progress on something else. It is a way to do two things at once, not a way to do the next step of your own plan faster. Once you have spawned a subagent the task is no longer yours: do not investigate, read, or write the same thing in this thread, and avoid editing files it may be touching, because you share one filesystem. If you cannot continue without its result, end your turn — the completion is delivered to you automatically, usually within seconds of the subagent finishing, and you pick the work up from there. Ending the turn to wait is the intended behaviour, not a stall, and it is always better than filling the wait by doing the delegated work yourself. `check_subagents` reports status on demand and is never a way to wait: it cannot reveal anything the completion message would not, and an unfinished run does not finish sooner because you asked. Give each subagent a complete, standalone task — it cannot see this conversation.";
+
 function formatProjectContext(projectContext: ProjectPromptContext): string {
   const lines = ["Project context:", `Name: ${projectContext.name}`];
   if (projectContext.description !== "") {
@@ -65,12 +80,14 @@ export function composeSystemPrompt(input: {
   projectContext?: ProjectPromptContext;
   memoryIndex?: MemoryIndexContext;
   sandboxAvailable?: boolean;
+  subagentsAvailable?: boolean;
 }): string {
   return (
     input.systemPrompt +
     MEMORY_POLICY +
     (input.sandboxAvailable ? FILE_TOOLS_POLICY : "") +
     (input.sandboxAvailable ? GITHUB_AUTH_POLICY : "") +
+    (input.subagentsAvailable ? SUBAGENT_POLICY : "") +
     (input.projectContext ? formatProjectContext(input.projectContext) : "") +
     // Last: the index is the most volatile part of the prompt, and a stable
     // prefix is what the provider prompt caches.

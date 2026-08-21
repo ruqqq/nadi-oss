@@ -1086,6 +1086,11 @@ describe("ThinkThreadAgent spike", () => {
       expect((enabled as FeedbackRuntimeProbe).activeTools).toEqual(
         expect.arrayContaining(["spawn_subagent", "check_subagents"]),
       );
+      // The policy rides the SAME gate as the tools: describing spawn_subagent
+      // to a turn that cannot call it is worse than saying nothing.
+      expect((disabled as FeedbackRuntimeProbe).system).not.toContain("Subagent policy");
+      expect((enabled as FeedbackRuntimeProbe).system).toContain("Subagent policy");
+      expect((enabled as FeedbackRuntimeProbe).system).toContain("end your turn");
     } finally {
       featureEnv.BACKGROUND_WORK_ENABLED = previous;
     }
