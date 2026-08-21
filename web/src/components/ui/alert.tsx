@@ -52,7 +52,11 @@ function AlertDescription({ className, ...props }: React.ComponentProps<"div">) 
     <div
       data-slot="alert-description"
       className={cn(
-        "col-start-2 grid min-w-0 gap-1 text-sm text-muted-foreground [overflow-wrap:anywhere] [&_p]:leading-relaxed",
+        // Block, not grid: a grid item (or implicit grid column) sizes to
+        // max-content, so a URL with no spaces overflows the bubble even after
+        // the parent column is minmax(0,1fr). Block + overflow-wrap:anywhere
+        // breaks the token at the container edge.
+        "col-start-2 min-w-0 space-y-1 text-sm text-muted-foreground [overflow-wrap:anywhere] [&_p]:leading-relaxed",
         className,
       )}
       {...props}
