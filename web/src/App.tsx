@@ -677,8 +677,8 @@ function AuthGate({ onSignedIn }: { onSignedIn: (session: AuthSession) => void }
             {invite !== null && (
               <Alert className="mt-6" variant="destructive">
                 <AlertDescription>
-                  {/* One <p>: AlertDescription is a grid, so sibling nodes would
-                      each become their own row and break the sentence apart. */}
+                  {/* One <p>: sibling nodes would each become their own block
+                      and break the sentence apart. */}
                   <p>That invite link is invalid or has already been used.</p>
                 </AlertDescription>
               </Alert>

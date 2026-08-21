@@ -243,7 +243,9 @@ export function ChatLog({
 
         {error && (
           <Alert variant="destructive">
-            <AlertDescription>{error.message}</AlertDescription>
+            <AlertDescription>
+              <p>{error.message}</p>
+            </AlertDescription>
           </Alert>
         )}
       </ConversationContent>
