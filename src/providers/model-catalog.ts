@@ -12,7 +12,7 @@ import type {
 } from "../db/repositories/provider-configs";
 import { loadProviderModels, type ProviderModelSearchResult } from "./model-search";
 import { getModelCapabilityCatalog } from "./model-capabilities";
-import { findModelProfile } from "./models-dev";
+import { findModelProfile, type ModelsDevCatalog } from "./models-dev";
 
 /**
  * The cached provider catalog, with stale-while-revalidate.
@@ -108,6 +108,34 @@ export async function getProviderCatalog(input: GetProviderCatalogInput): Promis
   };
 }
 
+/**
+ * Overlay models.dev onto a provider catalog.
+ *
+ * Reasoning already came from here. Input modalities follow the same rule:
+ * models.dev outranks the static table, a miss leaves whatever we already had
+ * (live architecture, or the vision-id heuristic). So a model models.dev has
+ * not listed yet — DeepSeek's vision-exp the day it shipped — still works.
+ */
+export function applyModelsDevProfiles(
+  models: ProviderModelSearchResult[],
+  catalog: ModelsDevCatalog | null,
+  provider: string,
+): ProviderModelSearchResult[] {
+  if (!catalog) return models;
+  return models.map((model) => {
+    const profile = findModelProfile(catalog, provider, model.id);
+    if (!profile) return model;
+    return {
+      ...model,
+      reasoning: profile.reasoning,
+      ...(profile.controls.length > 0 ? { reasoningControls: profile.controls } : {}),
+      ...(profile.inputModalities && profile.inputModalities.length > 0
+        ? { inputModalities: profile.inputModalities }
+        : {}),
+    };
+  });
+}
+
 async function enrichWithReasoningCapability(
   env: GetProviderCatalogInput["env"],
   provider: string,
@@ -117,16 +145,7 @@ async function enrichWithReasoningCapability(
     log.warn("provider.capability_lookup_failed", { provider, error: String(error) });
     return null;
   });
-  if (!capabilities) return models;
-  return models.map((model) => {
-    const profile = findModelProfile(capabilities, provider, model.id);
-    if (!profile) return model;
-    return {
-      ...model,
-      reasoning: profile.reasoning,
-      ...(profile.controls.length > 0 ? { reasoningControls: profile.controls } : {}),
-    };
-  });
+  return applyModelsDevProfiles(models, capabilities, provider);
 }
 
 async function refreshCatalog(
@@ -140,10 +159,11 @@ async function refreshCatalog(
       secret: input.secret,
       endpointConfig: input.endpointConfig,
     });
-    // models.dev knows per-model reasoning capability for every provider we
-    // support, including the ones whose own /models returns bare ids. Its answer
-    // outranks the static table; a miss leaves whatever we already had, so an
-    // outage degrades to the previous behaviour rather than to "nothing reasons".
+    // models.dev knows per-model reasoning and input modalities for every
+    // provider we support, including the ones whose own /models returns bare
+    // ids. Its answer outranks the static table; a miss leaves whatever we
+    // already had, so an outage degrades to the previous behaviour rather than
+    // to "nothing reasons" / "everything is text-only".
     const models = await enrichWithReasoningCapability(input.env, input.provider, rawModels);
     if (isMaxStoredCatalogModelsExceeded(models.length)) {
       // Truncation that isn't logged reads as a complete list.

@@ -1,11 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { CATALOG_TTL_MS, decideCatalogAction } from "../../../src/providers/model-catalog";
+import {
+  applyModelsDevProfiles,
+  CATALOG_TTL_MS,
+  decideCatalogAction,
+} from "../../../src/providers/model-catalog";
 import {
   filterProviderModels,
   loadProviderModels,
   searchProviderModels,
   type ProviderModelSearchResult,
 } from "../../../src/providers/model-search";
+import type { ModelsDevCatalog } from "../../../src/providers/models-dev";
 
 const NOW = 1_800_000_000_000;
 
@@ -152,5 +157,51 @@ describe("filterProviderModels", () => {
     ]);
     expect(filterProviderModels(models, "gpt-5.5").map((m) => m.id)).toEqual(["openai/gpt-5.5"]);
     expect(filterProviderModels(models, "open weights").map((m) => m.id)).toEqual(["meta/llama-4"]);
+  });
+});
+
+describe("applyModelsDevProfiles", () => {
+  const catalog: ModelsDevCatalog = {
+    "opencode-zen": {
+      "claude-sonnet-5": {
+        reasoning: true,
+        controls: [],
+        inputModalities: ["text", "image", "file"],
+      },
+      "deepseek-v4-pro": { reasoning: true, controls: [], inputModalities: ["text"] },
+    },
+    deepseek: {
+      "deepseek-v4-flash": { reasoning: true, controls: [], inputModalities: ["text"] },
+    },
+  };
+
+  it("overlays models.dev modalities onto ids-only live rows", () => {
+    // OpenCode Zen / DeepSeek /models return ids with no architecture. The
+    // static table then defaults those to ["text"], which is what hid image
+    // attach on Claude (and would on any vision model models.dev already knows).
+    const models: ProviderModelSearchResult[] = [
+      { id: "claude-sonnet-5", inputModalities: ["text"], source: "live" },
+      { id: "deepseek-v4-pro", inputModalities: ["text"], source: "live" },
+      {
+        id: "deepseek-v4-flash-vision-exp",
+        inputModalities: ["text", "image"],
+        source: "static",
+      },
+    ];
+
+    const byId = new Map(
+      applyModelsDevProfiles(models, catalog, "opencode-zen").map((model) => [model.id, model]),
+    );
+    expect(byId.get("claude-sonnet-5")?.inputModalities).toEqual(["text", "image", "file"]);
+    expect(byId.get("deepseek-v4-pro")?.inputModalities).toEqual(["text"]);
+    // models.dev has no entry yet — the static/heuristic overlay must survive.
+    expect(byId.get("deepseek-v4-flash-vision-exp")?.inputModalities).toEqual(["text", "image"]);
+  });
+
+  it("leaves the list untouched when the catalog is missing", () => {
+    const models: ProviderModelSearchResult[] = [
+      { id: "claude-sonnet-5", inputModalities: ["text"], source: "live" },
+    ];
+    expect(applyModelsDevProfiles(models, null, "opencode-zen")).toEqual(models);
   });
 });

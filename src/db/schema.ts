@@ -1016,9 +1016,10 @@ export const providerModelWhitelists = sqliteTable(
 
 /** Cached provider model catalogs. Pure cache — safe to delete any row. */
 /**
- * models.dev's reasoning metadata, pruned to our providers. Global rather than
- * per-workspace — it describes models, not a workspace's configuration — so it
- * deliberately has no workspaceId and a single well-known row id.
+ * models.dev's capability metadata (reasoning and input modalities), pruned to
+ * our providers. Global rather than per-workspace — it describes models, not a
+ * workspace's configuration — so it deliberately has no workspaceId and a
+ * single well-known row id.
  */
 export const modelCapabilityCatalog = sqliteTable("model_capability_catalog", {
   id: text("id").primaryKey(),

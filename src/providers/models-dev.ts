@@ -1,9 +1,11 @@
 /**
- * models.dev as the source of truth for per-model reasoning capability.
+ * models.dev as the source of truth for per-model capability.
  *
- * This is where the OpenCode CLI gets its model metadata, and it publishes two
- * things no provider `/models` endpoint does: whether a model reasons, and the
- * *vocabulary* it accepts for controlling that reasoning.
+ * This is where the OpenCode CLI gets its model metadata, and it publishes
+ * things no provider `/models` endpoint does: whether a model reasons, the
+ * *vocabulary* it accepts for controlling that reasoning, and which input
+ * modalities it takes. DeepSeek / OpenCode Go / Zen return ids only; without
+ * this catalog those rows default to text and the composer hides attach.
  *
  * The vocabulary is per MODEL, not per provider — the thing an earlier version
  * of this feature got wrong. Verified against the live catalog on 2026-08-01:
@@ -19,6 +21,7 @@
  * a toggle.
  */
 import { log } from "../log";
+import type { ModelInputModality } from "./model-search";
 
 export const MODELS_DEV_URL = "https://models.dev/api.json";
 
@@ -56,6 +59,12 @@ export interface ModelReasoningProfile {
    * so we must send nothing rather than guess.
    */
   controls: ReasoningControl[];
+  /**
+   * Input modalities from models.dev. Omitted when upstream did not publish
+   * them, so a miss cannot overwrite a static overlay (the vision-exp model
+   * is in our table and not yet in theirs).
+   */
+  inputModalities?: ModelInputModality[];
 }
 
 /** provider (ours) → model id → profile. */
@@ -90,8 +99,10 @@ function parseControls(value: unknown): ReasoningControl[] {
 }
 
 /**
- * Prunes the ~3.3 MB upstream payload to the ~39 KB we actually use: our nine
- * providers, and only the reasoning fields.
+ * Prunes the ~3.3 MB upstream payload to the fields we actually use: our nine
+ * providers, reasoning capability, and input modalities. Modalities are how
+ * ids-only `/models` endpoints (DeepSeek, OpenCode Go/Zen) get image/file
+ * support without a handwritten overlay per model.
  */
 export function parseModelsDevPayload(payload: unknown): ModelsDevCatalog {
   if (!isRecord(payload)) return {};
@@ -102,14 +113,35 @@ export function parseModelsDevPayload(payload: unknown): ModelsDevCatalog {
     const models: Record<string, ModelReasoningProfile> = {};
     for (const [id, model] of Object.entries(provider.models)) {
       if (!isRecord(model)) continue;
+      const inputModalities = parseModelsDevInputModalities(model.modalities);
       models[id] = {
         reasoning: model.reasoning === true,
         controls: parseControls(model.reasoning_options),
+        ...(inputModalities.length > 0 ? { inputModalities } : {}),
       };
     }
     if (Object.keys(models).length > 0) catalog[ours] = models;
   }
   return catalog;
+}
+
+/**
+ * models.dev uses `pdf`; our composer/runtime contract uses `file`. Unknown
+ * tokens are dropped rather than forwarded into the picker.
+ */
+function parseModelsDevInputModalities(value: unknown): ModelInputModality[] {
+  if (!isRecord(value) || !Array.isArray(value.input)) return [];
+  const allowed = new Set<ModelInputModality>(["text", "image", "audio", "video", "file"]);
+  const seen = new Set<ModelInputModality>();
+  const out: ModelInputModality[] = [];
+  for (const entry of value.input) {
+    if (typeof entry !== "string") continue;
+    const mapped = (entry === "pdf" ? "file" : entry) as ModelInputModality;
+    if (!allowed.has(mapped) || seen.has(mapped)) continue;
+    seen.add(mapped);
+    out.push(mapped);
+  }
+  return out;
 }
 
 export async function fetchModelsDevCatalog(

@@ -1,5 +1,6 @@
 /**
- * Cached access to models.dev's reasoning metadata.
+ * Cached access to models.dev's per-model capability metadata (reasoning and
+ * input modalities).
  *
  * Global, not per-workspace: it describes models, not configuration. Cached in
  * D1 with stale-while-revalidate so a turn never waits on an external service,
