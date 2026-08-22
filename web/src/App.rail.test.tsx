@@ -491,6 +491,7 @@ describe("ChatApp feedback route", () => {
     });
     expect(screen.queryByLabelText(/model/i)).toBeNull();
     expect(screen.queryByRole("button", { name: "Thread details" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Thread actions" })).toBeNull();
     expect(screen.queryByText("Workbench")).toBeNull();
     expect(screen.queryByText("Project")).toBeNull();
     expect(screen.queryByRole("button", { name: "Dictate" })).toBeNull();

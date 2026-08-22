@@ -42,6 +42,7 @@ export {
   FileCode,
   FileSvg,
   FileText,
+  Image,
   DownloadSimple,
   Globe,
   DotsThree,

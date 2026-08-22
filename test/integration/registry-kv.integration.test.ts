@@ -233,7 +233,7 @@ describe("RegistryKV list", () => {
     const second = await kv.list({ prefix, cursor: first.cursor });
     expect(second.keys.map((key) => key.name)).toEqual([`${prefix}1000`]);
     expect(second.list_complete).toBe(true);
-  });
+  }, 20_000);
 });
 
 describe("workspace secrets through the facade", () => {

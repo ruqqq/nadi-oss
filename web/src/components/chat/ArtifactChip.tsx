@@ -1,127 +1,18 @@
-import { useCallback, useEffect, useState } from "react";
-import { toast } from "sonner";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
-import { Spinner } from "@/components/ui/spinner";
 import { ArrowSquareOut, Browser } from "@/icons";
 import { cn } from "@/lib/utils";
 import {
   formatArtifactExpiryHint,
-  mintArtifactViewUrl,
   type MessageArtifactPart,
 } from "@/lib/message-artifact-parts";
-import { openMintedUrlInNewTab } from "@/lib/open-minted-url";
-import { useMediaQuery } from "@/lib/use-media-query";
-import { useVisualViewportInset } from "@/lib/use-visual-viewport-inset";
+import { ArtifactPreview, useArtifactPreview } from "./ArtifactPreview";
 
 export function ArtifactChip({ artifact, nowMs }: { artifact: MessageArtifactPart; nowMs: number }) {
-  const isMobile = useMediaQuery("(max-width: 640px)");
-  const expired = nowMs >= artifact.expiresAt;
+  const { expired, previewOpen, setPreviewOpen, openBusy, openInTab } = useArtifactPreview(
+    artifact,
+    nowMs,
+  );
   const expiryHint = formatArtifactExpiryHint(artifact.expiresAt, nowMs);
-
-  const [previewOpen, setPreviewOpen] = useState(false);
-  const [viewUrl, setViewUrl] = useState<string | null>(null);
-  const [previewLoading, setPreviewLoading] = useState(false);
-  const [previewExpired, setPreviewExpired] = useState(false);
-  const [openBusy, setOpenBusy] = useState(false);
-  const viewport = useVisualViewportInset(previewOpen && isMobile);
-
-  const resetPreview = useCallback(() => {
-    setViewUrl(null);
-    setPreviewLoading(false);
-    setPreviewExpired(false);
-  }, []);
-
-  useEffect(() => {
-    if (!previewOpen) {
-      resetPreview();
-      return;
-    }
-    if (expired) {
-      setPreviewExpired(true);
-      return;
-    }
-
-    let cancelled = false;
-    setPreviewLoading(true);
-    setPreviewExpired(false);
-    void mintArtifactViewUrl(artifact.url)
-      .then((url) => {
-        if (!cancelled) setViewUrl(url);
-      })
-      .catch((error: unknown) => {
-        if (cancelled) return;
-        const message = error instanceof Error ? error.message : "Couldn't open this preview.";
-        if (message.toLowerCase().includes("expired")) {
-          setPreviewExpired(true);
-          return;
-        }
-        toast.error(message);
-        setPreviewOpen(false);
-      })
-      .finally(() => {
-        if (!cancelled) setPreviewLoading(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [artifact.url, expired, previewOpen, resetPreview]);
-
-  async function openInTab() {
-    if (expired || openBusy) return;
-    setOpenBusy(true);
-    try {
-      // The tab is claimed inside this click (see openMintedUrlInNewTab) —
-      // minting first and opening after the await is what made this button do
-      // nothing at all on iOS Safari while working on desktop Chrome.
-      const result = await openMintedUrlInNewTab(() => mintArtifactViewUrl(artifact.url));
-      // A browser that refuses the tab anyway (iOS "Block Pop-ups", a locked
-      // down PWA) still has somewhere to go: the in-app preview renders the
-      // same artifact without leaving the conversation.
-      if (result.status === "blocked") setPreviewOpen(true);
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : "Couldn't open this preview.";
-      toast.error(message);
-    } finally {
-      setOpenBusy(false);
-    }
-  }
-
-  const previewBody = (
-    <div className="flex min-h-0 flex-1 flex-col">
-      {previewLoading && (
-        <div className="flex flex-1 items-center justify-center p-8">
-          <Spinner className="size-6 text-muted-foreground" label="Loading preview" />
-        </div>
-      )}
-      {!previewLoading && previewExpired && (
-        <div className="flex flex-1 items-center justify-center p-8 text-sm text-muted-foreground">
-          This artifact has expired.
-        </div>
-      )}
-      {!previewLoading && viewUrl && (
-        <iframe
-          title={artifact.title}
-          src={viewUrl}
-          className="min-h-0 w-full flex-1 border-0 bg-background"
-        />
-      )}
-    </div>
-  );
-
-  const previewHeader = (
-    <span className="flex min-w-0 items-center gap-2">
-      <Browser className="size-4 shrink-0 text-muted-foreground" />
-      <span className="truncate font-display">{artifact.title}</span>
-    </span>
-  );
 
   return (
     <>
@@ -137,12 +28,7 @@ export function ArtifactChip({ artifact, nowMs }: { artifact: MessageArtifactPar
           </span>
           <span className="flex min-w-0 flex-col">
             <span className="truncate text-sm font-medium text-foreground">{artifact.title}</span>
-            <span
-              className={cn(
-                "font-mono text-[11px] uppercase tracking-wider",
-                expired ? "text-muted-foreground" : "text-muted-foreground",
-              )}
-            >
+            <span className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
               {expiryHint}
             </span>
           </span>
@@ -172,33 +58,12 @@ export function ArtifactChip({ artifact, nowMs }: { artifact: MessageArtifactPar
         </div>
       </div>
 
-      {isMobile ? (
-        <Sheet open={previewOpen} onOpenChange={setPreviewOpen}>
-          <SheetContent
-            side="bottom"
-            className="flex h-dvh max-h-dvh flex-col gap-0 rounded-none p-0 pb-[env(safe-area-inset-bottom)]"
-            style={
-              viewport
-                ? { height: `${viewport.height}px`, maxHeight: `${viewport.height}px`, paddingBottom: viewport.keyboard }
-                : undefined
-            }
-          >
-            <SheetHeader className="shrink-0 border-b py-4 pr-12 pl-5">
-              <SheetTitle className="text-base">{previewHeader}</SheetTitle>
-            </SheetHeader>
-            {previewBody}
-          </SheetContent>
-        </Sheet>
-      ) : (
-        <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
-          <DialogContent className="fixed inset-0 flex h-dvh max-h-dvh w-screen max-w-none translate-x-0 translate-y-0 flex-col gap-0 rounded-none border-0 p-0 sm:max-w-none">
-            <DialogHeader className="shrink-0 border-b py-4 pr-12 pl-5">
-              <DialogTitle className="text-base">{previewHeader}</DialogTitle>
-            </DialogHeader>
-            {previewBody}
-          </DialogContent>
-        </Dialog>
-      )}
+      <ArtifactPreview
+        artifact={artifact}
+        expired={expired}
+        open={previewOpen}
+        onOpenChange={setPreviewOpen}
+      />
     </>
   );
 }

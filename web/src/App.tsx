@@ -170,7 +170,6 @@ import {
   UserPlus,
   FolderSimple,
   X,
-  Info,
   Bell,
   BellRinging,
   WifiSlash,
@@ -190,7 +189,9 @@ import { ConversationSkeleton } from "./components/chat/ConversationSkeleton";
 import { ConversationFallback } from "./components/chat/ConversationFallback";
 import { Composer, type ComposerHandle } from "./components/chat/Composer";
 import { NEW_CHAT_SUGGESTIONS, PromptSuggestions } from "./components/chat/PromptSuggestions";
+import { ThreadArtifactsSheet } from "./components/chat/ThreadArtifactsSheet";
 import { ThreadDetailsSheet } from "./components/chat/ThreadDetailsSheet";
+import { ThreadHeaderMenu } from "./components/chat/ThreadHeaderMenu";
 import { ThreadIndicator } from "./components/chat/ThreadIndicator";
 import { ShowMoreRow } from "./components/chat/ShowMoreRow";
 import { ThreadNavButton } from "./components/chat/ThreadNavButton";
@@ -4196,6 +4197,7 @@ function LegacyArchiveThread({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | undefined>(undefined);
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [artifactsOpen, setArtifactsOpen] = useState(false);
   const toolServers = useToolServers();
 
   useEffect(() => {
@@ -4243,15 +4245,10 @@ function LegacyArchiveThread({
           </>
         }
         actions={
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => setDetailsOpen(true)}
-            aria-label="Thread details"
-            title="Thread details"
-          >
-            <Info aria-hidden />
-          </Button>
+          <ThreadHeaderMenu
+            onOpenArtifacts={() => setArtifactsOpen(true)}
+            onOpenDetails={() => setDetailsOpen(true)}
+          />
         }
       />
 
@@ -4261,6 +4258,11 @@ function LegacyArchiveThread({
         thread={thread}
         projects={projects}
         onDeleteThread={onDeleteThread}
+      />
+      <ThreadArtifactsSheet
+        open={artifactsOpen}
+        onOpenChange={setArtifactsOpen}
+        threadId={thread.threadId}
       />
 
       <div className="mx-auto flex min-h-0 w-full max-w-content flex-1 flex-col">
@@ -5093,6 +5095,7 @@ function ThreadChat({
   // Rename / move / archive / delete + metadata live in the detail sheet now,
   // so the top bar stays uncluttered.
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [artifactsOpen, setArtifactsOpen] = useState(false);
   const [backgroundTasksOpen, setBackgroundTasksOpen] = useState(false);
 
   // Show typing dots as the last item for the whole assistant turn, so the
@@ -5415,15 +5418,10 @@ function ThreadChat({
               </>
             }
             actions={
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={() => setDetailsOpen(true)}
-                aria-label="Thread details"
-                title="Thread details"
-              >
-                <Info aria-hidden />
-              </Button>
+              <ThreadHeaderMenu
+                onOpenArtifacts={() => setArtifactsOpen(true)}
+                onOpenDetails={() => setDetailsOpen(true)}
+              />
             }
           />
 
@@ -5439,6 +5437,11 @@ function ThreadChat({
             onArchiveThread={onArchiveThread}
             onDeleteThread={onDeleteThread}
             onSwitchWorkbench={onSwitchWorkbench}
+          />
+          <ThreadArtifactsSheet
+            open={artifactsOpen}
+            onOpenChange={setArtifactsOpen}
+            threadId={thread.threadId}
           />
         </>
       )}

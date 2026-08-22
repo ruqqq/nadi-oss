@@ -285,23 +285,40 @@ const attachmentHandlers = [
       mimeType,
     });
   }),
-  http.get("*/api/attachments/:attachmentId", ({ request }) => {
+  http.get("*/api/attachments/:attachmentId", ({ request, params }) => {
+    const id = pathParam(params, "attachmentId");
     const download = new URL(request.url).searchParams.get("download");
-    return mockPngResponse(download === "1" || download === "true");
+    const row = getStore().attachments[id];
+    return mockPngResponse({
+      asDownload: download === "1" || download === "true",
+      filename: row?.filename ?? null,
+      chart: id === "att_adl_chart",
+    });
   }),
 ];
 
-function mockPngResponse(asDownload = false): Response {
-  const binary = atob(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
-  );
+/** 1×1 PNG used for generic attachment bytes. */
+const MOCK_PIXEL_PNG_B64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
+
+/** 240×160 bar chart so the assistant-attachments thumbnail is actually visible. */
+const MOCK_CHART_PNG_B64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAPAAAACgCAIAAAC9uXYyAAACLUlEQVR42u3WMRGAMBBFwehCAMVV1LGQFhnYwAlaaGkQgASqG0JmZ56Cf1tcua9TGqZiAgEtAS0BLQEtICWgJaAloCWugPdpkjKUYEGWkADLaCBFtBAC2gBDbSABlpAAy2ggRbQyipaTQpooIEGWkADLaCBBhpooIEGGmiggRbQQAtooIEGGmiggaYNaKAFNNBAAw000EADDTTQAhpoAQ000EADDTTQ+aC3GkkBDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAv3Xsa1JAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBA/wN0XWZpmIDWWKC/ejmkjIAW0BLQEtAS0AJaAloCWgJaAlpAS0BLQEtAS0ALaAloqYMeknuuOCMFpC0AAAAASUVORK5CYII=";
+
+function mockPngResponse(input: {
+  asDownload?: boolean;
+  filename?: string | null;
+  chart?: boolean;
+}): Response {
+  const binary = atob(input.chart ? MOCK_CHART_PNG_B64 : MOCK_PIXEL_PNG_B64);
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index += 1) {
     bytes[index] = binary.charCodeAt(index);
   }
   const headers: Record<string, string> = { "content-type": "image/png" };
-  if (asDownload) {
-    headers["content-disposition"] = 'attachment; filename="attachment.png"';
+  if (input.asDownload) {
+    const filename = input.filename?.trim() || "attachment.png";
+    headers["content-disposition"] = `attachment; filename="${filename}"`;
   }
   return new Response(bytes, { headers });
 }

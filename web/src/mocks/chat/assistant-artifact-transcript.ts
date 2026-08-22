@@ -5,9 +5,12 @@
 
 export const ASSISTANT_ARTIFACTS_THREAD_ID = "thr_assistant_artifacts";
 export const MOCK_ARTIFACT_ID = "art_mock_dashboard";
+export const ARTIFACT_TTL_MS = 24 * 60 * 60 * 1000;
 
-/** Aligns with scenario clock NOW + 24h (2026-07-09T00:00:00Z). */
-const ARTIFACT_EXPIRES_AT = 1_752_086_400_000;
+/** Scenario timestamps are frozen in July; expiry uses wall clock so Preview stays usable. */
+export function liveArtifactExpiresAt(nowMs = Date.now()): number {
+  return nowMs + ARTIFACT_TTL_MS;
+}
 
 export function assistantArtifactTranscript(): unknown[] {
   return [
@@ -44,7 +47,7 @@ export function assistantArtifactTranscript(): unknown[] {
             entryPath: "index.html",
             fileCount: 3,
             byteSize: 28_400,
-            expiresAt: ARTIFACT_EXPIRES_AT,
+            expiresAt: liveArtifactExpiresAt(),
             url: `/api/artifacts/${MOCK_ARTIFACT_ID}`,
           },
         },

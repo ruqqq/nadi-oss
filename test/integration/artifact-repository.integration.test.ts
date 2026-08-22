@@ -46,4 +46,19 @@ describe("ArtifactRepository", () => {
     await repo().markExpired("art-3");
     expect((await repo().getById("art-3"))?.status).toBe("expired");
   });
+
+  it("lists a thread's artifacts newest first and ignores other threads", async () => {
+    await repo().insert({ ...base, id: "art-old", createdAt: 10 });
+    await repo().insert({ ...base, id: "art-new", createdAt: 30, title: "Newer" });
+    await repo().insert({
+      ...base,
+      id: "art-other",
+      threadId: "th-art-other",
+      r2Prefix: "ws-test/th-art-other/art-other/",
+      createdAt: 40,
+    });
+
+    const rows = await repo().listByThread("th-art");
+    expect(rows.map((r) => r.id)).toEqual(["art-new", "art-old"]);
+  });
 });
