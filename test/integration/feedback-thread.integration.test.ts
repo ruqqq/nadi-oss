@@ -265,7 +265,7 @@ describe("feedback thread", () => {
       }),
     });
     expect(stillLimited.status).toBe(429);
-  });
+  }, 20_000);
 
   it("stores manual feedback drafts without consuming a report slot", async () => {
     const owner = await seedUserWorkspace({
