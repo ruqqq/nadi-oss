@@ -291,7 +291,7 @@ const attachmentHandlers = [
     const row = getStore().attachments[id];
     return mockPngResponse({
       asDownload: download === "1" || download === "true",
-      filename: row?.filename ?? undefined,
+      filename: row?.filename ?? null,
       chart: id === "att_adl_chart",
     });
   }),
