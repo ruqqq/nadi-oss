@@ -5,6 +5,7 @@ import { deriveArtifactViewSecret, signArtifactViewToken } from "../artifacts/vi
 import { validateRequestSession } from "../auth/session";
 import { registryBinding, registryDb } from "../db/client";
 import { ArtifactRepository } from "../db/artifact-repository";
+import { AttachmentRepository } from "../db/attachment-repository";
 import { threadIndex, workspaceMembers } from "../db/schema";
 import { assertFeedbackReporter } from "../feedback/access";
 
@@ -12,6 +13,7 @@ export const VIEW_TTL_MS = 15 * 60 * 1000;
 
 const METADATA_RE = /^\/api\/artifacts\/([^/]+)$/;
 const VIEW_RE = /^\/api\/artifacts\/([^/]+)\/view$/;
+const THREAD_LIST_RE = /^\/api\/threads\/([^/]+)\/artifacts$/;
 
 export function resolveArtifactOrigin(req: Request, artifactsHost: string): string {
   const url = new URL(req.url);
@@ -145,8 +147,45 @@ async function handleViewMint(req: Request, env: Env, id: string): Promise<Respo
   return Response.json({ viewUrl, expiresAt: exp });
 }
 
+async function handleThreadList(req: Request, env: Env, threadId: string): Promise<Response> {
+  const session = await validateRequestSession(env, req);
+  if (!session) return new Response("Unauthorized", { status: 401 });
+
+  const allowed = await authorizeArtifactAccess(env, threadId, session.user.id);
+  if (!allowed) return new Response("Not found", { status: 404 });
+
+  const binding = registryBinding(env);
+  const [artifactRows, attachmentRows] = await Promise.all([
+    new ArtifactRepository(binding).listByThread(threadId),
+    new AttachmentRepository(binding).listByThread(threadId),
+  ]);
+
+  const artifacts = artifactRows.map((row) => ({
+    ...metadataPayload(row),
+    createdAt: row.createdAt,
+  }));
+  const downloads = attachmentRows
+    .filter((row) => row.status === "committed")
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .map((row) => ({
+      id: row.id,
+      filename: row.filename,
+      mimeType: row.mimeType,
+      byteSize: row.byteSize,
+      url: `/api/attachments/${row.id}`,
+      createdAt: row.createdAt,
+    }));
+
+  return Response.json({ artifacts, downloads });
+}
+
 export async function routeArtifacts(req: Request, env: Env): Promise<Response | null> {
   const url = new URL(req.url);
+
+  const threadListMatch = url.pathname.match(THREAD_LIST_RE);
+  if (threadListMatch?.[1] && req.method === "GET") {
+    return handleThreadList(req, env, decodeURIComponent(threadListMatch[1]));
+  }
 
   const metadataMatch = url.pathname.match(METADATA_RE);
   if (metadataMatch?.[1] && req.method === "GET") {

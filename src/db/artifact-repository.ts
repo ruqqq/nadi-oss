@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import * as schema from "./schema";
@@ -41,6 +41,15 @@ export class ArtifactRepository {
       .where(and(eq(artifacts.id, id), eq(artifacts.threadId, threadId)))
       .get();
     return row ?? null;
+  }
+
+  async listByThread(threadId: string): Promise<ArtifactRow[]> {
+    return this.db
+      .select()
+      .from(artifacts)
+      .where(eq(artifacts.threadId, threadId))
+      .orderBy(desc(artifacts.createdAt))
+      .all();
   }
 
   async markExpired(id: string): Promise<void> {

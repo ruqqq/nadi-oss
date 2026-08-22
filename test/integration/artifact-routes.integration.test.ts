@@ -3,6 +3,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { drizzle } from "drizzle-orm/d1";
 import * as schema from "../../src/db/schema";
 import { ArtifactRepository } from "../../src/db/artifact-repository";
+import { AttachmentRepository } from "../../src/db/attachment-repository";
 import { applyRegistryTestSchema } from "./helpers/registry";
 
 type EnvWithArtifactsHost = typeof env & { ARTIFACTS_HOST?: string };
@@ -16,6 +17,7 @@ function cookie(token: string) {
 async function clearArtifactsAndThreads() {
   const db = drizzle(env.REGISTRY_DB, { schema });
   await db.delete(schema.artifacts);
+  await db.delete(schema.attachments);
   await db.delete(schema.threadIndex);
   await db.delete(schema.agents);
   await db.delete(schema.workspaceMembers);
@@ -245,5 +247,137 @@ describe("artifact routes", () => {
     });
     expect(res.status).toBe(503);
     expect(await res.text()).toBe("Artifact preview host is not configured");
+  });
+
+  it("lists a thread's artifacts and committed downloads newest first", async () => {
+    const seeded = await seedUserWorkspace();
+    await insertThread({ id: "th-list", workspaceId: seeded.workspaceId, agentId: seeded.agentId });
+    const artifacts = new ArtifactRepository(env.REGISTRY_DB);
+    await artifacts.insert({
+      id: "art_old",
+      workspaceId: seeded.workspaceId,
+      threadId: "th-list",
+      title: "Old dashboard",
+      entryPath: "index.html",
+      fileCount: 1,
+      byteSize: 10,
+      r2Prefix: `${seeded.workspaceId}/th-list/art_old/`,
+      status: "active",
+      expiresAt: now + 86_400_000,
+      createdAt: now - 2_000,
+    });
+    await artifacts.insert({
+      id: "art_new",
+      workspaceId: seeded.workspaceId,
+      threadId: "th-list",
+      title: "New dashboard",
+      entryPath: "index.html",
+      fileCount: 2,
+      byteSize: 20,
+      r2Prefix: `${seeded.workspaceId}/th-list/art_new/`,
+      status: "active",
+      expiresAt: now + 86_400_000,
+      createdAt: now - 1_000,
+    });
+    await artifacts.insert({
+      id: "art_other",
+      workspaceId: seeded.workspaceId,
+      threadId: "th-other",
+      title: "Other thread",
+      entryPath: "index.html",
+      fileCount: 1,
+      byteSize: 5,
+      r2Prefix: `${seeded.workspaceId}/th-other/art_other/`,
+      status: "active",
+      expiresAt: now + 86_400_000,
+      createdAt: now,
+    });
+
+    const attachments = new AttachmentRepository(env.REGISTRY_DB);
+    await attachments.insert({
+      id: "att_pending",
+      workspaceId: seeded.workspaceId,
+      threadId: "th-list",
+      mimeType: "image/png",
+      filename: "pending.png",
+      byteSize: 12,
+      r2Key: `${seeded.workspaceId}/th-list/att_pending`,
+      status: "pending",
+      createdAt: now,
+    });
+    await attachments.insert({
+      id: "att_old",
+      workspaceId: seeded.workspaceId,
+      threadId: "th-list",
+      mimeType: "text/plain",
+      filename: "notes.txt",
+      byteSize: 40,
+      r2Key: `${seeded.workspaceId}/th-list/att_old`,
+      status: "committed",
+      createdAt: now - 3_000,
+    });
+    await attachments.insert({
+      id: "att_new",
+      workspaceId: seeded.workspaceId,
+      threadId: "th-list",
+      mimeType: "image/png",
+      filename: "chart.png",
+      byteSize: 80,
+      r2Key: `${seeded.workspaceId}/th-list/att_new`,
+      status: "committed",
+      createdAt: now - 500,
+    });
+
+    const res = await SELF.fetch("https://nadi.test/api/threads/th-list/artifacts", {
+      headers: cookie(seeded.token),
+    });
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      artifacts: Array<{ id: string; title: string; url: string; createdAt: number }>;
+      downloads: Array<{ id: string; filename: string | null; url: string }>;
+    };
+    expect(json.artifacts.map((row) => row.id)).toEqual(["art_new", "art_old"]);
+    expect(json.artifacts[0]).toMatchObject({
+      title: "New dashboard",
+      url: "/api/artifacts/art_new",
+    });
+    expect(json.downloads.map((row) => row.id)).toEqual(["att_new", "att_old"]);
+    expect(json.downloads[0]).toMatchObject({
+      filename: "chart.png",
+      url: "/api/attachments/att_new",
+    });
+  });
+
+  it("returns empty arrays when a member's thread has no artifacts or downloads", async () => {
+    const seeded = await seedUserWorkspace();
+    await insertThread({
+      id: "th-empty",
+      workspaceId: seeded.workspaceId,
+      agentId: seeded.agentId,
+    });
+    const res = await SELF.fetch("https://nadi.test/api/threads/th-empty/artifacts", {
+      headers: cookie(seeded.token),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ artifacts: [], downloads: [] });
+  });
+
+  it("rejects unauthenticated thread artifact lists with 401", async () => {
+    const res = await SELF.fetch("https://nadi.test/api/threads/th-list/artifacts");
+    expect(res.status).toBe(401);
+  });
+
+  it("hides another workspace's thread list behind 404", async () => {
+    const owner = await seedUserWorkspace();
+    await insertThread({ id: "th-secret", workspaceId: owner.workspaceId, agentId: owner.agentId });
+    const outsider = await seedUserWorkspace({
+      userId: "user-outsider",
+      token: "outsider-token",
+      workspaceId: "ws-outsider",
+    });
+    const res = await SELF.fetch("https://nadi.test/api/threads/th-secret/artifacts", {
+      headers: cookie(outsider.token),
+    });
+    expect(res.status).toBe(404);
   });
 });
