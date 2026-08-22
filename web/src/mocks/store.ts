@@ -39,12 +39,25 @@ import { SCENARIOS } from "./scenarios";
 /** Ephemeral HTML artifact row backing GET /api/artifacts/:id. */
 export interface MockArtifact {
   id: string;
+  threadId: string;
   title: string;
   entryPath: string;
   fileCount: number;
   byteSize: number;
   expiresAt: number;
   status: "active" | "expired";
+  createdAt: number;
+}
+
+/** Committed (or pending) attachment row backing the thread artifacts list. */
+export interface MockAttachment {
+  id: string;
+  threadId: string;
+  filename: string | null;
+  mimeType: string;
+  byteSize: number;
+  status: "pending" | "committed";
+  createdAt: number;
 }
 
 export interface MockFaults {
@@ -108,6 +121,8 @@ export interface MockStore {
   };
   /** Keyed by artifact id. Seeded by scenarios that exercise artifact chips. */
   artifacts: Record<string, MockArtifact>;
+  /** Keyed by attachment id. Seeded by scenarios that exercise downloads. */
+  attachments: Record<string, MockAttachment>;
   faults: MockFaults;
 }
 

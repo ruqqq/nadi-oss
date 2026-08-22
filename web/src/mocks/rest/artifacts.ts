@@ -30,6 +30,32 @@ function artifactExpired(row: { status: string; expiresAt: number }, nowMs: numb
 }
 
 export const artifactHandlers = [
+  http.get("*/api/threads/:threadId/artifacts", ({ params }) => {
+    const threadId = pathParam(params, "threadId");
+    const store = getStore();
+    if (!store.threads.some((thread) => thread.threadId === threadId)) {
+      return notFound("That chat");
+    }
+    const artifacts = Object.values(store.artifacts)
+      .filter((artifact) => artifact.threadId === threadId)
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map((artifact) => ({
+        ...metadataPayload(artifact),
+        createdAt: artifact.createdAt,
+      }));
+    const downloads = Object.values(store.attachments)
+      .filter((attachment) => attachment.threadId === threadId && attachment.status === "committed")
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map((attachment) => ({
+        id: attachment.id,
+        filename: attachment.filename,
+        mimeType: attachment.mimeType,
+        byteSize: attachment.byteSize,
+        url: `/api/attachments/${attachment.id}`,
+        createdAt: attachment.createdAt,
+      }));
+    return HttpResponse.json({ artifacts, downloads });
+  }),
   http.get("/api/artifacts/:artifactId", ({ params }) => {
     const id = pathParam(params, "artifactId");
     const artifact = getStore().artifacts[id];
