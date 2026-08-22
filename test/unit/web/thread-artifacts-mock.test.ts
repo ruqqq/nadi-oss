@@ -32,6 +32,7 @@ describe("mock thread artifacts list", () => {
         url: "/api/artifacts/art_mock_dashboard",
       }),
     ]);
+    expect(result.artifacts[0]!.expiresAt).toBeGreaterThan(Date.now());
     expect(result.downloads).toEqual([]);
   });
 

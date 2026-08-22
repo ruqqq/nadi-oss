@@ -28,6 +28,7 @@ import { HERO_THREAD_ID } from "../chat/hero-transcript";
 import {
   ASSISTANT_ARTIFACTS_THREAD_ID,
   MOCK_ARTIFACT_ID,
+  liveArtifactExpiresAt,
 } from "../chat/assistant-artifact-transcript";
 import { ASSISTANT_DOWNLOAD_THREAD_ID } from "../chat/assistant-download-transcript";
 
@@ -1441,7 +1442,7 @@ export function makeArtifact(overrides: Partial<MockArtifact> = {}): MockArtifac
     entryPath: "index.html",
     fileCount: 3,
     byteSize: 28_400,
-    expiresAt: NOW + DAY,
+    expiresAt: liveArtifactExpiresAt(),
     status: "active",
     createdAt: NOW - 2 * MINUTE,
     ...overrides,
