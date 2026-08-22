@@ -40,17 +40,10 @@ const CODE_EXTS = new Set([
   "xml",
 ]);
 
-/**
- * Derives the glyph and a short uppercase type tag for a non-image file, from
- * its filename extension first and its media type as a fallback. The tag is
- * rendered in monospace to echo the operator-terminal identifiers (thr_…)
- * elsewhere in the UI.
- */
-function fileMeta(data: FileUIPart): { Glyph: Icon; tag: string } {
-  const name = data.filename || "";
+export function fileKind(filename: string, mediaType: string): { Glyph: Icon; tag: string } {
+  const name = filename || "";
   const dot = name.lastIndexOf(".");
   const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
-  const mediaType = data.mediaType || "";
 
   if (ext === "pdf" || mediaType === "application/pdf") {
     return { Glyph: FilePdf, tag: "PDF" };
@@ -68,6 +61,16 @@ function fileMeta(data: FileUIPart): { Glyph: Icon; tag: string } {
     return { Glyph: FileText, tag: "TEXT" };
   }
   return { Glyph: File, tag: "FILE" };
+}
+
+/**
+ * Derives the glyph and a short uppercase type tag for a non-image file, from
+ * its filename extension first and its media type as a fallback. The tag is
+ * rendered in monospace to echo the operator-terminal identifiers (thr_…)
+ * elsewhere in the UI.
+ */
+function fileMeta(data: FileUIPart): { Glyph: Icon; tag: string } {
+  return fileKind(data.filename || "", data.mediaType || "");
 }
 
 /**

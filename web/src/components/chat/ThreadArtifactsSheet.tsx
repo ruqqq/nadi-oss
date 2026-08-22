@@ -1,36 +1,15 @@
 import { useEffect, useState } from "react";
-import type { FileUIPart } from "ai";
 import {
   listThreadArtifacts,
   type ThreadArtifactItem,
   type ThreadDownloadItem,
 } from "../../artifacts-api";
-import type { MessageArtifactPart } from "../../lib/message-artifact-parts";
 import { useMediaQuery } from "../../lib/use-media-query";
 import { useVisualViewportInset } from "../../lib/use-visual-viewport-inset";
 import { ScrollArea } from "../ui/scroll-area";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "../ui/sheet";
 import { Spinner } from "../ui/spinner";
-import { ArtifactChip } from "./ArtifactChip";
-import { MessageAttachmentView } from "./MessageAttachmentView";
-
-function toArtifactPart(item: ThreadArtifactItem): MessageArtifactPart {
-  return {
-    artifactId: item.id,
-    title: item.title,
-    expiresAt: item.expiresAt,
-    url: item.url,
-  };
-}
-
-function toFilePart(item: ThreadDownloadItem): FileUIPart {
-  return {
-    type: "file",
-    url: item.url,
-    mediaType: item.mimeType,
-    ...(item.filename ? { filename: item.filename } : {}),
-  };
-}
+import { ArtifactListRow, DownloadListRow } from "./ThreadArtifactListRows";
 
 export function ThreadArtifactsSheet({
   open,
@@ -88,27 +67,31 @@ export function ThreadArtifactsSheet({
           <p className="text-sm text-muted-foreground">Nothing published in this chat yet.</p>
         )}
         {!loading && !error && artifacts.length > 0 && (
-          <section className="space-y-3">
+          <section className="space-y-2">
             <h3 className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
               Artifacts
             </h3>
-            <div className="flex flex-col gap-3">
+            <ul className="space-y-2">
               {artifacts.map((item) => (
-                <ArtifactChip key={item.id} artifact={toArtifactPart(item)} nowMs={nowMs} />
+                <li key={item.id}>
+                  <ArtifactListRow item={item} nowMs={nowMs} />
+                </li>
               ))}
-            </div>
+            </ul>
           </section>
         )}
         {!loading && !error && downloads.length > 0 && (
-          <section className="space-y-3">
+          <section className="space-y-2">
             <h3 className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
               Downloads
             </h3>
-            <div className="flex flex-col gap-3">
+            <ul className="space-y-2">
               {downloads.map((item) => (
-                <MessageAttachmentView key={item.id} data={toFilePart(item)} />
+                <li key={item.id}>
+                  <DownloadListRow item={item} />
+                </li>
               ))}
-            </div>
+            </ul>
           </section>
         )}
       </div>

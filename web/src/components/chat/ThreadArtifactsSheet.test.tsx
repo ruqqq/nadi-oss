@@ -87,11 +87,40 @@ describe("ThreadArtifactsSheet", () => {
     render(<ThreadArtifactsSheet open onOpenChange={() => undefined} threadId="thr_1" />);
 
     expect(await screen.findByText("Usage dashboard")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Preview" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Preview Usage dashboard" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Open Usage dashboard in a new tab" }),
+    ).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /download notes\.pdf/i })).toHaveAttribute(
       "href",
       "/api/attachments/att_1?download=1",
     );
+    expect(screen.getByText(/pdf · 1 kb/i)).toBeInTheDocument();
+    expect(screen.getByText(/3 files/i)).toBeInTheDocument();
+  });
+
+  it("disables preview and open on an expired artifact", async () => {
+    list.mockResolvedValue({
+      artifacts: [
+        {
+          id: "art_old",
+          title: "Stale board",
+          entryPath: "index.html",
+          fileCount: 1,
+          byteSize: 100,
+          expiresAt: Date.now() - 1_000,
+          status: "expired",
+          url: "/api/artifacts/art_old",
+          createdAt: 1,
+        },
+      ],
+      downloads: [],
+    });
+    render(<ThreadArtifactsSheet open onOpenChange={() => undefined} threadId="thr_1" />);
+
+    const preview = await screen.findByRole("button", { name: "Stale board, expired" });
+    expect(preview).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Open Stale board in a new tab" })).toBeDisabled();
   });
 
   it("surfaces a load error without a status code", async () => {
