@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { Env } from "../env";
 import { AttachmentRepository } from "../db/attachment-repository";
 import { deleteR2PrefixBestEffort } from "../artifacts/serve";
+import { ARTIFACT_TTL_MS } from "../artifacts/ttl";
 import { ArtifactRepository } from "../db/artifact-repository";
 import { AgentSkillRepository } from "../db/repositories/agent-skills";
 import { registryBinding, registryDb } from "../db/client";
@@ -1025,7 +1026,7 @@ export function buildComputeToolDefs(
               });
             }
             const createdAt = Date.now();
-            const expiresAt = createdAt + 24 * 60 * 60 * 1000;
+            const expiresAt = createdAt + ARTIFACT_TTL_MS;
             const entryPath = input.entryPath ?? "index.html";
             const title = input.title ?? input.path.split("/").filter(Boolean).pop() ?? artifactId;
             await new ArtifactRepository(registryBinding(env)).insert({

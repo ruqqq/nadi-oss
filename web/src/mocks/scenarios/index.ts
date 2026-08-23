@@ -1481,6 +1481,19 @@ function assistantArtifactsStore(): MockStore {
   };
 }
 
+/** Same published artifact, already past expiresAt — drives the Republish chip. */
+function assistantArtifactsExpiredStore(): MockStore {
+  const base = assistantArtifactsStore();
+  const artifact = makeArtifact({
+    expiresAt: Date.now() - 60_000,
+    status: "expired",
+  });
+  return {
+    ...base,
+    artifacts: { [artifact.id]: artifact },
+  };
+}
+
 /** Assistant sent an image via exec_download_file — chip + lightbox in the timeline. */
 function assistantAttachmentsStore(): MockStore {
   const base = defaultStore();
@@ -1505,6 +1518,7 @@ export const SCENARIOS: Record<string, () => MockStore> = {
   "tool-run": toolRunStore,
   "assistant-attachments": assistantAttachmentsStore,
   "assistant-artifacts": assistantArtifactsStore,
+  "assistant-artifacts-expired": assistantArtifactsExpiredStore,
   "empty-account": emptyStore,
   "fresh-account": freshAccountStore,
   "onboarding-empower": onboardingEmpowerStore,

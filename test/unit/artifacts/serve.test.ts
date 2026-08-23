@@ -113,7 +113,7 @@ describe("handleArtifactHostRequest", () => {
     expect(getById).not.toHaveBeenCalled();
   });
 
-  it("returns 410 and cleans up when the artifact is past expiresAt", async () => {
+  it("returns 410 and keeps R2 objects so the artifact can be republished", async () => {
     getById.mockResolvedValue(activeRow({ expiresAt: NOW - 1 }));
     const bucket = {
       get: vi.fn(),
@@ -130,11 +130,11 @@ describe("handleArtifactHostRequest", () => {
 
     expect(res.status).toBe(410);
     expect(markExpired).toHaveBeenCalledWith(ARTIFACT_ID);
-    expect(bucket.list).toHaveBeenCalledWith({ prefix: `artifacts/${ARTIFACT_ID}/` });
-    expect(bucket.delete).toHaveBeenCalledWith(`artifacts/${ARTIFACT_ID}/index.html`);
+    expect(bucket.list).not.toHaveBeenCalled();
+    expect(bucket.delete).not.toHaveBeenCalled();
   });
 
-  it("returns 410 and cleans up when status is already expired", async () => {
+  it("returns 410 and keeps files when status is already expired", async () => {
     getById.mockResolvedValue(activeRow({ status: "expired" }));
     const bucket = {
       get: vi.fn(),
@@ -148,6 +148,7 @@ describe("handleArtifactHostRequest", () => {
 
     expect(res.status).toBe(410);
     expect(markExpired).toHaveBeenCalledWith(ARTIFACT_ID);
+    expect(bucket.delete).not.toHaveBeenCalled();
   });
 
   it("returns 404 for parent traversal in the relative path", async () => {

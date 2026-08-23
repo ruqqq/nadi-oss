@@ -48,4 +48,21 @@ describe("mock thread artifacts list", () => {
       }),
     ]);
   });
+
+  it("republishes an expired mock artifact and extends expiresAt", async () => {
+    seedStore("assistant-artifacts-expired");
+    const listed = await listThreadArtifacts(ASSISTANT_ARTIFACTS_THREAD_ID, mswFetch);
+    expect(listed.artifacts[0]?.status).toBe("expired");
+    expect(listed.artifacts[0]?.expiresAt).toBeLessThan(Date.now());
+
+    const res = await mswFetch("/api/artifacts/art_mock_dashboard/republish", { method: "POST" });
+    expect(res.ok).toBe(true);
+    const republished = (await res.json()) as { expiresAt: number; status: string };
+    expect(republished.status).toBe("active");
+    expect(republished.expiresAt).toBeGreaterThan(Date.now());
+
+    const after = await listThreadArtifacts(ASSISTANT_ARTIFACTS_THREAD_ID, mswFetch);
+    expect(after.artifacts[0]?.status).toBe("active");
+    expect(after.artifacts[0]?.expiresAt).toBe(republished.expiresAt);
+  });
 });

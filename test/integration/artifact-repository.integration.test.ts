@@ -47,6 +47,16 @@ describe("ArtifactRepository", () => {
     expect((await repo().getById("art-3"))?.status).toBe("expired");
   });
 
+  it("reactivate restores an expired row with a new expiresAt", async () => {
+    await repo().insert({ ...base, id: "art-reactivate" });
+    await repo().markExpired("art-reactivate");
+    await repo().reactivate("art-reactivate", 2_000);
+
+    const row = await repo().getById("art-reactivate");
+    expect(row?.status).toBe("active");
+    expect(row?.expiresAt).toBe(2_000);
+  });
+
   it("lists a thread's artifacts newest first and ignores other threads", async () => {
     await repo().insert({ ...base, id: "art-old", createdAt: 10 });
     await repo().insert({ ...base, id: "art-new", createdAt: 30, title: "Newer" });

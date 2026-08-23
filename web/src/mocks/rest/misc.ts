@@ -21,7 +21,9 @@ import { MID_TURN_THREAD_ID, midTurnTranscript } from "../chat/mid-turn-transcri
 import { HERO_THREAD_ID, heroTranscript } from "../chat/hero-transcript";
 import {
   ASSISTANT_ARTIFACTS_THREAD_ID,
+  MOCK_ARTIFACT_ID,
   assistantArtifactTranscript,
+  liveArtifactExpiresAt,
 } from "../chat/assistant-artifact-transcript";
 import {
   ASSISTANT_DOWNLOAD_THREAD_ID,
@@ -405,7 +407,10 @@ function seededHistory(threadId: string): unknown[] | null {
   if (threadId === TOOL_RUN_THREAD_ID) return toolRunTranscript();
   if (threadId === TOOL_WRITE_THREAD_ID) return singleMcpWriteTranscript();
   if (threadId === ASSISTANT_DOWNLOAD_THREAD_ID) return assistantDownloadTranscript();
-  if (threadId === ASSISTANT_ARTIFACTS_THREAD_ID) return assistantArtifactTranscript();
+  if (threadId === ASSISTANT_ARTIFACTS_THREAD_ID) {
+    const artifact = getStore().artifacts[MOCK_ARTIFACT_ID];
+    return assistantArtifactTranscript(artifact?.expiresAt ?? liveArtifactExpiresAt());
+  }
   return feedbackHistory(threadId);
 }
 

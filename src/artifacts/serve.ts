@@ -8,7 +8,7 @@ import { deriveArtifactViewSecret, verifyArtifactViewToken } from "./view-token"
 
 const ARTIFACT_PATH = /^\/v\/([^/]+)\/(art_[^/]+)(?:\/(.*))?$/;
 
-/** Best-effort delete of every object under `prefix`. Used by serve expiry and publish rollback. */
+/** Best-effort delete of every object under `prefix`. Used by publish rollback. */
 export async function deleteR2PrefixBestEffort(bucket: R2Bucket, prefix: string): Promise<void> {
   try {
     let cursor: string | undefined;
@@ -31,19 +31,19 @@ export function artifactExpired(
   return row.status === "expired" || row.expiresAt < nowMs;
 }
 
+export async function r2PrefixHasObjects(bucket: R2Bucket, prefix: string): Promise<boolean> {
+  const page = await bucket.list({ prefix, limit: 1 });
+  return page.objects.length > 0;
+}
+
 export async function respondExpired(
-  env: Env,
   repo: ArtifactRepository,
   artifactId: string,
-  r2Prefix: string | undefined,
 ): Promise<Response> {
   try {
     await repo.markExpired(artifactId);
   } catch {
     // best-effort
-  }
-  if (r2Prefix) {
-    await deleteR2PrefixBestEffort(attachmentsBucket(env), r2Prefix);
   }
   return new Response("Artifact expired", { status: 410 });
 }
@@ -72,7 +72,7 @@ export async function handleArtifactHostRequest(req: Request, env: Env): Promise
   const repo = new ArtifactRepository(registryBinding(env));
   const row = await repo.getById(artifactId);
   if (!row || artifactExpired(row, nowMs)) {
-    return respondExpired(env, repo, artifactId, row?.r2Prefix);
+    return respondExpired(repo, artifactId);
   }
 
   let rel: string;

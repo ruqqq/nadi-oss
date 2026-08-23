@@ -55,4 +55,11 @@ export class ArtifactRepository {
   async markExpired(id: string): Promise<void> {
     await this.db.update(artifacts).set({ status: "expired" }).where(eq(artifacts.id, id));
   }
+
+  async reactivate(id: string, expiresAt: number): Promise<void> {
+    await this.db
+      .update(artifacts)
+      .set({ status: "active", expiresAt })
+      .where(eq(artifacts.id, id));
+  }
 }

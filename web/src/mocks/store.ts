@@ -47,6 +47,8 @@ export interface MockArtifact {
   expiresAt: number;
   status: "active" | "expired";
   createdAt: number;
+  /** When true, republish fails because the stored files were already swept. */
+  filesGone?: boolean;
 }
 
 /** Committed (or pending) attachment row backing the thread artifacts list. */

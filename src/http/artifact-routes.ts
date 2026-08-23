@@ -1,6 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import type { Env } from "../env";
-import { artifactExpired, respondExpired } from "../artifacts/serve";
+import { artifactExpired, respondExpired, r2PrefixHasObjects } from "../artifacts/serve";
+import { ARTIFACT_TTL_MS } from "../artifacts/ttl";
 import { deriveArtifactViewSecret, signArtifactViewToken } from "../artifacts/view-token";
 import { validateRequestSession } from "../auth/session";
 import { registryBinding, registryDb } from "../db/client";
@@ -8,11 +9,15 @@ import { ArtifactRepository } from "../db/artifact-repository";
 import { AttachmentRepository } from "../db/attachment-repository";
 import { threadIndex, workspaceMembers } from "../db/schema";
 import { assertFeedbackReporter } from "../feedback/access";
+import { attachmentsBucket } from "../storage/bucket-binding";
 
 export const VIEW_TTL_MS = 15 * 60 * 1000;
+export const ARTIFACT_FILES_GONE =
+  "This artifact's files are gone. Ask the assistant to publish it again.";
 
 const METADATA_RE = /^\/api\/artifacts\/([^/]+)$/;
 const VIEW_RE = /^\/api\/artifacts\/([^/]+)\/view$/;
+const REPUBLISH_RE = /^\/api\/artifacts\/([^/]+)\/republish$/;
 const THREAD_LIST_RE = /^\/api\/threads\/([^/]+)\/artifacts$/;
 
 export function resolveArtifactOrigin(req: Request, artifactsHost: string): string {
@@ -112,7 +117,7 @@ async function loadAuthorizedArtifact(
 
   const nowMs = Date.now();
   if (artifactExpired(row, nowMs)) {
-    return { ok: false, response: await respondExpired(env, repo, id, row.r2Prefix) };
+    return { ok: false, response: await respondExpired(repo, id) };
   }
 
   return { ok: true, row };
@@ -145,6 +150,25 @@ async function handleViewMint(req: Request, env: Env, id: string): Promise<Respo
   const viewUrl = `${artifactOrigin}/v/${token}/${id}/`;
 
   return Response.json({ viewUrl, expiresAt: exp });
+}
+
+async function handleRepublish(req: Request, env: Env, id: string): Promise<Response> {
+  const session = await validateRequestSession(env, req);
+  if (!session) return new Response("Unauthorized", { status: 401 });
+
+  const repo = new ArtifactRepository(registryBinding(env));
+  const row = await repo.getById(id);
+  if (!row) return new Response("Not found", { status: 404 });
+
+  const allowed = await authorizeArtifactAccess(env, row.threadId, session.user.id);
+  if (!allowed) return new Response("Not found", { status: 404 });
+
+  const hasFiles = await r2PrefixHasObjects(attachmentsBucket(env), row.r2Prefix);
+  if (!hasFiles) return new Response(ARTIFACT_FILES_GONE, { status: 410 });
+
+  const expiresAt = Date.now() + ARTIFACT_TTL_MS;
+  await repo.reactivate(id, expiresAt);
+  return Response.json(metadataPayload({ ...row, status: "active", expiresAt }));
 }
 
 async function handleThreadList(req: Request, env: Env, threadId: string): Promise<Response> {
@@ -195,6 +219,11 @@ export async function routeArtifacts(req: Request, env: Env): Promise<Response |
   const viewMatch = url.pathname.match(VIEW_RE);
   if (viewMatch?.[1] && req.method === "POST") {
     return handleViewMint(req, env, viewMatch[1]);
+  }
+
+  const republishMatch = url.pathname.match(REPUBLISH_RE);
+  if (republishMatch?.[1] && req.method === "POST") {
+    return handleRepublish(req, env, republishMatch[1]);
   }
 
   return null;

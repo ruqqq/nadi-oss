@@ -1,6 +1,6 @@
 import { Button } from "@/components/ui/button";
-import { ArrowSquareOut, Browser } from "@/icons";
-import { cn } from "@/lib/utils";
+import { Spinner } from "@/components/ui/spinner";
+import { ArrowSquareOut, ArrowsClockwise, Browser } from "@/icons";
 import {
   formatArtifactExpiryHint,
   type MessageArtifactPart,
@@ -8,20 +8,21 @@ import {
 import { ArtifactPreview, useArtifactPreview } from "./ArtifactPreview";
 
 export function ArtifactChip({ artifact, nowMs }: { artifact: MessageArtifactPart; nowMs: number }) {
-  const { expired, previewOpen, setPreviewOpen, openBusy, openInTab } = useArtifactPreview(
-    artifact,
-    nowMs,
-  );
-  const expiryHint = formatArtifactExpiryHint(artifact.expiresAt, nowMs);
+  const {
+    expired,
+    expiresAt,
+    previewOpen,
+    setPreviewOpen,
+    openBusy,
+    openInTab,
+    republishBusy,
+    republish,
+  } = useArtifactPreview(artifact, nowMs);
+  const expiryHint = formatArtifactExpiryHint(expiresAt, nowMs);
 
   return (
     <>
-      <div
-        className={cn(
-          "flex w-64 max-w-full flex-col gap-2 rounded-lg border border-border bg-card px-3 py-2.5",
-          expired && "opacity-60",
-        )}
-      >
+      <div className="flex w-64 max-w-full flex-col gap-2 rounded-lg border border-border bg-card px-3 py-2.5">
         <div className="flex items-center gap-3">
           <span className="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
             <Browser className="size-5" />
@@ -34,27 +35,46 @@ export function ArtifactChip({ artifact, nowMs }: { artifact: MessageArtifactPar
           </span>
         </div>
         <div className="flex gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="h-8 flex-1"
-            disabled={expired}
-            onClick={() => setPreviewOpen(true)}
-          >
-            Preview
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="h-8 flex-1"
-            disabled={expired || openBusy}
-            onClick={() => void openInTab()}
-          >
-            <ArrowSquareOut className="size-3.5" />
-            Open
-          </Button>
+          {expired ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-8 flex-1"
+              disabled={republishBusy}
+              onClick={() => void republish()}
+            >
+              {republishBusy ? (
+                <Spinner className="size-3.5" label="Republishing" />
+              ) : (
+                <ArrowsClockwise className="size-3.5" />
+              )}
+              Republish
+            </Button>
+          ) : (
+            <>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-8 flex-1"
+                onClick={() => setPreviewOpen(true)}
+              >
+                Preview
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-8 flex-1"
+                disabled={openBusy}
+                onClick={() => void openInTab()}
+              >
+                <ArrowSquareOut className="size-3.5" />
+                Open
+              </Button>
+            </>
+          )}
         </div>
       </div>
 
@@ -63,6 +83,8 @@ export function ArtifactChip({ artifact, nowMs }: { artifact: MessageArtifactPar
         expired={expired}
         open={previewOpen}
         onOpenChange={setPreviewOpen}
+        onRepublish={() => void republish()}
+        republishBusy={republishBusy}
       />
     </>
   );

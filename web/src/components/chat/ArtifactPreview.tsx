@@ -7,10 +7,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
-import { Browser } from "@/icons";
+import { ArrowsClockwise, Browser } from "@/icons";
 import {
   mintArtifactViewUrl,
+  republishArtifact,
   type MessageArtifactPart,
 } from "@/lib/message-artifact-parts";
 import { openMintedUrlInNewTab } from "@/lib/open-minted-url";
@@ -18,9 +20,16 @@ import { useMediaQuery } from "@/lib/use-media-query";
 import { useVisualViewportInset } from "@/lib/use-visual-viewport-inset";
 
 export function useArtifactPreview(artifact: MessageArtifactPart, nowMs: number) {
-  const expired = nowMs >= artifact.expiresAt;
+  const [expiresAt, setExpiresAt] = useState(artifact.expiresAt);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [openBusy, setOpenBusy] = useState(false);
+  const [republishBusy, setRepublishBusy] = useState(false);
+
+  useEffect(() => {
+    setExpiresAt(artifact.expiresAt);
+  }, [artifact.expiresAt]);
+
+  const expired = nowMs >= expiresAt;
 
   async function openInTab() {
     if (expired || openBusy) return;
@@ -42,7 +51,30 @@ export function useArtifactPreview(artifact: MessageArtifactPart, nowMs: number)
     }
   }
 
-  return { expired, previewOpen, setPreviewOpen, openBusy, openInTab };
+  async function republish() {
+    if (republishBusy) return;
+    setRepublishBusy(true);
+    try {
+      const next = await republishArtifact(artifact.url);
+      setExpiresAt(next.expiresAt);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "Couldn't republish this artifact.";
+      toast.error(message);
+    } finally {
+      setRepublishBusy(false);
+    }
+  }
+
+  return {
+    expired,
+    expiresAt,
+    previewOpen,
+    setPreviewOpen,
+    openBusy,
+    openInTab,
+    republishBusy,
+    republish,
+  };
 }
 
 export function ArtifactPreview({
@@ -50,11 +82,15 @@ export function ArtifactPreview({
   expired,
   open,
   onOpenChange,
+  onRepublish,
+  republishBusy = false,
 }: {
   artifact: MessageArtifactPart;
   expired: boolean;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onRepublish?: () => void;
+  republishBusy?: boolean;
 }) {
   const isMobile = useMediaQuery("(max-width: 640px)");
   const viewport = useVisualViewportInset(open && isMobile);
@@ -112,8 +148,25 @@ export function ArtifactPreview({
         </div>
       )}
       {!previewLoading && previewExpired && (
-        <div className="flex flex-1 items-center justify-center p-8 text-sm text-muted-foreground">
-          This artifact has expired.
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-sm text-muted-foreground">
+          <p>This artifact has expired.</p>
+          {onRepublish && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-8"
+              disabled={republishBusy}
+              onClick={() => onRepublish()}
+            >
+              {republishBusy ? (
+                <Spinner className="size-3.5" label="Republishing" />
+              ) : (
+                <ArrowsClockwise className="size-3.5" />
+              )}
+              Republish
+            </Button>
+          )}
         </div>
       )}
       {!previewLoading && viewUrl && (

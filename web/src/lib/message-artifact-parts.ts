@@ -93,3 +93,22 @@ export async function mintArtifactViewUrl(
   }
   return json.viewUrl;
 }
+
+/** Extend an expired artifact's TTL when its files are still stored. */
+export async function republishArtifact(
+  artifactUrl: string,
+  fetchFn: typeof fetch = fetch,
+): Promise<{ expiresAt: number }> {
+  const res = await fetchFn(`${artifactUrl}/republish`, {
+    method: "POST",
+    credentials: "include",
+  });
+  if (!res.ok) {
+    throw await errorFromResponse(res, "republish this artifact");
+  }
+  const json = (await res.json()) as { expiresAt?: unknown };
+  if (typeof json.expiresAt !== "number" || !Number.isFinite(json.expiresAt)) {
+    throw new Error("Republish response was missing a new expiry.");
+  }
+  return { expiresAt: json.expiresAt };
+}
