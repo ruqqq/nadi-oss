@@ -76,6 +76,7 @@ function baseProps(overrides: Partial<React.ComponentProps<typeof AllChatsView>>
     onSelectThread: vi.fn(),
     onArchiveThread: vi.fn(),
     onDeleteThread: vi.fn(),
+    onMarkThreadRead: vi.fn(),
     onBack: vi.fn(),
     ...overrides,
   };
@@ -284,6 +285,66 @@ function ControlledAllChats(
     />
   );
 }
+
+describe("AllChatsView row menu", () => {
+  async function openMenu(title: string) {
+    const trigger = screen.getByLabelText(`Actions for ${title}`);
+    fireEvent.pointerDown(trigger, { button: 0 });
+    fireEvent.pointerUp(trigger, { button: 0 });
+    await waitFor(() => expect(screen.getByRole("menuitem", { name: "Delete" })).toBeTruthy());
+  }
+
+  it("offers Mark as read only while the thread carries an unread outcome", async () => {
+    const onMarkThreadRead = vi.fn();
+    const unread = thread({
+      threadId: "unread",
+      title: "Unread one",
+      unreadOutcome: "completed",
+    });
+    const read = thread({ threadId: "read", title: "Read one", unreadOutcome: null });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(jsonResponse({ threads: [unread, read], nextCursor: null }))),
+    );
+
+    render(
+      <AllChatsView
+        {...baseProps({ threads: [unread, read], onMarkThreadRead })}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByText("Unread one")).toBeTruthy());
+    await openMenu("Read one");
+    expect(screen.queryByRole("menuitem", { name: "Mark as read" })).toBeNull();
+    fireEvent.keyDown(document.body, { key: "Escape" });
+
+    await waitFor(() => expect(screen.queryByRole("menuitem", { name: "Delete" })).toBeNull());
+    await openMenu("Unread one");
+    fireEvent.click(screen.getByRole("menuitem", { name: "Mark as read" }));
+    expect(onMarkThreadRead).toHaveBeenCalledWith("unread");
+  });
+
+  it("does not offer Mark as read on the archived tab", async () => {
+    const archived = thread({
+      threadId: "arch1",
+      title: "Archived unread",
+      status: "archived",
+      unreadOutcome: "completed",
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(jsonResponse({ threads: [archived], nextCursor: null }))),
+    );
+
+    render(
+      <AllChatsView {...baseProps({ showArchived: true, threads: [] })} />,
+    );
+
+    await waitFor(() => expect(screen.getByText("Archived unread")).toBeTruthy());
+    await openMenu("Archived unread");
+    expect(screen.queryByRole("menuitem", { name: "Mark as read" })).toBeNull();
+  });
+});
 
 describe("AllChatsView dedupe-stall", () => {
   it("keeps paging past a page that adds zero new rows, until the query is exhausted", async () => {

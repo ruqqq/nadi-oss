@@ -6,6 +6,7 @@ import type { ThreadChatApi, ThreadAgentSocket } from "./thread-chat-seam";
 import type { ThreadSummary } from "./threads-api";
 import { FINE_POINTER_QUERY } from "./lib/use-fine-pointer";
 import { WIDE_LAYOUT_QUERY } from "./lib/use-wide-layout";
+import { SIDEBAR_RECENT_THREAD_LIMIT } from "./lib/thread-dismissal";
 
 const live = vi.hoisted(() => {
   let onMessage: ((raw: string) => void) | null = null;
@@ -1048,6 +1049,246 @@ describe("a thread deleted while it is open", () => {
     live.emitMessage({ type: "thread.deleted", threadId: "thr_other", workspaceId: "ws_1" });
 
     await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(window.location.pathname).toBe("/threads/thr_open");
+  });
+});
+
+describe("ChatApp rail toggle badge", () => {
+  function renderAtHome(initialThreads: ThreadSummary[]) {
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+    window.history.replaceState(null, "", "/");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "/api/invites") {
+          return Promise.resolve(
+            Response.json({
+              invites: [],
+              quota: { used: 0, limit: 5 },
+              isSuperuser: false,
+              waitingList: [],
+            }),
+          );
+        }
+        if (url.startsWith("/api/workbenches")) {
+          return Promise.resolve(Response.json({ workbenches: [] }));
+        }
+        if (url.startsWith("/api/projects")) {
+          return Promise.resolve(Response.json({ projects: [] }));
+        }
+        if (url.startsWith("/api/threads")) {
+          return Promise.resolve(Response.json({ threads: initialThreads, nextCursor: null }));
+        }
+        return Promise.resolve(Response.json({}));
+      }),
+    );
+    return render(
+      <ChatApp
+        consentWorkspaceId={null}
+        user={{ id: "u1", email: "you@example.com" } as never}
+        initialProjects={[]}
+        initialThreads={initialThreads}
+        initialThreadsNextCursor={null}
+        onActiveWorkspaceChange={() => {}}
+        onSignOut={() => {}}
+        voiceEnabled={false}
+        backgroundWorkEnabled={false}
+        feedbackAdminEnabled={false}
+      />,
+    );
+  }
+
+  it("does not badge unread that only lives past the sidebar cap", async () => {
+    const recent = Array.from({ length: SIDEBAR_RECENT_THREAD_LIMIT }, (_, i) =>
+      thread({ threadId: `recent_${i}`, title: `Recent ${i}`, updatedAt: 200 - i }),
+    );
+    const overflow = thread({
+      threadId: "overflow",
+      title: "All-chats only unread",
+      updatedAt: 1,
+      unreadOutcome: "completed",
+    });
+    renderAtHome([...recent, overflow]);
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /Show chats/ })).toBeTruthy(),
+    );
+    expect(screen.getByRole("button", { name: "Show chats" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Show chats, unread chats" })).toBeNull();
+  });
+
+  it("badges unread that appears in the sidebar", async () => {
+    renderAtHome([
+      thread({
+        threadId: "recent_0",
+        title: "Recent unread",
+        updatedAt: 200,
+        unreadOutcome: "completed",
+      }),
+    ]);
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Show chats, unread chats" })).toBeTruthy(),
+    );
+  });
+
+  it("does not badge a dismissed unread thread that only All chats still shows", async () => {
+    renderAtHome([
+      thread({
+        threadId: "hidden",
+        title: "Dismissed unread",
+        updatedAt: 100,
+        recentDismissedAt: 150,
+        unreadOutcome: "completed",
+      }),
+    ]);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Show chats" })).toBeTruthy());
+    expect(screen.queryByRole("button", { name: "Show chats, unread chats" })).toBeNull();
+  });
+});
+
+describe("ChatApp dismiss of the open thread", () => {
+  function pointerLayout() {
+    window.matchMedia = ((query: string) =>
+      ({
+        matches: query === WIDE_LAYOUT_QUERY || query === FINE_POINTER_QUERY,
+        media: query,
+        onchange: null,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        addListener: () => {},
+        removeListener: () => {},
+        dispatchEvent: () => false,
+      }) as unknown as MediaQueryList) as typeof window.matchMedia;
+  }
+
+  function renderOpenThreads(threads: ThreadSummary[], openId: string) {
+    pointerLayout();
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+    window.history.replaceState(null, "", `/threads/${openId}`);
+    const open = threads.find((item) => item.threadId === openId)!;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        if (url === `/think-agents/think-thread-agent/${openId}/get-messages`) {
+          return Promise.resolve(Response.json({ messages: [] }));
+        }
+        if (url === "/api/invites") {
+          return Promise.resolve(
+            Response.json({
+              invites: [],
+              quota: { used: 0, limit: 5 },
+              isSuperuser: false,
+              waitingList: [],
+            }),
+          );
+        }
+        if (url.startsWith("/api/workbenches")) {
+          return Promise.resolve(Response.json({ workbenches: [] }));
+        }
+        if (url.startsWith("/api/projects")) {
+          return Promise.resolve(Response.json({ projects: [] }));
+        }
+        if (url.endsWith("/dismiss-recent") && method === "POST") {
+          const threadId = url.split("/").at(-2)!;
+          const target = threads.find((item) => item.threadId === threadId) ?? open;
+          return Promise.resolve(
+            Response.json({ thread: { ...target, recentDismissedAt: Date.now() } }),
+          );
+        }
+        if (url.startsWith("/api/threads")) {
+          return Promise.resolve(Response.json({ threads, nextCursor: null }));
+        }
+        return Promise.resolve(Response.json({}));
+      }),
+    );
+    const socket: ThreadAgentSocket = {
+      readyState: WebSocket.OPEN,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      call: vi.fn(async () => undefined),
+    };
+    const threadChat = {
+      useThreadAgent: () => socket as never,
+      useThreadChat: (agent: ThreadAgentSocket, initialMessages: ThreadChatApi["messages"]) =>
+        ({
+          agent,
+          messages: initialMessages,
+          setMessages: vi.fn(),
+          sendMessage: vi.fn(),
+          addToolApprovalResponse: vi.fn(),
+          status: "ready",
+          isStreaming: false,
+          error: undefined,
+          stop: vi.fn(),
+        }) satisfies ThreadChatApi,
+    };
+    return render(
+      <ChatApp
+        consentWorkspaceId={null}
+        user={{ id: "u1", email: "you@example.com" } as never}
+        initialProjects={[]}
+        initialThreads={threads}
+        initialThreadsNextCursor={null}
+        onActiveWorkspaceChange={() => {}}
+        onSignOut={() => {}}
+        voiceEnabled={false}
+        backgroundWorkEnabled={false}
+        feedbackAdminEnabled={false}
+        threadChat={threadChat}
+      />,
+    );
+  }
+
+  async function openRowMenu(title: string) {
+    await waitFor(() =>
+      expect(screen.getAllByLabelText(`Actions for ${title}`).length).toBeGreaterThan(0),
+    );
+    const trigger = screen.getAllByLabelText(`Actions for ${title}`)[0]!;
+    fireEvent.pointerDown(trigger, { button: 0 });
+    fireEvent.pointerUp(trigger, { button: 0 });
+    await waitFor(() => expect(screen.getByRole("menuitem", { name: "Dismiss" })).toBeTruthy());
+  }
+
+  it("lands on a new chat when the dismissed thread is the one on screen", async () => {
+    const target = thread({ threadId: "thr_open", title: "Open thread", updatedAt: 200 });
+    renderOpenThreads([target], "thr_open");
+
+    await waitFor(() => expect(window.location.pathname).toBe("/threads/thr_open"));
+    await openRowMenu("Open thread");
+    fireEvent.click(screen.getByRole("menuitem", { name: "Dismiss" }));
+
+    await waitFor(() => expect(window.location.pathname).toBe("/"));
+  });
+
+  it("stays on the open thread when a different one is dismissed", async () => {
+    const open = thread({ threadId: "thr_open", title: "Open thread", updatedAt: 200 });
+    const other = thread({ threadId: "thr_other", title: "Other thread", updatedAt: 150 });
+    renderOpenThreads([open, other], "thr_open");
+
+    await waitFor(() => expect(window.location.pathname).toBe("/threads/thr_open"));
+    await openRowMenu("Other thread");
+    fireEvent.click(screen.getByRole("menuitem", { name: "Dismiss" }));
+
+    await waitFor(() => expect(screen.queryByRole("menuitem", { name: "Dismiss" })).toBeNull());
     expect(window.location.pathname).toBe("/threads/thr_open");
   });
 });
