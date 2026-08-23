@@ -12,7 +12,7 @@ export function liveArtifactExpiresAt(nowMs = Date.now()): number {
   return nowMs + ARTIFACT_TTL_MS;
 }
 
-export function assistantArtifactTranscript(): unknown[] {
+export function assistantArtifactTranscript(expiresAt = liveArtifactExpiresAt()): unknown[] {
   return [
     {
       id: "msg_aa_user",
@@ -47,7 +47,7 @@ export function assistantArtifactTranscript(): unknown[] {
             entryPath: "index.html",
             fileCount: 3,
             byteSize: 28_400,
-            expiresAt: liveArtifactExpiresAt(),
+            expiresAt,
             url: `/api/artifacts/${MOCK_ARTIFACT_ID}`,
           },
         },

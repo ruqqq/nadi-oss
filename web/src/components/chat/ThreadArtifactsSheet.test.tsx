@@ -99,7 +99,7 @@ describe("ThreadArtifactsSheet", () => {
     expect(screen.getByText(/3 files/i)).toBeInTheDocument();
   });
 
-  it("disables preview and open on an expired artifact", async () => {
+  it("offers Republish on an expired artifact instead of preview and open", async () => {
     list.mockResolvedValue({
       artifacts: [
         {
@@ -118,9 +118,12 @@ describe("ThreadArtifactsSheet", () => {
     });
     render(<ThreadArtifactsSheet open onOpenChange={() => undefined} threadId="thr_1" />);
 
-    const preview = await screen.findByRole("button", { name: "Stale board, expired" });
-    expect(preview).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Open Stale board in a new tab" })).toBeDisabled();
+    expect(await screen.findByText("Stale board")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Republish Stale board" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Preview Stale board" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Open Stale board in a new tab" }),
+    ).not.toBeInTheDocument();
   });
 
   it("surfaces a load error without a status code", async () => {

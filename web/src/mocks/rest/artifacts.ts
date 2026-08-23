@@ -1,4 +1,5 @@
 import { http, HttpResponse } from "msw";
+import { ARTIFACT_TTL_MS } from "../chat/assistant-artifact-transcript";
 import { getStore } from "../store";
 import { errorResponse, notFound, pathParam } from "./util";
 
@@ -81,5 +82,19 @@ export const artifactHandlers = [
       viewUrl: `https://artifacts.example/v/mock-token/${id}/`,
       expiresAt,
     });
+  }),
+  http.post("*/api/artifacts/:artifactId/republish", ({ params }) => {
+    const id = pathParam(params, "artifactId");
+    const artifact = getStore().artifacts[id];
+    if (!artifact) return notFound("That artifact");
+    if (artifact.filesGone) {
+      return errorResponse(
+        410,
+        "This artifact's files are gone. Ask the assistant to publish it again.",
+      );
+    }
+    artifact.status = "active";
+    artifact.expiresAt = Date.now() + ARTIFACT_TTL_MS;
+    return HttpResponse.json(metadataPayload(artifact));
   }),
 ];

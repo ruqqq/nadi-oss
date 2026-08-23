@@ -1,6 +1,7 @@
 import type { ThreadArtifactItem, ThreadDownloadItem } from "../../artifacts-api";
 import { Button } from "../ui/button";
-import { ArrowSquareOut, Browser, DownloadSimple, Image } from "../../icons";
+import { Spinner } from "../ui/spinner";
+import { ArrowSquareOut, ArrowsClockwise, Browser, DownloadSimple, Image } from "../../icons";
 import { cn } from "../../lib/utils";
 import { formatArtifactExpiryHint, type MessageArtifactPart } from "../../lib/message-artifact-parts";
 import { attachmentDownloadUrl } from "../../lib/message-file-parts";
@@ -45,51 +46,87 @@ export function ArtifactListRow({
   nowMs: number;
 }) {
   const artifact = toArtifactPart(item);
-  const { expired, previewOpen, setPreviewOpen, openBusy, openInTab } = useArtifactPreview(
-    artifact,
-    nowMs,
-  );
-  const expiryHint = formatArtifactExpiryHint(item.expiresAt, nowMs);
+  const {
+    expired,
+    expiresAt,
+    previewOpen,
+    setPreviewOpen,
+    openBusy,
+    openInTab,
+    republishBusy,
+    republish,
+  } = useArtifactPreview(artifact, nowMs);
+  const expiryHint = formatArtifactExpiryHint(expiresAt, nowMs);
   const filesLabel =
     item.fileCount === 1 ? "1 file" : `${item.fileCount.toLocaleString("en-US")} files`;
 
+  const identity = (
+    <>
+      <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+        <Browser aria-hidden className="size-4" />
+      </span>
+      <span className="flex min-w-0 flex-1 flex-col">
+        <span className="truncate font-medium text-sm text-foreground">{item.title}</span>
+        <span className="truncate font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
+          {expiryHint} · {filesLabel}
+        </span>
+      </span>
+    </>
+  );
+
   return (
     <>
-      <div className={cn(rowClass, expired && "opacity-60 hover:bg-card")}>
-        <button
-          type="button"
-          className="flex min-w-0 flex-1 items-center gap-3 py-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none"
-          disabled={expired}
-          onClick={() => setPreviewOpen(true)}
-          aria-label={expired ? `${item.title}, expired` : `Preview ${item.title}`}
-        >
-          <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
-            <Browser aria-hidden className="size-4" />
-          </span>
-          <span className="flex min-w-0 flex-1 flex-col">
-            <span className="truncate font-medium text-sm text-foreground">{item.title}</span>
-            <span className="truncate font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
-              {expiryHint} · {filesLabel}
-            </span>
-          </span>
-        </button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          disabled={expired || openBusy}
-          aria-label={`Open ${item.title} in a new tab`}
-          title="Open in a new tab"
-          onClick={() => void openInTab()}
-        >
-          <ArrowSquareOut aria-hidden className="size-4" />
-        </Button>
+      <div className={rowClass}>
+        {expired ? (
+          <div className="flex min-w-0 flex-1 items-center gap-3 py-1">{identity}</div>
+        ) : (
+          <button
+            type="button"
+            className="flex min-w-0 flex-1 items-center gap-3 py-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            onClick={() => setPreviewOpen(true)}
+            aria-label={`Preview ${item.title}`}
+          >
+            {identity}
+          </button>
+        )}
+        {expired ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-8 shrink-0"
+            disabled={republishBusy}
+            aria-label={`Republish ${item.title}`}
+            onClick={() => void republish()}
+          >
+            {republishBusy ? (
+              <Spinner className="size-3.5" label="Republishing" />
+            ) : (
+              <ArrowsClockwise aria-hidden className="size-3.5" />
+            )}
+            Republish
+          </Button>
+        ) : (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            disabled={openBusy}
+            aria-label={`Open ${item.title} in a new tab`}
+            title="Open in a new tab"
+            onClick={() => void openInTab()}
+          >
+            <ArrowSquareOut aria-hidden className="size-4" />
+          </Button>
+        )}
       </div>
       <ArtifactPreview
         artifact={artifact}
         expired={expired}
         open={previewOpen}
         onOpenChange={setPreviewOpen}
+        onRepublish={() => void republish()}
+        republishBusy={republishBusy}
       />
     </>
   );

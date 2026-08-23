@@ -194,6 +194,11 @@ describe("artifact routes", () => {
 
     const row = await new ArtifactRepository(env.REGISTRY_DB).getById(seeded.artifactId);
     expect(row?.status).toBe("expired");
+    expect(
+      await env.ATTACHMENTS_BUCKET.get(
+        `${seeded.workspaceId}/${seeded.threadId}/${seeded.artifactId}/index.html`,
+      ),
+    ).not.toBeNull();
   });
 
   it("returns metadata for workspace members", async () => {
@@ -247,6 +252,80 @@ describe("artifact routes", () => {
     });
     expect(res.status).toBe(503);
     expect(await res.text()).toBe("Artifact preview host is not configured");
+  });
+
+  it("rejects unauthenticated republish with 401", async () => {
+    await seedArtifact();
+    const res = await SELF.fetch("https://nadi.test/api/artifacts/art_test1/republish", {
+      method: "POST",
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 404 when a non-member republishes", async () => {
+    const owner = await seedArtifact();
+    const outsider = await seedUserWorkspace({
+      userId: "user-outsider",
+      token: "outsider-token",
+      workspaceId: "ws-other",
+    });
+    const res = await SELF.fetch(`https://nadi.test/api/artifacts/${owner.artifactId}/republish`, {
+      method: "POST",
+      headers: cookie(outsider.token),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("republishes an expired artifact when its files are still in R2", async () => {
+    const expiredAt = Date.now() - 60_000;
+    const seeded = await seedArtifact({ expiresAt: expiredAt });
+    const objectKey = `${seeded.workspaceId}/${seeded.threadId}/${seeded.artifactId}/index.html`;
+    await env.ATTACHMENTS_BUCKET.put(objectKey, "html");
+    await new ArtifactRepository(env.REGISTRY_DB).markExpired(seeded.artifactId);
+
+    const before = Date.now();
+    const res = await SELF.fetch(`https://nadi.test/api/artifacts/${seeded.artifactId}/republish`, {
+      method: "POST",
+      headers: cookie(seeded.token),
+    });
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      id: string;
+      status: string;
+      expiresAt: number;
+      url: string;
+    };
+    expect(json).toMatchObject({
+      id: seeded.artifactId,
+      status: "active",
+      url: `/api/artifacts/${seeded.artifactId}`,
+    });
+    expect(json.expiresAt).toBeGreaterThanOrEqual(before + 24 * 60 * 60 * 1000 - 5_000);
+    expect(json.expiresAt).toBeLessThanOrEqual(Date.now() + 24 * 60 * 60 * 1000 + 5_000);
+
+    const row = await new ArtifactRepository(env.REGISTRY_DB).getById(seeded.artifactId);
+    expect(row?.status).toBe("active");
+    expect(row?.expiresAt).toBe(json.expiresAt);
+
+    const view = await SELF.fetch(`https://nadi.test/api/artifacts/${seeded.artifactId}/view`, {
+      method: "POST",
+      headers: cookie(seeded.token),
+    });
+    expect(view.status).toBe(200);
+  });
+
+  it("returns 410 when republishing an artifact whose files are gone", async () => {
+    const seeded = await seedArtifact({ id: "art_gone", expiresAt: Date.now() - 60_000 });
+    await new ArtifactRepository(env.REGISTRY_DB).markExpired(seeded.artifactId);
+
+    const res = await SELF.fetch(`https://nadi.test/api/artifacts/${seeded.artifactId}/republish`, {
+      method: "POST",
+      headers: cookie(seeded.token),
+    });
+    expect(res.status).toBe(410);
+    expect(await res.text()).toBe(
+      "This artifact's files are gone. Ask the assistant to publish it again.",
+    );
   });
 
   it("lists a thread's artifacts and committed downloads newest first", async () => {

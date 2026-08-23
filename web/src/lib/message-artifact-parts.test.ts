@@ -4,6 +4,7 @@ import {
   collectMessageArtifactParts,
   formatArtifactExpiryHint,
   mintArtifactViewUrl,
+  republishArtifact,
 } from "./message-artifact-parts";
 
 type Part = UIMessage["parts"][number];
@@ -133,6 +134,37 @@ describe("mintArtifactViewUrl", () => {
 
     await expect(mintArtifactViewUrl("/api/artifacts/art_1", fetchFn)).rejects.toThrow(
       "Artifact expired",
+    );
+  });
+});
+
+describe("republishArtifact", () => {
+  it("POSTs to the republish route and returns the new expiresAt", async () => {
+    const fetchFn = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ expiresAt: 1_800_000_000_000, status: "active" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    await expect(republishArtifact("/api/artifacts/art_1", fetchFn)).resolves.toEqual({
+      expiresAt: 1_800_000_000_000,
+    });
+    expect(fetchFn).toHaveBeenCalledWith("/api/artifacts/art_1/republish", {
+      method: "POST",
+      credentials: "include",
+    });
+  });
+
+  it("surfaces server errors via errorFromResponse", async () => {
+    const fetchFn = vi.fn().mockResolvedValue(
+      new Response("This artifact's files are gone. Ask the assistant to publish it again.", {
+        status: 410,
+      }),
+    );
+
+    await expect(republishArtifact("/api/artifacts/art_1", fetchFn)).rejects.toThrow(
+      "This artifact's files are gone. Ask the assistant to publish it again.",
     );
   });
 });
