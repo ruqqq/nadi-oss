@@ -1,5 +1,10 @@
 import { describe, expect, test } from "vitest";
-import { isThreadDismissedFromRail, visibleRailThreads } from "./thread-dismissal";
+import {
+  isThreadDismissedFromRail,
+  SIDEBAR_RECENT_THREAD_LIMIT,
+  sidebarRailThreads,
+  visibleRailThreads,
+} from "./thread-dismissal";
 import type { ThreadSummary } from "../threads-api";
 
 function thread(over: Partial<ThreadSummary> = {}): ThreadSummary {
@@ -102,5 +107,38 @@ describe("visibleRailThreads", () => {
       activeThreadId: "plain",
     });
     expect(visible.map((t) => t.threadId)).toEqual(["plain"]);
+  });
+});
+
+describe("sidebarRailThreads", () => {
+  test("matches the unsearched rail: dismissed threads are gone, then the recent cap", () => {
+    const recent = Array.from({ length: SIDEBAR_RECENT_THREAD_LIMIT }, (_, i) =>
+      thread({ threadId: `recent_${i}`, updatedAt: 200 - i }),
+    );
+    const overflow = thread({ threadId: "overflow", updatedAt: 1 });
+    const dismissed = thread({
+      threadId: "dismissed",
+      updatedAt: 300,
+      recentDismissedAt: 400,
+    });
+
+    expect(sidebarRailThreads([dismissed, ...recent, overflow], null).map((t) => t.threadId)).toEqual(
+      recent.map((t) => t.threadId),
+    );
+  });
+
+  test("does not keep an overflow thread just because it is unread", () => {
+    const recent = Array.from({ length: SIDEBAR_RECENT_THREAD_LIMIT }, (_, i) =>
+      thread({ threadId: `recent_${i}`, updatedAt: 200 - i }),
+    );
+    const overflow = thread({
+      threadId: "overflow",
+      updatedAt: 1,
+      unreadOutcome: "completed",
+    });
+
+    expect(sidebarRailThreads([...recent, overflow], null).map((t) => t.threadId)).not.toContain(
+      "overflow",
+    );
   });
 });

@@ -32,8 +32,10 @@ export function isThreadDismissedFromRail(
  *
  * - While searching. The user typed this thread's name; hiding the result is
  *   the bug, not the feature.
- * - The active thread. Dismissing the chat you are reading must not pull it out
- *   from under you — it drops off once you navigate away.
+ * - The active thread. A live update that stamps dismissal must not pull the
+ *   chat you are reading out from under you — it drops off once you navigate
+ *   away. User-initiated Dismiss of the open thread navigates to a new chat,
+ *   which is what spends this exception.
  */
 export function visibleRailThreads(
   threads: ThreadSummary[],
@@ -42,5 +44,25 @@ export function visibleRailThreads(
   if (options.searching) return threads;
   return threads.filter(
     (thread) => thread.threadId === options.activeThreadId || !isThreadDismissedFromRail(thread),
+  );
+}
+
+/** The unsearched rail's display budget. All chats holds the rest. */
+export const SIDEBAR_RECENT_THREAD_LIMIT = 15;
+
+/**
+ * What the unsearched sidebar actually shows — dismissed threads gone, then
+ * capped at the recent window. The hamburger badge must scan this set, not
+ * the shared array: All chats pages older chats into that array, and a
+ * badge for a thread past the cap would send you looking at a rail that
+ * does not contain it.
+ */
+export function sidebarRailThreads(
+  threads: ThreadSummary[],
+  activeThreadId: string | null,
+): ThreadSummary[] {
+  return visibleRailThreads(threads, { searching: false, activeThreadId }).slice(
+    0,
+    SIDEBAR_RECENT_THREAD_LIMIT,
   );
 }

@@ -165,6 +165,7 @@ import {
   DotsThree,
   DotsThreeVertical,
   Archive,
+  Eye,
   Trash,
   Robot,
   UserPlus,
@@ -301,7 +302,11 @@ import { showThreadActivityToast } from "./lib/thread-activity-toast";
  * ordering — without polling indefinitely.
  */
 const CLAIM_RETRY_DELAYS_MS = [250, 750, 1_500, 3_000, 5_000];
-import { visibleRailThreads } from "./lib/thread-dismissal";
+import {
+  SIDEBAR_RECENT_THREAD_LIMIT,
+  sidebarRailThreads,
+  visibleRailThreads,
+} from "./lib/thread-dismissal";
 import { awaitsAssistantReply, isConversationComplete } from "./lib/message-state";
 import { mergeResyncedHistory } from "./lib/history-merge";
 /** How long a thread may promise an inbound reply with nothing to show for it. */
@@ -779,7 +784,6 @@ function AuthGate({ onSignedIn }: { onSignedIn: (session: AuthSession) => void }
 // Thread navigation                                                   //
 // ------------------------------------------------------------------ //
 
-const SIDEBAR_RECENT_THREAD_LIMIT = 15;
 // All chats holds every active chat already; this caps what gets built into the
 // DOM at once, not what is fetched.
 const ALL_CHATS_PAGE_SIZE = 25;
@@ -1002,7 +1006,7 @@ function ThreadList({
   );
   // Search spans every loaded chat; the unsearched list stays capped at the
   // recent window, with the remainder named rather than silently dropped.
-  const visible = searching ? railMatches : railMatches.slice(0, SIDEBAR_RECENT_THREAD_LIMIT);
+  const visible = searching ? railMatches : sidebarRailThreads(matches, activeThreadId);
 
   // Debounce the query into the server fetch only — the local `matches` above
   // stays keyed on the raw `query` so typing feels instant.
@@ -2586,9 +2590,15 @@ export function ChatApp({
    */
   const dismissThread = useCallback(
     (thread: ThreadSummary) => {
+      // Same landing as archive/delete of the open thread: the rail is no
+      // longer showing this chat, so staying on it would leave you reading
+      // something you just asked to put away.
+      const leavingOpenThread =
+        thread.threadId === (activeThread?.threadId ?? routeThreadId);
       void setThreadRecentDismissed(thread.threadId, true)
         .then((updated) => {
           applyUpdatedThread(updated);
+          if (leavingOpenThread) startNewThread();
           // Name where the chat went. A row that vanishes with no explanation
           // reads as deletion, which is the one thing this action is not.
           toast.success("Dismissed", {
@@ -2611,7 +2621,7 @@ export function ChatApp({
           toast.error(error instanceof Error ? error.message : "Couldn't dismiss this chat");
         });
     },
-    [applyUpdatedThread],
+    [activeThread, applyUpdatedThread, routeThreadId, startNewThread],
   );
 
   const archiveThread = useCallback(
@@ -3033,14 +3043,12 @@ export function ChatApp({
     browserNotifications.vapidPublicKey !== null &&
     notificationPromptKey !== dismissedNotificationPromptKey;
 
-  // What the rail is holding while it is a drawer and out of sight. Computed
-  // from the same `visibleRailThreads` set the rail renders, so a dismissed
-  // thread can't badge a toggle that then shows nothing. Deliberately NOT
-  // capped at SIDEBAR_RECENT_THREAD_LIMIT: that cap is a display budget and the
-  // rail names its own remainder, so a badge for a thread past it still leads
-  // somewhere.
+  // What the rail is holding while it is a drawer and out of sight. The same
+  // recent window the unsearched sidebar renders — dismissed threads and
+  // anything past the cap live in All chats, so they must not badge a toggle
+  // that then shows nothing of them.
   const railToggleBadge = useMemo(
-    () => railToggleIndicator(visibleRailThreads(threads, { searching: false, activeThreadId })),
+    () => railToggleIndicator(sidebarRailThreads(threads, activeThreadId)),
     [threads, activeThreadId],
   );
 
@@ -3135,6 +3143,7 @@ export function ChatApp({
                 onSelectThread={openThreadFromCurrentScreen}
                 onArchiveThread={archiveThread}
                 onDeleteThread={deleteThread}
+                onMarkThreadRead={markThreadRead}
                 onBack={closeAllChats}
               />
             ) : panelRoute?.kind === "projects" ? (
@@ -3497,6 +3506,7 @@ export function AllChatsView({
   onSelectThread,
   onArchiveThread,
   onDeleteThread,
+  onMarkThreadRead,
   onBack,
 }: {
   threads: ThreadSummary[];
@@ -3508,6 +3518,7 @@ export function AllChatsView({
   onSelectThread: (threadId: string) => void;
   onArchiveThread: (threadId: string) => void;
   onDeleteThread: (threadId: string) => void;
+  onMarkThreadRead: (threadId: string) => void;
   /** All Chats is a destination you go to, so it goes back — it never opens the rail. */
   onBack: () => void;
 }) {
@@ -3792,7 +3803,15 @@ export function AllChatsView({
                           <DotsThreeVertical aria-hidden className="size-5" />
                         </Button>
                       </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end" className="w-40">
+                      <DropdownMenuContent align="end" className="w-48">
+                        {!showArchived && thread.unreadOutcome != null && (
+                          <DropdownMenuItem
+                            onSelect={() => onMarkThreadRead(thread.threadId)}
+                          >
+                            <Eye aria-hidden />
+                            Mark as read
+                          </DropdownMenuItem>
+                        )}
                         {!showArchived && (
                           <DropdownMenuItem onSelect={() => setPendingArchive(thread)}>
                             <Archive aria-hidden />
