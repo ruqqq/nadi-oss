@@ -80,7 +80,9 @@ the type system, and each one cost a production incident or a broken feature.
   alive while an interval is live, so a stray one pins the request open. This is
   why the subagent liveness timer is bound to the turn and cleared on settle
   (`src/agent/subagent.ts`). Note `setInterval` _threw outright_ on celld before
-  v0.3.0 (denoland/celld#156).
+  v0.3.0 (denoland/celld#156). That timer is unreachable on celld regardless —
+  subagents need Durable Object facets, which celld does not implement — so the
+  rule matters for the Cloudflare path and for any interval added later.
 - **Never let an error message carry a URL that holds secrets.** The sandbox
   exec URL carries `env=` for every workbench secret plus `GH_TOKEN`. Truncate
   at the first URL-ish marker rather than stripping — truncating cannot leak on

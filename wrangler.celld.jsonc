@@ -29,8 +29,11 @@
     // v6 created CelldTicker, a per-minute alarm DO that stood in for
     // scheduled() while celld rejected `triggers`. celld v0.3.0 runs cron
     // natively, so the class and its tag are gone. An upgraded deployment
-    // leaves one orphaned `CelldTicker` cell in the fleet bucket; nothing
-    // references it and it costs one idle cell's storage.
+    // leaves an orphaned `CelldTicker` cell in the fleet bucket, and it is NOT
+    // free: the cell carries a persisted alarm celld keeps retrying against a
+    // class nothing exports, measured at ~16 attempts/second forever. Delete
+    // the cell prefix and restart the node — docs/self-hosting-celld.md,
+    // "Upgrading celld".
   ],
   // celld v0.3.0 runs D1, and a D1 database is a cell — so this gets the same
   // fencing, replication and durable write acknowledgement as any other cell.

@@ -30,6 +30,7 @@ have no equivalent:
 | Browser rendering for `web_fetch` | no browser binding; fetch degrades to direct HTTP |
 | Attachment vision extraction, `toMarkdown` | needs the Workers AI binding |
 | The `cloudflare` sandbox provider | needs Containers; `wrangler.celld.jsonc` binds no sandbox classes |
+| Subagents (`BACKGROUND_WORK_ENABLED=true`) | the `agents` SDK builds them from Durable Object *facets*, which celld does not implement — see [Upgrading celld](#upgrading-celld) |
 
 Nadi hides these rather than offering something that fails on use — voice and
 Workers AI via `platformCapabilities`, and the Cloudflare sandbox via
@@ -135,7 +136,7 @@ rules in [Operating](#operating).
 > write-heavy period until you have your own evidence:
 >
 > ```bash
-> D=$(docker exec nadi-celld-celld-1 sh -c 'ls -d /tmp/celld-1/Registry*/ltx/*/ | tail -1')
+> D=$(docker exec nadi-celld-celld-1 sh -c 'ls -d /tmp/celld-1/__D1Database*/ltx/*/ | tail -1')
 > docker cp "nadi-celld-celld-1:${D}db.sqlite" ./registry.sqlite
 > sqlite3 ./registry.sqlite 'PRAGMA integrity_check;'
 > ```
@@ -556,9 +557,33 @@ v0.3.0's configuration, and this Nadi will not run on v0.2.x at all.
 **Native cron replaced the ticker DO.** `wrangler.celld.jsonc` now carries
 `triggers.crons` and `scheduled()` runs on both platforms. The `CelldTicker`
 class, the watchdog service and `CELLD_ALARM_RESIDENT_MS` are gone — see
-[Operating](#operating). An upgraded deployment leaves one orphaned
-`CelldTicker` cell in the fleet bucket; nothing references it and it costs one
-idle cell's storage.
+[Operating](#operating).
+
+> **Delete the orphaned `CelldTicker` cell, and restart the node after you do.**
+> The cell left behind in the fleet bucket is not inert: it carries a persisted
+> alarm, and celld keeps trying to run it against a class the Worker no longer
+> exports. Measured on this deployment, it retried **~16 times a second,
+> indefinitely** — 9,700 failed starts in ten minutes, each one re-reading the
+> cell's 117 objects (~29 KB) from the bucket. Compaction bounds the disk, so
+> nothing grows and nothing breaks; what it costs is a permanent ~1,900
+> object-GETs/second against your store, which on R2 or S3 is a real bill.
+>
+> The log line is unmissable once you look:
+>
+> ```
+> celld runtime start failed for CelldTicker:<hash>: no Worker exports Durable
+> Object class CelldTicker
+> ```
+>
+> ```bash
+> mc rm --recursive --force "local/<fleet-bucket>/cells/CelldTicker:<hash>/"
+> docker compose restart celld
+> ```
+>
+> The restart is not optional. A running node has already restored the alarm
+> into memory, so deleting the objects alone only slows the retry to once a
+> minute — and the cell's `own.json` is rewritten on every attempt, so it looks
+> like the delete did not take.
 
 **Native D1 replaced the registry Durable Object.** The registry is now a real
 `d1_databases` binding. A celld D1 database is a cell, so it keeps the same
@@ -581,10 +606,24 @@ binary in `CELLD_ESBUILD` because celld wants one on `PATH` and this repo keeps
 it in the pnpm store.
 
 **`setInterval` works** (denoland/celld#156). It threw when called on every
-earlier release, which would have broken the subagent liveness stamp
-(`src/agent/subagent.ts`) for anyone who set `BACKGROUND_WORK_ENABLED=true`.
-Note celld's rule that a Worker must clear an interval before the handler ends,
-because a live interval keeps the request alive — which that code already does.
+earlier release. Note celld's rule that a Worker must clear an interval before
+the handler ends, because a live interval keeps the request alive — which
+`src/agent/subagent.ts` already does.
+
+**Subagents still do not run on celld, for an unrelated reason.** The liveness
+stamp that `setInterval` unblocked is never reached: the `agents` SDK builds a
+subagent out of Durable Object *facets*, and celld does not implement them.
+Setting `BACKGROUND_WORK_ENABLED=true` and spawning one fails immediately with
+
+```
+subAgent() is not supported in this runtime — `ctx.facets` / `ctx.exports` are
+unavailable. Update to the latest `compatibility_date` in your wrangler.jsonc.
+```
+
+The advice in that message does not apply here — `wrangler.celld.jsonc` already
+carries the same `compatibility_date` as `wrangler.jsonc`. It is a missing
+runtime capability, not a stale config. Leave `BACKGROUND_WORK_ENABLED=false`
+on celld.
 
 **The replication corruption is fixed upstream** (#150, #158). See the
 durability section.
@@ -683,6 +722,22 @@ source change means nothing was rebuilt. See "Deploying a change".
 
 **Everything behaves as though configuration is missing** — the vars file is
 probably JSON. It must be `KEY=VALUE` lines.
+
+**`cron schedule not armed` in the log right after a restart** — expected, and
+it clears itself. While the previous node session's lease on the `.cron:nadi`
+cell is still stale, arming races it:
+
+```
+WARN  celld: peer owner unreachable scope=.cron:nadi owner=127.0.0.1:8081
+WARN  celld: cron arm failed, retrying cell=".cron:nadi"
+ERROR celld: cron schedule not armed cell=".cron:nadi"
+```
+
+It reads like a hard failure of exactly the thing the ticker used to guard, so
+it is worth knowing it is not one. Measured here: a restart at 23:32 logged the
+ERROR above and ticks resumed at 23:32, 23:34, then every minute — one or two
+missed occurrences across the restart window, then normal. Only a `lastTickMs`
+that stays behind for several minutes is a real stall.
 
 **Automata never fire** — check `/api/debug/celld-ticker`. A `lastTickMs` of
 `null` means `scheduled()` has never run: confirm `triggers.crons` survived into
