@@ -73,7 +73,14 @@ the type system, and each one cost a production incident or a broken feature.
   isolate. REST keeps the base URL verbatim — only the upgrade is rewritten
   (`execUrl` in `src/compute/backends/sprites-client.ts`).
 - **Alarm handlers must be idempotent.** celld replays an alarm on every
-  stall-retry; one armed alarm has been observed running 7 times.
+  stall-retry; one armed alarm has been observed running 7 times. celld v0.2.1
+  and v0.3.0 both claim fixes here (a lost reschedule, and overlapping
+  handlers), unverified on this deployment — keep writing them idempotent.
+- **Clear every `setInterval` before the handler ends.** celld keeps the request
+  alive while an interval is live, so a stray one pins the request open. This is
+  why the subagent liveness timer is bound to the turn and cleared on settle
+  (`src/agent/subagent.ts`). Note `setInterval` _threw outright_ on celld before
+  v0.3.0 (denoland/celld#156).
 - **Never let an error message carry a URL that holds secrets.** The sandbox
   exec URL carries `env=` for every workbench secret plus `GH_TOKEN`. Truncate
   at the first URL-ish marker rather than stripping — truncating cannot leak on

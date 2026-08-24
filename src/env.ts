@@ -8,21 +8,10 @@ import type { ThinkThreadAgent } from "./agent/think-thread-agent";
 import type { WorkspaceMcpAgent } from "./agent/workspace-mcp-agent";
 import type { ComputeBackend } from "./compute/backend";
 import type { NadiSandboxMedium, NadiSandboxSmall } from "./compute/cloudflare-sandbox-classes";
-import type { RegistryDatabase } from "./db/registry-do";
 
 export interface Env extends Cloudflare.Env {
   THINK_THREAD_AGENT: DurableObjectNamespace<ThinkThreadAgent>;
   WORKSPACE_MCP_AGENT: DurableObjectNamespace<WorkspaceMcpAgent>;
-
-  /**
-   * The registry Durable Object namespace on celld, where there is no D1
-   * binding. `registryBinding` in `src/db/client.ts` returns a `RegistryD1`
-   * facade over the `registry` singleton inside it whenever `REGISTRY_DB` is
-   * absent. Only the celld deploy binds it, so it is optional here and absent
-   * from worker-configuration.d.ts (which `pnpm types` regenerates from the
-   * Cloudflare configs).
-   */
-  REGISTRY_DO?: DurableObjectNamespace<RegistryDatabase>;
 
   /**
    * Which edition this deploy is: `cloud` for the hosted service, anything else

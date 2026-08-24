@@ -45,6 +45,42 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_REGION: ${AWS_REGION:-us-east-1}
 
+  # One-shot: applies migrations/ to the registry D1 database.
+  #
+  # ORDER MATTERS, and it is the reverse of what you may expect. A celld D1
+  # database is a CELL, so `celld d1` needs a RUNNING fleet to talk to — it
+  # finds a node through the node leases in the bucket and asks that node to
+  # route the work to the database's owner. So the sequence is deploy, then
+  # up, THEN migrate; a migrate before `up` fails with no node to reach.
+  #
+  # Re-run after every schema change. celld records applied migrations in the
+  # `d1_migrations` table exactly as `wrangler d1 migrations` does, so this is
+  # idempotent and safe to run on every deploy.
+  migrate:
+    profiles: [migrate]
+    build:
+      context: ../..
+      dockerfile: deploy/celld/Dockerfile
+      target: deployer
+    entrypoint: ["celld"]
+    command:
+      [
+        "d1",
+        "migrations",
+        "apply",
+        "nadi-registry",
+        "--bucket",
+        "${CELLD_BUCKET}",
+        "--endpoint",
+        "${S3_ENDPOINT_INTERNAL}",
+      ]
+    environment:
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+    depends_on:
+      - celld
+
   celld:
     build:
       context: ../..

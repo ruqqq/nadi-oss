@@ -6,7 +6,7 @@ import { attachmentsBucket } from "../storage/bucket-binding";
 import { agents, attachments, threadIndex, users } from "../db/schema";
 import { McpServerRepository } from "../db/repositories/mcp-servers";
 import { RegistryKV } from "../db/registry-kv";
-import { CRON_LAST_DAILY_RUN_KEY, CRON_LAST_TICK_KEY } from "../celld/cron-liveness";
+import { CRON_LAST_DAILY_RUN_KEY, CRON_LAST_TICK_KEY, isCelld } from "../celld/cron-liveness";
 import { AUTOMATA_CRON, AUTO_ARCHIVE_CRON } from "../automata/fire-policy";
 import { NotificationRepository } from "../db/repositories/notifications";
 import { isWebPushConfigured, sendWebPush } from "../notifications/web-push";
@@ -1193,15 +1193,15 @@ export async function routeDebug(req: Request, env: Env): Promise<Response | nul
   // in the dashboard — so the route reports not_applicable rather than a
   // stale-looking null.
   if (url.pathname === "/api/debug/celld-ticker" && req.method === "GET") {
-    if (!env.REGISTRY_DO) {
+    if (!isCelld(env) || !env.REGISTRY_DB) {
       return Response.json({
         ticker: "not_applicable",
-        note: "no REGISTRY_DO binding — Cloudflare runs scheduled() instead",
+        note: "not celld — Cloudflare runs its own cron, observable in the dashboard",
       });
     }
     // `registry` is captured so the narrowed (non-undefined) type survives
     // into the tryJson closure — TS does not keep property narrowing there.
-    const registry = env.REGISTRY_DO;
+    const registry = env.REGISTRY_DB;
     return tryJson(async () => {
       const kv = new RegistryKV(registry);
       const [lastTickRaw, lastDailyRunRaw] = await Promise.all([

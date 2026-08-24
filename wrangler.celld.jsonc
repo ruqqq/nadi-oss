@@ -3,17 +3,15 @@
   // r2_buckets, kv_namespaces, ai, browser, send_email and containers.
   // Everything dropped here is a binding seam that tasks 04/05/09/11 own.
   //
-  // celld v0.3.0 also accepts `d1_databases` and `assets`, which this file
-  // does NOT use yet: the registry still runs on the RegistryDatabase DO, and
-  // Caddy still serves the SPA. Both are live opportunities, not oversights —
-  // see docs/self-hosting-celld.md.
+  // celld v0.3.0 accepts `assets`, which this file does NOT use yet: Caddy
+  // still serves the SPA. That is a live opportunity, not an oversight — see
+  // docs/self-hosting-celld.md.
   "name": "nadi",
   "main": "src/index.ts",
   "compatibility_date": "2026-05-01",
   "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
     "bindings": [
-      { "name": "REGISTRY_DO", "class_name": "RegistryDatabase" },
       { "name": "THINK_THREAD_AGENT", "class_name": "ThinkThreadAgent" },
       { "name": "WORKSPACE_MCP_AGENT", "class_name": "WorkspaceMcpAgent" },
       { "name": "USER_HUB", "class_name": "UserHub" },
@@ -25,13 +23,21 @@
     { "tag": "v2", "new_sqlite_classes": ["UserHub"] },
     { "tag": "v3", "new_sqlite_classes": ["ThinkThreadAgent"] },
     { "tag": "v4", "new_sqlite_classes": ["VoiceAgent"] },
-    { "tag": "v5", "new_sqlite_classes": ["RegistryDatabase"] },
+    // v5 created RegistryDatabase, the DO that held the whole registry while
+    // celld had no D1. celld v0.3.0 has one, so the registry is a real
+    // `d1_databases` binding below and the class is gone.
     // v6 created CelldTicker, a per-minute alarm DO that stood in for
     // scheduled() while celld rejected `triggers`. celld v0.3.0 runs cron
     // natively, so the class and its tag are gone. An upgraded deployment
     // leaves one orphaned `CelldTicker` cell in the fleet bucket; nothing
     // references it and it costs one idle cell's storage.
   ],
+  // celld v0.3.0 runs D1, and a D1 database is a cell — so this gets the same
+  // fencing, replication and durable write acknowledgement as any other cell.
+  // `database_name` is the identity when no `database_id` is given. Schema is
+  // applied with `celld d1 migrations apply` from the SAME migrations/ that
+  // drizzle-kit generates for Cloudflare; there is no second history.
+  "d1_databases": [{ "binding": "REGISTRY_DB", "database_name": "nadi-registry" }],
   // Same expressions as wrangler.jsonc — scheduled() dispatches on
   // controller.cron, so they must stay in step with AUTOMATA_CRON /
   // AUTO_ARCHIVE_CRON in src/automata/fire-policy.ts. celld numbers

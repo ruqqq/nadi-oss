@@ -18,7 +18,6 @@ export { SubAgent } from "./agent/subagent";
 export { WorkspaceMcpAgent } from "./agent/workspace-mcp-agent";
 export { UserHub } from "./agent/user-hub";
 export { VoiceAgent } from "./agent/voice-agent";
-export { RegistryDatabase } from "./db/registry-do";
 export {
   ContainerProxy,
   NadiSandboxSmall,

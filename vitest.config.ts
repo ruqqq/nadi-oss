@@ -127,15 +127,6 @@ function integrationPlugins() {
           // parent ThinkThreadAgent). This binding lets integration tests
           // drive it directly in-pool without a real facet parent call.
           SUB_AGENT: { className: "SubAgent", useSQLite: true },
-          // TEST-ONLY: the celld registry Durable Object. It is bound only in
-          // wrangler.celld.jsonc in production; this binding lets the registry
-          // facade / migration tests drive it in-pool on the Cloudflare side.
-          REGISTRY_DO: { className: "RegistryDatabase", useSQLite: true },
-          // TEST-ONLY: the celld ticker Durable Object (celld's replacement for
-          // scheduled(), which that platform never invokes). Bound only in
-          // wrangler.celld.jsonc; this binding lets the ticker integration
-          // tests drive its alarm in-pool.
-          CRON_TICKER: { className: "CelldTicker", useSQLite: true },
         },
         bindings: {
           LOG_LEVEL: "warn",

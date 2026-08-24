@@ -10,24 +10,25 @@ import {
 import { createWorkspaceSecretsServices, secretsBinding } from "../../src/secrets";
 import { buildWorkspaceSecretKey, buildWorkspaceSecretPrefix } from "../../src/secrets/kv-records";
 
-// TEST-ONLY: REGISTRY_DO is bound in the pool (see vitest.config.ts) so the
-// celld KV facade can be exercised on the Cloudflare side.
+// The pool binds a real D1 as REGISTRY_DB, which since celld v0.3.0 is the
+// SAME kind of binding celld itself provides — so exercising the facade here
+// exercises the production shape rather than a Cloudflare-only stand-in.
 const poolEnv = env as unknown as Env;
 
-/** An env shaped like celld's: no SECRETS_KV, REGISTRY_DO present. */
+/** An env shaped like celld's: no SECRETS_KV, real D1 present. */
 function celldEnv(overrides?: Partial<Env>): Env {
   return {
     ...poolEnv,
     SECRETS_KV: undefined,
-    REGISTRY_DO: poolEnv.REGISTRY_DO,
+    REGISTRY_DB: poolEnv.REGISTRY_DB,
     NADI_PLATFORM: "celld",
     ...overrides,
   } as unknown as Env;
 }
 
-/** A KVNamespace-shaped facade over the singleton RegistryDatabase DO. */
+/** A KVNamespace-shaped facade over the registry's `celld_kv` table. */
 function freshKv(): KVNamespace {
-  return new RegistryKV(poolEnv.REGISTRY_DO!);
+  return new RegistryKV(poolEnv.REGISTRY_DB!);
 }
 
 describe("secretsBinding", () => {
@@ -44,8 +45,8 @@ describe("secretsBinding", () => {
   });
 
   it("fails loudly when neither binding exists", () => {
-    const broken = { ...poolEnv, SECRETS_KV: undefined, REGISTRY_DO: undefined } as unknown as Env;
-    expect(() => secretsBinding(broken)).toThrow(/SECRETS_KV nor REGISTRY_DO/);
+    const broken = { ...poolEnv, SECRETS_KV: undefined, REGISTRY_DB: undefined } as unknown as Env;
+    expect(() => secretsBinding(broken)).toThrow(/SECRETS_KV nor REGISTRY_DB/);
   });
 });
 

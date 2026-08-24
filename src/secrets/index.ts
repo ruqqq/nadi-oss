@@ -17,18 +17,19 @@ export { RegistryKV } from "../db/registry-kv";
 
 /**
  * The KV namespace workspace secrets live in. Cloudflare binds the real
- * `SECRETS_KV`; celld has no KV, so it hands every consumer a `RegistryKV`
- * facade over the registry DO instead — the rest of the secrets stack
- * (store/writer) never needs to know which platform it is on.
+ * `SECRETS_KV`; celld has no KV and none is planned, so it hands every
+ * consumer a `RegistryKV` facade over the `celld_kv` table in the registry D1
+ * database instead — the rest of the secrets stack (store/writer) never needs
+ * to know which platform it is on.
  */
 export function secretsBinding(env: Env): KVNamespace {
   if (env.SECRETS_KV) return env.SECRETS_KV;
-  if (!env.REGISTRY_DO) {
+  if (!env.REGISTRY_DB) {
     throw new Error(
-      "secretsBinding: neither SECRETS_KV nor REGISTRY_DO is bound — workspace secrets have no backing store",
+      "secretsBinding: neither SECRETS_KV nor REGISTRY_DB is bound — workspace secrets have no backing store",
     );
   }
-  return new RegistryKV(env.REGISTRY_DO);
+  return new RegistryKV(env.REGISTRY_DB);
 }
 
 export function createWorkspaceSecretsServices(env: Env): {

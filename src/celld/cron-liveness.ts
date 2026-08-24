@@ -9,17 +9,18 @@
  * failure, and "did cron run?" is still worth being able to answer from
  * outside the process. `/api/debug/celld-ticker` reads these.
  *
- * Written only where `REGISTRY_DO` exists, which is celld — Cloudflare's
- * registry is the `REGISTRY_DB` D1 binding and its cron is Cloudflare's own,
- * observable in the dashboard. A stamp must never fail the run it is
- * reporting on, so every write here is best-effort.
+ * Written only where the registry has no dashboard behind it, which is celld.
+ * Both platforms now bind real D1, so the marker is gated on NADI_PLATFORM
+ * rather than on a binding: a binding used as a platform predicate is exactly
+ * the mistake `hasRegistry` exists to prevent. A stamp must never fail the run
+ * it is reporting on, so every write here is best-effort.
  *
  * The key strings are deliberately the ones `CelldTicker` wrote, so a
  * deployment upgraded from the ticker keeps reading its existing markers
  * instead of showing null until the next occurrence.
  */
 
-import type { RegistryDatabase } from "../db/registry-do";
+import type { Env } from "../env";
 import { RegistryKV } from "../db/registry-kv";
 import { log } from "../log";
 
@@ -29,19 +30,20 @@ export const CRON_LAST_TICK_KEY = "system/celld-ticker/last-tick";
 /** Set when the daily sweep expression (`0 3 * * *`) completes. */
 export const CRON_LAST_DAILY_RUN_KEY = "system/celld-ticker/last-daily-run";
 
+/** Whether this deployment is the one with no cron dashboard to consult. */
+export function isCelld(env: Pick<Env, "NADI_PLATFORM">): boolean {
+  return env.NADI_PLATFORM === "celld";
+}
+
 /**
- * Best-effort liveness stamp. No-op off celld (no `REGISTRY_DO`), and a throw
- * is logged rather than propagated — a marker that cannot be written must not
- * take down the automata run or the daily sweep that just succeeded.
+ * Best-effort liveness stamp. No-op off celld, and a throw is logged rather
+ * than propagated — a marker that cannot be written must not take down the
+ * automata run or the daily sweep that just succeeded.
  */
-export async function stampCronRun(
-  env: { REGISTRY_DO?: DurableObjectNamespace<RegistryDatabase> },
-  key: string,
-  atMs: number,
-): Promise<void> {
-  if (!env.REGISTRY_DO) return;
+export async function stampCronRun(env: Env, key: string, atMs: number): Promise<void> {
+  if (!isCelld(env) || !env.REGISTRY_DB) return;
   try {
-    await new RegistryKV(env.REGISTRY_DO).put(key, String(atMs));
+    await new RegistryKV(env.REGISTRY_DB).put(key, String(atMs));
   } catch (error) {
     log.warn("celld_cron.marker_failed", { key, error: String(error) });
   }
