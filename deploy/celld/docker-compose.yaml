@@ -52,8 +52,22 @@ services:
   # Re-run after every schema change. celld records applied migrations in the
   # `d1_migrations` table exactly as `wrangler d1 migrations` does, so this is
   # idempotent and safe to run on every deploy.
+  #
+  # It runs in the NODE's network namespace, and that is load-bearing. `celld
+  # d1` finds a node through the leases in the bucket and then connects to the
+  # address that lease advertises — which for this single-node stack is the
+  # INTERNAL listener, `127.0.0.1:8081`. From a container of its own that
+  # loopback is its own, so the connect fails with `Connection refused`.
+  # Sharing celld's namespace makes 127.0.0.1 mean the node, without widening
+  # the internal listener to the Docker network. `minio` still resolves,
+  # because the namespace it joins is on the compose network.
+  #
+  # Consequence of network_mode: no `depends_on` (compose forbids the pair),
+  # so the node must already be up — which the documented ordering requires
+  # anyway.
   migrate:
     profiles: [migrate]
+    network_mode: "service:celld"
     build:
       context: ../..
       dockerfile: deploy/celld/Dockerfile
@@ -74,8 +88,6 @@ services:
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_REGION: ${AWS_REGION:-us-east-1}
-    depends_on:
-      - celld
 
   celld:
     build:

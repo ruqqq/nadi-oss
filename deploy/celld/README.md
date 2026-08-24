@@ -82,6 +82,20 @@ docker compose run --rm migrate          # apply migrations/ to the registry
 `migrate` runs last and is not optional on a new deployment: the registry
 database is a cell, so `celld d1` needs a live node to reach it.
 
+Two things about that service are load-bearing. It runs in the **node's network
+namespace** (`network_mode: service:celld`), because `celld d1` connects to the
+address the node's bucket lease advertises — the internal listener, which on
+this single-node stack is `127.0.0.1:8081`. From a container of its own that
+loopback is its own, and the command fails with `Connection refused`. Sharing
+the namespace makes `127.0.0.1` mean the node without exposing the internal
+listener to the Docker network.
+
+The other is that `network_mode` costs the service its `depends_on` (compose
+forbids the pair) while still pulling `celld` up implicitly. So running
+`migrate` first does not fail cleanly — it starts the node and then races its
+lease, giving `409 Conflict: peer request targets a different node session`.
+Re-run it once the node is up.
+
 Then sign in — Nadi is invite-only, so the first account must be listed in
 `SUPERUSER_EMAILS`, or the request is accepted and quietly added to a waiting
 list instead. See
