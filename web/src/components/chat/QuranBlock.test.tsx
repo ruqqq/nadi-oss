@@ -29,6 +29,31 @@ describe("QuranBlock", () => {
     expect(medallion?.textContent).toBe("٢٥٥");
   });
 
+  it("keeps the medallion inline, sized in em so its gap scales with the verse", () => {
+    // A printed mushaf closes the āyah inline, so that is where this belongs.
+    // Keeping it clear of the last word is a units problem: Arabic final forms
+    // paint outside their advance box (worst measured: 0.11em, ر in ٱلْقَدْرِ)
+    // and the browser lays out by advance width, so it reports no collision
+    // while the ink runs through the marker. Two shipped versions got this
+    // wrong — a flat `mx-1`, then an `ms-[0.5em]` resolving against the
+    // medallion's own font-size — and both stopped clearing as the verse grew.
+    // The real check is a browser measurement; what jsdom can pin is that the
+    // medallion states no font size of its own, which is what makes every em
+    // here resolve against the verse.
+    const { container } = render(
+      <QuranBlock source={"97:1 Al-Qadr\nإِنَّآ أَنزَلْنَـٰهُ فِى لَيْلَةِ ٱلْقَدْرِ"} />,
+    );
+
+    const medallion = container.querySelector('p[lang="ar"] [aria-hidden="true"]');
+    expect(medallion).not.toBeNull();
+    expect(medallion?.textContent).toBe("١");
+
+    const className = medallion?.className ?? "";
+    expect(className).toContain("ms-[0.45em]");
+    expect(className).toContain("size-[1.15em]");
+    expect(className).not.toMatch(/text-\[[\d.]+(px|rem)\]/);
+  });
+
   it("omits the medallion for a range, which has no single marker", () => {
     const { container } = render(<QuranBlock source={`2:255-257\n${AYAH}`} />);
     expect(container.querySelector('[aria-hidden="true"]')).toBeNull();

@@ -120,6 +120,16 @@ const arabicMd = `Ayat al-Kursi is the best known verse of the Qur'an:
 Allah — there is no deity except Him, the Ever-Living, the Sustainer of existence. Neither drowsiness overtakes Him nor sleep.
 \`\`\`
 
+A short verse ending in ر is the case that broke the inline medallion — the
+tail sweeps left and below its advance box:
+
+\`\`\`quran
+97:1 Al-Qadr
+إِنَّآ أَنزَلْنَـٰهُ فِى لَيْلَةِ ٱلْقَدْرِ
+
+Indeed, We sent it down on the Night of Decree.
+\`\`\`
+
 People often say الحمد لله after finishing something, and a full Arabic line reads like this:
 
 وَقُل رَّبِّ زِدْنِي عِلْمًا`;

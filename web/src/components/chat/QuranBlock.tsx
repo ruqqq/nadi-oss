@@ -8,13 +8,28 @@ import { formatReference, parseQuranVerse, toArabicIndic } from "@/lib/quran-ver
 // is. The one flourish is the ayah medallion — the circular marker that closes
 // every āyah in a printed Qur'an — and everything else stays quiet so it lands.
 
+// The medallion sits inline at the end of the verse, where a printed mushaf
+// puts it. The gap that keeps it off the last word is measured, not guessed:
+// Arabic final forms paint outside their advance box, and the browser places
+// the next inline box by advance width alone, so layout reports no collision
+// while the ink runs through the marker. Pixel-scanning Amiri Quran across the
+// verse-final forms puts the worst overhang at 0.11em (ر in ٱلْقَدْرِ); every
+// other final letter's ink stays inside its box.
+//
+// Every dimension here is em against the VERSE's font size, which is why this
+// span sets no font-size of its own and the digit is shrunk on an inner span.
+// Two versions of this got the unit wrong: first a flat `mx-1` (4px against a
+// 3.1px overhang at the top of the size clamp — touching on a phone, clean on
+// the preview fixture), then an `ms-[0.5em]` that silently resolved against the
+// medallion's own 0.7rem and stayed 5.6px at every verse size. The overhang
+// scales with the type, so the gap has to as well.
 function AyahMedallion({ ayah }: { ayah: number }) {
   return (
     <span
       aria-hidden="true"
-      className="mx-1 inline-flex size-7 shrink-0 translate-y-1 items-center justify-center rounded-full bg-primary/5 font-arabic text-[0.7rem] text-primary/70 leading-none ring-1 ring-primary/25"
+      className="ms-[0.45em] inline-flex size-[1.15em] shrink-0 items-center justify-center rounded-full bg-primary/5 align-middle font-arabic text-primary/70 leading-none ring-1 ring-primary/25"
     >
-      {toArabicIndic(ayah)}
+      <span className="text-[0.42em]">{toArabicIndic(ayah)}</span>
     </span>
   );
 }
