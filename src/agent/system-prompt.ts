@@ -43,6 +43,16 @@ const GITHUB_AUTH_POLICY =
 const SUBAGENT_POLICY =
   "\n\nSubagent policy: `spawn_subagent` runs a task in the background on the same machine as you and returns immediately; the subagent's result arrives LATER as its own message, never as that tool's return value. Delegate work that is INDEPENDENT of what you do next — a probe, an investigation, or a build whose answer you do not need in order to keep making progress on something else. It is a way to do two things at once, not a way to do the next step of your own plan faster. Once you have spawned a subagent the task is no longer yours: do not investigate, read, or write the same thing in this thread, and avoid editing files it may be touching, because you share one filesystem. If you cannot continue without its result, end your turn — the completion is delivered to you automatically, usually within seconds of the subagent finishing, and you pick the work up from there. Ending the turn to wait is the intended behaviour, not a stall, and it is always better than filling the wait by doing the delegated work yourself. `check_subagents` reports status on demand and is never a way to wait: it cannot reveal anything the completion message would not, and an unfinished run does not finish sooner because you asked. Give each subagent a complete, standalone task — it cannot see this conversation.";
 
+// The transcript renders Arabic with a real Arabic face, RTL flow, and a
+// dedicated verse block (web/src/components/chat/QuranBlock.tsx) — but only for
+// output shaped the way this describes. Two failure modes drove the wording:
+// a model that transliterates instead of quoting, and a model that wraps Arabic
+// in a plain code fence, where monospace destroys the letter shaping the script
+// depends on. The accuracy sentence is last because it matters most: careful
+// typography makes a misquoted ayah MORE convincing, not less.
+const ARABIC_OUTPUT_POLICY =
+  "\n\nArabic and Qur'anic text: When you quote the Qur'an, put the verse in a ```quran fenced block whose first line is the reference as `surah:ayah` (a range is `2:255-257`), then the Arabic, then a blank line, then the translation. Write the Arabic in Uthmani orthography with full tashk\u012bl. Quote one verse or one contiguous range per block. For any other Arabic \u2014 a du'\u0101, a hadith, a phrase, a single word \u2014 write it inline as plain Arabic text; the transcript gives it Arabic typography automatically. Never put Arabic inside a plain code fence or inline code: monospace breaks the letter shaping and the text becomes unreadable. Give the Arabic itself rather than transliteration alone, unless the user asks for transliteration. If you are not certain of the exact wording of a verse, say so or look it up rather than reconstructing it from memory.";
+
 function formatProjectContext(projectContext: ProjectPromptContext): string {
   const lines = ["Project context:", `Name: ${projectContext.name}`];
   if (projectContext.description !== "") {
@@ -85,6 +95,7 @@ export function composeSystemPrompt(input: {
   return (
     input.systemPrompt +
     MEMORY_POLICY +
+    ARABIC_OUTPUT_POLICY +
     (input.sandboxAvailable ? FILE_TOOLS_POLICY : "") +
     (input.sandboxAvailable ? GITHUB_AUTH_POLICY : "") +
     (input.subagentsAvailable ? SUBAGENT_POLICY : "") +

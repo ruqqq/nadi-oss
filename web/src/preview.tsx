@@ -109,6 +109,21 @@ https://example.com/deploys directly.
 await deploy({ env: "staging" });
 \`\`\``;
 
+// Arabic sample: a verse block, an Arabic-only paragraph, and an inline phrase
+// inside English — the three shapes lib/rehype-arabic.ts has to get right.
+const arabicMd = `Ayat al-Kursi is the best known verse of the Qur'an:
+
+\`\`\`quran
+2:255
+ٱللَّهُ لَآ إِلَٰهَ إِلَّا هُوَ ٱلْحَىُّ ٱلْقَيُّومُ ۚ لَا تَأْخُذُهُۥ سِنَةٌ وَلَا نَوْمٌ
+
+Allah — there is no deity except Him, the Ever-Living, the Sustainer of existence. Neither drowsiness overtakes Him nor sleep.
+\`\`\`
+
+People often say الحمد لله after finishing something, and a full Arabic line reads like this:
+
+وَقُل رَّبِّ زِدْنِي عِلْمًا`;
+
 function ToggleTheme() {
   return (
     <button
@@ -128,6 +143,12 @@ function Phone() {
       <Message from="user">
         <MessageContent>
           <MessageResponse>Deploy the staging build.</MessageResponse>
+        </MessageContent>
+      </Message>
+
+      <Message from="assistant">
+        <MessageContent>
+          <MessageResponse>{arabicMd}</MessageResponse>
         </MessageContent>
       </Message>
 
