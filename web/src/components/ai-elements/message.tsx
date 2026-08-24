@@ -14,6 +14,8 @@ import {
 import type { ComponentProps, HTMLAttributes, ReactElement } from "react";
 import { createContext, memo, useContext, useEffect, useState } from "react";
 import { Streamdown } from "streamdown";
+import { QuranBlock } from "@/components/chat/QuranBlock";
+import { rehypeArabic, rehypeQuran } from "@/lib/rehype-arabic";
 
 export type MessageProps = HTMLAttributes<HTMLDivElement> & {
   from: UIMessage["role"];
@@ -270,11 +272,27 @@ export const MessageBranchPage = ({ className, ...props }: MessageBranchPageProp
 
 export type MessageResponseProps = ComponentProps<typeof Streamdown>;
 
+// Order matters: rehypeQuran claims the ```quran fence first, so rehypeArabic
+// never sees a verse as ordinary prose to re-style.
+const REHYPE_PLUGINS = [rehypeQuran, rehypeArabic];
+
+// `quran-verse` is our own element, minted by rehypeQuran. react-markdown looks
+// components up by tag name and renders anything it doesn't recognise as-is, so
+// this mapping is what turns the fence into a verse; the cast is only because
+// the Components type enumerates HTML tags.
+const MARKDOWN_COMPONENTS = {
+  "quran-verse": ({ source }: { source?: string }) => <QuranBlock source={source} />,
+} as ComponentProps<typeof Streamdown>["components"];
+
 export const MessageResponse = memo(
   ({ className, ...props }: MessageResponseProps) => (
     <Streamdown
       className={cn("size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0", className)}
       {...props}
+      // After the spread, not before: Arabic rendering is what this component
+      // IS, not a default a caller should be able to drop by accident.
+      components={MARKDOWN_COMPONENTS}
+      rehypePlugins={REHYPE_PLUGINS}
     />
   ),
   (prevProps, nextProps) => prevProps.children === nextProps.children,

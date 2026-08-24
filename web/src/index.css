@@ -60,6 +60,11 @@
   --gate-bg: #f3edf7;
   --steer: #9a6410;
   --steer-bg: #f7efdd;
+
+  /* A Qur'an verse band. It sits *into* the page rather than on top of it —
+     deeper than --background in light, a touch lifted in dark — so it reads as
+     inset parchment instead of as one more raised UI card. */
+  --quran-bg: #efe7d7;
 }
 
 .dark {
@@ -93,6 +98,8 @@
   --gate-bg: #241a2b;
   --steer: #e0b364;
   --steer-bg: #2a2113;
+
+  --quran-bg: #1c1811;
 }
 
 /* Map tokens into Tailwind's theme so utilities (bg-background, text-approve,
@@ -128,6 +135,7 @@
   --color-gate-bg: var(--gate-bg);
   --color-steer: var(--steer);
   --color-steer-bg: var(--steer-bg);
+  --color-quran-bg: var(--quran-bg);
 
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
@@ -137,6 +145,16 @@
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
   --font-display: "Fraunces", ui-serif, Georgia, serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", monospace;
+  /* Arabic. Inter/Fraunces/JetBrains cover no Arabic at all, so without these
+     every Arabic string fell back to whatever the OS picked, at Latin body
+     size — which is precisely why tashkīl was unreadable. Amiri is a naskh
+     text face for general Arabic; Amiri Quran is its mushaf sibling, with the
+     mark positioning Qur'anic orthography needs. Both are fetched on first
+     sight of Arabic rather than at boot — see lib/arabic-font.ts. Until they
+     land, and on any device where they fail, the fallbacks below render
+     readable (if less beautiful) Arabic. */
+  --font-arabic: "Amiri", "Geeza Pro", "Noto Naskh Arabic", serif;
+  --font-quran: "Amiri Quran", "Amiri", "Geeza Pro", "Noto Naskh Arabic", serif;
 
   /* The one reading-column width. Every main-column surface — chat, compose,
      the "All chats" list, and the settings panels — caps at `max-w-content`
@@ -337,4 +355,27 @@ body[data-rail-settling] [data-slot="sheet-overlay"] {
   [data-sonner-toaster][data-x-position="center"] {
     left: calc(50% + 144px) !important;
   }
+}
+
+/* ============================================================
+   Arabic in the transcript (lib/rehype-arabic.ts marks these).
+
+   Arabic needs more vertical room than Latin at the same nominal size: the
+   marks stack above and below the baseline, and at the transcript's 14px body
+   size they collide into an unreadable smudge. Bumping the size and the
+   leading is the whole fix — `.arabic-block` for a paragraph that is mostly
+   Arabic, `.arabic-inline` for a phrase inside Latin prose (font only; the
+   bidi algorithm owns inline direction).
+   ============================================================ */
+.arabic-block {
+  font-family: var(--font-arabic);
+  font-size: 1.3em;
+  line-height: 2;
+}
+.arabic-inline {
+  font-family: var(--font-arabic);
+  font-size: 1.2em;
+  /* Keeps a phrase from pushing its Latin line apart — inline leading is the
+     surrounding paragraph's to set. */
+  line-height: 1;
 }

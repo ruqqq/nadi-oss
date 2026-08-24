@@ -4,8 +4,30 @@ import { composeSystemPrompt } from "../../../src/agent/system-prompt";
 describe("composeSystemPrompt", () => {
   it("keeps the unassigned prompt text unchanged when no project context is provided", () => {
     expect(composeSystemPrompt({ systemPrompt: "You are Nadi." })).toBe(
-      "You are Nadi.\n\nAgent memory policy: Memories are durable across threads for this agent. Record a memory yourself, without being asked, when the user corrects you, states a preference or a constraint, settles on a way of working, or tells you something about their project, tools, or environment that will still be true next week. Prefer granular records: one discrete fact, preference, constraint, or workflow per memory — when the user shares several independent points, call `remember` once per point rather than bundling them. Do NOT record what the repository already states (code structure, git history, documented commands), anything that only matters inside this thread, or secrets, credentials, API keys, tokens, or passwords. Prefer `update_memory` over a near-duplicate `remember`, and use `forget_memory` when the user asks you to drop something or you learn a memory is wrong. Memories reflect what was true when written: verify one against the current code before you rely on it.",
+      "You are Nadi.\n\nAgent memory policy: Memories are durable across threads for this agent. Record a memory yourself, without being asked, when the user corrects you, states a preference or a constraint, settles on a way of working, or tells you something about their project, tools, or environment that will still be true next week. Prefer granular records: one discrete fact, preference, constraint, or workflow per memory — when the user shares several independent points, call `remember` once per point rather than bundling them. Do NOT record what the repository already states (code structure, git history, documented commands), anything that only matters inside this thread, or secrets, credentials, API keys, tokens, or passwords. Prefer `update_memory` over a near-duplicate `remember`, and use `forget_memory` when the user asks you to drop something or you learn a memory is wrong. Memories reflect what was true when written: verify one against the current code before you rely on it.\n\nArabic and Qur'anic text: When you quote the Qur'an, put the verse in a ```quran fenced block whose first line is the reference as `surah:ayah`, optionally followed by the s\u016brah's name (`2:255 Al-Baqarah`; a range is `2:255-257`), then the Arabic, then a blank line, then the translation. Write the Arabic in Uthmani orthography with full tashk\u012bl. Quote one verse or one contiguous range per block. For any other Arabic \u2014 a du'\u0101, a hadith, a phrase, a single word \u2014 write it inline as plain Arabic text; the transcript gives it Arabic typography automatically. Never put Arabic inside a plain code fence or inline code: monospace breaks the letter shaping and the text becomes unreadable. Give the Arabic itself rather than transliteration alone, unless the user asks for transliteration. If you are not certain of the exact wording of a verse, say so or look it up rather than reconstructing it from memory.",
     );
+  });
+
+  it("puts the Arabic policy between the memory policy and project context", () => {
+    const out = composeSystemPrompt({
+      systemPrompt: "You are Nadi.",
+      projectContext: { name: "Nadi", description: "", instructions: "", repositories: [] },
+    });
+
+    expect(out.indexOf("Agent memory policy:")).toBeLessThan(
+      out.indexOf("Arabic and Qur'anic text:"),
+    );
+    expect(out.indexOf("Arabic and Qur'anic text:")).toBeLessThan(out.indexOf("Project context:"));
+  });
+
+  it("names the quran fence the renderer actually looks for", () => {
+    // web/src/lib/rehype-arabic.ts matches `language-quran`, and
+    // web/src/lib/quran-verse.ts parses `surah:ayah` from the first body line.
+    // If either half is renamed without the other, verses render as code.
+    const out = composeSystemPrompt({ systemPrompt: "You are Nadi." });
+    expect(out).toContain("```quran");
+    expect(out).toContain("whose first line is the reference as `surah:ayah`");
+    expect(out).toContain("2:255 Al-Baqarah");
   });
 
   it("renders project context after the memory policy", () => {
