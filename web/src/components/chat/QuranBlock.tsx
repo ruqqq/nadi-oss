@@ -1,7 +1,6 @@
 import { useMemo } from "react";
 import { cn } from "@/lib/utils";
 import { formatReference, parseQuranVerse, toArabicIndic } from "@/lib/quran-verse";
-import { surahByNumber } from "@/lib/surahs";
 
 // A verse is a band, not a card. The transcript is already a stack of rounded
 // bordered cards (tools, approvals, artifacts) and one more would read as UI
@@ -32,7 +31,6 @@ export function QuranBlock({ source, className }: QuranBlockProps) {
 
   if (arabic === "" && translation === "" && reference === null) return null;
 
-  const surah = reference ? surahByNumber(reference.surah) : null;
   // A range has no single marker to draw, so the medallion sits it out and the
   // header carries the numbers on its own.
   const medallionAyah = reference && reference.endAyah === undefined ? reference.ayah : null;
@@ -42,15 +40,10 @@ export function QuranBlock({ source, className }: QuranBlockProps) {
       className={cn("my-4 rounded-md bg-quran-bg px-5 py-6 text-foreground sm:px-7", className)}
     >
       {reference && (
-        <figcaption className="mb-5 flex items-baseline justify-between gap-4">
-          <span className="text-muted-foreground text-xs">
-            {surah ? `${surah.latin} · ${formatReference(reference)}` : formatReference(reference)}
-          </span>
-          {surah && (
-            <span className="font-arabic text-base text-muted-foreground leading-none" lang="ar">
-              {surah.arabic}
-            </span>
-          )}
+        <figcaption className="mb-5 text-muted-foreground text-xs">
+          {reference.label === undefined
+            ? formatReference(reference)
+            : `${reference.label} · ${formatReference(reference)}`}
         </figcaption>
       )}
 

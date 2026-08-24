@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { formatReference, parseQuranVerse, toArabicIndic } from "./quran-verse";
-import { SURAH_COUNT, surahByNumber } from "./surahs";
 
 const AYAH = "ٱللَّهُ لَآ إِلَٰهَ إِلَّا هُوَ ٱلْحَىُّ ٱلْقَيُّومُ";
 
@@ -10,6 +9,39 @@ describe("parseQuranVerse", () => {
     expect(verse.reference).toEqual({ surah: 2, ayah: 255 });
     expect(verse.arabic).toBe(AYAH);
     expect(verse.translation).toBe("Allah — there is no deity except Him.");
+  });
+
+  it("reads an optional surah label after the numbers", () => {
+    const verse = parseQuranVerse(`2:255 Al-Baqarah\n${AYAH}`);
+    expect(verse.reference).toEqual({ surah: 2, ayah: 255, label: "Al-Baqarah" });
+    expect(verse.arabic).toBe(AYAH);
+  });
+
+  it("reads a label on a range", () => {
+    expect(parseQuranVerse(`2:255-257 Al-Baqarah\n${AYAH}`).reference).toEqual({
+      surah: 2,
+      ayah: 255,
+      endAyah: 257,
+      label: "Al-Baqarah",
+    });
+  });
+
+  it("takes an Arabic label as readily as a Latin one", () => {
+    expect(parseQuranVerse("112:1 الإخلاص\ntext").reference?.label).toBe("الإخلاص");
+  });
+
+  it("omits label entirely when there is none", () => {
+    const reference = parseQuranVerse(`2:255\n${AYAH}`).reference;
+    expect(reference && "label" in reference).toBe(false);
+  });
+
+  it("treats a long trailing sentence as text, not a label", () => {
+    // Otherwise a line that merely starts with digits gets eaten by the header.
+    const verse = parseQuranVerse(
+      "2:255 is the verse people call Ayat al-Kursi, the greatest verse\ntext",
+    );
+    expect(verse.reference).toBeNull();
+    expect(verse.arabic).toContain("Ayat al-Kursi");
   });
 
   it("reads a range", () => {
@@ -74,27 +106,5 @@ describe("formatReference", () => {
   it("formats a single ayah and a range", () => {
     expect(formatReference({ surah: 2, ayah: 255 })).toBe("2:255");
     expect(formatReference({ surah: 2, ayah: 255, endAyah: 257 })).toBe("2:255–257");
-  });
-});
-
-describe("surahByNumber", () => {
-  it("covers all 114 surahs", () => {
-    expect(SURAH_COUNT).toBe(114);
-    for (let number = 1; number <= 114; number += 1) {
-      const surah = surahByNumber(number);
-      expect(surah?.arabic, `surah ${number}`).toBeTruthy();
-      expect(surah?.latin, `surah ${number}`).toBeTruthy();
-    }
-  });
-
-  it("names the familiar ones correctly", () => {
-    expect(surahByNumber(1)?.arabic).toBe("الفاتحة");
-    expect(surahByNumber(2)?.latin).toBe("Al-Baqarah");
-    expect(surahByNumber(114)?.arabic).toBe("الناس");
-  });
-
-  it("returns null outside the range", () => {
-    expect(surahByNumber(0)).toBeNull();
-    expect(surahByNumber(115)).toBeNull();
   });
 });

@@ -114,7 +114,7 @@ await deploy({ env: "staging" });
 const arabicMd = `Ayat al-Kursi is the best known verse of the Qur'an:
 
 \`\`\`quran
-2:255
+2:255 Al-Baqarah
 ٱللَّهُ لَآ إِلَٰهَ إِلَّا هُوَ ٱلْحَىُّ ٱلْقَيُّومُ ۚ لَا تَأْخُذُهُۥ سِنَةٌ وَلَا نَوْمٌ
 
 Allah — there is no deity except Him, the Ever-Living, the Sustainer of existence. Neither drowsiness overtakes Him nor sleep.

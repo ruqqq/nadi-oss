@@ -11,10 +11,11 @@ afterEach(cleanup);
 
 describe("QuranBlock", () => {
   it("renders reference, Arabic and translation", () => {
-    const { container } = render(<QuranBlock source={`2:255\n${AYAH}\n\n${TRANSLATION}`} />);
+    const { container } = render(
+      <QuranBlock source={`2:255 Al-Baqarah\n${AYAH}\n\n${TRANSLATION}`} />,
+    );
 
-    expect(screen.getByText(/Al-Baqarah · 2:255/)).toBeTruthy();
-    expect(screen.getByText("البقرة")).toBeTruthy();
+    expect(screen.getByText("Al-Baqarah · 2:255")).toBeTruthy();
     expect(screen.getByText(TRANSLATION)).toBeTruthy();
 
     const arabic = container.querySelector('p[lang="ar"]');
@@ -34,6 +35,11 @@ describe("QuranBlock", () => {
     expect(screen.getByText(/2:255–257/)).toBeTruthy();
   });
 
+  it("shows the bare reference when the fence names no surah", () => {
+    render(<QuranBlock source={`2:255\n${AYAH}`} />);
+    expect(screen.getByText("2:255")).toBeTruthy();
+  });
+
   it("renders the Arabic even when the reference is unparseable", () => {
     const { container } = render(<QuranBlock source={AYAH} />);
     expect(container.querySelector('p[lang="ar"]')?.textContent).toContain(AYAH);
@@ -49,12 +55,12 @@ describe("QuranBlock", () => {
 describe("MessageResponse markdown pipeline", () => {
   it("turns a quran fence into a verse block, not a code block", () => {
     const { container } = render(
-      <MessageResponse>{`Here it is:\n\n\`\`\`quran\n2:255\n${AYAH}\n\n${TRANSLATION}\n\`\`\`\n`}</MessageResponse>,
+      <MessageResponse>{`Here it is:\n\n\`\`\`quran\n2:255 Al-Baqarah\n${AYAH}\n\n${TRANSLATION}\n\`\`\`\n`}</MessageResponse>,
     );
 
     expect(container.querySelector("figure")).toBeTruthy();
     expect(container.querySelector("pre")).toBeNull();
-    expect(screen.getByText(/Al-Baqarah · 2:255/)).toBeTruthy();
+    expect(screen.getByText("Al-Baqarah · 2:255")).toBeTruthy();
     expect(screen.getByText(TRANSLATION)).toBeTruthy();
   });
 
