@@ -9,7 +9,6 @@ import type { WorkspaceMcpAgent } from "./agent/workspace-mcp-agent";
 import type { ComputeBackend } from "./compute/backend";
 import type { NadiSandboxMedium, NadiSandboxSmall } from "./compute/cloudflare-sandbox-classes";
 import type { RegistryDatabase } from "./db/registry-do";
-import type { CelldTicker } from "./celld/ticker";
 
 export interface Env extends Cloudflare.Env {
   THINK_THREAD_AGENT: DurableObjectNamespace<ThinkThreadAgent>;
@@ -24,18 +23,6 @@ export interface Env extends Cloudflare.Env {
    * Cloudflare configs).
    */
   REGISTRY_DO?: DurableObjectNamespace<RegistryDatabase>;
-
-  /**
-   * The celld-only ticker Durable Object that stands in for Cloudflare's
-   * `scheduled()` cron: celld rejects the `triggers` config key and never
-   * invokes a `scheduled()` handler, so this DO re-arms itself every minute
-   * and calls the same job functions `scheduled()` calls. The fetch handler
-   * arms its first alarm (`armCelldTicker` in `src/celld/ticker.ts`); it
-   * re-arms itself thereafter. Only the celld deploy binds it, so it is
-   * optional here and absent from worker-configuration.d.ts — the Cloudflare
-   * configs keep `scheduled()` as the only scheduler, unchanged.
-   */
-  CRON_TICKER?: DurableObjectNamespace<CelldTicker>;
 
   /**
    * Which edition this deploy is: `cloud` for the hosted service, anything else

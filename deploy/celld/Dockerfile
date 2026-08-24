@@ -49,8 +49,9 @@ ENV CELLD_INSTALL_ROOT=/usr/local
 # deployment was actually verified against. Override with --build-arg
 # CELLD_VERSION=… ; an empty value takes the latest release, which means two
 # builds a week apart differ. Do not move this without re-reading the upgrade
-# notes in docs/self-hosting-celld.md — v0.2.0 changed the listener flags.
-ARG CELLD_VERSION="v0.2.0"
+# notes in docs/self-hosting-celld.md — v0.2.0 changed the listener flags, and
+# v0.2.1 stopped trusting X-Forwarded-* by default.
+ARG CELLD_VERSION="v0.3.0"
 RUN CELLD_VERSION="${CELLD_VERSION}" sh -c 'curl -fsSL https://celld.dev/install.sh | sh'
 
 # --- web-server: Caddy with the SPA baked in --------------------------------

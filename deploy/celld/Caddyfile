@@ -26,7 +26,16 @@
 		# reverse_proxy detects and upgrades WebSockets on its own, with no
 		# timeout on an upgraded connection — /agents/*, /think-agents/* and
 		# /live are all long-lived sockets and need no extra configuration.
-		reverse_proxy celld:8080
+		reverse_proxy celld:8080 {
+			# LOAD-BEARING, paired with --trust-forwarded-headers on the node.
+			# celld ignores X-Forwarded-* by default since v0.2.1, so the node
+			# is told to trust these; that is only safe while this proxy
+			# REPLACES both on every request rather than passing a client's
+			# through. `header_up` sets, so a forged inbound value is
+			# overwritten here. Remove the flag if you remove these.
+			header_up X-Forwarded-Host {host}
+			header_up X-Forwarded-Proto {scheme}
+		}
 	}
 
 	handle {
@@ -53,7 +62,12 @@
 # Published artifacts get their own origin so untrusted HTML cannot touch the
 # app's cookies. Every path here belongs to the Worker.
 {$ARTIFACTS_SITE} {
-	reverse_proxy celld:8080
+	# Same header contract as the app site above — every path here is the
+	# Worker's, and the node trusts X-Forwarded-* from this proxy.
+	reverse_proxy celld:8080 {
+		header_up X-Forwarded-Host {host}
+		header_up X-Forwarded-Proto {scheme}
+	}
 }
 
 # Attachment downloads 302 the BROWSER to a presigned S3 URL built from

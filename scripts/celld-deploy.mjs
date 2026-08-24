@@ -1,6 +1,4 @@
-// One-command deploy to a celld fleet bucket. The esbuild alias requirement is
-// handled here — see scripts/celld-esbuild.mjs — so nothing about esbuild is a
-// prerequisite the operator has to reassemble.
+// One-command deploy to a celld fleet bucket.
 //
 // Usage:
 //   pnpm celld:deploy                            # bucket/endpoint/region from env
@@ -14,18 +12,69 @@
 // celld itself is never vendored or installed by this script — it is a binary
 // the operator installs (curl -fsSL https://celld.dev/install.sh | sh). We
 // only fail loudly with the install hint when it is missing.
+//
+// esbuild: `celld deploy` shells out to esbuild and expects it on PATH, which
+// it is not here — esbuild is a transitive dependency living in the pnpm
+// store, not a declared one and not installed globally. So this script
+// resolves a binary and names it in CELLD_ESBUILD, which keeps "install
+// esbuild" off the operator's prerequisite list.
+//
+// Until celld v0.3.0 that variable pointed at scripts/celld-esbuild.mjs, a
+// wrapper that appended `--alias:path=node:path` and friends: celld's bundler
+// did not alias bare Node builtins the way wrangler's nodejs_compat does, and
+// `mime-types` (transitive under `agents`) does `require('path')`, so the
+// bundle failed outright without it. celld v0.3.0 accepts bare builtin
+// specifiers (denoland/celld#157) and the wrapper is gone.
 
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync } from "node:fs";
+import { accessSync, constants, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const wrapper = join(repoRoot, "scripts", "celld-esbuild.mjs");
 
-// celld spawns CELLD_ESBUILD directly, so the wrapper must be executable even
-// if git lost the mode bit on some checkout.
-if (existsSync(wrapper)) chmodSync(wrapper, 0o755);
+function executable(p) {
+  try {
+    accessSync(p, constants.X_OK);
+    return statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
+
+// Newest esbuild in the pnpm store wins; versions are compared as [major,
+// minor, patch] so 0.28.1 sorts above 0.25.12.
+function pnpmStoreEsbuild() {
+  const root = join(repoRoot, "node_modules", ".pnpm");
+  let best = null;
+  let bestVersion = [-1, -1, -1];
+  try {
+    for (const entry of readdirSync(root)) {
+      const match = /^esbuild@(\d+)\.(\d+)\.(\d+)$/.exec(entry);
+      if (!match) continue;
+      const candidate = join(root, entry, "node_modules", "esbuild", "bin", "esbuild");
+      if (!executable(candidate)) continue;
+      const version = match.slice(1).map(Number);
+      if (
+        version[0] > bestVersion[0] ||
+        (version[0] === bestVersion[0] && version[1] > bestVersion[1]) ||
+        (version[0] === bestVersion[0] &&
+          version[1] === bestVersion[1] &&
+          version[2] > bestVersion[2])
+      ) {
+        best = candidate;
+        bestVersion = version;
+      }
+    }
+  } catch {
+    // No pnpm store; leave CELLD_ESBUILD unset and let celld find esbuild on
+    // PATH, which is the documented arrangement.
+  }
+  return best;
+}
+
+// ESBUILD_BIN wins, then the pnpm store. Unset means "celld, use PATH".
+const esbuild = process.env.ESBUILD_BIN ?? pnpmStoreEsbuild();
 
 const celldBin = process.env.CELLD_BIN ?? "celld";
 // pnpm passes the `--` separator through to the script; drop it so the
@@ -37,7 +86,7 @@ const args = ["deploy", "--config", "wrangler.celld.jsonc", ...passthrough];
 const child = spawn(celldBin, args, {
   cwd: repoRoot,
   stdio: "inherit",
-  env: { ...process.env, CELLD_ESBUILD: wrapper },
+  env: { ...process.env, ...(esbuild ? { CELLD_ESBUILD: esbuild } : {}) },
 });
 
 child.on("error", (err) => {

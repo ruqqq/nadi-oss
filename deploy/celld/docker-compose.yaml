@@ -61,6 +61,13 @@ services:
       # around, so no --advertise is needed at all.
       - "--internal-listen"
       - "127.0.0.1:8081"
+      # celld v0.2.1 stopped trusting X-Forwarded-* by default. Without this
+      # request.url carries celld's own http://celld:8080 rather than the
+      # public https:// origin Caddy terminated. Safe here precisely because
+      # Caddy REPLACES both headers on every proxied request (the header_up
+      # lines in the Caddyfile), so a client cannot forge either one. Do NOT
+      # set this on a node that is reachable without a proxy in front.
+      - "--trust-forwarded-headers"
     environment:
       CELLD_VARS_FILE: /etc/nadi/celld-vars.env
       # How long a quiet cell stays resident. Keep it HIGH: an evicted thread
@@ -69,10 +76,6 @@ services:
       # The old "stay under the 60s tick" rule was a v0.1.0 constraint and no
       # longer holds — see the long note in .env.example.
       CELLD_IDLE_EVICT_S: ${CELLD_IDLE_EVICT_S:-300}
-      # Without this the ticker's always-imminent 60s alarm keeps its cell
-      # resident forever, so it never replicates and scheduled work silently
-      # stops after a restart.
-      CELLD_ALARM_RESIDENT_MS: ${CELLD_ALARM_RESIDENT_MS:-1000}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_REGION: ${AWS_REGION:-us-east-1}
@@ -125,17 +128,6 @@ services:
       # Let's Encrypt rate-limits you out after a handful.
       - ./data/caddy:/data
       - ./data/caddy-config:/config
-    depends_on:
-      - celld
-
-  # Arms the scheduler after a fresh deployment and backstops a lost alarm.
-  # A brand-new deployment has no alarm to restore and is armed by the first
-  # request; this makes that automatic rather than a curl you must remember.
-  ticker-watchdog:
-    image: curlimages/curl:latest
-    restart: unless-stopped
-    command:
-      ["sh", "-c", "while true; do curl -sf http://celld:8080/ >/dev/null || true; sleep 60; done"]
     depends_on:
       - celld
 

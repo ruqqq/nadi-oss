@@ -1,8 +1,12 @@
 {
   // Trimmed celld variant of wrangler.jsonc — celld deploy rejects
-  // d1_databases, r2_buckets, kv_namespaces, ai, browser, send_email,
-  // triggers and containers. Everything dropped here is a binding seam that
-  // tasks 04/05/09/11 already own.
+  // r2_buckets, kv_namespaces, ai, browser, send_email and containers.
+  // Everything dropped here is a binding seam that tasks 04/05/09/11 own.
+  //
+  // celld v0.3.0 also accepts `d1_databases` and `assets`, which this file
+  // does NOT use yet: the registry still runs on the RegistryDatabase DO, and
+  // Caddy still serves the SPA. Both are live opportunities, not oversights —
+  // see docs/self-hosting-celld.md.
   "name": "nadi",
   "main": "src/index.ts",
   "compatibility_date": "2026-05-01",
@@ -10,7 +14,6 @@
   "durable_objects": {
     "bindings": [
       { "name": "REGISTRY_DO", "class_name": "RegistryDatabase" },
-      { "name": "CRON_TICKER", "class_name": "CelldTicker" },
       { "name": "THINK_THREAD_AGENT", "class_name": "ThinkThreadAgent" },
       { "name": "WORKSPACE_MCP_AGENT", "class_name": "WorkspaceMcpAgent" },
       { "name": "USER_HUB", "class_name": "UserHub" },
@@ -23,10 +26,19 @@
     { "tag": "v3", "new_sqlite_classes": ["ThinkThreadAgent"] },
     { "tag": "v4", "new_sqlite_classes": ["VoiceAgent"] },
     { "tag": "v5", "new_sqlite_classes": ["RegistryDatabase"] },
-    // celld-only ticker standing in for Cloudflare's scheduled() cron (celld
-    // rejects triggers). Its alarm re-arms itself every minute.
-    { "tag": "v6", "new_sqlite_classes": ["CelldTicker"] },
+    // v6 created CelldTicker, a per-minute alarm DO that stood in for
+    // scheduled() while celld rejected `triggers`. celld v0.3.0 runs cron
+    // natively, so the class and its tag are gone. An upgraded deployment
+    // leaves one orphaned `CelldTicker` cell in the fleet bucket; nothing
+    // references it and it costs one idle cell's storage.
   ],
+  // Same expressions as wrangler.jsonc — scheduled() dispatches on
+  // controller.cron, so they must stay in step with AUTOMATA_CRON /
+  // AUTO_ARCHIVE_CRON in src/automata/fire-policy.ts. celld numbers
+  // day-of-week Cloudflare's way (1 = Sunday) and refuses 0, a descending
+  // range, and a `*` inside a list; both expressions here use `*` for the
+  // day-of-week field, so none of that bites.
+  "triggers": { "crons": ["0 3 * * *", "* * * * *"] },
   "vars": {
     "NADI_EDITION": "self-hosted",
     "NADI_PLATFORM": "celld",
