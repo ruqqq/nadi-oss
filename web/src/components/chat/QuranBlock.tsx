@@ -8,14 +8,22 @@ import { formatReference, parseQuranVerse, toArabicIndic } from "@/lib/quran-ver
 // is. The one flourish is the ayah medallion — the circular marker that closes
 // every āyah in a printed Qur'an — and everything else stays quiet so it lands.
 
+// The medallion closes the verse on its own line rather than sitting inline at
+// the end of the text. Inline is where a printed mushaf puts it, but the web
+// cannot place it safely there: Arabic final forms paint well outside their
+// advance box — the tail of ر in ٱلْقَدْرِ sweeps left and below the baseline —
+// and the browser positions the next inline box by advance width alone. Layout
+// reports no collision while the ink runs straight through the medallion. No
+// margin fixes it, because the overhang is per-letter: ر ى ن ج ح sweep, د ه ا
+// do not, so any value tuned on one āyah breaks on the next.
 function AyahMedallion({ ayah }: { ayah: number }) {
   return (
-    <span
+    <div
       aria-hidden="true"
-      className="mx-1 inline-flex size-7 shrink-0 translate-y-1 items-center justify-center rounded-full bg-primary/5 font-arabic text-[0.7rem] text-primary/70 leading-none ring-1 ring-primary/25"
+      className="mt-4 flex size-7 items-center justify-center self-center rounded-full bg-primary/5 font-arabic text-[0.7rem] text-primary/70 leading-none ring-1 ring-primary/25"
     >
       {toArabicIndic(ayah)}
-    </span>
+    </div>
   );
 }
 
@@ -37,7 +45,10 @@ export function QuranBlock({ source, className }: QuranBlockProps) {
 
   return (
     <figure
-      className={cn("my-4 rounded-md bg-quran-bg px-5 py-6 text-foreground sm:px-7", className)}
+      className={cn(
+        "my-4 flex flex-col rounded-md bg-quran-bg px-5 py-6 text-foreground sm:px-7",
+        className,
+      )}
     >
       {reference && (
         <figcaption className="mb-5 text-muted-foreground text-xs">
@@ -54,9 +65,10 @@ export function QuranBlock({ source, className }: QuranBlockProps) {
           lang="ar"
         >
           {arabic}
-          {medallionAyah !== null && <AyahMedallion ayah={medallionAyah} />}
         </p>
       )}
+
+      {medallionAyah !== null && arabic !== "" && <AyahMedallion ayah={medallionAyah} />}
 
       {translation !== "" && (
         <p className={cn("text-pretty text-sm leading-relaxed", arabic !== "" && "mt-5")}>

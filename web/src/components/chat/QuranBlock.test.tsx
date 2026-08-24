@@ -29,6 +29,17 @@ describe("QuranBlock", () => {
     expect(medallion?.textContent).toBe("٢٥٥");
   });
 
+  it("keeps the medallion out of the Arabic text flow", () => {
+    // Inline is where a mushaf puts it, but Arabic final forms paint outside
+    // their advance box — the tail of ر in ٱلْقَدْرِ ran straight through an
+    // inline medallion while layout reported no collision. Anything that puts
+    // it back inside the verse paragraph reintroduces that, so pin it here.
+    const { container } = render(<QuranBlock source={"97:1 Al-Qadr\nإِنَّآ أَنزَلْنَـٰهُ فِى لَيْلَةِ ٱلْقَدْرِ"} />);
+
+    expect(container.querySelector('p[lang="ar"] [aria-hidden="true"]')).toBeNull();
+    expect(container.querySelector('[aria-hidden="true"]')?.textContent).toBe("١");
+  });
+
   it("omits the medallion for a range, which has no single marker", () => {
     const { container } = render(<QuranBlock source={`2:255-257\n${AYAH}`} />);
     expect(container.querySelector('[aria-hidden="true"]')).toBeNull();
