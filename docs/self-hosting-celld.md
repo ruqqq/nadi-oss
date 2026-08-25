@@ -271,6 +271,22 @@ Cloudflare — there is no separate celld schema or migration history — and
 records what it applied in `d1_migrations`, exactly as `wrangler d1 migrations`
 does. Re-run it after every schema change; it is idempotent.
 
+> **Expect the first attempt after a node restart to fail, and retry it.** In a
+> deploy this step runs seconds behind `docker compose restart celld`, which is
+> exactly when the previous node session's lease on the registry cell is still
+> stale. The losing attempt is loud and looks fatal:
+>
+> ```
+> Error: decode the database reply (503 Service Unavailable): cell Worker failed:
+> ... peer no longer owns __D1Database:<hash>
+> ```
+>
+> A run before the node is up gives the same race from the other side, as
+> `409 Conflict: peer request targets a different node session`. Both clear
+> within a few seconds. Measured on a laptop stack and on a hosted node, so
+> automate the retry rather than treating a single failure as a bad deploy —
+> and because the command is idempotent, retrying costs nothing.
+
 ## 5. First sign-in
 
 Nadi is **invite-only**. The first account must be listed in
