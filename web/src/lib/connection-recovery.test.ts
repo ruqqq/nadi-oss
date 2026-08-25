@@ -7,6 +7,7 @@ import {
   resolveHiddenMs,
   shouldNudgeReconnect,
   shouldRecoverOnResume,
+  watchdogTick,
 } from "./connection-recovery";
 
 describe("resolveHiddenMs", () => {
@@ -76,5 +77,65 @@ describe("shouldNudgeReconnect", () => {
 
   test("does not nudge a CONNECTING socket (reconnect already in flight)", () => {
     expect(shouldNudgeReconnect(WS_CONNECTING, true, true)).toBe(false);
+  });
+});
+
+describe("watchdogTick", () => {
+  test("nudges a dead socket and remembers it did", () => {
+    expect(watchdogTick(false, WS_CLOSED, true, true)).toEqual({
+      nudge: true,
+      resync: false,
+      nudged: true,
+    });
+  });
+
+  test("does not resync while the socket is still down", () => {
+    // The watchdog runs every few seconds; resyncing on each tick would hammer
+    // /get-messages for as long as the socket stays dead.
+    expect(watchdogTick(true, WS_CLOSED, true, true).resync).toBe(false);
+  });
+
+  test("does not resync while the reconnect is still in flight", () => {
+    expect(watchdogTick(true, WS_CONNECTING, true, true)).toEqual({
+      nudge: false,
+      resync: false,
+      nudged: true,
+    });
+  });
+
+  test("resyncs once the nudged socket is OPEN again", () => {
+    expect(watchdogTick(true, WS_OPEN, true, true)).toEqual({
+      nudge: false,
+      resync: true,
+      nudged: false,
+    });
+  });
+
+  test("resyncs only once per revival", () => {
+    const first = watchdogTick(true, WS_OPEN, true, true);
+    expect(first.resync).toBe(true);
+    expect(watchdogTick(first.nudged, WS_OPEN, true, true).resync).toBe(false);
+  });
+
+  test("a socket that was never nudged does not resync", () => {
+    expect(watchdogTick(false, WS_OPEN, true, true)).toEqual({
+      nudge: false,
+      resync: false,
+      nudged: false,
+    });
+  });
+
+  test("holds the pending resync across a hidden tab", () => {
+    // Hidden means no nudge, but the flag must survive so the refetch still
+    // happens when the socket comes back.
+    expect(watchdogTick(true, WS_CLOSED, false, true)).toEqual({
+      nudge: false,
+      resync: false,
+      nudged: true,
+    });
+  });
+
+  test("holds the pending resync while offline", () => {
+    expect(watchdogTick(true, WS_CLOSED, true, false).nudged).toBe(true);
   });
 });

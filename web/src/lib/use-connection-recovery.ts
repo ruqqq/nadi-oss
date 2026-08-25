@@ -1,8 +1,8 @@
 import { useEffect, useRef } from "react";
 import {
   resolveHiddenMs,
-  shouldNudgeReconnect,
   shouldRecoverOnResume,
+  watchdogTick,
 } from "./connection-recovery";
 
 /** The parts of the Agents-SDK client (a partysocket) this module touches. */
@@ -80,8 +80,13 @@ export function useOnResume(onResume: (hiddenMs: number) => void): void {
  * "zombie", restoring liveness, and unsticking a stream that froze mid-turn —
  * and (2) runs `onResume` so the caller can refetch the message history (a
  * reconnect alone does NOT resync; the server never re-pushes history to a
- * reconnecting socket). A foreground watchdog also nudges a CLOSED/CLOSING
- * socket back while the tab stays visible.
+ * reconnecting socket).
+ *
+ * A foreground watchdog nudges a CLOSED/CLOSING socket back while the tab stays
+ * visible, and then runs `onResume` too, once the socket is OPEN again. That
+ * second half matters: a socket can die and be replaced without the tab ever
+ * hiding, so no resume event fires, and without the refetch the UI sits on a
+ * healthy socket showing a turn that already finished.
  */
 export function useAgentConnectionRecovery(
   agent: RecoverableSocket | null | undefined,
@@ -92,8 +97,16 @@ export function useAgentConnectionRecovery(
   const onResumeRef = useRef(onResume);
   onResumeRef.current = onResume;
 
+  // Set by the watchdog when it revives a socket, cleared once the refetch has
+  // run. A ref, not state: nothing renders off it, and the watchdog interval
+  // closes over it for the life of the hook.
+  const nudgedRef = useRef(false);
+
   useOnResume((hiddenMs) => {
     if (!shouldRecoverOnResume(hiddenMs, MIN_HIDDEN_MS)) return;
+    // This path refetches unconditionally, so a watchdog resync would be a
+    // duplicate.
+    nudgedRef.current = false;
     agentRef.current?.reconnect();
     onResumeRef.current?.(hiddenMs);
   });
@@ -101,9 +114,18 @@ export function useAgentConnectionRecovery(
   useEffect(() => {
     const id = setInterval(() => {
       const a = agentRef.current;
-      if (a && shouldNudgeReconnect(a.readyState, tabIsVisible(), networkIsOnline())) {
-        a.reconnect();
-      }
+      if (!a) return;
+      const step = watchdogTick(
+        nudgedRef.current,
+        a.readyState,
+        tabIsVisible(),
+        networkIsOnline(),
+      );
+      nudgedRef.current = step.nudged;
+      if (step.nudge) a.reconnect();
+      // Infinity: a revived socket always warrants a refetch, the same signal
+      // bfcache and network-online use.
+      if (step.resync) onResumeRef.current?.(Number.POSITIVE_INFINITY);
     }, WATCHDOG_INTERVAL_MS);
     return () => clearInterval(id);
   }, []);

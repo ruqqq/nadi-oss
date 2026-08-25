@@ -503,8 +503,19 @@ concrete. When a thread's cell is evicted between messages, the next message
 pays for it three times over: the transcript is restored from the bucket before
 the turn can start (805 KB across 22 objects on a young thread, and it grows
 with the thread), the MCP servers are re-connected and re-discovered, and any
-hibernatable WebSocket goes with the cell — which a client can be slow to
-notice, leaving it on a dead socket watching nothing arrive.
+hibernatable WebSocket goes with the cell.
+
+The client half of that last one is worth knowing about, because it looked for
+a while like a hung turn. A foreground watchdog in the SPA
+(`web/src/lib/use-connection-recovery.ts`) reconnects a socket that dies while
+the tab is visible — but a reconnect alone resyncs nothing: the server
+broadcasts a finished turn to the sockets that were live at the time and never
+re-pushes history to a reconnecting one. So the tab ended up holding a healthy
+socket and stale content, with the turn already complete on the server. The
+watchdog now refetches history on the CLOSED-to-OPEN transition, which closes
+it. If you see a turn that never renders and then appears in full on reload,
+that is the shape to look for; the node log shows it as `dropped a frame for a
+closed WebSocket` next to a successful `command_completion`.
 
 **Treat 300 as a choice rather than a proof.** The measurements above are one
 pass against a local MinIO, and the durability defect that motivated the old
