@@ -41,12 +41,6 @@ jobs:
       - name: Wrangler config parity
         run: pnpm run check:wrangler
 
-      # celld serves no static files, so Caddy owns the static/Worker split. A
-      # route added to src/index.ts but not to the Caddyfile is answered with
-      # the SPA shell and a 200 — no 404, nothing in any log.
-      - name: celld proxy routes cover src/index.ts
-        run: pnpm run check:celld-proxy
-
       - name: Format check
         run: pnpm run fmt:check
 

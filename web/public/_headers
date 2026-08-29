@@ -1,0 +1,20 @@
+# Cache rules for the static shell, honoured by BOTH platforms' asset servers
+# (Cloudflare Workers static assets and celld). This file used to be a set of
+# `header` directives in deploy/celld/Caddyfile; it moved here when celld took
+# over serving the SPA, so that one file states the policy for both deploys.
+
+# Hashed bundles are content-addressed, so they can be cached hard.
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# The shell and the service worker must NOT be, or a deploy is invisible to an
+# open tab until the cache expires. The service worker is also the app's own
+# update mechanism, so a stale one cannot fix itself.
+/
+  Cache-Control: no-cache
+/index.html
+  Cache-Control: no-cache
+/sw.js
+  Cache-Control: no-cache
+/manifest.webmanifest
+  Cache-Control: no-cache

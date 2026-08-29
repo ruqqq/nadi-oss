@@ -1,6 +1,9 @@
-# Caddy in front of a celld node. Two jobs: serve the SPA (celld has no assets
-# binding and cannot), and terminate TLS (the app hardcodes https:// for any
-# non-localhost artifact origin, so plain HTTP is not an option on a server).
+# Caddy in front of a celld node. ONE job now: terminate TLS (the app hardcodes
+# https:// for any non-localhost artifact origin, so plain HTTP is not an option
+# on a server). celld serves the SPA itself as of v0.4.0 — see the `assets`
+# block in wrangler.celld.jsonc — so this file no longer owns the split between
+# static files and Worker routes, and no longer has to be kept in step with
+# src/index.ts by hand.
 #
 # Site addresses come from deploy/celld/.env — see .env.example. They carry a
 # scheme, and the scheme is load-bearing: a bare hostname turns on auto-HTTPS
@@ -13,49 +16,23 @@
 }
 
 {$NADI_SITE} {
-	# Everything the Worker owns. Anything not listed here is a static file,
-	# so a route added to src/index.ts must be added here too or it will be
-	# answered with index.html and 200 — which looks like a broken SPA, not a
-	# missing proxy rule.
+	# Everything, including the SPA. celld decides what is a static file and
+	# what is a Worker route, using the same `assets` configuration Cloudflare
+	# reads — so there is exactly one answer to that question and it lives in
+	# wrangler.celld.jsonc, not in two places that can disagree.
 	#
-	# Enumerated from src/index.ts: /api/*, /agents/* (which covers
-	# VOICE_PARTY_PREFIX = /agents/voice-agent/), /think-agents/*, and the
-	# exact path /live.
-	@worker path /api/* /agents/* /think-agents/* /live
-	handle @worker {
-		# reverse_proxy detects and upgrades WebSockets on its own, with no
-		# timeout on an upgraded connection — /agents/*, /think-agents/* and
-		# /live are all long-lived sockets and need no extra configuration.
-		reverse_proxy celld:8080 {
-			# LOAD-BEARING, paired with --trust-forwarded-headers on the node.
-			# celld ignores X-Forwarded-* by default since v0.2.1, so the node
-			# is told to trust these; that is only safe while this proxy
-			# REPLACES both on every request rather than passing a client's
-			# through. `header_up` sets, so a forged inbound value is
-			# overwritten here. Remove the flag if you remove these.
-			header_up X-Forwarded-Host {host}
-			header_up X-Forwarded-Proto {scheme}
-		}
-	}
-
-	handle {
-		root * /srv
-
-		# Hashed bundles are content-addressed, so they can be cached hard.
-		@immutable path /assets/*
-		header @immutable Cache-Control "public, max-age=31536000, immutable"
-
-		# The shell and the service worker must NOT be, or a deploy is
-		# invisible to an open tab until the cache expires.
-		@shell path / /index.html /sw.js /manifest.webmanifest
-		header @shell Cache-Control "no-cache"
-
-		# Matches Cloudflare's not_found_handling: single-page-application.
-		# Note this makes a deleted JS chunk return index.html with 200 rather
-		# than 404 — the same behaviour the app's stale-bundle recovery is
-		# written against, so keep it.
-		try_files {path} /index.html
-		file_server
+	# reverse_proxy detects and upgrades WebSockets on its own, with no timeout
+	# on an upgraded connection — /agents/*, /think-agents/* and /live are all
+	# long-lived sockets and need no extra configuration.
+	reverse_proxy celld:8080 {
+		# LOAD-BEARING, paired with --trust-forwarded-headers on the node.
+		# celld ignores X-Forwarded-* by default since v0.2.1, so the node
+		# is told to trust these; that is only safe while this proxy
+		# REPLACES both on every request rather than passing a client's
+		# through. `header_up` sets, so a forged inbound value is
+		# overwritten here. Remove the flag if you remove these.
+		header_up X-Forwarded-Host {host}
+		header_up X-Forwarded-Proto {scheme}
 	}
 }
 

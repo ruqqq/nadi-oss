@@ -92,11 +92,11 @@ if (vars.onlyInA.length || vars.onlyInB.length) {
 // ---------------------------------------------------------------------------
 // wrangler.celld.jsonc — the non-Cloudflare deploy.
 //
-// This one cannot be a set-equality check: celld has no D1/KV/R2/AI/browser/
-// email/container bindings at all, so the whole point of the file is that it
-// differs. What must NOT happen is a var key or Durable Object binding being
-// added to wrangler.jsonc and quietly missed here — the celld deploy then
-// reads `undefined` and a feature is off with no signal.
+// This one cannot be a set-equality check: some binding kinds genuinely do not
+// exist on celld, so the whole point of the file is that it differs. What must
+// NOT happen is a var key or a binding of a kind celld DOES support being added
+// to wrangler.jsonc and quietly missed here — the celld deploy then reads
+// `undefined` and a feature is off with no signal.
 //
 // So the rule is: celld carries everything, except what is explicitly listed
 // below as Cloudflare-only. The allowlist is the point — dropping something
@@ -107,6 +107,8 @@ const CLOUDFLARE_ONLY_VARS = {
   R2_BUCKET_NAME: "R2 attachments; celld signs S3 instead (S3_ATTACHMENTS_BUCKET_NAME)",
   BACKUP_BUCKET_NAME: "R2 compute backups; celld uses S3_BACKUP_BUCKET_NAME",
   CLOUDFLARE_ACCOUNT_ID: "only used to presign R2 backup URLs",
+  // The three above are a DECISION as of celld v0.4.0, which does implement R2
+  // — see the note in CLOUDFLARE_ONLY_BINDINGS — not a missing binding.
   SANDBOX_TRANSPORT: "Cloudflare Sandbox container transport; celld has no containers",
   MAX_ACTIVE_CONTAINERS_PER_WORKSPACE: "caps Cloudflare containers; celld has none",
   WORKERS_AI_EMAILS: "Workers AI provider allowlist; celld has no AI binding",
@@ -118,7 +120,19 @@ const CLOUDFLARE_ONLY_VARS = {
 const CLOUDFLARE_ONLY_BINDINGS = {
   "durable_object:NADI_SANDBOX_SMALL": "Cloudflare container class",
   "durable_object:NADI_SANDBOX_MEDIUM": "Cloudflare container class",
+  // celld v0.4.0 DOES implement R2, so this is a choice rather than a limit:
+  // its buckets live inside the fleet bucket and cannot presign, and Nadi hands
+  // presigned URLs to a sandbox that fetches them without the Worker in the
+  // path. src/storage/s3-bucket.ts serves both buckets on celld instead.
+  "r2:ATTACHMENTS_BUCKET": "deliberate — celld R2 cannot presign; celld signs S3 directly",
+  "r2:BACKUP_BUCKET": "deliberate — celld R2 cannot presign; celld signs S3 directly",
 };
+
+// Binding kinds celld implements, and therefore compares. A kind absent here
+// (r2, ai, browser, email, container) is not checked at all, because celld
+// either cannot have it or does not want it — those are covered by
+// CLOUDFLARE_ONLY_BINDINGS above where the distinction matters.
+const CELLD_BINDING_KINDS = ["durable_object", "d1", "kv", "assets"];
 
 const celld = parseJsonc(readFileSync("wrangler.celld.jsonc", "utf8"));
 
@@ -134,21 +148,25 @@ if (missingVars.length) {
   console.error("to CLOUDFLARE_ONLY_VARS in this script, with the reason.");
 }
 
-// Only Durable Objects are comparable: every other binding kind is one celld
-// does not have, which is what the facades exist for.
-const celldDoNames = (celld.durable_objects?.bindings ?? []).map((b) => `durable_object:${b.name}`);
-const localDoNames = (local.durable_objects?.bindings ?? []).map((b) => `durable_object:${b.name}`);
-const missingDo = localDoNames.filter(
-  (n) => !celldDoNames.includes(n) && !(n in CLOUDFLARE_ONLY_BINDINGS),
+// Compare every binding kind celld implements. Before v0.4.0 this checked only
+// Durable Objects, because D1 was the only other kind celld had; KV and assets
+// were facades and Caddy. Both are real bindings now, so both are covered — a
+// second KV namespace added on Cloudflare and forgotten here would otherwise
+// read as `undefined` on celld with nothing to catch it.
+const ofCelldKinds = (names) =>
+  names.filter((n) => CELLD_BINDING_KINDS.includes(n.slice(0, n.indexOf(":"))));
+
+const celldBindings = ofCelldKinds(bindingNames(celld));
+const missingBindings = ofCelldKinds(bindingNames(local)).filter(
+  (n) => !celldBindings.includes(n) && !(n in CLOUDFLARE_ONLY_BINDINGS),
 );
-if (missingDo.length) {
+if (missingBindings.length) {
   failed = true;
-  console.error(
-    "\nDurable Object bindings in wrangler.jsonc but missing from wrangler.celld.jsonc:",
-  );
-  for (const n of missingDo) console.error(`  ${n}`);
-  console.error("\nAdd each to wrangler.celld.jsonc (and to its `migrations` list), or to");
-  console.error("CLOUDFLARE_ONLY_BINDINGS in this script, with the reason.");
+  console.error("\nBindings in wrangler.jsonc but missing from wrangler.celld.jsonc:");
+  for (const n of missingBindings) console.error(`  ${n}`);
+  console.error("\nAdd each to wrangler.celld.jsonc (a Durable Object also needs an entry in");
+  console.error("its `migrations` list), or to CLOUDFLARE_ONLY_BINDINGS in this script, with");
+  console.error("the reason.");
 }
 
 // A Durable Object class with no migration entry fails the celld deploy — loud,

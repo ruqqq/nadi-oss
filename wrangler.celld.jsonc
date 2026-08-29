@@ -1,15 +1,30 @@
 {
-  // Trimmed celld variant of wrangler.jsonc — celld deploy rejects
-  // r2_buckets, kv_namespaces, ai, browser, send_email and containers.
-  // Everything dropped here is a binding seam that tasks 04/05/09/11 own.
+  // Trimmed celld variant of wrangler.jsonc. As of celld v0.4.0 the only
+  // bindings `celld deploy` rejects are `ai`, `browser`, `send_email`,
+  // `containers` — and `routes`, which is Cloudflare platform surface. KV, R2,
+  // D1, Queues, Workflows and assets are all accepted.
   //
-  // celld v0.3.0 accepts `assets`, which this file does NOT use yet: Caddy
-  // still serves the SPA. That is a live opportunity, not an oversight — see
-  // docs/self-hosting-celld.md.
+  // What is absent from this file is therefore a DECISION in every case, not a
+  // platform limit. R2 is the one deliberate omission: celld's R2 binding
+  // stores objects in the fleet bucket and cannot presign, and Nadi hands out
+  // presigned URLs that a SANDBOX fetches directly, outside the Worker — so
+  // the S3 path in src/storage/ is required regardless and a binding would
+  // only add a second one. See docs/self-hosting-celld.md.
   "name": "nadi",
   "main": "src/index.ts",
   "compatibility_date": "2026-05-01",
   "compatibility_flags": ["nodejs_compat"],
+  // celld serves the SPA itself, exactly as Cloudflare does. Before this,
+  // Caddy owned the split between static files and Worker routes, with the
+  // list of Worker paths hand-copied out of src/index.ts — and a route that
+  // drifted out of that list was answered with the SPA shell and a 200, which
+  // no log records and no status code betrays.
+  "assets": {
+    "directory": "web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": true,
+  },
   "durable_objects": {
     "bindings": [
       { "name": "THINK_THREAD_AGENT", "class_name": "ThinkThreadAgent" },
@@ -41,6 +56,16 @@
   // applied with `celld d1 migrations apply` from the SAME migrations/ that
   // drizzle-kit generates for Cloudflare; there is no second history.
   "d1_databases": [{ "binding": "REGISTRY_DB", "database_name": "nadi-registry" }],
+  // Workspace secrets. celld v0.4.0 runs KV natively: a namespace is a cell of
+  // its own, so it gets the same fencing, replication and durable write
+  // acknowledgement as the registry — one writer, strongly consistent, no edge
+  // cache. Before this, celld had no KV and `RegistryKV` faked the binding over
+  // a `celld_kv` table in the registry; that facade is gone and both platforms
+  // now use the same binding.
+  //
+  // `id` is the namespace identity. celld accepts any stable string where
+  // Cloudflare wants a hex id.
+  "kv_namespaces": [{ "binding": "SECRETS_KV", "id": "nadi-secrets" }],
   // Same expressions as wrangler.jsonc — scheduled() dispatches on
   // controller.cron, so they must stay in step with AUTOMATA_CRON /
   // AUTO_ARCHIVE_CRON in src/automata/fire-policy.ts. celld numbers
