@@ -142,7 +142,21 @@ services:
       # BETTER_AUTH_SECRET or the KEK will serve sessions and secrets the
       # others cannot read, and the failure looks like random sign-outs.
       - ./celld-vars.env:/etc/nadi/celld-vars.env:ro
-    stop_grace_period: 60s
+    # Larger than the single-node file, and for a reason that only exists here.
+    # A v0.4.0 node hands its cells to a PEER on the way out, and it claims a
+    # fleet-wide drain token first so two nodes cannot hand off at once. The
+    # budget is CELLD_DRAIN_TOKEN_WAIT_MS (30s default, left alone here because
+    # there ARE other donors) plus CELLD_SHUTDOWN_TOTAL_MS (40s). A grace under
+    # that SIGKILLs a node mid-handoff, which is the one thing the handoff is
+    # for.
+    stop_grace_period: 120s
+    healthcheck:
+      test:
+        ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8080/.well-known/celld/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 20s
 
   # Serves the SPA and proxies the Worker's routes to the LOCAL node. Reuses
   # the single-node Caddyfile unchanged: `reverse_proxy celld:8080` resolves to
