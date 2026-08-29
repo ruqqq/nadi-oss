@@ -116,7 +116,9 @@ S3_HOSTNAME=s3.localhost
 Neither detail generalises: `http://` turns Caddy's auto-HTTPS off, and
 `.localhost` is required because the app mints `http://` artifact origins only
 for `localhost` and `*.localhost` hosts. `nadi.test` would produce artifact
-URLs on an origin nothing serves.
+URLs on an origin nothing serves. Linux glibc does not resolve `*.localhost`
+the way macOS does — add `127.0.0.1 app.localhost artifacts.localhost s3.localhost`
+to `/etc/hosts`.
 
 ### Deploying a change
 

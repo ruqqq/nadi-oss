@@ -426,7 +426,12 @@ Two details make this work, and neither generalises to other local hostnames:
   for everything else, so `nadi.test` or `nadi.local` would produce artifact
   URLs on an origin nothing serves. Better Auth's cookies rely on the same
   property. macOS and the major browsers resolve `*.localhost` to `127.0.0.1`
-  natively, so no `/etc/hosts` entry is needed.
+  natively. Linux glibc does not — add the three names to `/etc/hosts` or
+  curl will fail with "Could not resolve host":
+
+  ```
+  127.0.0.1 app.localhost artifacts.localhost s3.localhost
+  ```
 
 `S3_HOSTNAME` is attached to the Caddy container as a Docker network alias.
 That is what lets `S3_ENDPOINT` be a **single** value that resolves from both

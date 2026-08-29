@@ -7,16 +7,13 @@
 #
 # Three things have to be built, and they are genuinely separate:
 #
-#   web-server  the SPA. celld has NO assets binding (wrangler.celld.jsonc has
-#               no `assets` key, and `celld deploy` uploads only the Worker
-#               bundle), so unlike Cloudflare the node does not serve the UI at
-#               all — src/index.ts falls through to `route()` and 404s. Caddy
-#               serves web/dist and proxies the app's routes to celld.
+#   web-server  Caddy: TLS termination and a reverse proxy. celld serves the
+#               SPA itself from the `assets` binding (same as Cloudflare), so
+#               this image no longer bakes web/dist.
 #   deployer    a one-shot that runs `pnpm celld:deploy` to push the Worker
-#               bundle into the fleet bucket. Needs node + the repo + esbuild.
-#               The same image also runs `celld d1 migrations apply` (see the
-#               `migrate` service), which needs the repo for migrations/ and
-#               the wrangler config that resolves the database name.
+#               bundle AND web/dist into the fleet bucket. Needs node + the
+#               repo + esbuild. The same image also runs `celld d1 migrations
+#               apply` (see the `migrate` service).
 #   node        the long-running celld process. Needs only the binary.
 
 ARG NODE_VERSION=22-slim

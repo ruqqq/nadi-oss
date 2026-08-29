@@ -22,9 +22,10 @@
 name: nadi-celld
 
 services:
-  # One-shot: bundles the Worker and uploads it to the fleet bucket. Re-run
-  # after every code change, then restart `celld` — nodes read a deployment at
-  # startup only, so a deploy alone changes nothing.
+  # One-shot: bundles the Worker + SPA and uploads them to the fleet bucket.
+  # Re-run after every code change. A v0.4.0 node adopts the new Version ID
+  # in place (poll every CELLD_DEPLOY_POLL_S, or POST /reload to skip the wait).
+  # No restart.
   deploy:
     profiles: [deploy]
     build:

@@ -29,10 +29,9 @@
 name: nadi-celld-node
 
 services:
-  # One-shot, run from ONE host only. Uploads the Worker bundle to the fleet
+  # One-shot, run from ONE host only. Uploads the Worker + SPA to the fleet
   # bucket, which records a single current deployment for the whole cluster.
-  # Nodes read a deployment at startup only, so this changes nothing until you
-  # restart them — see the rolling-restart section of README.md.
+  # v0.4.0 nodes adopt it in place (poll or POST /reload) — see README.md.
   deploy:
     profiles: [deploy]
     build:
@@ -184,7 +183,8 @@ services:
       - ./data/caddy:/data
       - ./data/caddy-config:/config
     depends_on:
-      - celld
+      celld:
+        condition: service_healthy
 
 # No named volumes, for the same reason as the single-node file: persistent
 # state lives under ./data/ where `docker compose down -v` cannot reach it.
