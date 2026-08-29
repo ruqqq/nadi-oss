@@ -74,3 +74,8 @@ wrangler.smoke.jsonc
 # TLS cert here on first run. Local-only by construction: a committed
 # subscription private key would be a shared secret that decrypts nothing real.
 .push-catcher/
+
+# `celld dev` keeps its whole local object store here — the registry, every
+# cell, and the deployment bundle. Reproducible from a fresh `pnpm celld:dev`,
+# and it holds whatever secrets CELLD_VARS_FILE fed the Worker.
+.celld/

@@ -1,5 +1,4 @@
 import type { Env } from "../env";
-import { RegistryKV } from "../db/registry-kv";
 import { loadKek } from "./load-kek";
 import { KVWorkspaceSecretsStore } from "./kv-store";
 import { KVWorkspaceSecretsWriter } from "./kv-writer";
@@ -13,23 +12,26 @@ export {
 } from "./kv-records";
 export { KVWorkspaceSecretsStore } from "./kv-store";
 export { KVWorkspaceSecretsWriter } from "./kv-writer";
-export { RegistryKV } from "../db/registry-kv";
 
 /**
- * The KV namespace workspace secrets live in. Cloudflare binds the real
- * `SECRETS_KV`; celld has no KV and none is planned, so it hands every
- * consumer a `RegistryKV` facade over the `celld_kv` table in the registry D1
- * database instead — the rest of the secrets stack (store/writer) never needs
- * to know which platform it is on.
+ * The KV namespace workspace secrets live in.
+ *
+ * Both platforms bind a real `SECRETS_KV` now. celld gained native KV in
+ * v0.4.0 — a namespace is a cell, with one writer and the same durability as
+ * the registry — which retired `RegistryKV`, the facade that used to fake this
+ * binding over a table in the registry D1.
+ *
+ * Kept as a function rather than inlined at every call site: it is the one
+ * place that states which store secrets live in, and it fails loudly when the
+ * binding is absent instead of letting a missing namespace read as an empty
+ * one — an empty secrets store looks exactly like a workspace that has no
+ * secrets configured.
  */
 export function secretsBinding(env: Env): KVNamespace {
-  if (env.SECRETS_KV) return env.SECRETS_KV;
-  if (!env.REGISTRY_DB) {
-    throw new Error(
-      "secretsBinding: neither SECRETS_KV nor REGISTRY_DB is bound — workspace secrets have no backing store",
-    );
+  if (!env.SECRETS_KV) {
+    throw new Error("secretsBinding: SECRETS_KV is not bound — workspace secrets have no store");
   }
-  return new RegistryKV(env.REGISTRY_DB);
+  return env.SECRETS_KV;
 }
 
 export function createWorkspaceSecretsServices(env: Env): {

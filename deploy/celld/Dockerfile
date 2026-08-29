@@ -7,16 +7,13 @@
 #
 # Three things have to be built, and they are genuinely separate:
 #
-#   web-server  the SPA. celld has NO assets binding (wrangler.celld.jsonc has
-#               no `assets` key, and `celld deploy` uploads only the Worker
-#               bundle), so unlike Cloudflare the node does not serve the UI at
-#               all — src/index.ts falls through to `route()` and 404s. Caddy
-#               serves web/dist and proxies the app's routes to celld.
+#   web-server  Caddy: TLS termination and a reverse proxy. celld serves the
+#               SPA itself from the `assets` binding (same as Cloudflare), so
+#               this image no longer bakes web/dist.
 #   deployer    a one-shot that runs `pnpm celld:deploy` to push the Worker
-#               bundle into the fleet bucket. Needs node + the repo + esbuild.
-#               The same image also runs `celld d1 migrations apply` (see the
-#               `migrate` service), which needs the repo for migrations/ and
-#               the wrangler config that resolves the database name.
+#               bundle AND web/dist into the fleet bucket. Needs node + the
+#               repo + esbuild. The same image also runs `celld d1 migrations
+#               apply` (see the `migrate` service).
 #   node        the long-running celld process. Needs only the binary.
 
 ARG NODE_VERSION=22-slim
@@ -52,20 +49,29 @@ ENV CELLD_INSTALL_ROOT=/usr/local
 # deployment was actually verified against. Override with --build-arg
 # CELLD_VERSION=… ; an empty value takes the latest release, which means two
 # builds a week apart differ. Do not move this without re-reading the upgrade
-# notes in docs/self-hosting-celld.md — v0.2.0 changed the listener flags, and
-# v0.2.1 stopped trusting X-Forwarded-* by default.
-ARG CELLD_VERSION="v0.3.0"
+# notes in docs/self-hosting-celld.md — v0.2.0 changed the listener flags,
+# v0.2.1 stopped trusting X-Forwarded-* by default, and v0.4.0 moved the health
+# endpoint and made a v0.3.0→v0.4.0 rolling update unsafe.
+ARG CELLD_VERSION="v0.4.0"
 RUN CELLD_VERSION="${CELLD_VERSION}" sh -c 'curl -fsSL https://celld.dev/install.sh | sh'
 
-# --- web-server: Caddy with the SPA baked in --------------------------------
+# --- web-server: Caddy, TLS only --------------------------------------------
+# No SPA baked in any more: celld serves web/dist from its `assets` binding, so
+# this image terminates TLS and proxies. The name is kept because the compose
+# service is named `caddy` and the build target is referenced by it.
 FROM caddy:2-alpine AS web-server
-COPY --from=web-build /app/web/dist /srv
 COPY deploy/celld/Caddyfile /etc/caddy/Caddyfile
 
 # --- deployer: one-shot `pnpm celld:deploy` ---------------------------------
 FROM deps AS deployer
 WORKDIR /app
 COPY . .
+# The Worker bundle is no longer the whole deployment: `celld deploy` uploads
+# web/dist alongside it as static assets. web/dist is a BUILD OUTPUT and is
+# gitignored, so `COPY . .` above cannot supply it — without this line the
+# deploy uploads a Worker with an empty asset directory and every non-API route
+# 404s, while the API keeps working and nothing in the log says why.
+COPY --from=web-build /app/web/dist /app/web/dist
 # The installer's bin entry is a SYMLINK into lib/celld/releases/<version>/,
 # so copying only /usr/local/bin/celld yields a dangling link.
 COPY --from=celld-bin /usr/local/lib/celld /usr/local/lib/celld
@@ -75,8 +81,11 @@ ENTRYPOINT ["pnpm", "celld:deploy", "--"]
 
 # --- node: the long-running celld process -----------------------------------
 FROM debian:bookworm-slim AS node
+# curl is here for the compose healthcheck, not for celld: this image's /bin/sh
+# is dash, which has no /dev/tcp, so there is otherwise nothing in it that can
+# make an HTTP request.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates \
+  && apt-get install -y --no-install-recommends ca-certificates curl \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=celld-bin /usr/local/lib/celld /usr/local/lib/celld
 COPY --from=celld-bin /usr/local/bin/celld /usr/local/bin/celld

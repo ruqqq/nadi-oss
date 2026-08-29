@@ -76,6 +76,26 @@ function pnpmStoreEsbuild() {
 // ESBUILD_BIN wins, then the pnpm store. Unset means "celld, use PATH".
 const esbuild = process.env.ESBUILD_BIN ?? pnpmStoreEsbuild();
 
+// `assets` in wrangler.celld.jsonc points at web/dist, and a MISSING directory
+// is the quiet failure: celld deploys the Worker, the API answers normally, and
+// every other route 404s with nothing in any log saying the SPA was never
+// uploaded. `pnpm web:build` is a separate step from this one and is easy to
+// skip, so check rather than discover it in a browser.
+const assetsDir = join(repoRoot, "web", "dist");
+try {
+  if (!statSync(assetsDir).isDirectory() || readdirSync(assetsDir).length === 0) {
+    throw new Error("empty");
+  }
+} catch {
+  console.error(
+    "celld-deploy: web/dist is missing or empty, and wrangler.celld.jsonc serves\n" +
+      "  the SPA from it. Deploying now would upload a Worker with no static\n" +
+      "  assets: the API would work and every other route would 404.\n" +
+      "  Run `pnpm web:build` first.",
+  );
+  process.exit(1);
+}
+
 const celldBin = process.env.CELLD_BIN ?? "celld";
 // pnpm passes the `--` separator through to the script; drop it so the
 // forwarded args are exactly what the operator wrote after `--`.

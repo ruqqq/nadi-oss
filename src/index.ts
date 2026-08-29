@@ -9,7 +9,6 @@ import { canonicalRedirectUrl } from "./http/canonical-host";
 import { route } from "./http/router";
 import { log, setLogLevel } from "./log";
 import { CRON_LAST_DAILY_RUN_KEY, CRON_LAST_TICK_KEY, stampCronRun } from "./celld/cron-liveness";
-import { installResponseRedirectShim } from "./celld/response-redirect-shim";
 import { autoArchiveIdleThreads } from "./agent/auto-archive";
 import { AUTOMATA_CRON, fireDueAutomata } from "./automata/fire-due";
 import { repairStaleThreadSearchProjections } from "./thread-knowledge/repair";
@@ -23,13 +22,6 @@ export {
   NadiSandboxSmall,
   NadiSandboxMedium,
 } from "./compute/cloudflare-sandbox-classes";
-
-// Module scope on purpose. This has to be in place before ANY handler runs,
-// and a Durable Object's entry point is not our `fetch` — the call site that
-// exposed the gap lives inside the agents SDK, reached from
-// WorkspaceMcpAgent.fetch. Module evaluation covers every isolate that loads
-// this graph, DOs included. No-op on Cloudflare.
-installResponseRedirectShim();
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {

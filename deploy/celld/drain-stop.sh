@@ -10,12 +10,13 @@
 # So the order matters: cut traffic first, wait past the eviction threshold so
 # every cell replicates, and only then stop the node.
 #
-# This does not assume celld quiesces on SIGTERM. If it does, this is belt and
-# braces; if it does not, this is the only thing standing between you and a
-# silent rollback to the last eviction.
+# celld v0.4.0 drains on SIGTERM — `docker compose stop` is no longer reckless —
+# and this script is belt and braces over that: it cuts traffic first and waits
+# past the eviction threshold so every cell replicates before the node stops.
 #
 #   ./drain-stop.sh            # drain, then stop everything
-#   ./drain-stop.sh --restart  # drain, then restart the node (e.g. after a deploy)
+#   ./drain-stop.sh --restart  # drain, then restart the node (vars-file change,
+#                              #  or a celld version bump — not a deploy)
 
 set -eu
 
@@ -44,8 +45,8 @@ if [ "${1:-}" = "--restart" ]; then
 	echo "Restarting celld (picks up the current deployment and vars file)..."
 	compose restart celld
 	compose start caddy
-	echo "Up. A node loads a deployment at startup only, so this is what makes a"
-	echo "'docker compose run --rm deploy' take effect."
+	echo "Up. Vars-file changes and celld version bumps need a restart; a"
+	echo "v0.4.0 node adopts a new deploy in place without one."
 else
 	echo "Stopping celld..."
 	compose stop celld

@@ -73,9 +73,17 @@ the type system, and each one cost a production incident or a broken feature.
   isolate. REST keeps the base URL verbatim — only the upgrade is rewritten
   (`execUrl` in `src/compute/backends/sprites-client.ts`).
 - **Alarm handlers must be idempotent.** celld replays an alarm on every
-  stall-retry; one armed alarm has been observed running 7 times. celld v0.2.1
-  and v0.3.0 both claim fixes here (a lost reschedule, and overlapping
-  handlers), unverified on this deployment — keep writing them idempotent.
+  stall-retry; one armed alarm has been observed running 7 times. celld v0.2.1,
+  v0.3.0 and v0.4.0 all claim fixes here (a lost reschedule, overlapping
+  handlers, and an expired handler settling its own alarm claim), unverified on
+  this deployment — keep writing them idempotent.
+- **Two adjacent versions must accept each other's Durable Object calls.** Since
+  celld v0.4.0 a node adopts a new deployment WITHOUT restarting, and during the
+  switch a request on the old deployment can call an object already running the
+  new one. Cloudflare has always had this window on rollout; on celld it is now
+  every deploy. A new or newly-required field on an RPC payload, or a changed
+  stored shape, has to land in two releases — add and write it, ship, then read
+  it. This is the seam the Workbenches wire-contract regressions came through.
 - **Clear every `setInterval` before the handler ends.** celld keeps the request
   alive while an interval is live, so a stray one pins the request open. This is
   why the subagent liveness timer is bound to the turn and cleared on settle

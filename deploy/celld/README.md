@@ -1,8 +1,8 @@
 # Running Nadi on celld, packaged
 
 This directory packages a Nadi deployment on [celld](https://github.com/denoland/celld)
-as Docker images and a Compose stack — Caddy serving the SPA and terminating
-TLS, a celld node behind it, and optionally a bundled MinIO.
+as Docker images and a Compose stack — Caddy terminating TLS, a celld node
+behind it serving both the Worker and the SPA, and optionally a bundled MinIO.
 
 For the concepts underneath — what works on celld and what does not, why the
 vars file is not JSON, how scheduled work survives a restart — read
@@ -35,16 +35,16 @@ deployment; if you scale out, measure it before trusting it.
 
 ## What is in here
 
-| File                            |                                                                                                |
-| ------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `Dockerfile`                    | three targets: `web-server` (Caddy + SPA), `deployer` (one-shot bundle+upload), `node` (celld) |
-| `Caddyfile`                     | shared by both topologies; site addresses come from the env file                               |
-| `docker-compose.yaml`           | **single node**, with an optional bundled MinIO                                                |
-| `.env.example`                  | Compose config for the single-node stack                                                       |
-| `docker-compose.multinode.yaml` | **multi node**, one copy per host                                                              |
-| `.env.multinode.example`        | Compose config for one host of a cluster                                                       |
-| `celld-vars.env.example`        | application config and secrets, both topologies                                                |
-| `drain-stop.sh`                 | stop the single-node stack without losing data                                                 |
+| File                            |                                                                                                                        |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `Dockerfile`                    | three targets: `web-server` (Caddy, TLS only), `deployer` (one-shot bundle+upload, carries `web/dist`), `node` (celld) |
+| `Caddyfile`                     | shared by both topologies; site addresses come from the env file                                                       |
+| `docker-compose.yaml`           | **single node**, with an optional bundled MinIO                                                                        |
+| `.env.example`                  | Compose config for the single-node stack                                                                               |
+| `docker-compose.multinode.yaml` | **multi node**, one copy per host                                                                                      |
+| `.env.multinode.example`        | Compose config for one host of a cluster                                                                               |
+| `celld-vars.env.example`        | application config and secrets, both topologies                                                                        |
+| `drain-stop.sh`                 | stop the single-node stack without losing data                                                                         |
 
 Two config files, and the split matters: `.env*` configures **Docker**
 (hostnames, buckets, the credentials celld uses for its fleet bucket), while
@@ -116,20 +116,26 @@ S3_HOSTNAME=s3.localhost
 Neither detail generalises: `http://` turns Caddy's auto-HTTPS off, and
 `.localhost` is required because the app mints `http://` artifact origins only
 for `localhost` and `*.localhost` hosts. `nadi.test` would produce artifact
-URLs on an origin nothing serves.
+URLs on an origin nothing serves. Linux glibc does not resolve `*.localhost`
+the way macOS does — add `127.0.0.1 app.localhost artifacts.localhost s3.localhost`
+to `/etc/hosts`.
 
 ### Deploying a change
 
 Both images bake the repo in with `COPY . .`, so **rebuild before deploying**:
 
 ```sh
-docker compose build deploy      # Worker changes (src/)
+docker compose build deploy      # Worker (src/) AND SPA (web/) — one image
 docker compose run --rm deploy
-./drain-stop.sh --restart        # a node loads a deployment at startup only
 
-docker compose build caddy       # SPA changes (web/) — no redeploy needed
-docker compose up -d caddy
+# optional: adopt now instead of within CELLD_DEPLOY_POLL_S (30s)
+docker compose exec celld curl -fsS -X POST http://127.0.0.1:8081/reload
 ```
+
+**No restart.** Since celld v0.4.0 a node adopts a new deployment in place,
+finishing in-flight requests on the old one. `web/` changes ship the same way —
+celld serves the SPA now, so `docker compose build caddy` is no longer part of
+a deploy.
 
 Skipping the build does not fail. It prints `Uploaded nadi` and a
 `Current Version ID` exactly as a real deploy does, then serves the old code.
@@ -268,14 +274,23 @@ celld diagnose --bucket s3://celld-fleet --endpoint <your endpoint>
 
 ## Rolling restarts and deploys
 
-A deploy is cluster-wide and immediate; picking it up is not. The bucket
-records one current deployment, and **nodes read a deployment only at
-startup**. Between the first and last node restarting, the cluster runs two
-versions of the Worker against one set of shared state.
+A deploy is cluster-wide and immediate; picking it up takes up to
+`CELLD_DEPLOY_POLL_S` (30s), or is instant with `POST /reload` per node. Since
+v0.4.0 **no node restarts to pick up a deployment** — each adopts it in place.
 
-Keep that window short, and avoid deploying a change that alters stored shapes
-in a way the old version cannot read — ordinary rolling-deploy discipline,
-except the two versions share Durable Object state directly.
+The two-versions window did not go away, it moved: during an adoption a request
+on the old deployment can call a Durable Object already running the new one, on
+one node. So the discipline is unchanged and now applies to every deploy rather
+than only a rollout — avoid a change that alters a stored shape or an RPC
+signature in a way the adjacent version cannot read. Add the field, ship, then
+read it.
+
+> **Upgrading celld itself is a different matter, and v0.3.0 → v0.4.0 must not
+> be rolling.** Stop every v0.3.0 node before starting any v0.4.0 node: the peer
+> tunnel refuses a foreign version and large KV values gain epoch-qualified
+> references an older node cannot read, so a mixed fleet can make a committed
+> value unavailable. The procedure below is for rolling a _deployment_ or a
+> host, not a celld version.
 
 `./drain-stop.sh` targets the single-node stack (it assumes the default compose
 file and `.env`). Per host, the equivalent is:
@@ -289,7 +304,8 @@ EF=.env.multinode
 docker compose -f $CF --env-file $EF stop caddy
 # 3. wait past the eviction threshold so this node's cells replicate
 sleep 35
-# 4. restart the node; it loads the current deployment now
+# 4. restart the node — needed for a celld VERSION change or a host restart,
+#    not for a deploy, which the running node adopts on its own
 docker compose -f $CF --env-file $EF restart celld
 docker compose -f $CF --env-file $EF start caddy
 # 5. put it back in the LB, confirm it is serving, then move to the next host

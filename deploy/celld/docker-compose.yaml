@@ -22,9 +22,10 @@
 name: nadi-celld
 
 services:
-  # One-shot: bundles the Worker and uploads it to the fleet bucket. Re-run
-  # after every code change, then restart `celld` — nodes read a deployment at
-  # startup only, so a deploy alone changes nothing.
+  # One-shot: bundles the Worker + SPA and uploads them to the fleet bucket.
+  # Re-run after every code change. A v0.4.0 node adopts the new Version ID
+  # in place (poll every CELLD_DEPLOY_POLL_S, or POST /reload to skip the wait).
+  # No restart.
   deploy:
     profiles: [deploy]
     build:
@@ -129,14 +130,36 @@ services:
       # The old "stay under the 60s tick" rule was a v0.1.0 constraint and no
       # longer holds — see the long note in .env.example.
       CELLD_IDLE_EVICT_S: ${CELLD_IDLE_EVICT_S:-300}
+      # A draining node claims a fleet-wide token before it releases cells, so
+      # that concurrent donors hand off one at a time. This deployment is one
+      # node: there is no other donor to queue behind and no successor to hand
+      # off TO, so the wait is 30s of dead time on every stop. Set it to 0 and
+      # the stop budget below is just CELLD_SHUTDOWN_TOTAL_MS.
+      # docker-compose.multinode.yaml deliberately leaves it at the default.
+      CELLD_DRAIN_TOKEN_WAIT_MS: ${CELLD_DRAIN_TOKEN_WAIT_MS:-0}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_REGION: ${AWS_REGION:-us-east-1}
     volumes:
       - ./celld-vars.env:/etc/nadi/celld-vars.env:ro
-    # Long enough to replicate on the way out IF celld quiesces on SIGTERM.
-    # Whether it does is unverified — do not rely on it. drain-stop.sh does not.
-    stop_grace_period: 60s
+    # celld v0.4.0 drains on SIGTERM: it reports itself unhealthy, answers new
+    # public requests with 503, finishes what it accepted, and then runs its
+    # local durability shutdown. The grace must cover that whole budget or the
+    # orchestrator SIGKILLs mid-handoff — the exact thing draining exists to
+    # avoid. The budget is CELLD_DRAIN_TOKEN_WAIT_MS (0 above) plus
+    # CELLD_SHUTDOWN_TOTAL_MS (40s default), so 90s is comfortable headroom
+    # rather than a coin flip.
+    stop_grace_period: 90s
+    # The public health endpoint. It moved in v0.4.0 — it was /__celld/health
+    # through v0.3.0 — and it reports 503 while the node drains, which is what
+    # makes it usable as a readiness gate and not just a liveness ping.
+    healthcheck:
+      test:
+        ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8080/.well-known/celld/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 20s
     depends_on:
       minio:
         condition: service_healthy
@@ -182,7 +205,13 @@ services:
       - ./data/caddy:/data
       - ./data/caddy-config:/config
     depends_on:
-      - celld
+      # `service_healthy`, not a bare name: a bare dependency waits for the
+      # container to START, which for celld is well before it can answer. The
+      # health endpoint reports 503 until the node is actually serving, so this
+      # is the difference between Caddy proxying to a live node and Caddy
+      # returning 502 to whoever is watching the first boot.
+      celld:
+        condition: service_healthy
 
   # Optional bundled S3. Omit the profile and point CELLD_BUCKET / S3_* at R2,
   # AWS, or any other S3-compatible service instead.
