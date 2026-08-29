@@ -10,18 +10,19 @@
  * outside the process. `/api/debug/celld-ticker` reads these.
  *
  * Written only where the registry has no dashboard behind it, which is celld.
- * Both platforms now bind real D1, so the marker is gated on NADI_PLATFORM
- * rather than on a binding: a binding used as a platform predicate is exactly
- * the mistake `hasRegistry` exists to prevent. A stamp must never fail the run
- * it is reporting on, so every write here is best-effort.
+ * Both platforms bind the same stores now, so the marker is gated on
+ * NADI_PLATFORM rather than on a binding: a binding used as a platform
+ * predicate is exactly the mistake this gate exists to prevent. A stamp must
+ * never fail the run it is reporting on, so every write here is best-effort.
  *
- * The key strings are deliberately the ones `CelldTicker` wrote, so a
- * deployment upgraded from the ticker keeps reading its existing markers
- * instead of showing null until the next occurrence.
+ * These live in the secrets KV namespace under a `system/` prefix, which is
+ * where they lived when that namespace was a table. It is a shared namespace,
+ * not a secret one — the workspace secret keys are all `workspaces/<id>/…`, so
+ * the two prefixes cannot collide, and a `list` for either one cannot see the
+ * other.
  */
 
 import type { Env } from "../env";
-import { RegistryKV } from "../db/registry-kv";
 import { log } from "../log";
 
 /** Set on every `scheduled()` invocation, whichever expression fired. */
@@ -41,9 +42,9 @@ export function isCelld(env: Pick<Env, "NADI_PLATFORM">): boolean {
  * automata run or the daily sweep that just succeeded.
  */
 export async function stampCronRun(env: Env, key: string, atMs: number): Promise<void> {
-  if (!isCelld(env) || !env.REGISTRY_DB) return;
+  if (!isCelld(env) || !env.SECRETS_KV) return;
   try {
-    await new RegistryKV(env.REGISTRY_DB).put(key, String(atMs));
+    await env.SECRETS_KV.put(key, String(atMs));
   } catch (error) {
     log.warn("celld_cron.marker_failed", { key, error: String(error) });
   }

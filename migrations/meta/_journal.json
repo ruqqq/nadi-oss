@@ -428,6 +428,13 @@
       "when": 1787583893147,
       "tag": "0060_smart_silver_fox",
       "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "6",
+      "when": 1787999835014,
+      "tag": "0061_confused_king_bedlam",
+      "breakpoints": true
     }
   ]
 }

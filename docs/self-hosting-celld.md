@@ -30,6 +30,7 @@ have no equivalent:
 | Browser rendering for `web_fetch` | no browser binding; fetch degrades to direct HTTP |
 | Attachment vision extraction, `toMarkdown` | needs the Workers AI binding |
 | The `cloudflare` sandbox provider | needs Containers; `wrangler.celld.jsonc` binds no sandbox classes |
+| Attachment storage via an R2 *binding* | celld v0.4.0 has R2, but its buckets live inside the fleet bucket and cannot presign. Attachments and sandbox backups are handed out as presigned URLs that a browser or a **sandbox** fetches without the Worker in the path, so celld signs S3 directly instead — a deliberate choice, not a gap |
 | Subagents (`BACKGROUND_WORK_ENABLED=true`) | the `agents` SDK builds them from Durable Object *facets*, which celld does not implement — see [Upgrading celld](#upgrading-celld) |
 
 Nadi hides these rather than offering something that fails on use — voice and
@@ -47,13 +48,22 @@ configuration change either way. VAPID keys in either common format work: a raw
 32-byte scalar (what `web-push generate-vapid-keys` emits) or PKCS#8.
 
 **GitHub App auth works**, though celld's WebCrypto still cannot *sign* with
-RSA — v0.3.0 added RSASSA-PKCS1-v1_5 **verification** and RSA key generation,
-but not signing — so the RS256 JWT that private-repo clone/push needs is signed
-in-repo with BigInt. The path is chosen by probing whether the runtime can
-actually sign rather than by platform, and is verified byte-identical to the
-Cloudflare path in the integration suite. (The probe signs rather than merely
-importing because v0.2.0 accepted the key import and then refused the signature
-— see [Upgrading celld](#upgrading-celld).) Only PKCS#8 keys are accepted — if your GitHub App key
+RSA, so the RS256 JWT that private-repo clone/push needs is signed in-repo with
+BigInt. The path is chosen by probing whether the runtime can actually sign
+rather than by platform, and is verified byte-identical to the Cloudflare path
+in the integration suite.
+
+> **Re-measured on v0.4.0, because the release notes read the other way.**
+> v0.4.0's compatibility page lists only RSA-PSS signing as unavailable, which
+> reads as "PKCS#1 v1.5 signing works now". It does not. A `celld dev` node on
+> v0.4.0 generates the key, exports PKCS#8, and imports it — and then throws
+> `NotSupportedError: unsupported sign algorithm: RSASSA-PKCS1-V1_5` on the
+> sign. This is the third release where import succeeds and sign refuses, and
+> the second time the docs would have talked someone out of the shim that is
+> load-bearing. The probe signs rather than merely importing for exactly this
+> reason; it takes the in-repo path on its own, with no configuration.
+
+Only PKCS#8 keys are accepted — if your GitHub App key
 is PKCS#1 (`BEGIN RSA PRIVATE KEY`), convert it with
 `openssl pkcs8 -topk8 -nocrypt -in github-app.pem -out github-app-pkcs8.pem`.
 
@@ -100,6 +110,7 @@ What reaches the bucket, and when, has moved twice:
 | v0.1.0 | on idle eviction only — a crash lost everything since the cell last went quiet |
 | v0.2.0–v0.2.1 | one LTX frame per transaction. Measured here: `SIGKILL` with the container destroyed 0.1 s after the last write lost **0 of 25** registry rows |
 | v0.3.0 | as above for a single node. For fleets of **two or more**, a replicated write-behind log acknowledges a write after peer fsync and uploads to the bucket behind it |
+| v0.4.0 | unchanged for a single node. The output gate is stronger — read-only output now waits for earlier request or alarm writes to become durable, so a response cannot describe state the bucket has not accepted |
 
 The v0.3.0 write-behind log is the one change that would alter the posture
 below, and a single-node deployment does not get it — there is no peer to
@@ -149,8 +160,8 @@ rules in [Operating](#operating).
 ## Prerequisites
 
 - A machine with Node 22+, `pnpm`, and `git`.
-- **celld v0.3.0**: `curl -fsSL https://celld.dev/install.sh | sh` (add
-  `CELLD_VERSION=v0.3.0` to pin). This is the version Nadi is built against and
+- **celld v0.4.0**: `curl -fsSL https://celld.dev/install.sh | sh` (add
+  `CELLD_VERSION=v0.4.0` to pin). This is the version Nadi is built against and
   the one `deploy/celld/Dockerfile` pins. See
   [Upgrading celld](#upgrading-celld) before moving it.
 - **An S3-compatible bucket.** [MinIO](https://min.io) is fine and is what this
@@ -237,10 +248,18 @@ Optional:
 ## 3. Deploy
 
 ```bash
+pnpm web:build      # the SPA — celld serves it, so it is part of the deploy
 pnpm celld:deploy -- --bucket s3://celld-fleet --endpoint http://127.0.0.1:9100
 ```
 
-One command: it bundles and uploads to the fleet bucket.
+Two commands: build the SPA, then bundle and upload both it and the Worker to
+the fleet bucket. `celld deploy` reads the `assets` block in
+`wrangler.celld.jsonc` — the same block Cloudflare reads — so the static shell
+and the Worker ship together as one deployment.
+
+`pnpm celld:deploy` refuses to run when `web/dist` is missing or empty, because
+that failure is otherwise silent: the Worker deploys, the API answers, and every
+other route 404s.
 
 Add `--dry-run` to bundle without writing anything.
 
@@ -310,17 +329,36 @@ curl -X POST -H 'Content-Type: application/json' \
 
 Signing in provisions your workspace and a default agent.
 
+## Trying it without a bucket: `celld dev`
+
+Steps 1–5 need an S3-compatible bucket. `celld dev` does not: it runs one node
+against a local SQLite object store, keeps state in `.celld/dev`, and rebuilds
+the app when a source or configuration file changes.
+
+```bash
+pnpm web:build                                   # celld serves the SPA
+CELLD_VARS_FILE=$PWD/deploy/celld/celld-vars.env pnpm celld:dev
+```
+
+The Worker lands on `http://127.0.0.1:9876` (`--port` to move it). A failed
+build leaves the previous version serving rather than taking the node down, and
+a successful rebuild keeps the durable state.
+
+This is the fastest way to answer "does this actually run on celld", which
+before v0.4.0 meant bringing up Docker and MinIO — so it was usually not asked
+until something had already broken in the packaged stack. `.celld/` is
+gitignored; delete it to start from nothing.
+
+It is a development tool, not a deployment: a regular node cannot select the
+local object store, so nothing here transfers to a server.
+
 ## Running on a server
 
-Steps 1–5 bring the API up on localhost. A real server adds four requirements
-that localhost hides, and the first is the one that surprises people:
-
-**celld does not serve the web UI.** On Cloudflare the SPA comes from the
-`assets` binding; `wrangler.celld.jsonc` has no such binding and `celld deploy`
-uploads only the Worker bundle, so `src/index.ts` falls through to `route()`
-and answers every non-API path with a 404. Something else has to serve
-`web/dist`. This is not a gap you can configure away — it is what the reverse
-proxy is for.
+Steps 1–5 bring the API up on localhost. A real server adds three requirements
+that localhost hides. (Serving the web UI used to be a fourth: through v0.3.0
+`wrangler.celld.jsonc` had no `assets` binding, `celld deploy` uploaded only the
+Worker, and something else had to serve `web/dist`. celld serves it now, so the
+proxy below exists for TLS alone.)
 
 **TLS is required, not recommended.** `resolveArtifactOrigin` hardcodes
 `https://` for any non-localhost artifact host, so artifact previews break over
@@ -342,10 +380,10 @@ fail for everyone while every other feature looks fine.
 ### The packaged setup
 
 [`deploy/celld/`](../deploy/celld/README.md) has a Dockerfile and Compose file
-covering all four: Caddy serves `web/dist` and terminates TLS for both
-hostnames, and celld runs behind it with no published port. Its README is the
-operating reference for the packaged stack, in both the single-node and
-multi-node topologies.
+covering all three: Caddy terminates TLS for both hostnames, and celld runs
+behind it with no published port, serving both the Worker and the SPA. Its
+README is the operating reference for the packaged stack, in both the
+single-node and multi-node topologies.
 
 ```bash
 cd deploy/celld
@@ -416,44 +454,73 @@ Both images bake the repo in with `COPY . .`, so **rebuild before deploying** �
 the source as it was when that image was last built:
 
 ```bash
-docker compose build deploy      # Worker changes (src/)
+docker compose build deploy      # Worker (src/) AND SPA (web/) — one image now
 docker compose run --rm deploy
-./drain-stop.sh --restart        # a node loads a deployment at startup only
-
-docker compose build caddy       # SPA changes (web/) — no redeploy needed
-docker compose up -d caddy
 ```
 
+That is the whole deploy. **No restart.** A v0.4.0 node reads the deployment
+pointer every 30 seconds (`CELLD_DEPLOY_POLL_S`) and adopts a new deployment in
+place: it builds the new one beside the one it is serving and switches new
+requests over in a single step, while requests already running finish on the
+old one. To skip the wait, `POST /reload` on the internal listener:
+
+```bash
+docker compose exec celld curl -fsS -X POST http://127.0.0.1:8081/reload
+```
+
+`/reload` rebuilds even an unchanged deployment, so it is also how an edit to
+`celld-vars.env` takes effect without a restart.
+
 Skipping the build does not fail. It prints `Uploaded nadi` and a
-`Current Version ID` exactly as a real deploy does, then the restart serves the
-old code and the change appears simply not to work. **The Version ID is the
-tell**: it is a content hash, so an unchanged one after a real source change
-means nothing was rebuilt. A suspiciously fast `Bundled nadi (0.6s)` against the
-usual ~35s says the same thing.
+`Current Version ID` exactly as a real deploy does, then the node adopts the old
+code and the change appears simply not to work. **The Version ID is the tell**:
+it is a content hash, so an unchanged one after a real source change means
+nothing was rebuilt. A suspiciously fast `Bundled nadi (0.6s)` against the usual
+~35s says the same thing.
 
-The SPA is served by Caddy, not by celld, so a `web/`-only change needs the
-`caddy` rebuild and no `deploy`/restart at all. The running service worker
-picks it up and shows "Updated to the latest version".
+A `web/`-only change is no longer a Caddy rebuild. celld serves the SPA from its
+`assets` binding, so the SPA ships in the same deployment as the Worker and
+takes the same two commands above. The running service worker picks it up and
+shows "Updated to the latest version".
 
-**A deploy is not zero-downtime.** For roughly ten seconds after the node comes
-back, registry RPC answers `remote RPC owner was stale` while cell ownership
-settles. Signed-in requests fail with a 500 in that window — Better Auth cannot
-read its session table. It clears on its own and needs no intervention, but
-anyone using the app during a deploy sees errors rather than a retry. Deploy
-when nobody is mid-turn.
+**What adoption does to a running object.** A Durable Object that is not
+resident simply starts on the new code. A resident one moves at a safe point —
+no request running in it, no alarm running, no output waiting on durability, no
+regular WebSocket open. One that reaches no safe point within
+`CELLD_DEPLOY_MAX_AGE_S` (60s) is forced: celld cancels its work and closes its
+sockets with code 1012, which is what a Cloudflare deploy does to every object.
+The SPA reconnects on its own.
+
+> **Two versions run at once during an adoption, and they call each other.** A
+> request on the old deployment can hit a Durable Object already running the new
+> one. So a change to a DO's RPC signature or its stored shape has to be
+> backward-compatible for one deploy — add the new field, ship, then read it —
+> exactly as it would on Cloudflare. This is the seam that produced the
+> Workbenches wire-contract regressions, and it is now a deploy-time seam rather
+> than a rollout-only one.
 
 ### Stopping
 
-**Use `./drain-stop.sh`, not `docker compose down`.** Stopping a node while
-traffic is live risks discarding whatever has not reached the bucket — on a
-healthy machine, with the disk intact, because celld restores from the bucket
-and drops local state. The window is far smaller than it was on v0.1.0 (see
-[Durability](#durability-read-this-before-you-rely-on-it)), but draining is
-still free: the script cuts traffic, lets the cells go quiet, and only then
-stops the node.
+**`docker compose stop` is now a real drain.** celld v0.4.0 shuts down
+gracefully on SIGTERM — the signal `docker stop` sends. It reports itself
+unhealthy on `/.well-known/celld/health` so a load balancer stops routing to it,
+answers new public requests with 503, finishes the requests it already accepted,
+and then runs its local durability shutdown. Through v0.3.0 this was unverified
+and `drain-stop.sh` deliberately assumed nothing.
 
-`stop_grace_period` is set to 60s as a backstop, but whether celld quiesces on
-SIGTERM is unverified. Do not rely on it.
+**The grace period is what makes that true, and it is easy to get wrong.** The
+budget is `CELLD_DRAIN_TOKEN_WAIT_MS` plus `CELLD_SHUTDOWN_TOTAL_MS` (40s
+default). A shorter orchestrator grace SIGKILLs the node mid-shutdown, which is
+the one thing the shutdown exists to prevent. `docker-compose.yaml` sets
+`stop_grace_period: 90s` and pins the token wait to 0 — there is no other donor
+to queue behind on one node — while `docker-compose.multinode.yaml` uses 120s
+and leaves the token wait at its default, because there the token is doing real
+work.
+
+`./drain-stop.sh` is still there and still correct: it cuts traffic first and
+waits for cells to go quiet before stopping anything, which is belt and braces
+over a drain that now happens anyway. Use it if you want certainty; plain
+`docker compose stop` is no longer the reckless option it was.
 
 What `down` **cannot** destroy is the bucket: every piece of persistent state
 is a bind mount under `deploy/celld/data/`, not a named volume, so even
@@ -461,9 +528,10 @@ is a bind mount under `deploy/celld/data/`, not a named volume, so even
 `./drain-stop.sh`, `docker compose down -v`, bring the stack back up, and the
 same user, workspace and agent are still there, with cron resuming on its own.
 
-That is a backstop for the volume, not for the eviction rule above. Stopping
-the node mid-traffic still discards whatever has not replicated yet, which is
-why the drain still matters.
+That is a backstop for the volume, not for the eviction rule above. A node
+killed outright — SIGKILL, a power cut, a grace period too short for the
+budget above — still discards whatever has not replicated yet, which is why the
+grace period matters more than the script now does.
 
 ## Operating
 
@@ -535,11 +603,16 @@ hold state.
 
 **Quiesce before restarting.** Stop traffic, wait past the eviction threshold,
 then restart. A quiesced restart loses nothing. An unquiesced one reverts to the
-last eviction — on the same machine, with the disk intact.
+last eviction — on the same machine, with the disk intact. Since v0.4.0 a
+SIGTERM does the quiescing for you, provided the grace period covers it (see
+[Stopping](#stopping)).
 
-**A deploy is not a rollout.** Nodes load a deployment at startup only. Restart
-the node to pick up a new deploy. Changing the vars file also needs a restart,
-but no redeploy.
+**A deploy is no longer a restart.** Through v0.3.0 a node loaded a deployment
+at startup only, and every deploy cost roughly ten seconds of `remote RPC owner
+was stale` 500s while cell ownership resettled. v0.4.0 nodes adopt a new
+deployment in place — see
+[Deploying a change](#deploying-a-change). Changing the vars file is likewise a
+`POST /reload` rather than a restart.
 
 **One worker per fleet bucket.** The bucket records a single current deployment;
 deploying a second worker into it displaces the first for every request.
@@ -566,14 +639,68 @@ curl -H "x-debug-token: $DEBUG_TOKEN" http://127.0.0.1:8080/api/debug/celld-tick
 # {"ticker":"celld-cron","crons":{…},"lastTickMs":…,"lastDailyRunMs":…}
 ```
 
-`scheduled()` stamps those markers into the registry itself. Both are the cron
+`scheduled()` stamps those markers into the secrets KV namespace under a
+`system/` prefix. Both are the cron
 **occurrence**, not the moment the handler ran — celld runs late but never
 early — so a `lastTickMs` more than a couple of minutes behind now means
 occurrences are being missed, not merely delayed.
 
 ## Upgrading celld
 
-Nadi pins **v0.3.0** (`CELLD_VERSION` in `deploy/celld/Dockerfile`).
+Nadi pins **v0.4.0** (`CELLD_VERSION` in `deploy/celld/Dockerfile`).
+
+### v0.3.0 → v0.4.0
+
+**This upgrade must NOT be a rolling update.** Stop every v0.3.0 node, then
+start the v0.4.0 nodes. v0.4.0 moves proxied fetch, RPC and WebSocket calls onto
+one versioned peer tunnel that refuses a different version, and it writes
+epoch-qualified references for large KV values that a v0.3.0 node cannot read —
+so a mixed fleet can make a committed value **unavailable**, not merely slow.
+This is the exception to the rolling procedure in
+[`deploy/celld/README.md`](../deploy/celld/README.md); on the single-node stack
+it is the ordinary `./drain-stop.sh` → `docker compose build` →
+`docker compose up -d`.
+
+Like v0.3.0 before it, this release retired workarounds in this repo, so it is a
+code change rather than only a version bump.
+
+**Workspace secrets moved to a real KV binding.** celld v0.4.0 implements
+Workers KV: a namespace is a cell of its own, with one writer and the same
+durability as the registry. `RegistryKV` — the facade that presented a
+`KVNamespace` over a `celld_kv` table in the registry D1 — is deleted, along
+with the table, and both platforms now bind `SECRETS_KV`. Migration `0061` drops
+`celld_kv` on both.
+
+> **If you ran a v0.3.0 deployment with real secrets in it, copy them across
+> before upgrading.** The rows are AES-GCM ciphertext under the same keys, so a
+> copy is a copy — but nothing does it for you, and after migration `0061` the
+> source table is gone. Read the old table with
+> `celld d1 execute nadi-registry --command "SELECT key, value FROM celld_kv"`
+> while still on v0.3.0, and write each pair back with
+> `celld kv put SECRETS_KV <key> <value>` once on v0.4.0.
+
+**celld serves the SPA.** `wrangler.celld.jsonc` carries an `assets` block, so
+the static shell deploys with the Worker and Caddy no longer owns the split
+between them. If you have a customised `Caddyfile`, drop its `@worker` matcher
+and `root`/`file_server` handling and proxy everything — and note that
+`docker compose build caddy` is no longer how a `web/` change ships. Cache
+headers moved to `web/public/_headers`, which both platforms honour.
+
+**Deploys stopped being restarts** — see
+[Deploying a change](#deploying-a-change) — and **SIGTERM now drains**, which
+changes what `stop_grace_period` has to be. See [Stopping](#stopping).
+
+**The health endpoint moved** from `/__celld/health` to
+`/.well-known/celld/health`. Update any external load-balancer or uptime check;
+the compose files here already use the new path.
+
+**What did NOT change, despite the release notes.** v0.4.0's compatibility page
+stops listing RSASSA-PKCS1-v1_5 signing as a gap, which reads as though the
+in-repo RS256 signer could go. It cannot: a v0.4.0 node still throws
+`NotSupportedError: unsupported sign algorithm: RSASSA-PKCS1-V1_5` on the sign,
+having accepted the key import. Measured, not inferred. `Response.redirect` and
+`Response.error` *are* implemented now, so the shim that provided them is
+deleted.
 
 ### v0.2.x → v0.3.0
 

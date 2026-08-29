@@ -5,7 +5,6 @@ import { registryDb } from "../db/client";
 import { attachmentsBucket } from "../storage/bucket-binding";
 import { agents, attachments, threadIndex, users } from "../db/schema";
 import { McpServerRepository } from "../db/repositories/mcp-servers";
-import { RegistryKV } from "../db/registry-kv";
 import { CRON_LAST_DAILY_RUN_KEY, CRON_LAST_TICK_KEY, isCelld } from "../celld/cron-liveness";
 import { AUTOMATA_CRON, AUTO_ARCHIVE_CRON } from "../automata/fire-policy";
 import { NotificationRepository } from "../db/repositories/notifications";
@@ -1187,23 +1186,22 @@ export async function routeDebug(req: Request, env: Env): Promise<Response | nul
   // GET /api/debug/celld-ticker — celld-only: is cron alive? celld v0.3.0 runs
   // `scheduled()` on native cron triggers, so the CelldTicker DO this route was
   // built for is gone; what it reads now are the markers `scheduled()` itself
-  // stamps into the registry DO (src/celld/cron-liveness.ts). The path keeps
-  // its name so an operator's existing bookmark and the runbook still work.
-  // On Cloudflare there is no REGISTRY_DO — its own cron runs there, observable
-  // in the dashboard — so the route reports not_applicable rather than a
-  // stale-looking null.
+  // stamps into the secrets KV namespace (src/celld/cron-liveness.ts). The path
+  // keeps its name so an operator's existing bookmark and the runbook still
+  // work. On Cloudflare the marker is never written — its own cron runs there,
+  // observable in the dashboard — so the route reports not_applicable rather
+  // than a stale-looking null.
   if (url.pathname === "/api/debug/celld-ticker" && req.method === "GET") {
-    if (!isCelld(env) || !env.REGISTRY_DB) {
+    if (!isCelld(env) || !env.SECRETS_KV) {
       return Response.json({
         ticker: "not_applicable",
         note: "not celld — Cloudflare runs its own cron, observable in the dashboard",
       });
     }
-    // `registry` is captured so the narrowed (non-undefined) type survives
-    // into the tryJson closure — TS does not keep property narrowing there.
-    const registry = env.REGISTRY_DB;
+    // `kv` is captured so the narrowed (non-undefined) type survives into the
+    // tryJson closure — TS does not keep property narrowing there.
+    const kv = env.SECRETS_KV;
     return tryJson(async () => {
-      const kv = new RegistryKV(registry);
       const [lastTickRaw, lastDailyRunRaw] = await Promise.all([
         kv.get(CRON_LAST_TICK_KEY),
         kv.get(CRON_LAST_DAILY_RUN_KEY),

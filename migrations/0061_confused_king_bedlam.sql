@@ -1,0 +1,1 @@
+DROP TABLE `celld_kv`;
