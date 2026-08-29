@@ -5,27 +5,33 @@ as Docker images and a Compose stack — Caddy serving the SPA and terminating
 TLS, a celld node behind it, and optionally a bundled MinIO.
 
 For the concepts underneath — what works on celld and what does not, why the
-vars file is not JSON, how the ticker survives a restart — read
+vars file is not JSON, how scheduled work survives a restart — read
 [`docs/self-hosting-celld.md`](../../docs/self-hosting-celld.md). This file
 covers operating the packaged stack, in both topologies.
 
 ## Pick a topology first
 
-|                            | Single node                                | Multi node                                               |
-| -------------------------- | ------------------------------------------ | -------------------------------------------------------- |
-| Status                     | **Run end to end**                         | **Untested** — a starting point                          |
-| Hosts                      | one                                        | one full copy of the stack per host                      |
-| S3                         | bundled MinIO, or external                 | external only                                            |
-| Survives a host dying      | no                                         | yes, at a cost — see [failover](#what-failover-costs)    |
-| Planned restart loses data | no, with `./drain-stop.sh`                 | no, with a drain per host                                |
-| Unplanned host loss        | everything since the last idle replication | same, but now it is the case you added a node to survive |
+|                            | Single node                         | Multi node                                               |
+| -------------------------- | ----------------------------------- | -------------------------------------------------------- |
+| Status                     | **Run end to end**                  | **Untested** — a starting point                          |
+| Hosts                      | one                                 | one full copy of the stack per host                      |
+| S3                         | bundled MinIO, or external          | external only                                            |
+| Survives a host dying      | no                                  | yes, at a cost — see [failover](#what-failover-costs)    |
+| Planned restart loses data | no, with `./drain-stop.sh`          | no, with a drain per host                                |
+| Unplanned host loss        | whatever has not reached the bucket | same, but now it is the case you added a node to survive |
 
-**Start with single node.** A second node buys _availability_, not durability.
-Failover restores cells from their last idle replication and discards the rest
-without surfacing an error anywhere, so one node with a low
-`CELLD_IDLE_EVICT_S`, a real backup of the fleet bucket, and `./drain-stop.sh`
-for planned restarts is the stronger durability posture. Scale out when a host
-dying is genuinely unacceptable, and go in knowing what it costs.
+**Start with single node — but the durability argument changed in v0.3.0.**
+Through v0.2.1 a second node bought availability and cost durability: failover
+restored cells from the bucket and discarded the rest without surfacing an error
+anywhere. celld v0.3.0 adds a replicated write-behind log for fleets of two or
+more, acknowledging a write after **peer fsync** with the bucket upload behind
+it, which upstream measures at 10x lower write latency and 100x fewer S3 Class A
+operations.
+
+So single node is now the recommendation because it is the _tested_ topology
+here and the simpler one to operate — not because a second node is worse for
+your data. Neither the write-behind log nor failover has been measured on this
+deployment; if you scale out, measure it before trusting it.
 
 ## What is in here
 
@@ -69,8 +75,26 @@ Caddy issues certificates on startup and Let's Encrypt rate-limits failures.
 ```sh
 docker compose --profile minio up -d     # only if you want the bundled S3
 docker compose run --rm deploy           # bundle + upload the Worker
-docker compose up -d                     # celld + Caddy + ticker watchdog
+docker compose up -d                     # celld + Caddy
+docker compose run --rm migrate          # apply migrations/ to the registry
 ```
+
+`migrate` runs last and is not optional on a new deployment: the registry
+database is a cell, so `celld d1` needs a live node to reach it.
+
+Two things about that service are load-bearing. It runs in the **node's network
+namespace** (`network_mode: service:celld`), because `celld d1` connects to the
+address the node's bucket lease advertises — the internal listener, which on
+this single-node stack is `127.0.0.1:8081`. From a container of its own that
+loopback is its own, and the command fails with `Connection refused`. Sharing
+the namespace makes `127.0.0.1` mean the node without exposing the internal
+listener to the Docker network.
+
+The other is that `network_mode` costs the service its `depends_on` (compose
+forbids the pair) while still pulling `celld` up implicitly. So running
+`migrate` first does not fail cleanly — it starts the node and then races its
+lease, giving `409 Conflict: peer request targets a different node session`.
+Re-run it once the node is up.
 
 Then sign in — Nadi is invite-only, so the first account must be listed in
 `SUPERUSER_EMAILS`, or the request is accepted and quietly added to a waiting
@@ -262,12 +286,12 @@ EF=.env.multinode
 
 # 1. take this host out of the LB — how depends on your LB
 # 2. stop local traffic
-docker compose -f $CF --env-file $EF stop caddy ticker-watchdog
+docker compose -f $CF --env-file $EF stop caddy
 # 3. wait past the eviction threshold so this node's cells replicate
 sleep 35
 # 4. restart the node; it loads the current deployment now
 docker compose -f $CF --env-file $EF restart celld
-docker compose -f $CF --env-file $EF start caddy ticker-watchdog
+docker compose -f $CF --env-file $EF start caddy
 # 5. put it back in the LB, confirm it is serving, then move to the next host
 ```
 

@@ -30,6 +30,7 @@ have no equivalent:
 | Browser rendering for `web_fetch` | no browser binding; fetch degrades to direct HTTP |
 | Attachment vision extraction, `toMarkdown` | needs the Workers AI binding |
 | The `cloudflare` sandbox provider | needs Containers; `wrangler.celld.jsonc` binds no sandbox classes |
+| Subagents (`BACKGROUND_WORK_ENABLED=true`) | the `agents` SDK builds them from Durable Object *facets*, which celld does not implement — see [Upgrading celld](#upgrading-celld) |
 
 Nadi hides these rather than offering something that fails on use — voice and
 Workers AI via `platformCapabilities`, and the Cloudflare sandbox via
@@ -37,19 +38,22 @@ Workers AI via `platformCapabilities`, and the Cloudflare sandbox via
 cannot select it either. **Sandboxes work** on Daytona and on sprites; pick one
 in Settings → Sandbox.
 
-**Web push works**, though celld has no ECDH: the payload encryption is
-implemented in-repo against `@noble/curves`, selected by probing whether native
-ECDH is available rather than by platform, and verified byte-identical to the
-Cloudflare path. VAPID keys in either common format work — a raw 32-byte scalar
-(what `web-push generate-vapid-keys` emits) or PKCS#8.
+**Web push works.** The payload encryption is selected by probing whether
+native ECDH is available rather than by platform, and both paths are verified
+byte-identical to Cloudflare's. celld gained ECDH `deriveBits`/`deriveKey` on
+P-256, so on v0.3.0 the probe takes the native path and the in-repo
+`@noble/curves` implementation becomes the fallback rather than the norm — no
+configuration change either way. VAPID keys in either common format work: a raw
+32-byte scalar (what `web-push generate-vapid-keys` emits) or PKCS#8.
 
-**GitHub App auth works**, though celld's WebCrypto cannot sign with RSA: the
-RS256 JWT that private-repo clone/push needs is signed in-repo with BigInt,
-selected by probing whether the runtime can actually *sign* rather than by
-platform, and verified byte-identical to the Cloudflare path in the integration
-suite. (The probe signs rather than merely importing because v0.2.0 accepts the
-key import and then refuses the signature — see
-[Upgrading celld](#upgrading-celld).) Only PKCS#8 keys are accepted — if your GitHub App key
+**GitHub App auth works**, though celld's WebCrypto still cannot *sign* with
+RSA — v0.3.0 added RSASSA-PKCS1-v1_5 **verification** and RSA key generation,
+but not signing — so the RS256 JWT that private-repo clone/push needs is signed
+in-repo with BigInt. The path is chosen by probing whether the runtime can
+actually sign rather than by platform, and is verified byte-identical to the
+Cloudflare path in the integration suite. (The probe signs rather than merely
+importing because v0.2.0 accepted the key import and then refused the signature
+— see [Upgrading celld](#upgrading-celld).) Only PKCS#8 keys are accepted — if your GitHub App key
 is PKCS#1 (`BEGIN RSA PRIVATE KEY`), convert it with
 `openssl pkcs8 -topk8 -nocrypt -in github-app.pem -out github-app-pkcs8.pem`.
 
@@ -83,82 +87,79 @@ should be idempotent.
 
 ## Durability: read this before you rely on it
 
-celld replicates a cell to your bucket **only when that cell goes idle**. An
-unquiesced crash therefore loses everything written since the affected cell last
-went quiet — and it does so *even if the machine survives*, because celld
-restores from the bucket at startup and discards local-only state.
+celld restores a cell from your bucket at startup and **discards local-only
+state**. Whatever has not reached the bucket when a node dies is gone, even if
+the machine itself survives — there is no volume you can add that changes this,
+which was verified by killing a node and restarting the same container on an
+intact working directory.
 
-This is an accepted trade for a single-user deployment, bounded by the rules in
-[Operating](#operating). It is not a bug you can configure away, and it is why
-the recommended posture is one node with a low idle-eviction threshold.
+What reaches the bucket, and when, has moved twice:
 
-Verified here rather than assumed: write a thread and a message, `SIGKILL` the
-node seconds later, recreate the container, and both are gone. Waiting past the
-eviction threshold first leaves the earlier writes intact. Preserving celld's
-local working directory does **not** rescue them — a kill with the same
-container restarted loses the same data, so there is no volume you can add to
-avoid this.
+| version | replication cadence |
+| --- | --- |
+| v0.1.0 | on idle eviction only — a crash lost everything since the cell last went quiet |
+| v0.2.0–v0.2.1 | one LTX frame per transaction. Measured here: `SIGKILL` with the container destroyed 0.1 s after the last write lost **0 of 25** registry rows |
+| v0.3.0 | as above for a single node. For fleets of **two or more**, a replicated write-behind log acknowledges a write after peer fsync and uploads to the bucket behind it |
 
-> **A separate, worse failure: concurrent writes can corrupt the backup, and
-> draining does not save you.** Under concurrent writes to one cell, celld can
-> replicate a chain that is missing pages it references. That cell then fails
-> every later request with `RestoreFailed` /
-> `missing page N in restore plan (incomplete backup)`, permanently.
+The v0.3.0 write-behind log is the one change that would alter the posture
+below, and a single-node deployment does not get it — there is no peer to
+fsync to. Read the [multi-node note](#operating) before treating that as a
+reason to scale out; it is a real durability argument now, where it was not
+before, but it brings a failover story with it.
+
+This remains an accepted trade for a single-user deployment, bounded by the
+rules in [Operating](#operating).
+
+> **Historical, and fixed in v0.3.0: concurrent writes could corrupt the
+> backup, and draining did not save you.** Under concurrent writes to one cell,
+> celld ≤ v0.2.1 could replicate a chain missing pages it referenced. That cell
+> then failed every later request with `RestoreFailed` /
+> `missing page N in restore plan (incomplete backup)`, permanently. The damage
+> happened during the writes, not at shutdown, so no shutdown discipline
+> avoided it — only lowering write concurrency did.
 >
-> The damage happens during the writes, not at shutdown. Measured: a cell driven
-> by four concurrent writers, then left completely quiet for 50 s so it evicted
-> and replicated, was still unrecoverable afterwards — via a hard kill **and via
-> a graceful `SIGTERM` stop**. So `./drain-stop.sh` does not protect against
-> this, and neither does any other shutdown discipline; only the amount of
-> write concurrency matters.
+> On Nadi it presented as *silent* corruption rather than a loud failure: a
+> restored registry whose `PRAGMA integrity_check` failed, with rowids out of
+> order in `thread_index`, four indexes over it carrying the wrong entry count,
+> and an unused page. Every other registry read and write kept working; only
+> the thread-list query — the one joining `automata` through a damaged index —
+> failed, taking `/api/bootstrap` and `/api/threads` to a 500. **"The app
+> mostly works" was never evidence the database was fine.**
 >
-> Reproduced on a minimal worker
-> (github.com/ruqqq/celld-incomplete-backup-repro). Root-caused upstream to a
-> capture/checkpoint race in celld's LTX replication; a fix is in review.
+> celld v0.3.0 closes both halves upstream: denoland/celld#150 (large
+> transactions batched into one replication segment losing pages) and #158
+> (corruption after eviction and reactivation). Reproduced originally on a
+> minimal worker (github.com/ruqqq/celld-incomplete-backup-repro).
 >
-> **v0.2.0 does not fix it, and on Nadi it now presents as silent corruption
-> rather than a loud failure.** Observed on the packaged stack under a
-> write-heavy run (a forced compaction seeding 60 messages, the search
-> projector reindexing behind it, then thread deletes and a restart): a restore
-> produced a registry whose `PRAGMA integrity_check` fails — rowids out of
-> order in `thread_index` itself and in `thread_search_messages`, four indexes
-> over `thread_index` with the wrong entry count, an unused page. The two
-> restores before it were clean, so the damage entered at one restore and then
-> replicated, surviving every subsequent restart. `REINDEX` cannot repair it
-> (the table B-tree, not just the indexes, is inconsistent).
->
-> The app-visible symptom is narrow and misleading: every other registry read
-> and write kept working, and only the thread-list query — the one joining
-> `automata` through a damaged index — failed, taking `/api/bootstrap` and
-> `/api/threads` to a 500. **Do not read "the app mostly works" as "the
-> database is fine."** `sqlite3 PRAGMA integrity_check` on the node's working
-> copy is the check that tells the truth:
+> **This is read off the release notes, not re-measured here.** The check that
+> tells the truth still costs nothing, so keep running it after any
+> write-heavy period until you have your own evidence:
 >
 > ```bash
-> D=$(docker exec nadi-celld-celld-1 sh -c 'ls -d /tmp/celld-1/Registry*/ltx/*/ | tail -1')
+> D=$(docker exec nadi-celld-celld-1 sh -c 'ls -d /tmp/celld-1/__D1Database*/ltx/*/ | tail -1')
 > docker cp "nadi-celld-celld-1:${D}db.sqlite" ./registry.sqlite
 > sqlite3 ./registry.sqlite 'PRAGMA integrity_check;'
 > ```
 >
-> Recovery is from your bucket backup. `sqlite3 .recover` reads the data out of
-> a damaged copy, but there is no supported way to hand a repaired file back to
-> celld — it restores from the bucket at startup and discards local state. This
-> is the strongest argument for the backup section below, and for keeping write
-> concurrency low.
+> Recovery, if it ever recurs, is from your bucket backup. `sqlite3 .recover`
+> reads data out of a damaged copy, but there is no supported way to hand a
+> repaired file back to celld — it restores from the bucket at startup and
+> discards local state.
 
 ## Prerequisites
 
 - A machine with Node 22+, `pnpm`, and `git`.
-- **celld v0.2.0**: `curl -fsSL https://celld.dev/install.sh | sh` (add
-  `CELLD_VERSION=v0.2.0` to pin). This is the version Nadi is verified against
-  and the one `deploy/celld/Dockerfile` pins. See
+- **celld v0.3.0**: `curl -fsSL https://celld.dev/install.sh | sh` (add
+  `CELLD_VERSION=v0.3.0` to pin). This is the version Nadi is built against and
+  the one `deploy/celld/Dockerfile` pins. See
   [Upgrading celld](#upgrading-celld) before moving it.
 - **An S3-compatible bucket.** [MinIO](https://min.io) is fine and is what this
   was tested against; so is Cloudflare R2 or AWS S3. You need two buckets, or one
   bucket and one prefix: the *fleet* bucket celld replicates into, and an
   *attachments* bucket.
 - `esbuild` is resolved automatically from this repo's dependencies. Nothing to
-  install.
+  install. (`celld deploy` wants it on `PATH`; `pnpm celld:deploy` finds the one
+  in the pnpm store and names it in `CELLD_ESBUILD` so you do not have to.)
 
 ## 1. Create the buckets
 
@@ -230,7 +231,7 @@ Optional:
 - `AUTH_OTP_LOG_FALLBACK=true` — writes the sign-in code to the log instead of
   emailing it. **Local development only**: anyone who can read the log can sign
   in as anyone. It is refused outright on the hosted edition.
-- `DEBUG_TOKEN` — enables `/api/debug/*` routes, including the ticker health
+- `DEBUG_TOKEN` — enables `/api/debug/*` routes, including the cron health
   check below.
 
 ## 3. Deploy
@@ -239,9 +240,7 @@ Optional:
 pnpm celld:deploy -- --bucket s3://celld-fleet --endpoint http://127.0.0.1:9100
 ```
 
-One command. It bundles with the alias shim celld needs (`scripts/celld-esbuild.mjs`
-— without it the bundle fails outright on a transitive `require('path')`) and
-uploads to the fleet bucket.
+One command: it bundles and uploads to the fleet bucket.
 
 Add `--dry-run` to bundle without writing anything.
 
@@ -249,15 +248,44 @@ Add `--dry-run` to bundle without writing anything.
 
 ```bash
 CELLD_VARS_FILE=$PWD/celld-vars.env \
-CELLD_IDLE_EVICT_S=15 \
-CELLD_ALARM_RESIDENT_MS=1000 \
+CELLD_IDLE_EVICT_S=300 \
 celld --bucket s3://celld-fleet --endpoint http://127.0.0.1:9100 --listen 127.0.0.1:8080
-
-curl http://127.0.0.1:8080/    # first run only — arms the scheduler
 ```
 
-Both `CELLD_*` settings matter; see [Operating](#operating) for what each one
-buys you.
+See [Operating](#operating) for what `CELLD_IDLE_EVICT_S` buys you.
+
+## 4b. Apply the registry migrations
+
+```bash
+celld d1 migrations apply nadi-registry \
+  --bucket s3://celld-fleet --endpoint http://127.0.0.1:9100
+```
+
+**This comes after the node is running, not before.** A celld D1 database is a
+cell, so `celld d1` needs a live fleet to talk to: it finds a node through the
+node leases in the bucket, and that node routes the work to the database's
+owner. Running it against a stopped fleet fails with nothing to reach.
+
+It reads the same `migrations/` directory `drizzle-kit generate` writes for
+Cloudflare — there is no separate celld schema or migration history — and
+records what it applied in `d1_migrations`, exactly as `wrangler d1 migrations`
+does. Re-run it after every schema change; it is idempotent.
+
+> **Expect the first attempt after a node restart to fail, and retry it.** In a
+> deploy this step runs seconds behind `docker compose restart celld`, which is
+> exactly when the previous node session's lease on the registry cell is still
+> stale. The losing attempt is loud and looks fatal:
+>
+> ```
+> Error: decode the database reply (503 Service Unavailable): cell Worker failed:
+> ... peer no longer owns __D1Database:<hash>
+> ```
+>
+> A run before the node is up gives the same race from the other side, as
+> `409 Conflict: peer request targets a different node session`. Both clear
+> within a few seconds. Measured on a laptop stack and on a hosted node, so
+> automate the retry rather than treating a single failure as a bad deploy —
+> and because the command is idempotent, retrying costs nothing.
 
 ## 5. First sign-in
 
@@ -372,8 +400,12 @@ two hostnames means one of the two fails its signature check.
 ```bash
 docker compose --profile minio up -d     # only if you want the bundled S3
 docker compose run --rm deploy           # bundle + upload the Worker
-docker compose up -d                     # celld + Caddy + ticker watchdog
+docker compose up -d                     # celld + Caddy
+docker compose run --rm migrate          # apply migrations/ to the registry
 ```
+
+The migrate step is last because the registry database is a cell and `celld d1`
+needs a live node to reach it. Re-run it after any schema change.
 
 Sign in as in step 5, against your real hostname.
 
@@ -406,17 +438,19 @@ picks it up and shows "Updated to the latest version".
 **A deploy is not zero-downtime.** For roughly ten seconds after the node comes
 back, registry RPC answers `remote RPC owner was stale` while cell ownership
 settles. Signed-in requests fail with a 500 in that window — Better Auth cannot
-read its session table — and the ticker logs `celld_ticker.arm_failed`. It
-clears on its own and needs no intervention, but anyone using the app during a
-deploy sees errors rather than a retry. Deploy when nobody is mid-turn.
+read its session table. It clears on its own and needs no intervention, but
+anyone using the app during a deploy sees errors rather than a retry. Deploy
+when nobody is mid-turn.
 
 ### Stopping
 
-**Use `./drain-stop.sh`, not `docker compose down`.** celld replicates a cell
-only when that cell goes idle, so stopping the node while traffic is live
-discards everything written since the last eviction — on a healthy machine,
-with the disk intact. The script cuts traffic, waits past the eviction
-threshold, and only then stops the node.
+**Use `./drain-stop.sh`, not `docker compose down`.** Stopping a node while
+traffic is live risks discarding whatever has not reached the bucket — on a
+healthy machine, with the disk intact, because celld restores from the bucket
+and drops local state. The window is far smaller than it was on v0.1.0 (see
+[Durability](#durability-read-this-before-you-rely-on-it)), but draining is
+still free: the script cuts traffic, lets the cells go quiet, and only then
+stops the node.
 
 `stop_grace_period` is set to 60s as a backstop, but whether celld quiesces on
 SIGTERM is unverified. Do not rely on it.
@@ -425,8 +459,7 @@ What `down` **cannot** destroy is the bucket: every piece of persistent state
 is a bind mount under `deploy/celld/data/`, not a named volume, so even
 `docker compose down -v` leaves it intact. Verified end to end — sign in,
 `./drain-stop.sh`, `docker compose down -v`, bring the stack back up, and the
-same user, workspace and agent are still there, with the ticker resuming from
-its persisted alarm.
+same user, workspace and agent are still there, with cron resuming on its own.
 
 That is a backstop for the volume, not for the eviction rule above. Stopping
 the node mid-traffic still discards whatever has not replicated yet, which is
@@ -437,35 +470,52 @@ why the drain still matters.
 These are not tips. A deployment that ignores them loses data or silently stops
 working.
 
-**One node.** The durability posture above is only sound with a single node.
-Adding a second introduces failover, where a node that dies hands its cells to a
-peer that restores them from the bucket — losing everything since those cells
-last went idle. Do not scale out without revisiting it.
+**One node — but this is now a real decision rather than a default.** Through
+v0.2.1 a second node bought availability and cost durability: failover handed a
+dead node's cells to a peer that restored them from the bucket, losing anything
+not yet replicated. celld v0.3.0's replicated write-behind log inverts that for
+fleets of two or more — a write is acknowledged after **peer fsync**, with the
+bucket upload trailing — which upstream measures at 10x lower write latency and
+over 100x fewer S3 Class A operations.
 
-celld itself is built for a cluster, so this is a property of *this* deployment
-rather than a limit of the runtime. If you need the availability, there is an
-untested starting point in [`deploy/celld/README.md`](../deploy/celld/README.md)
-— read what failover costs there before deciding it is worth it.
+So the honest position is: single node remains the *tested* posture here and
+what the rest of this page assumes, and the argument against a second node is
+now operational complexity rather than durability. If you want the availability,
+[`deploy/celld/README.md`](../deploy/celld/README.md) is the starting point.
+Neither the write-behind log nor failover has been measured on this deployment.
 
 **`CELLD_IDLE_EVICT_S` = 300.** This decides how long a quiet cell stays
 resident, and the default is deliberately high.
 
 The old guidance here was 31–40 s, for two reasons that were true on celld
-v0.1.0 and are not on v0.2.0. Replication happened *only* on idle eviction, so a
-low threshold bounded what a crash cost; and anything past the scheduler's
+v0.1.0 and are not since v0.2.0. Replication happened *only* on idle eviction, so
+a low threshold bounded what a crash cost; and anything past the scheduler's
 60-second tick meant the registry never idled and therefore never replicated at
-all. Measured against v0.2.0: the bucket now carries **one LTX frame per
-transaction**, an unquiesced `SIGKILL` with the container destroyed 0.1 s after
-the last write lost **0 of 25** registry rows, and with this set to 300 and the
-ticker watchdog stopped the scheduler's alarm still fired after a node restart.
+all. Measured against v0.2.0: the bucket carries **one LTX frame per
+transaction**, and an unquiesced `SIGKILL` with the container destroyed 0.1 s
+after the last write lost **0 of 25** registry rows.
+
+The second reason is gone outright as of v0.3.0: cron is celld's own, not a
+resident alarm cell of Nadi's, so nothing in the scheduler pins a cell any more.
 
 What the high value buys is warmth, and the cost of getting it wrong is
 concrete. When a thread's cell is evicted between messages, the next message
 pays for it three times over: the transcript is restored from the bucket before
 the turn can start (805 KB across 22 objects on a young thread, and it grows
 with the thread), the MCP servers are re-connected and re-discovered, and any
-hibernatable WebSocket goes with the cell — which a client can be slow to
-notice, leaving it on a dead socket watching nothing arrive.
+hibernatable WebSocket goes with the cell.
+
+The client half of that last one is worth knowing about, because it looked for
+a while like a hung turn. A foreground watchdog in the SPA
+(`web/src/lib/use-connection-recovery.ts`) reconnects a socket that dies while
+the tab is visible — but a reconnect alone resyncs nothing: the server
+broadcasts a finished turn to the sockets that were live at the time and never
+re-pushes history to a reconnecting one. So the tab ended up holding a healthy
+socket and stale content, with the turn already complete on the server. The
+watchdog now refetches history on the CLOSED-to-OPEN transition, which closes
+it. If you see a turn that never renders and then appears in full on reload,
+that is the shape to look for; the node log shows it as `dropped a frame for a
+closed WebSocket` next to a successful `command_completion`.
 
 **Treat 300 as a choice rather than a proof.** The measurements above are one
 pass against a local MinIO, and the durability defect that motivated the old
@@ -494,74 +544,159 @@ but no redeploy.
 **One worker per fleet bucket.** The bucket records a single current deployment;
 deploying a second worker into it displaces the first for every request.
 
-**`CELLD_ALARM_RESIDENT_MS` = 1000.** Automata, thread auto-archiving and
-search-index repair are driven by an internal ticker that re-arms itself every
-minute. celld keeps a cell resident while it has an imminent alarm — and with a
-60-second tick, the ticker's alarm is *always* imminent, so by default it never
-goes idle, never replicates, and its pending alarm dies with the node. Scheduled
-work then silently never resumes.
+**Scheduled work needs no arming, and no watchdog.** Automata, thread
+auto-archiving and search-index repair run from `scheduled()` on celld's own
+cron triggers, from the same expressions `wrangler.jsonc` uses. celld runs a
+handler once per occurrence across the whole fleet, never two at a time for one
+script, retries a handler that throws with increasing delay, and after downtime
+runs **one** missed occurrence rather than replaying the backlog. A handler can
+run late but never early.
 
-Setting this to 1000 lets the ticker evict between ticks, so its alarm is
-persisted and celld's waker fires it after a restart. Verified: hard-kill the
-node, restart it, make no requests at all, and the ticker resumes on its own.
+Through v0.2.1 none of that existed — celld rejected the `triggers` key — so
+Nadi drove the same jobs from a per-minute alarm DO that had to be armed by a
+request, kept alive by a watchdog, and prevented from pinning its own cell with
+`CELLD_ALARM_RESIDENT_MS=1000`. **All three are gone.** If you are upgrading,
+delete the watchdog cron and the `CELLD_ALARM_RESIDENT_MS` setting; leaving them
+costs a pointless request a minute and an eviction threshold you did not choose.
 
-**Arm the scheduler on first run.** A brand-new deployment has no alarm to
-restore, and the ticker is armed by the first request. One `curl` after the
-first start is enough — it is not needed on subsequent restarts. A host-side
-watchdog is still worth having as a backstop:
-
-```cron
-* * * * * curl -sf http://127.0.0.1:8080/ >/dev/null
-```
-
-With `DEBUG_TOKEN` set you can check the ticker directly:
+With `DEBUG_TOKEN` set you can still confirm cron is firing:
 
 ```bash
 curl -H "x-debug-token: $DEBUG_TOKEN" http://127.0.0.1:8080/api/debug/celld-ticker
-# {"lastTickMs":…, "lastDailyRunMs":…}
+# {"ticker":"celld-cron","crons":{…},"lastTickMs":…,"lastDailyRunMs":…}
 ```
 
-A `lastTickMs` older than a couple of minutes means the ticker is not running.
+`scheduled()` stamps those markers into the registry itself. Both are the cron
+**occurrence**, not the moment the handler ran — celld runs late but never
+early — so a `lastTickMs` more than a couple of minutes behind now means
+occurrences are being missed, not merely delayed.
 
 ## Upgrading celld
 
-Nadi pins **v0.2.0** (`CELLD_VERSION` in `deploy/celld/Dockerfile`). What the
-v0.1.0 → v0.2.0 move cost, verified here rather than read off the release notes:
+Nadi pins **v0.3.0** (`CELLD_VERSION` in `deploy/celld/Dockerfile`).
+
+### v0.2.x → v0.3.0
+
+This release retired three workarounds in this repo, so the upgrade is a code
+change and not only a version bump — an older Nadi will not run correctly on
+v0.3.0's configuration, and this Nadi will not run on v0.2.x at all.
+
+**Native cron replaced the ticker DO.** `wrangler.celld.jsonc` now carries
+`triggers.crons` and `scheduled()` runs on both platforms. The `CelldTicker`
+class, the watchdog service and `CELLD_ALARM_RESIDENT_MS` are gone — see
+[Operating](#operating).
+
+> **Delete the orphaned `CelldTicker` cell, and restart the node after you do.**
+> The cell left behind in the fleet bucket is not inert: it carries a persisted
+> alarm, and celld keeps trying to run it against a class the Worker no longer
+> exports. Measured on this deployment, it retried **~16 times a second,
+> indefinitely** — 9,700 failed starts in ten minutes, each one re-reading the
+> cell's 117 objects (~29 KB) from the bucket. Compaction bounds the disk, so
+> nothing grows and nothing breaks; what it costs is a permanent ~1,900
+> object-GETs/second against your store, which on R2 or S3 is a real bill.
+>
+> The log line is unmissable once you look:
+>
+> ```
+> celld runtime start failed for CelldTicker:<hash>: no Worker exports Durable
+> Object class CelldTicker
+> ```
+>
+> ```bash
+> mc rm --recursive --force "local/<fleet-bucket>/cells/CelldTicker:<hash>/"
+> docker compose restart celld
+> ```
+>
+> The restart is not optional. A running node has already restored the alarm
+> into memory, so deleting the objects alone only slows the retry to once a
+> minute — and the cell's `own.json` is rewritten on every attempt, so it looks
+> like the delete did not take.
+
+**Native D1 replaced the registry Durable Object.** The registry is now a real
+`d1_databases` binding. A celld D1 database is a cell, so it keeps the same
+fencing, replication and durable write acknowledgement it had as a DO; what
+changes is that celld and Cloudflare now run the *same* code path, and the
+`RegistryD1` facade, the hand-rolled batch runner and the boot-time migration
+bundle are deleted. Schema is applied with `celld d1 migrations apply` from the
+same `migrations/` drizzle-kit generates for Cloudflare.
+
+> **The registry does not migrate itself across this change.** The old registry
+> lived inside a Durable Object and the new one is a different cell; there is no
+> supported export path between them. A deployment upgrading from v0.2.x starts
+> with an empty registry — sign-in, workspace, agents and thread index are all
+> recreated from scratch. Thread *transcripts* live in their own DO cells and are
+> not affected, but nothing will point at them. Back up your fleet bucket first.
+
+**Bare Node builtins bundle without a shim** (denoland/celld#157), so
+`scripts/celld-esbuild.mjs` is gone. `pnpm celld:deploy` still names an esbuild
+binary in `CELLD_ESBUILD` because celld wants one on `PATH` and this repo keeps
+it in the pnpm store.
+
+**`setInterval` works** (denoland/celld#156). It threw when called on every
+earlier release. Note celld's rule that a Worker must clear an interval before
+the handler ends, because a live interval keeps the request alive — which
+`src/agent/subagent.ts` already does.
+
+**Subagents still do not run on celld, for an unrelated reason.** The liveness
+stamp that `setInterval` unblocked is never reached: the `agents` SDK builds a
+subagent out of Durable Object *facets*, and celld does not implement them.
+Setting `BACKGROUND_WORK_ENABLED=true` and spawning one fails immediately with
+
+```
+subAgent() is not supported in this runtime — `ctx.facets` / `ctx.exports` are
+unavailable. Update to the latest `compatibility_date` in your wrangler.jsonc.
+```
+
+The advice in that message does not apply here — `wrangler.celld.jsonc` already
+carries the same `compatibility_date` as `wrangler.jsonc`. It is a missing
+runtime capability, not a stale config. Leave `BACKGROUND_WORK_ENABLED=false`
+on celld.
+
+**The replication corruption is fixed upstream** (#150, #158). See the
+durability section.
+
+**Watch for the isolate heap limit.** Each isolate gets a V8 heap limit,
+defaulting to 128 MB to match Cloudflare, tunable with `CELLD_V8_HEAP_LIMIT_MB`.
+Unlike workerd, celld *refuses* work near it rather than discarding the isolate:
+`state.acceptWebSocket()` throws above 90%, and a large `toArray()` throws
+naming the heap. Both lift when the heap drains. A thread cell holding a big
+transcript and a hibernatable WebSocket is exactly the shape that meets this, so
+it is the first thing to check behind an unexplained refused connection.
+
+### What v0.2.1 changed (crossed on the way here)
+
+- **X-Forwarded-* are ignored by default.** `--trust-forwarded-headers` opts
+  back in and is only sound behind a proxy that *replaces* both headers; the
+  packaged Caddyfile sets them explicitly for that reason.
+- **A startup conditional-write probe** refuses to serve if the bucket accepts a
+  write it should reject. `CELLD_STORAGE_PROBE=0` skips it — the first thing to
+  try if a node will not start against a non-MinIO store.
+- **Cell scopes are validated**: non-empty, ≤512 bytes, ASCII alphanumerics plus
+  `_ - . : $`. Nadi's names (`workspace:<uuid>`, thread and user ids) are inside
+  that, but a name is now a hard reject rather than something celld slugs.
+- Fixes for a shedding bug that could leave a node refusing every request until
+  restarted, an alarm lost when rescheduled within the same minute, and a
+  cancelled WebSocket read desynchronising a stream.
+
+### v0.1.0 → v0.2.0, kept for the record
 
 **The listener flags changed, and a v0.1.0 command line does not start.** A
-non-loopback `--listen` now requires `--internal-listen`; `--advertise` names
-that internal address and is peers-only. Both Compose files were updated. The
-upgrade must not be rolling — stop every old node, then start the new ones.
-
-**An in-place upgrade reads the old data.** A v0.2.0 node restored cells
-written by v0.1.0 with no migration step: sign-in, workspace, agent, threads
-and the ticker's persisted alarm all survived.
+non-loopback `--listen` requires `--internal-listen`; `--advertise` names that
+internal address and is peers-only. The upgrade must not be rolling — stop every
+old node, then start the new ones.
 
 **Two crypto capabilities moved half-way, which is worse than not moving.**
-v0.2.0 announces ECDH derivation and PKCS#8 import. Measured on the runtime:
+v0.2.0 announced ECDH derivation and PKCS#8 import, but `importKey("pkcs8", …,
+RSASSA-PKCS1-v1_5)` succeeded while `sign` still threw. Nadi's RS256 probe used
+to stop at the import, so it reported native RSA, took the native path, and threw
+on every GitHub App JWT. The probe now signs (`nativeRsaAvailable`,
+`src/github/jwt.ts`). **If you touch either probe, probe the operation that has
+to work, not a proxy for it.**
 
-| Operation | v0.2.0 |
-| --- | --- |
-| `importKey("pkcs8", …, RSASSA-PKCS1-v1_5)` | **succeeds** (v0.1.0 threw) |
-| `sign("RSASSA-PKCS1-v1_5", …)` | still `NotSupportedError` |
-| `importKey("pkcs8", …, ECDH)`, `generateKey(ECDH)` | **succeed** |
-| `importKey("raw", …, ECDH)` → so `deriveBits` | still `NotSupportedError` |
-| ECDSA sign, AES-GCM | work, as before |
-
-Nadi picks its in-repo shims by probing the runtime, and the RS256 probe used
-to stop at the import — so on v0.2.0 it reported native RSA, took the native
-path, and threw on every GitHub App JWT, breaking all private-repo clone/push.
-The probe now signs (`nativeRsaAvailable`, `src/github/jwt.ts`). The web-push
-ECDH probe already exercised the whole derivation and was unaffected. **If you
-touch either probe, probe the operation that has to work, not a proxy for it.**
-
-**The first request to a cell after a restart can fail once.** Observed:
-`RestoreFailed … database disk image is malformed`, which then re-restored from
-the replicated objects and served normally on retry. Like the
-`remote RPC owner was stale` window, it clears itself — but it is a hard error
-to the caller, so a client with no retry sees a 500.
-
-**It does not fix the replication corruption below.** See the warning there.
+**The first request to a cell after a restart can fail once** —
+`RestoreFailed … database disk image is malformed`, which then re-restores and
+serves normally on retry. It clears itself, but it is a hard error to the
+caller, so a client with no retry sees a 500.
 
 ## Backups
 
@@ -576,9 +711,10 @@ with.
 
 ## Troubleshooting
 
-**The bundle fails with `Could not resolve "path"`** — you invoked `celld deploy`
-directly instead of `pnpm celld:deploy`. celld's bundler does not alias bare node
-builtins; the wrapper does.
+**The bundle fails to resolve a bare `node:` builtin** — you are on celld
+v0.2.x, which did not alias them. Upgrade to v0.3.0 (denoland/celld#157), which
+accepts bare builtin specifiers; the `scripts/celld-esbuild.mjs` shim that used
+to rewrite them is gone.
 
 **Sign-in returns 200 but no code arrives** — no email provider is configured.
 Set `RESEND_API_KEY`, or `AUTH_OTP_LOG_FALLBACK=true` for local use. The node log
@@ -614,10 +750,27 @@ source change means nothing was rebuilt. See "Deploying a change".
 **Everything behaves as though configuration is missing** — the vars file is
 probably JSON. It must be `KEY=VALUE` lines.
 
-**Automata never fire** — either the deployment has never been requested (the
-first request arms the ticker), or `CELLD_ALARM_RESIDENT_MS` is unset, in which
-case the ticker never replicates and does not survive restarts. Check
-`/api/debug/celld-ticker`.
+**`cron schedule not armed` in the log right after a restart** — expected, and
+it clears itself. While the previous node session's lease on the `.cron:nadi`
+cell is still stale, arming races it:
+
+```
+WARN  celld: peer owner unreachable scope=.cron:nadi owner=127.0.0.1:8081
+WARN  celld: cron arm failed, retrying cell=".cron:nadi"
+ERROR celld: cron schedule not armed cell=".cron:nadi"
+```
+
+It reads like a hard failure of exactly the thing the ticker used to guard, so
+it is worth knowing it is not one. Measured here: a restart at 23:32 logged the
+ERROR above and ticks resumed at 23:32, 23:34, then every minute — one or two
+missed occurrences across the restart window, then normal. Only a `lastTickMs`
+that stays behind for several minutes is a real stall.
+
+**Automata never fire** — check `/api/debug/celld-ticker`. A `lastTickMs` of
+`null` means `scheduled()` has never run: confirm `triggers.crons` survived into
+the deployment you actually shipped (a stale `Current Version ID` after a deploy
+means nothing was rebuilt). A `lastTickMs` that is stale rather than null means
+occurrences are being missed, not that cron is unconfigured.
 
 **A route 404s that should exist** — `/api/debug/*` requires `DEBUG_TOKEN` to be
 set *and* the matching `x-debug-token` header.

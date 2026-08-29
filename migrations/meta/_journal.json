@@ -421,6 +421,13 @@
       "when": 1785897066445,
       "tag": "0059_soft_sumo",
       "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "6",
+      "when": 1787583893147,
+      "tag": "0060_smart_silver_fox",
+      "breakpoints": true
     }
   ]
 }

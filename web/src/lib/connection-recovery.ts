@@ -56,3 +56,34 @@ export function shouldNudgeReconnect(
   if (!isVisible || !isOnline) return false;
   return readyState === WS_CLOSED || readyState === WS_CLOSING;
 }
+
+/**
+ * One foreground-watchdog tick, as a state machine over the `nudged` flag.
+ *
+ * Nudging a dead socket back is only half a recovery. The reconnected socket
+ * gets NOTHING — the server broadcast a finished turn to the socket that died,
+ * and it never re-pushes history to a reconnecting one. So a turn that lands
+ * while the tab is in the FOREGROUND (no resume event, so no `onResume`
+ * refetch) leaves a healthy socket showing stale content, which reads as a
+ * hung turn. Observed on celld, which drops sockets on node restart and idle
+ * eviction where Cloudflare hibernates them; reachable anywhere via an
+ * abnormal close.
+ *
+ * `resync` therefore fires on the CLOSED→OPEN transition, not on every tick —
+ * the watchdog runs every few seconds, and refetching history on each tick
+ * while a socket stays down would hammer the endpoint.
+ */
+export function watchdogTick(
+  nudged: boolean,
+  readyState: number,
+  isVisible: boolean,
+  isOnline: boolean,
+): { nudge: boolean; resync: boolean; nudged: boolean } {
+  if (shouldNudgeReconnect(readyState, isVisible, isOnline)) {
+    return { nudge: true, resync: false, nudged: true };
+  }
+  if (nudged && readyState === WS_OPEN) {
+    return { nudge: false, resync: true, nudged: false };
+  }
+  return { nudge: false, resync: false, nudged };
+}

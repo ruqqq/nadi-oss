@@ -6,12 +6,8 @@ import { attachmentsBucket } from "../storage/bucket-binding";
 import { agents, attachments, threadIndex, users } from "../db/schema";
 import { McpServerRepository } from "../db/repositories/mcp-servers";
 import { RegistryKV } from "../db/registry-kv";
-import {
-  DAILY_INTERVAL_MS,
-  TICKER_LAST_DAILY_RUN_KEY,
-  TICKER_LAST_TICK_KEY,
-  TICK_INTERVAL_MS,
-} from "../celld/ticker-policy";
+import { CRON_LAST_DAILY_RUN_KEY, CRON_LAST_TICK_KEY, isCelld } from "../celld/cron-liveness";
+import { AUTOMATA_CRON, AUTO_ARCHIVE_CRON } from "../automata/fire-policy";
 import { NotificationRepository } from "../db/repositories/notifications";
 import { isWebPushConfigured, sendWebPush } from "../notifications/web-push";
 import { WorkspaceRepository } from "../db/repositories/workspaces";
@@ -1188,31 +1184,36 @@ export async function routeDebug(req: Request, env: Env): Promise<Response | nul
     return tryJson(async () => runSpritesSmoke(env));
   }
 
-  // GET /api/debug/celld-ticker — celld-only: is the ticker alive? Reads the
-  // liveness markers the CelldTicker writes into the registry DO every tick
-  // (the ticker itself keeps no state, so there is nothing to read off it).
-  // On Cloudflare there is no REGISTRY_DO — scheduled() runs there instead —
-  // so the route reports not_applicable rather than a stale-looking null.
+  // GET /api/debug/celld-ticker — celld-only: is cron alive? celld v0.3.0 runs
+  // `scheduled()` on native cron triggers, so the CelldTicker DO this route was
+  // built for is gone; what it reads now are the markers `scheduled()` itself
+  // stamps into the registry DO (src/celld/cron-liveness.ts). The path keeps
+  // its name so an operator's existing bookmark and the runbook still work.
+  // On Cloudflare there is no REGISTRY_DO — its own cron runs there, observable
+  // in the dashboard — so the route reports not_applicable rather than a
+  // stale-looking null.
   if (url.pathname === "/api/debug/celld-ticker" && req.method === "GET") {
-    if (!env.REGISTRY_DO) {
+    if (!isCelld(env) || !env.REGISTRY_DB) {
       return Response.json({
         ticker: "not_applicable",
-        note: "no REGISTRY_DO binding — Cloudflare runs scheduled() instead",
+        note: "not celld — Cloudflare runs its own cron, observable in the dashboard",
       });
     }
     // `registry` is captured so the narrowed (non-undefined) type survives
     // into the tryJson closure — TS does not keep property narrowing there.
-    const registry = env.REGISTRY_DO;
+    const registry = env.REGISTRY_DB;
     return tryJson(async () => {
       const kv = new RegistryKV(registry);
       const [lastTickRaw, lastDailyRunRaw] = await Promise.all([
-        kv.get(TICKER_LAST_TICK_KEY),
-        kv.get(TICKER_LAST_DAILY_RUN_KEY),
+        kv.get(CRON_LAST_TICK_KEY),
+        kv.get(CRON_LAST_DAILY_RUN_KEY),
       ]);
       return {
-        ticker: "celld",
-        tickIntervalMs: TICK_INTERVAL_MS,
-        dailyIntervalMs: DAILY_INTERVAL_MS,
+        ticker: "celld-cron",
+        crons: { automata: AUTOMATA_CRON, dailySweep: AUTO_ARCHIVE_CRON },
+        // Both are the cron OCCURRENCE, not the moment the handler ran: celld
+        // runs a handler late rather than early, so a lastTickMs well behind
+        // now() means runs are being missed, not merely delayed.
         lastTickMs: lastTickRaw === null ? null : Number(lastTickRaw),
         lastDailyRunMs: lastDailyRunRaw === null ? null : Number(lastDailyRunRaw),
       };

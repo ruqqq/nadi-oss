@@ -34,8 +34,8 @@ evict_s="$( (grep -E '^CELLD_IDLE_EVICT_S=' .env 2>/dev/null || echo 'CELLD_IDLE
 # timer, so a cell that went quiet just after a check waits nearly two.
 drain_s=$((evict_s * 2 + 5))
 
-echo "Stopping traffic (caddy, ticker-watchdog)..."
-compose stop caddy ticker-watchdog
+echo "Stopping traffic (caddy)..."
+compose stop caddy
 
 echo "Draining for ${drain_s}s so every cell goes idle and replicates..."
 sleep "$drain_s"
@@ -43,7 +43,7 @@ sleep "$drain_s"
 if [ "${1:-}" = "--restart" ]; then
 	echo "Restarting celld (picks up the current deployment and vars file)..."
 	compose restart celld
-	compose start caddy ticker-watchdog
+	compose start caddy
 	echo "Up. A node loads a deployment at startup only, so this is what makes a"
 	echo "'docker compose run --rm deploy' take effect."
 else

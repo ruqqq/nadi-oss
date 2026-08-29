@@ -45,6 +45,42 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_REGION: ${AWS_REGION:-us-east-1}
 
+  # One-shot: applies migrations/ to the registry D1 database.
+  #
+  # ORDER MATTERS, and it is the reverse of what you may expect. A celld D1
+  # database is a CELL, so `celld d1` needs a RUNNING fleet to talk to — it
+  # finds a node through the node leases in the bucket and asks that node to
+  # route the work to the database's owner. So the sequence is deploy, then
+  # up, THEN migrate; a migrate before `up` fails with no node to reach.
+  #
+  # Re-run after every schema change. celld records applied migrations in the
+  # `d1_migrations` table exactly as `wrangler d1 migrations` does, so this is
+  # idempotent and safe to run on every deploy.
+  migrate:
+    profiles: [migrate]
+    build:
+      context: ../..
+      dockerfile: deploy/celld/Dockerfile
+      target: deployer
+    entrypoint: ["celld"]
+    command:
+      [
+        "d1",
+        "migrations",
+        "apply",
+        "nadi-registry",
+        "--bucket",
+        "${CELLD_BUCKET}",
+        "--endpoint",
+        "${S3_ENDPOINT_INTERNAL}",
+      ]
+    environment:
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+    depends_on:
+      - celld
+
   celld:
     build:
       context: ../..
@@ -70,6 +106,13 @@ services:
       # single-node file omits it entirely, because it has no peers.
       - "--advertise"
       - "${CELLD_ADVERTISE}"
+      # celld v0.2.1 stopped trusting X-Forwarded-* by default. Without this
+      # request.url carries celld's own http://celld:8080 rather than the
+      # public https:// origin Caddy terminated. Safe here precisely because
+      # Caddy REPLACES both headers on every proxied request (the header_up
+      # lines in the Caddyfile), so a client cannot forge either one. Do NOT
+      # set this on a node that is reachable without a proxy in front.
+      - "--trust-forwarded-headers"
     ports:
       # Peer traffic is unencrypted, and the operator API on this same port
       # permits unauthenticated eviction, state inspection and shutdown. (celld
@@ -87,7 +130,6 @@ services:
       # written in between is discarded silently. See README.md.
       CELLD_TTL_MS: ${CELLD_TTL_MS:-10000}
       CELLD_IDLE_EVICT_S: ${CELLD_IDLE_EVICT_S:-15}
-      CELLD_ALARM_RESIDENT_MS: ${CELLD_ALARM_RESIDENT_MS:-1000}
       # `release` lets a loaded node hand cells to a quieter peer instead of
       # shedding under pressure — the multi-node-only behaviour. `sticky`
       # keeps them local, which is what you want with one node.
@@ -127,18 +169,6 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./data/caddy:/data
       - ./data/caddy-config:/config
-    depends_on:
-      - celld
-
-  # Arms the scheduler and backstops a lost alarm. Harmless to run on every
-  # host — it is a GET to `/`, and whichever node owns the ticker cell answers
-  # it regardless of which node received it. If N pokes a minute bothers you,
-  # delete the service from all but one host's copy.
-  ticker-watchdog:
-    image: curlimages/curl:latest
-    restart: unless-stopped
-    command:
-      ["sh", "-c", "while true; do curl -sf http://celld:8080/ >/dev/null || true; sleep 60; done"]
     depends_on:
       - celld
 

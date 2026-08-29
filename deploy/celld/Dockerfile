@@ -14,6 +14,9 @@
 #               serves web/dist and proxies the app's routes to celld.
 #   deployer    a one-shot that runs `pnpm celld:deploy` to push the Worker
 #               bundle into the fleet bucket. Needs node + the repo + esbuild.
+#               The same image also runs `celld d1 migrations apply` (see the
+#               `migrate` service), which needs the repo for migrations/ and
+#               the wrangler config that resolves the database name.
 #   node        the long-running celld process. Needs only the binary.
 
 ARG NODE_VERSION=22-slim
@@ -49,8 +52,9 @@ ENV CELLD_INSTALL_ROOT=/usr/local
 # deployment was actually verified against. Override with --build-arg
 # CELLD_VERSION=… ; an empty value takes the latest release, which means two
 # builds a week apart differ. Do not move this without re-reading the upgrade
-# notes in docs/self-hosting-celld.md — v0.2.0 changed the listener flags.
-ARG CELLD_VERSION="v0.2.0"
+# notes in docs/self-hosting-celld.md — v0.2.0 changed the listener flags, and
+# v0.2.1 stopped trusting X-Forwarded-* by default.
+ARG CELLD_VERSION="v0.3.0"
 RUN CELLD_VERSION="${CELLD_VERSION}" sh -c 'curl -fsSL https://celld.dev/install.sh | sh'
 
 # --- web-server: Caddy with the SPA baked in --------------------------------
@@ -66,6 +70,7 @@ COPY . .
 # so copying only /usr/local/bin/celld yields a dangling link.
 COPY --from=celld-bin /usr/local/lib/celld /usr/local/lib/celld
 COPY --from=celld-bin /usr/local/bin/celld /usr/local/bin/celld
+# Overridden by the `migrate` service, which runs `celld d1` from this image.
 ENTRYPOINT ["pnpm", "celld:deploy", "--"]
 
 # --- node: the long-running celld process -----------------------------------

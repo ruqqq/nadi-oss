@@ -1095,6 +1095,22 @@ export type Account = typeof accounts.$inferSelect;
 export type Verification = typeof verifications.$inferSelect;
 export type Invite = typeof invites.$inferSelect;
 export type InviteStatus = Invite["status"];
+/**
+ * The KV table `RegistryKV` reads and writes — workspace secrets, already
+ * AES-GCM ciphertext, plus a couple of `system/` markers the cron liveness
+ * endpoint reads.
+ *
+ * Used on celld ONLY, where there is no KV binding and none is planned. On
+ * Cloudflare the real `SECRETS_KV` binding serves this and the table stays
+ * empty; it is defined here rather than created out-of-band so that ONE
+ * drizzle-generated migration history covers both platforms, which is the
+ * whole point of celld gaining D1 in v0.3.0.
+ */
+export const celldKv = sqliteTable("celld_kv", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+});
+
 export type WaitingListEntry = typeof waitingList.$inferSelect;
 export type Workspace = typeof workspaces.$inferSelect;
 export type WorkspaceMember = typeof workspaceMembers.$inferSelect;
@@ -1120,3 +1136,4 @@ export type AutomatonRunStatus = AutomatonRun["status"];
 export type AutomatonRunTrigger = AutomatonRun["trigger"];
 export type PushSubscriptionRow = typeof pushSubscriptions.$inferSelect;
 export type UserNotificationSettings = typeof userNotificationSettings.$inferSelect;
+export type CelldKvRow = typeof celldKv.$inferSelect;

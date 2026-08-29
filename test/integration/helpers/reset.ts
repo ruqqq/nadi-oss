@@ -27,6 +27,10 @@ const registryTables = [
   // Global, no FK to workspaces — position is not load-bearing, but it must be
   // cleared or capability leaks between tests.
   "model_capability_catalog",
+  // Same: the celld-only KV table behind RegistryKV. No FK, so it sits with
+  // the other globals rather than after "users", which stays last because
+  // every FK-bearing table above it must be cleared first.
+  "celld_kv",
   "provider_configs",
   "push_subscriptions",
   "user_notification_settings",

@@ -9,6 +9,11 @@
 #   docker compose --profile minio up -d          # only if you want bundled MinIO
 #   docker compose run --rm deploy                # push the Worker bundle
 #   docker compose up -d                          # start the node + proxy
+#   docker compose run --rm migrate               # apply migrations/ to the registry
+#
+# The migrate step comes LAST and it is not optional on a new deployment: the
+# registry D1 database is a cell, so `celld d1` needs a running node to reach
+# it. Re-run it after any schema change.
 #
 # Shut down with ./drain-stop.sh, NOT `docker compose down`. celld replicates a
 # cell to the bucket only when that cell goes idle, so stopping the node while
@@ -36,6 +41,54 @@ services:
         condition: service_healthy
         required: false
 
+  # One-shot: applies migrations/ to the registry D1 database.
+  #
+  # ORDER MATTERS, and it is the reverse of what you may expect. A celld D1
+  # database is a CELL, so `celld d1` needs a RUNNING fleet to talk to — it
+  # finds a node through the node leases in the bucket and asks that node to
+  # route the work to the database's owner. So the sequence is deploy, then
+  # up, THEN migrate; a migrate before `up` fails with no node to reach.
+  #
+  # Re-run after every schema change. celld records applied migrations in the
+  # `d1_migrations` table exactly as `wrangler d1 migrations` does, so this is
+  # idempotent and safe to run on every deploy.
+  #
+  # It runs in the NODE's network namespace, and that is load-bearing. `celld
+  # d1` finds a node through the leases in the bucket and then connects to the
+  # address that lease advertises — which for this single-node stack is the
+  # INTERNAL listener, `127.0.0.1:8081`. From a container of its own that
+  # loopback is its own, so the connect fails with `Connection refused`.
+  # Sharing celld's namespace makes 127.0.0.1 mean the node, without widening
+  # the internal listener to the Docker network. `minio` still resolves,
+  # because the namespace it joins is on the compose network.
+  #
+  # Consequence of network_mode: no `depends_on` (compose forbids the pair),
+  # so the node must already be up — which the documented ordering requires
+  # anyway.
+  migrate:
+    profiles: [migrate]
+    network_mode: "service:celld"
+    build:
+      context: ../..
+      dockerfile: deploy/celld/Dockerfile
+      target: deployer
+    entrypoint: ["celld"]
+    command:
+      [
+        "d1",
+        "migrations",
+        "apply",
+        "nadi-registry",
+        "--bucket",
+        "${CELLD_BUCKET}",
+        "--endpoint",
+        "${S3_ENDPOINT_INTERNAL}",
+      ]
+    environment:
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+
   celld:
     build:
       context: ../..
@@ -61,6 +114,13 @@ services:
       # around, so no --advertise is needed at all.
       - "--internal-listen"
       - "127.0.0.1:8081"
+      # celld v0.2.1 stopped trusting X-Forwarded-* by default. Without this
+      # request.url carries celld's own http://celld:8080 rather than the
+      # public https:// origin Caddy terminated. Safe here precisely because
+      # Caddy REPLACES both headers on every proxied request (the header_up
+      # lines in the Caddyfile), so a client cannot forge either one. Do NOT
+      # set this on a node that is reachable without a proxy in front.
+      - "--trust-forwarded-headers"
     environment:
       CELLD_VARS_FILE: /etc/nadi/celld-vars.env
       # How long a quiet cell stays resident. Keep it HIGH: an evicted thread
@@ -69,10 +129,6 @@ services:
       # The old "stay under the 60s tick" rule was a v0.1.0 constraint and no
       # longer holds — see the long note in .env.example.
       CELLD_IDLE_EVICT_S: ${CELLD_IDLE_EVICT_S:-300}
-      # Without this the ticker's always-imminent 60s alarm keeps its cell
-      # resident forever, so it never replicates and scheduled work silently
-      # stops after a restart.
-      CELLD_ALARM_RESIDENT_MS: ${CELLD_ALARM_RESIDENT_MS:-1000}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_REGION: ${AWS_REGION:-us-east-1}
@@ -125,17 +181,6 @@ services:
       # Let's Encrypt rate-limits you out after a handful.
       - ./data/caddy:/data
       - ./data/caddy-config:/config
-    depends_on:
-      - celld
-
-  # Arms the scheduler after a fresh deployment and backstops a lost alarm.
-  # A brand-new deployment has no alarm to restore and is armed by the first
-  # request; this makes that automatic rather than a curl you must remember.
-  ticker-watchdog:
-    image: curlimages/curl:latest
-    restart: unless-stopped
-    command:
-      ["sh", "-c", "while true; do curl -sf http://celld:8080/ >/dev/null || true; sleep 60; done"]
     depends_on:
       - celld
 

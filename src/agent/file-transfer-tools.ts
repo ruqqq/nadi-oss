@@ -69,7 +69,7 @@ export interface AttachmentRepositoryLike {
 }
 
 export interface UploadToSignedUrlDeps {
-  env: Pick<Env, "ATTACHMENTS_BUCKET" | "REGISTRY_DB" | "REGISTRY_DO">;
+  env: Pick<Env, "ATTACHMENTS_BUCKET" | "REGISTRY_DB">;
   threadId: string;
   fetchImpl?: typeof fetch;
   attachmentRepository?: AttachmentRepositoryLike;

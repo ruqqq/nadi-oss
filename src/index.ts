@@ -8,7 +8,7 @@ import { validateRequestSession } from "./auth/session";
 import { canonicalRedirectUrl } from "./http/canonical-host";
 import { route } from "./http/router";
 import { log, setLogLevel } from "./log";
-import { armCelldTicker } from "./celld/ticker";
+import { CRON_LAST_DAILY_RUN_KEY, CRON_LAST_TICK_KEY, stampCronRun } from "./celld/cron-liveness";
 import { installResponseRedirectShim } from "./celld/response-redirect-shim";
 import { autoArchiveIdleThreads } from "./agent/auto-archive";
 import { AUTOMATA_CRON, fireDueAutomata } from "./automata/fire-due";
@@ -18,8 +18,6 @@ export { SubAgent } from "./agent/subagent";
 export { WorkspaceMcpAgent } from "./agent/workspace-mcp-agent";
 export { UserHub } from "./agent/user-hub";
 export { VoiceAgent } from "./agent/voice-agent";
-export { RegistryDatabase } from "./db/registry-do";
-export { CelldTicker } from "./celld/ticker";
 export {
   ContainerProxy,
   NadiSandboxSmall,
@@ -37,12 +35,6 @@ export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     setLogLevel(env.LOG_LEVEL);
     log.debug("worker.fetch", { method: req.method, url: req.url });
-
-    // celld-only: it rejects the `triggers` config key and never invokes
-    // `scheduled()`, so the ticker DO replaces the cron. This arms its first
-    // alarm (idempotent; it re-arms itself every minute thereafter).
-    // Cloudflare has no CRON_TICKER binding and runs scheduled() — no-op.
-    if (env.CRON_TICKER) armCelldTicker(env, ctx);
 
     const url = new URL(req.url);
     const artifactsHost = (env.ARTIFACTS_HOST ?? "").trim().toLowerCase();
@@ -134,6 +126,12 @@ export default {
   },
   async scheduled(controller: ScheduledController, env: Env): Promise<void> {
     setLogLevel(env.LOG_LEVEL);
+    // celld-only liveness marker, best-effort and a no-op on Cloudflare. Both
+    // platforms run this same handler now — celld v0.3.0 runs cron natively —
+    // but only celld has no dashboard to ask whether it fired.
+    // `controller.scheduledTime` is the OCCURRENCE, not the moment the handler
+    // started, which is what makes a late run distinguishable from a missed one.
+    await stampCronRun(env, CRON_LAST_TICK_KEY, controller.scheduledTime);
     if (controller.cron === AUTOMATA_CRON) {
       const result = await fireDueAutomata(env);
       log.info("worker.scheduled.automata", result);
@@ -143,5 +141,8 @@ export default {
     log.info("worker.scheduled.auto_archive", result);
     const repairResult = await repairStaleThreadSearchProjections(env);
     log.info("worker.scheduled.thread_search_repair", repairResult);
+    // Stamped only after the sweep succeeds: a throw above leaves the marker
+    // untouched, so the endpoint shows the last run that actually completed.
+    await stampCronRun(env, CRON_LAST_DAILY_RUN_KEY, controller.scheduledTime);
   },
 } satisfies ExportedHandler<Env>;
