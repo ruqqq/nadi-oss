@@ -3,6 +3,9 @@ import { importRawKey, packB64 } from "../../../src/secrets/aead";
 import { SecretsError } from "../../../src/secrets/errors";
 import {
   buildWorkspaceSecretKey,
+  buildWorkspaceSecretIndexKey,
+  buildWorkspaceSecretPrefix,
+  parseWorkspaceSecretIndex,
   KVWorkspaceSecretsStore,
   KVWorkspaceSecretsWriter,
 } from "../../../src/secrets";
@@ -90,5 +93,37 @@ describe("workspace secrets", () => {
       name: "SecretsError",
       code: "secret_corrupt",
     } satisfies Partial<SecretsError>);
+  });
+});
+
+describe("workspace secret index records", () => {
+  it("builds an index key that is not itself under the secrets prefix", () => {
+    const key = buildWorkspaceSecretIndexKey("ws_1");
+    expect(key).toBe("workspaces/ws_1/secret-index");
+    expect(key.startsWith(buildWorkspaceSecretPrefix("ws_1"))).toBe(false);
+  });
+
+  it("parses a well-formed index", () => {
+    const raw = JSON.stringify({
+      version: 1,
+      entries: { EXA_API_KEY: { updated_at: "2026-08-30T00:00:00.000Z" } },
+    });
+    expect(parseWorkspaceSecretIndex(raw, "ws_1")).toEqual({
+      version: 1,
+      entries: { EXA_API_KEY: { updated_at: "2026-08-30T00:00:00.000Z" } },
+    });
+  });
+
+  it("rejects a malformed index rather than reading it as empty", () => {
+    expect(() => parseWorkspaceSecretIndex("{]", "ws_1")).toThrow(/invalid workspace secret index/);
+    expect(() => parseWorkspaceSecretIndex('{"version":2,"entries":{}}', "ws_1")).toThrow(
+      /invalid workspace secret index/,
+    );
+    expect(() => parseWorkspaceSecretIndex('{"version":1}', "ws_1")).toThrow(
+      /invalid workspace secret index/,
+    );
+    expect(() => parseWorkspaceSecretIndex('{"version":1,"entries":{"A":{}}}', "ws_1")).toThrow(
+      /invalid workspace secret index/,
+    );
   });
 });
