@@ -19,9 +19,15 @@ kv() {
   # `grep -v` would make the function's exit status grep's (1 when the
   # filter drops every line, indistinguishable from a genuine docker/minio
   # failure). A successful-but-empty listing must return 0.
+  #
+  # `</dev/null` is load-bearing, not hygiene. `docker compose run` without it
+  # attaches the caller's stdin, and this function is called from inside a
+  # `while IFS= read -r key` loop — so the first `kv get` swallowed the rest of
+  # the loop's input and every workspace was indexed with exactly one secret,
+  # silently. Measured on the live host: two secrets in KV, one in the index.
   local out status
   out=$(docker compose run --rm --entrypoint celld migrate kv "$@" \
-    --bucket s3://celld-fleet --endpoint http://minio:9000 2>/dev/null)
+    --bucket s3://celld-fleet --endpoint http://minio:9000 2>/dev/null </dev/null)
   status=$?
   if [ "$status" -ne 0 ]; then
     return "$status"
