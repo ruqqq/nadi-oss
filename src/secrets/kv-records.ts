@@ -22,6 +22,50 @@ export function buildWorkspaceSecretPrefix(workspaceId: string): string {
   return `workspaces/${workspaceId}/secrets/`;
 }
 
+/**
+ * One key per workspace listing the secret names it holds, so listing never
+ * needs `kv.list({ prefix })`. Named `secret-index` rather than
+ * `secrets/index` deliberately: it must NOT sit under
+ * `buildWorkspaceSecretPrefix`, or a backfill would ingest the index as if it
+ * were a secret.
+ */
+export function buildWorkspaceSecretIndexKey(workspaceId: string): string {
+  return `workspaces/${workspaceId}/secret-index`;
+}
+
+export interface StoredWorkspaceSecretIndex {
+  version: 1;
+  entries: Record<string, { updated_at: string }>;
+}
+
+export function parseWorkspaceSecretIndex(
+  raw: string,
+  workspaceId: string,
+): StoredWorkspaceSecretIndex {
+  const message = `invalid workspace secret index for ${workspaceId}`;
+  const parsed = parseJson(raw, message);
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    (parsed as { version?: unknown }).version !== 1 ||
+    typeof (parsed as { entries?: unknown }).entries !== "object" ||
+    (parsed as { entries?: unknown }).entries === null
+  ) {
+    throw new Error(message);
+  }
+  const entries = (parsed as { entries: Record<string, unknown> }).entries;
+  for (const value of Object.values(entries)) {
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      typeof (value as { updated_at?: unknown }).updated_at !== "string"
+    ) {
+      throw new Error(message);
+    }
+  }
+  return parsed as StoredWorkspaceSecretIndex;
+}
+
 export function parseSecretNameFromKey(workspaceId: string, key: string): string | null {
   const prefix = buildWorkspaceSecretPrefix(workspaceId);
   if (!key.startsWith(prefix)) return null;

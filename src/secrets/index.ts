@@ -9,7 +9,10 @@ export {
   buildWorkspaceDekKey,
   buildWorkspaceSecretKey,
   buildWorkspaceSecretPrefix,
+  buildWorkspaceSecretIndexKey,
+  parseWorkspaceSecretIndex,
 } from "./kv-records";
+export type { StoredWorkspaceSecretIndex } from "./kv-records";
 export { KVWorkspaceSecretsStore } from "./kv-store";
 export { KVWorkspaceSecretsWriter } from "./kv-writer";
 

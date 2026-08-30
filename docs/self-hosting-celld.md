@@ -67,11 +67,30 @@ Only PKCS#8 keys are accepted — if your GitHub App key
 is PKCS#1 (`BEGIN RSA PRIVATE KEY`), convert it with
 `openssl pkcs8 -topk8 -nocrypt -in github-app.pem -out github-app-pkcs8.pem`.
 
-### Two celld runtime constraints the code works around
+### Three celld runtime constraints the code works around
 
-Both cost every sandbox `exec` on celld before they were found, and neither
-shows up on Cloudflare. If you touch this code, keep them in mind — nothing in
-the type system enforces either one.
+All three cost a production incident or a deployed workaround on celld before
+they were found, and none shows up on Cloudflare. If you touch this code, keep
+them in mind — nothing in the type system enforces any of them.
+
+**A KV list prefix cannot exceed 49 bytes.** celld compiles `list({ prefix })`
+into a SQL `LIKE` pattern and SQLite rejects one longer than
+`SQLITE_LIMIT_LIKE_PATTERN_LENGTH` — 49 bytes — with `LIKE or GLOB pattern too
+complex`. Each `_`, `%` or `\` costs two, because celld escapes it. Measured on
+a live v0.4.0 node: a 49-byte plain prefix lists, a 50-byte one fails, and one
+`_` moves the boundary down by exactly one.
+
+Nadi's workspace-secrets prefix was 60 bytes under that accounting, so every
+`/api/settings/sandbox` load returned 500 on celld until the secret index
+landed. Cloudflare KV has no equivalent limit, which is why nothing in CI saw
+it.
+
+The fix removed the listing rather than shortening the prefix: workspace
+secrets are enumerated from `workspaces/<id>/secret-index`, maintained on every
+write, and `src/` no longer calls `kv.list()` on the secrets path at all. A
+workspace that predates the index fails loudly with `index_missing` until
+`deploy/celld/backfill-secret-index.sh` has run — deliberately, because a
+silent empty listing is indistinguishable from a workspace with no secrets.
 
 **Outbound WebSocket upgrades must use `wss:`/`ws:`, not `https:`/`http:`.**
 workerd accepts either scheme for a client upgrade, so the shape the Cloudflare

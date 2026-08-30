@@ -95,6 +95,19 @@ the type system, and each one cost a production incident or a broken feature.
   exec URL carries `env=` for every workbench secret plus `GH_TOKEN`. Truncate
   at the first URL-ish marker rather than stripping — truncating cannot leak on
   a runtime whose phrasing we have never seen (`redactTransportError`).
+- **Do not enumerate KV with a long list prefix.** celld compiles
+  `list({ prefix })` into a SQL LIKE pattern, each `_`/`%`/`\` costing two, and
+  SQLite rejects anything past 49 bytes with "LIKE or GLOB pattern too
+  complex". Cloudflare has no such limit, so a long prefix passes CI and breaks
+  only the self-hosted deployment. Prefer an index key — one edge-cached `get`
+  instead of a central list plus N reads on BOTH platforms — as
+  `workspaces/<id>/secret-index` does. If you must list, keep the prefix inside
+  the budget and re-filter in memory.
+- **A missing index is not an empty one.** Workspace secrets fail loudly with
+  `index_missing` rather than returning `[]`, because an empty secrets store
+  looks exactly like a workspace with nothing configured. New self-hosters
+  would need the backfill wired back into the read path — see "Why there is no
+  runtime rebuild" in `docs/superpowers/plans/2026-08-30-workspace-secrets-index.md`.
 - **A platform divergence gets a named capability, not a platform check.** Add it
   to `PlatformCapabilities` in `src/edition.ts` and branch on the capability, so
   each divergence has one honest name and one place to flip. Gate SELECTION on

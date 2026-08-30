@@ -2,13 +2,14 @@ import { decrypt, encrypt, importRawKey, packB64, unpackB64 } from "./aead";
 import { SecretsError, type SecretsErrorCode } from "./errors";
 import {
   buildWorkspaceDekKey,
+  buildWorkspaceSecretIndexKey,
   buildWorkspaceSecretKey,
-  buildWorkspaceSecretPrefix,
-  parseSecretNameFromKey,
   parseWorkspaceDekRecord,
+  parseWorkspaceSecretIndex,
   parseWorkspaceSecretRecord,
   type StoredWorkspaceDek,
   type StoredWorkspaceSecret,
+  type StoredWorkspaceSecretIndex,
 } from "./kv-records";
 import { dekAad, secretAad } from "./kv-store";
 
@@ -32,6 +33,18 @@ export class KVWorkspaceSecretsWriter {
       kek_version: 1,
       created_at: new Date().toISOString(),
     };
+    // Seed the index BEFORE the DEK, not after. These are two unguarded
+    // sequential writes with no transaction, so an interleaving must be
+    // benign whichever write lands and whichever doesn't. An index with no
+    // DEK reads as an empty list (harmless) and a retry after a partial
+    // failure still takes the "no DEK yet" branch and creates one. The
+    // reverse order can strand a workspace with a DEK but no index forever:
+    // the early return below only fires once the DEK exists, so it would
+    // never get a chance to re-seed.
+    await this.putText(
+      buildWorkspaceSecretIndexKey(workspaceId),
+      JSON.stringify({ version: 1, entries: {} } satisfies StoredWorkspaceSecretIndex),
+    );
     await this.putText(key, JSON.stringify(record));
     return true;
   }
@@ -43,6 +56,9 @@ export class KVWorkspaceSecretsWriter {
     input: { updatedAt?: string } = {},
   ): Promise<void> {
     const rawDek = await this.loadWorkspaceDek(workspaceId);
+    // Probe the index BEFORE writing the value: a refused write (un-backfilled
+    // workspace, index_missing) must leave nothing behind, not just the index.
+    await this.readIndex(workspaceId);
     const dek = await importRawKey(rawDek);
     const record: StoredWorkspaceSecret = {
       ciphertext: await encrypt(dek, plaintext, secretAad(workspaceId, name)),
@@ -50,17 +66,33 @@ export class KVWorkspaceSecretsWriter {
       updated_at: input.updatedAt ?? new Date().toISOString(),
     };
     await this.putText(buildWorkspaceSecretKey(workspaceId, name), JSON.stringify(record));
+    await this.writeIndex(workspaceId, (index) => {
+      index.entries[name] = { updated_at: record.updated_at };
+    });
   }
 
   async delete(workspaceId: string, name: string): Promise<boolean> {
     const key = buildWorkspaceSecretKey(workspaceId, name);
-    if ((await this.getText(key)) === null) return false;
-    try {
-      await this.kv.delete(key);
-      return true;
-    } catch (error) {
-      return this.fail("store_error", error);
+    // Probe the index BEFORE removing the value: a refused delete
+    // (un-backfilled workspace, index_missing) must leave the ciphertext in
+    // place, not destroy it and then throw.
+    await this.readIndex(workspaceId);
+    const existed = (await this.getText(key)) !== null;
+    if (existed) {
+      try {
+        await this.kv.delete(key);
+      } catch (error) {
+        return this.fail("store_error", error);
+      }
     }
+    // Drop the index entry EVEN IF the value was already gone. A delete that
+    // crashed between the two writes leaves a name in the listing pointing at
+    // nothing; without this the UI's delete button reports "not found" and walks
+    // away, making the ghost permanent.
+    await this.writeIndex(workspaceId, (index) => {
+      delete index.entries[name];
+    });
+    return existed;
   }
 
   async getMetadata(
@@ -74,26 +106,11 @@ export class KVWorkspaceSecretsWriter {
   }
 
   async listMetadata(workspaceId: string): Promise<Array<{ name: string; updated_at: string }>> {
-    let page: KVNamespaceListResult<unknown>;
-    try {
-      page = await this.kv.list({ prefix: buildWorkspaceSecretPrefix(workspaceId) });
-    } catch (error) {
-      return this.fail("store_error", error);
-    }
+    const index = await this.readIndex(workspaceId);
+    if (index === null) return [];
 
-    const metadata = await Promise.all(
-      page.keys.map(async (key) => {
-        const name = parseSecretNameFromKey(workspaceId, key.name);
-        if (name === null) return null;
-        const raw = await this.getText(key.name);
-        if (raw === null) return null;
-        const record = parseWorkspaceSecretRecord(raw, workspaceId, name);
-        return { name, updated_at: record.updated_at };
-      }),
-    );
-
-    return metadata
-      .filter((item): item is { name: string; updated_at: string } => item !== null)
+    return Object.entries(index.entries)
+      .map(([name, entry]) => ({ name, updated_at: entry.updated_at }))
       .sort((left, right) => left.name.localeCompare(right.name));
   }
 
@@ -115,6 +132,59 @@ export class KVWorkspaceSecretsWriter {
     } catch (error) {
       return this.fail("dek_corrupt", error);
     }
+  }
+
+  /**
+   * The index, or `null` for a workspace that has never held a secret.
+   *
+   * A workspace gets its DEK and its index together on the first write, so a
+   * DEK with no index means the workspace predates the index and has NOT been
+   * backfilled. That must not read as an empty list: an empty secrets store
+   * looks exactly like a workspace with nothing configured, and a user who
+   * believes that will re-add secrets that are already there.
+   */
+  private async readIndex(workspaceId: string): Promise<StoredWorkspaceSecretIndex | null> {
+    const raw = await this.getText(buildWorkspaceSecretIndexKey(workspaceId));
+    if (raw !== null) {
+      try {
+        return parseWorkspaceSecretIndex(raw, workspaceId);
+      } catch (error) {
+        return this.fail("store_error", error);
+      }
+    }
+    if ((await this.getText(buildWorkspaceDekKey(workspaceId))) === null) return null;
+    throw new SecretsError(
+      "index_missing",
+      `workspace ${workspaceId} has secrets but no secret index — run the backfill ` +
+        `(scripts/backfill-secret-index.mjs, or deploy/celld/backfill-secret-index.sh)`,
+    );
+  }
+
+  /**
+   * Read-modify-write of the index.
+   *
+   * KV has no compare-and-swap, so two secrets written concurrently can race
+   * and lose one INDEX entry — never a value. That is not the only shape a
+   * race can take, just the common one:
+   *   - a concurrent `set(A)` and `delete(B)` can resurrect B into the index
+   *     if delete's read-modify-write loses; benign, because the read path
+   *     skips an entry with no backing value, and a later `delete(B)` clears
+   *     the ghost.
+   *   - two concurrent FIRST writes to a workspace race inside
+   *     `ensureWorkspaceDek`: both see no existing DEK, and the loser's empty
+   *     index seed can land after the winner's first `set()` and clobber that
+   *     entry.
+   * Contention here is a human in a settings form, and re-running the
+   * backfill is the repair. Do not move a high-frequency writer onto this
+   * path without revisiting that.
+   */
+  private async writeIndex(
+    workspaceId: string,
+    mutate: (index: StoredWorkspaceSecretIndex) => void,
+  ): Promise<void> {
+    const index = (await this.readIndex(workspaceId)) ?? { version: 1, entries: {} };
+    mutate(index);
+    await this.putText(buildWorkspaceSecretIndexKey(workspaceId), JSON.stringify(index));
   }
 
   private async getText(key: string): Promise<string | null> {

@@ -1,4 +1,9 @@
-export type SecretsErrorCode = "kek_unavailable" | "dek_corrupt" | "secret_corrupt" | "store_error";
+export type SecretsErrorCode =
+  | "kek_unavailable"
+  | "dek_corrupt"
+  | "secret_corrupt"
+  | "store_error"
+  | "index_missing";
 
 export class SecretsError extends Error {
   constructor(
