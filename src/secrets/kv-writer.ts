@@ -33,14 +33,19 @@ export class KVWorkspaceSecretsWriter {
       kek_version: 1,
       created_at: new Date().toISOString(),
     };
-    await this.putText(key, JSON.stringify(record));
-    // Seed an empty index alongside the DEK. Every write path calls this first,
-    // so from here on "index missing" can only mean "predates the index" —
-    // which is what lets listMetadata tell that apart from "no secrets".
+    // Seed the index BEFORE the DEK, not after. These are two unguarded
+    // sequential writes with no transaction, so an interleaving must be
+    // benign whichever write lands and whichever doesn't. An index with no
+    // DEK reads as an empty list (harmless) and a retry after a partial
+    // failure still takes the "no DEK yet" branch and creates one. The
+    // reverse order can strand a workspace with a DEK but no index forever:
+    // the early return below only fires once the DEK exists, so it would
+    // never get a chance to re-seed.
     await this.putText(
       buildWorkspaceSecretIndexKey(workspaceId),
       JSON.stringify({ version: 1, entries: {} } satisfies StoredWorkspaceSecretIndex),
     );
+    await this.putText(key, JSON.stringify(record));
     return true;
   }
 
@@ -68,6 +73,10 @@ export class KVWorkspaceSecretsWriter {
 
   async delete(workspaceId: string, name: string): Promise<boolean> {
     const key = buildWorkspaceSecretKey(workspaceId, name);
+    // Probe the index BEFORE removing the value: a refused delete
+    // (un-backfilled workspace, index_missing) must leave the ciphertext in
+    // place, not destroy it and then throw.
+    await this.readIndex(workspaceId);
     const existed = (await this.getText(key)) !== null;
     if (existed) {
       try {
@@ -154,10 +163,20 @@ export class KVWorkspaceSecretsWriter {
   /**
    * Read-modify-write of the index.
    *
-   * KV has no compare-and-swap, so two secrets written concurrently can race and
-   * lose one INDEX entry — never a value. Contention here is a human in a
-   * settings form, and re-running the backfill is the repair. Do not move a
-   * high-frequency writer onto this path without revisiting that.
+   * KV has no compare-and-swap, so two secrets written concurrently can race
+   * and lose one INDEX entry — never a value. That is not the only shape a
+   * race can take, just the common one:
+   *   - a concurrent `set(A)` and `delete(B)` can resurrect B into the index
+   *     if delete's read-modify-write loses; benign, because the read path
+   *     skips an entry with no backing value, and a later `delete(B)` clears
+   *     the ghost.
+   *   - two concurrent FIRST writes to a workspace race inside
+   *     `ensureWorkspaceDek`: both see no existing DEK, and the loser's empty
+   *     index seed can land after the winner's first `set()` and clobber that
+   *     entry.
+   * Contention here is a human in a settings form, and re-running the
+   * backfill is the repair. Do not move a high-frequency writer onto this
+   * path without revisiting that.
    */
   private async writeIndex(
     workspaceId: string,

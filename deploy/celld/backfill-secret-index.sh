@@ -38,19 +38,26 @@ if ! all_keys=$(kv list nadi-secrets --prefix "workspaces/" --all); then
 fi
 
 keys=$(printf '%s\n' "$all_keys" | grep '/secrets/' || true)
-if [ -z "$keys" ]; then
+# A workspace with a DEK but zero secret keys (its last secret got deleted)
+# never shows up in $keys, but it still needs an index — a DEK with no index
+# reads as "predates the index" and index_missing throws forever, with no
+# runtime repair path. The DEK listing is already in hand from $all_keys.
+dek_workspaces=$(printf '%s\n' "$all_keys" | grep -E '^workspaces/[^/]+/dek$' | sed -E 's#^workspaces/([^/]+)/dek$#\1#' | sort -u || true)
+
+if [ -z "$keys" ] && [ -z "$dek_workspaces" ]; then
   echo "no secret keys found — nothing to backfill"
   exit 0
 fi
 
-workspaces=$(printf '%s\n' "$keys" | sed -E 's#^workspaces/([^/]+)/secrets/.*#\1#' | sort -u)
+secret_workspaces=$(printf '%s\n' "$keys" | sed -E 's#^workspaces/([^/]+)/secrets/.*#\1#' | sort -u || true)
+workspaces=$(printf '%s\n%s\n' "$secret_workspaces" "$dek_workspaces" | sed '/^$/d' | sort -u)
 for ws in $workspaces; do
   entries=""
   while IFS= read -r key; do
     name=${key#workspaces/$ws/secrets/}
     updated=$(kv get nadi-secrets "$key" | python3 -c 'import json,sys; print(json.load(sys.stdin)["updated_at"])')
     entries="$entries$(printf '%s\t%s\n' "$name" "$updated")"$'\n'
-  done < <(printf '%s\n' "$keys" | grep "^workspaces/$ws/secrets/")
+  done < <(printf '%s\n' "$keys" | grep "^workspaces/$ws/secrets/" || true)
 
   index=$(printf '%s' "$entries" | python3 -c '
 import json,sys

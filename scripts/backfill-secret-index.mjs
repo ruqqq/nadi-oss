@@ -33,17 +33,37 @@ export function validatedUpdatedAt(record) {
 function main() {
   const keys = JSON.parse(wrangler("key", "list", "--prefix", "workspaces/")).map((k) => k.name);
   const secretKeys = keys.filter((k) => k.includes("/secrets/"));
-  if (secretKeys.length === 0) {
+  // A workspace with a DEK but zero secret keys (e.g. its last secret was
+  // deleted) never shows up in secretKeys, but it still needs an index — a
+  // DEK with no index reads as "predates the index" and index_missing throws
+  // forever, with no runtime repair path. The dek listing is already in hand
+  // from the same `workspaces/` scan; this only changes how it is grouped.
+  const dekWorkspaceIds = new Set();
+  for (const key of keys) {
+    const [, workspaceId] = key.match(/^workspaces\/([^/]+)\/dek$/) ?? [];
+    if (workspaceId) dekWorkspaceIds.add(workspaceId);
+  }
+
+  if (secretKeys.length === 0 && dekWorkspaceIds.size === 0) {
     console.log("no secret keys found — nothing to backfill");
     process.exit(0);
   }
 
   const byWorkspace = new Map();
   for (const key of secretKeys) {
-    const [, workspaceId, name] = key.match(/^workspaces\/([^/]+)\/secrets\/(.+)$/) ?? [];
-    if (!workspaceId) continue;
+    const match = key.match(/^workspaces\/([^/]+)\/secrets\/([\s\S]+)$/);
+    if (!match) {
+      console.error(`error: key ${key} looks like a secret key but does not parse — aborting`);
+      process.exit(1);
+    }
+    const [, workspaceId, name] = match;
     if (!byWorkspace.has(workspaceId)) byWorkspace.set(workspaceId, []);
     byWorkspace.get(workspaceId).push({ key, name });
+  }
+
+  // Every DEK-only workspace (no secrets at all) still needs an empty index.
+  for (const workspaceId of dekWorkspaceIds) {
+    if (!byWorkspace.has(workspaceId)) byWorkspace.set(workspaceId, []);
   }
 
   let anyFailed = false;

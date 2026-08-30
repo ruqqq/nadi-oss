@@ -187,6 +187,15 @@ describe("workspace secret listing without a KV prefix scan", () => {
     await expect(writerFor(kv).listMetadata(ws)).resolves.toEqual([]);
   });
 
+  it("lists [] right after ensureWorkspaceDek alone, with no set() ever called", async () => {
+    const kv = new MemoryKV();
+    const writer = writerFor(kv);
+
+    await expect(writer.ensureWorkspaceDek(ws)).resolves.toBe(true);
+
+    await expect(writer.listMetadata(ws)).resolves.toEqual([]);
+  });
+
   it("fails loudly when a workspace has a DEK but no index", async () => {
     const kv = new MemoryKV();
     const writer = writerFor(kv);
