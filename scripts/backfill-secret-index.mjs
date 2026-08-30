@@ -21,30 +21,58 @@ const wrangler = (...rest) =>
     maxBuffer: 64 * 1024 * 1024,
   });
 
-const keys = JSON.parse(wrangler("key", "list", "--prefix", "workspaces/")).map((k) => k.name);
-const secretKeys = keys.filter((k) => k.includes("/secrets/"));
-if (secretKeys.length === 0) {
-  console.log("no secret keys found — nothing to backfill");
-  process.exit(0);
+// A missing/invalid updated_at must never silently become {} — that entry
+// fails parseWorkspaceSecretIndex on read and takes out the whole workspace's
+// index. Mirrors the celld script's Python KeyError, which aborts loudly on
+// the same input rather than filling in a fabricated timestamp.
+export function validatedUpdatedAt(record) {
+  const value = record?.updated_at;
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-const byWorkspace = new Map();
-for (const key of secretKeys) {
-  const [, workspaceId, name] = key.match(/^workspaces\/([^/]+)\/secrets\/(.+)$/) ?? [];
-  if (!workspaceId) continue;
-  if (!byWorkspace.has(workspaceId)) byWorkspace.set(workspaceId, []);
-  byWorkspace.get(workspaceId).push({ key, name });
-}
-
-for (const [workspaceId, secrets] of byWorkspace) {
-  const entries = {};
-  for (const { key, name } of secrets) {
-    // updated_at is plaintext beside the ciphertext, so no KEK is needed here.
-    const record = JSON.parse(wrangler("key", "get", key));
-    entries[name] = { updated_at: record.updated_at };
+function main() {
+  const keys = JSON.parse(wrangler("key", "list", "--prefix", "workspaces/")).map((k) => k.name);
+  const secretKeys = keys.filter((k) => k.includes("/secrets/"));
+  if (secretKeys.length === 0) {
+    console.log("no secret keys found — nothing to backfill");
+    process.exit(0);
   }
-  const indexKey = `workspaces/${workspaceId}/secret-index`;
-  wrangler("key", "put", indexKey, JSON.stringify({ version: 1, entries }));
-  console.log(`${workspaceId}: ${Object.keys(entries).length} secrets indexed`);
+
+  const byWorkspace = new Map();
+  for (const key of secretKeys) {
+    const [, workspaceId, name] = key.match(/^workspaces\/([^/]+)\/secrets\/(.+)$/) ?? [];
+    if (!workspaceId) continue;
+    if (!byWorkspace.has(workspaceId)) byWorkspace.set(workspaceId, []);
+    byWorkspace.get(workspaceId).push({ key, name });
+  }
+
+  let anyFailed = false;
+  for (const [workspaceId, secrets] of byWorkspace) {
+    const entries = {};
+    let workspaceFailed = false;
+    for (const { key, name } of secrets) {
+      // updated_at is plaintext beside the ciphertext, so no KEK is needed here.
+      const record = JSON.parse(wrangler("key", "get", key));
+      const updatedAt = validatedUpdatedAt(record);
+      if (updatedAt === null) {
+        console.error(
+          `error: workspace ${workspaceId} key ${key} has no valid updated_at — refusing to write an index for this workspace`,
+        );
+        workspaceFailed = true;
+        anyFailed = true;
+        break;
+      }
+      entries[name] = { updated_at: updatedAt };
+    }
+    if (workspaceFailed) continue;
+    const indexKey = `workspaces/${workspaceId}/secret-index`;
+    wrangler("key", "put", indexKey, JSON.stringify({ version: 1, entries }));
+    console.log(`${workspaceId}: ${Object.keys(entries).length} secrets indexed`);
+  }
+  console.log("backfill complete");
+  if (anyFailed) process.exit(1);
 }
-console.log("backfill complete");
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main();
+}

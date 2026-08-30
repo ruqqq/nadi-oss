@@ -20,7 +20,14 @@ kv() {
     | grep -v "INFO object_store"
 }
 
-keys=$(kv list nadi-secrets --prefix "workspaces/" --all | grep '/secrets/' || true)
+# Capture the list call's own exit status before filtering, so a docker/minio
+# failure (which also yields empty stdout) is not mistaken for "no keys".
+if ! all_keys=$(kv list nadi-secrets --prefix "workspaces/" --all); then
+  echo "error: celld kv list failed — aborting without writing an index" >&2
+  exit 1
+fi
+
+keys=$(printf '%s\n' "$all_keys" | grep '/secrets/' || true)
 if [ -z "$keys" ]; then
   echo "no secret keys found — nothing to backfill"
   exit 0
