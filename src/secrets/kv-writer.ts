@@ -51,6 +51,9 @@ export class KVWorkspaceSecretsWriter {
     input: { updatedAt?: string } = {},
   ): Promise<void> {
     const rawDek = await this.loadWorkspaceDek(workspaceId);
+    // Probe the index BEFORE writing the value: a refused write (un-backfilled
+    // workspace, index_missing) must leave nothing behind, not just the index.
+    await this.readIndex(workspaceId);
     const dek = await importRawKey(rawDek);
     const record: StoredWorkspaceSecret = {
       ciphertext: await encrypt(dek, plaintext, secretAad(workspaceId, name)),

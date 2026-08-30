@@ -211,8 +211,9 @@ describe("workspace secret listing without a KV prefix scan", () => {
     kv.values.delete(buildWorkspaceSecretIndexKey(ws));
 
     await expect(writer.set(ws, "NEW", "v")).rejects.toMatchObject({ code: "index_missing" });
-    // And the pre-existing secret is untouched.
+    // And the pre-existing secret is untouched, and the refused write left nothing behind.
     expect(kv.values.has(buildWorkspaceSecretKey(ws, "OLD"))).toBe(true);
+    expect(kv.values.has(buildWorkspaceSecretKey(ws, "NEW"))).toBe(false);
   });
 
   it("drops a deleted secret from the listing", async () => {
