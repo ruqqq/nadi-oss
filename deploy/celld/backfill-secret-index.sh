@@ -15,9 +15,19 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 kv() {
-  docker compose run --rm --entrypoint celld migrate kv "$@" \
-    --bucket s3://celld-fleet --endpoint http://minio:9000 2>/dev/null \
-    | grep -v "INFO object_store"
+  # Capture docker's own exit status before any pipe — piping straight into
+  # `grep -v` would make the function's exit status grep's (1 when the
+  # filter drops every line, indistinguishable from a genuine docker/minio
+  # failure). A successful-but-empty listing must return 0.
+  local out status
+  out=$(docker compose run --rm --entrypoint celld migrate kv "$@" \
+    --bucket s3://celld-fleet --endpoint http://minio:9000 2>/dev/null)
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    return "$status"
+  fi
+  printf '%s\n' "$out" | grep -v "INFO object_store" || true
+  return 0
 }
 
 # Capture the list call's own exit status before filtering, so a docker/minio
