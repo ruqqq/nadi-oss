@@ -5,7 +5,7 @@
  *  1. The wire shape is NOT `BootstrapData`. `bootstrap-api.ts` reads a nested
  *     `session: {authenticated, user}` and derives `voiceEnabled`/`workersAiEnabled`
  *     from `features: {voiceInput, workersAi, feedbackAdmin, backgroundWork,
- *     workbenchNetworkAllowlist}`. `backgroundWork` is workspace-effective.
+ *     agentNetworkAllowlist}`. `backgroundWork` is workspace-effective.
  *     Send the flat interface and the
  *     app renders signed-out.
  *  2. This endpoint doubles as the app's reachability probe. Without it the
@@ -46,7 +46,7 @@ export const bootstrapHandlers = [
         workersAi: false,
         feedbackAdmin: store.features.feedbackAdmin,
         backgroundWork: store.features.backgroundWork,
-        workbenchNetworkAllowlist: store.features.workbenchNetworkAllowlist,
+        agentNetworkAllowlist: store.features.agentNetworkAllowlist,
       },
     });
   }),

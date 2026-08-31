@@ -35,7 +35,7 @@ import {
 } from "../../src/automata/fire-due";
 import { computeNextDueAt, parseSchedule } from "../../src/automata/schedule";
 import { AutomatonRepository } from "../../src/db/repositories/automata";
-import { WorkbenchRepository } from "../../src/db/repositories/workbenches";
+import { AgentRepository } from "../../src/db/repositories/agents";
 import { log } from "../../src/log";
 
 const WORKSPACE_ID = "ws_sched";
@@ -70,7 +70,7 @@ type AutomatonInput = {
   id: string;
   nextDueAt: number | null;
   projectId?: string | null;
-  workbenchId?: string | null;
+  agentId?: string | null;
   scheduleJson?: string;
   timezone?: string;
   enabled?: boolean;
@@ -86,9 +86,9 @@ function prepareAutomaton(input: AutomatonInput, now = Date.now()) {
     input.id,
     WORKSPACE_ID,
     USER_ID,
-    // The agent IS the environment: a `workbenchId` on the input names the
+    // The agent IS the environment: an `agentId` on the input names the
     // agent this automaton's runs execute as.
-    input.workbenchId ?? AGENT_ID,
+    input.agentId ?? AGENT_ID,
     input.projectId ?? null,
     "Test Automaton",
     "Do the thing.",
@@ -104,7 +104,7 @@ function prepareAutomaton(input: AutomatonInput, now = Date.now()) {
   );
 }
 
-async function insertWorkbench(input: {
+async function insertAgentRow(input: {
   id: string;
   name: string;
   createdAt: number;
@@ -129,9 +129,9 @@ async function insertWorkbench(input: {
     });
 }
 
-async function insertProjectWithDefaultWorkbench(input: {
+async function insertProjectWithDefaultAgent(input: {
   id: string;
-  defaultWorkbenchId: string | null;
+  defaultAgentId: string | null;
   createdAt: number;
 }) {
   await db().insert(schema.projects).values({
@@ -140,7 +140,7 @@ async function insertProjectWithDefaultWorkbench(input: {
     name: "Test Project",
     description: "",
     customInstructions: "",
-    defaultAgentId: input.defaultWorkbenchId,
+    defaultAgentId: input.defaultAgentId,
     archivedAt: null,
     createdAt: input.createdAt,
     updatedAt: input.createdAt,
@@ -600,19 +600,19 @@ describe("fireDueAutomata (real D1 + real DO dispatch)", () => {
     expect(thread?.modelInputModalities).toBe('["text","image"]');
   });
 
-  // The two "degrades to no workbench" cases these replace tested a fallback
+  // The two "degrades to no agent" cases these replace tested a fallback
   // that no longer has anything to fall back TO: `automata.agent_id` is NOT
   // NULL and it IS the environment. The behaviour that matters now is that the
   // automaton's own agent is authoritative — an unattended run must not be
   // silently moved onto another agent's repositories and secrets.
   it("runs as the automaton's own agent even after that agent is archived", async () => {
     const now = Date.now();
-    await insertWorkbench({
+    await insertAgentRow({
       id: "wb_archived_explicit",
       name: "Archived Explicit",
       createdAt: now,
     });
-    await new WorkbenchRepository(db()).archive("wb_archived_explicit", now + 1);
+    await new AgentRepository(db()).archive("wb_archived_explicit", now + 1);
 
     const warnSpy = vi.spyOn(log, "warn").mockImplementation(() => {});
 
@@ -621,7 +621,7 @@ describe("fireDueAutomata (real D1 + real DO dispatch)", () => {
       id: "auto_stale_explicit_wb",
       nextDueAt: dueAt,
       projectId: null,
-      workbenchId: "wb_archived_explicit",
+      agentId: "wb_archived_explicit",
     });
 
     const result = await fireDueAutomata(env, dueAt + 1000);
@@ -634,16 +634,16 @@ describe("fireDueAutomata (real D1 + real DO dispatch)", () => {
     const thread = await getThread(runs[0]?.threadId as string);
     expect(thread?.agentId).toBe("wb_archived_explicit");
     // Nothing was dropped, so nothing is logged as dropped.
-    expect(warnSpy).not.toHaveBeenCalledWith("automata.workbench_dropped", expect.anything());
+    expect(warnSpy).not.toHaveBeenCalledWith("automata.agent_dropped", expect.anything());
   });
 
   it("does NOT adopt the project's default agent over the automaton's own", async () => {
     const now = Date.now();
-    await insertWorkbench({ id: "wb_project_default", name: "Project Default", createdAt: now });
-    await insertWorkbench({ id: "wb_automaton_own", name: "Automaton Own", createdAt: now });
-    await insertProjectWithDefaultWorkbench({
+    await insertAgentRow({ id: "wb_project_default", name: "Project Default", createdAt: now });
+    await insertAgentRow({ id: "wb_automaton_own", name: "Automaton Own", createdAt: now });
+    await insertProjectWithDefaultAgent({
       id: "proj_default_ignored",
-      defaultWorkbenchId: "wb_project_default",
+      defaultAgentId: "wb_project_default",
       createdAt: now,
     });
 
@@ -652,7 +652,7 @@ describe("fireDueAutomata (real D1 + real DO dispatch)", () => {
       id: "auto_own_agent_wins",
       nextDueAt: dueAt,
       projectId: "proj_default_ignored",
-      workbenchId: "wb_automaton_own",
+      agentId: "wb_automaton_own",
     });
 
     expect(await fireDueAutomata(env, dueAt + 1000)).toEqual({ fired: 1, skipped: 0 });

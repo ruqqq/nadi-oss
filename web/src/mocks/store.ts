@@ -27,7 +27,7 @@ import type { Skill } from "../skills-api";
 import type { ThreadSummary } from "../threads-api";
 import type { VoiceSettingsResponse } from "../voice-settings-api";
 import type { UserPreferences } from "../user-preferences-api";
-import type { WorkbenchSummary } from "../workbenches-api";
+import type { AgentSummary } from "../agents-api";
 import { SCENARIOS } from "./scenarios";
 
 /**
@@ -88,7 +88,7 @@ export interface MockStore {
   settings: AgentSettingsResponse | null;
   threads: ThreadSummary[];
   projects: ProjectSummary[];
-  workbenches: WorkbenchSummary[];
+  agents: AgentSummary[];
   automata: AutomatonSummary[];
   skills: Skill[];
   memories: Memory[];
@@ -113,7 +113,7 @@ export interface MockStore {
     feedbackAdmin: boolean;
     /** Workspace-effective background work capability returned by bootstrap. */
     backgroundWork: boolean;
-    workbenchNetworkAllowlist: boolean;
+    agentNetworkAllowlist: boolean;
   };
   feedback: {
     thread: ThreadSummary | null;

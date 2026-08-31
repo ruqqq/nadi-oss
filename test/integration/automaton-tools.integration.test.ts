@@ -155,7 +155,7 @@ describe("automaton management tools (integration)", () => {
     expect(result.error).toContain("Not/A_Zone");
   });
 
-  async function seedWorkbench(workspaceId: string, id: string, name: string, description: string) {
+  async function seedAgentRow(workspaceId: string, id: string, name: string, description: string) {
     await db().insert(schema.agents).values({
       id,
       workspaceId,
@@ -173,18 +173,18 @@ describe("automaton management tools (integration)", () => {
     });
   }
 
-  it("list_workbenches returns the workspace's active agents", async () => {
+  it("list_agents returns the workspace's active agents", async () => {
     const seeded = await seed();
-    await seedWorkbench(seeded.workspaceId, "wbk_tools", "Backend", "the backend bench");
+    await seedAgentRow(seeded.workspaceId, "wbk_tools", "Backend", "the backend bench");
     const tools = createAutomatonManagementTools({ env: env as never, threadId });
 
-    const result = (await run(tools.list_workbenches, {})) as {
+    const result = (await run(tools.list_agents, {})) as {
       ok: boolean;
-      workbenches: { id: string; name: string; description: string }[];
+      agents: { id: string; name: string; description: string }[];
     };
 
     expect(result.ok).toBe(true);
-    expect(result.workbenches).toContainEqual({
+    expect(result.agents).toContainEqual({
       id: "wbk_tools",
       name: "Backend",
       description: "the backend bench",
@@ -193,7 +193,7 @@ describe("automaton management tools (integration)", () => {
 
   it("create_automaton persists an agent override", async () => {
     const seeded = await seed();
-    await seedWorkbench(seeded.workspaceId, "wbk_override", "Override", "");
+    await seedAgentRow(seeded.workspaceId, "wbk_override", "Override", "");
     const tools = createAutomatonManagementTools({ env: env as never, threadId });
 
     const result = (await run(tools.create_automaton, {
@@ -201,7 +201,7 @@ describe("automaton management tools (integration)", () => {
       prompt: "go",
       timezone: "UTC",
       schedule: { kind: "daily", hour: 8, minute: 0 },
-      workbenchId: "wbk_override",
+      agentId: "wbk_override",
     })) as { ok: boolean; automaton: { id: string } };
 
     expect(result.ok).toBe(true);

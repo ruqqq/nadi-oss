@@ -262,7 +262,7 @@ export interface ThreadComputeServiceDeps {
   config: EffectiveComputeConfig;
   environmentId: string;
   /** The owning thread's id, for retention-decision logging only — never used
-   *  for compute addressing (that's `environmentId`, a workbench identifier). */
+   *  for compute addressing (that's `environmentId`, a resource-profile identifier). */
   threadId?: string;
   env: Record<string, string>;
   /**
@@ -270,7 +270,7 @@ export interface ThreadComputeServiceDeps {
    * (Worker `Env.APP_BASE_URL`) and the Worker secret that callback's token
    * is HMAC-signed with (`Env.BETTER_AUTH_SECRET`, via
    * `deriveCompletionSecret`). Deliberately NOT part of `env` above — that is
-   * the SANDBOX's own exec environment (workbench vars, the minted
+   * the SANDBOX's own exec environment (agent env vars, the minted
    * `GH_TOKEN`), a completely different scope despite the similarly-named
    * field.
    *
@@ -2097,7 +2097,7 @@ export class ThreadComputeService {
     };
     // `no_repo` with NO files is genuinely nothing to lose, and it is the same
     // state `confirmWorkSaved` accepts and sets the bit on — the two deciders
-    // have to agree or a workbench-less thread that ran one `exec` (a bare
+    // have to agree or a repo-less thread that ran one `exec` (a bare
     // command leaves /workspace empty, and a chat thread never calls
     // `confirm_work_saved`) keeps a 24h recovery snapshot forever.
     // `no_repo` WITH files still preserves: unversioned work is still work.
@@ -2428,18 +2428,17 @@ export class ThreadComputeService {
 
   /**
    * Widened form of {@link isComputeLive} that also counts `acquiring`, for the
-   * workbench-switch decision only.
+   * agent-retarget decision only.
    *
    * `isComputeLive` is deliberately NOT widened: its other callers are eviction
    * backstops that read `!isComputeLive()` as "compute is gone, clear the
    * coding-task state". A wedged `acquiring` row must keep clearing there.
    *
-   * The switch decision needs the opposite bias. A Daytona acquire takes
-   * seconds to a minute; a switch landing inside that window would take the
-   * immediate path, moving the snapshot to the new workbench while the
-   * container that is still coming up gets cloned from the OLD one — with no
-   * marker set, nothing ever tears it down or re-clones. Deferring instead
-   * costs at worst one redundant save-work prompt.
+   * The retarget decision needs the opposite bias. A Daytona acquire takes
+   * seconds to a minute; a retarget landing inside that window would come up
+   * cloned from the OLD agent's repositories while the container that is still
+   * coming up finishes acquiring — with no marker set, nothing ever tears it
+   * down or re-clones.
    */
   async isComputeLiveOrAcquiring(): Promise<boolean> {
     return (

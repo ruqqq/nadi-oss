@@ -125,13 +125,13 @@ import {
   moveThreadToProject,
   renameThread,
   setThreadRecentDismissed,
-  switchThreadWorkbench,
+  switchThreadAgent as switchThreadWorkbench,
   updateThreadReasoningEffort,
   type ThreadSummary,
   fetchArchivedSummaries,
 } from "./threads-api";
 import { createProject, listProjects, type ProjectSummary } from "./projects-api";
-import { listWorkbenches, type WorkbenchSummary } from "./workbenches-api";
+import { listAgents as listWorkbenches, type AgentSummary as WorkbenchSummary } from "./agents-api";
 import {
   getBrowserNotifications,
   saveBrowserPushSubscription,
@@ -1470,7 +1470,7 @@ export function ChatApp({
   onSignOut,
   voiceEnabled,
   backgroundWorkEnabled,
-  workbenchNetworkAllowlistEnabled = false,
+  agentNetworkAllowlistEnabled = false,
   feedbackAdminEnabled = false,
   threadChat,
 }: {
@@ -1483,7 +1483,7 @@ export function ChatApp({
   onSignOut: () => void;
   voiceEnabled: boolean;
   backgroundWorkEnabled: boolean;
-  workbenchNetworkAllowlistEnabled?: boolean;
+  agentNetworkAllowlistEnabled?: boolean;
   feedbackAdminEnabled?: boolean;
   threadChat?: ThreadChatImpl;
 }) {
@@ -2441,7 +2441,7 @@ export function ChatApp({
         reasoningEffort: newChatReasoningEffort,
         modelSupportsReasoning: newChatModelSupportsReasoning,
         ...(selectedProjectId ? { projectId: selectedProjectId } : {}),
-        ...(selectedWorkbenchId ? { workbenchId: selectedWorkbenchId } : {}),
+        ...(selectedWorkbenchId ? { agentId: selectedWorkbenchId } : {}),
       })
         .then((thread) => {
           setThreads((current) => mergeThreadsExcluding(current, [thread], excludedThreadIds()));
@@ -3244,7 +3244,7 @@ export function ChatApp({
                 <Settings
                   consentWorkspaceId={consentWorkspaceId}
                   voiceEnabled={voiceEnabled}
-                  workbenchNetworkAllowlistEnabled={workbenchNetworkAllowlistEnabled}
+                  agentNetworkAllowlistEnabled={agentNetworkAllowlistEnabled}
                   tab={parseSettingsTab(routePath)}
                   onTabChange={selectSettingsTab}
                   routePath={routePath}
@@ -5841,8 +5841,8 @@ export default function App({
   const [backgroundWorkEnabled, setBackgroundWorkEnabled] = useState(
     cachedBootstrap?.backgroundWorkEnabled ?? false,
   );
-  const [workbenchNetworkAllowlistEnabled, setWorkbenchNetworkAllowlistEnabled] = useState(
-    cachedBootstrap?.workbenchNetworkAllowlistEnabled ?? false,
+  const [agentNetworkAllowlistEnabled, setAgentNetworkAllowlistEnabled] = useState(
+    cachedBootstrap?.agentNetworkAllowlistEnabled ?? false,
   );
   const [workersAiEnabled, setWorkersAiEnabled] = useState(
     cachedBootstrap?.workersAiEnabled ?? false,
@@ -5915,7 +5915,7 @@ export default function App({
           setAppName(data.appName);
           setVoiceEnabled(data.voiceEnabled);
           setBackgroundWorkEnabled(data.backgroundWorkEnabled);
-          setWorkbenchNetworkAllowlistEnabled(data.workbenchNetworkAllowlistEnabled);
+          setAgentNetworkAllowlistEnabled(data.agentNetworkAllowlistEnabled);
           setWorkersAiEnabled(data.workersAiEnabled);
           setFeedbackAdminEnabled(data.feedbackAdminEnabled);
           setOnboarding(computeOnboarding(data.settings, data.threads));
@@ -5951,7 +5951,7 @@ export default function App({
           setBootstrapProjects([]);
           setBootstrapThreads([]);
           setBackgroundWorkEnabled(false);
-          setWorkbenchNetworkAllowlistEnabled(false);
+          setAgentNetworkAllowlistEnabled(false);
           setFeedbackAdminEnabled(false);
           setOnboarding({ status: "done" });
           setConsentWorkspaceId(null);
@@ -6080,7 +6080,7 @@ export default function App({
       setBootstrapProjects([]);
       setBootstrapThreads([]);
       setBackgroundWorkEnabled(false);
-      setWorkbenchNetworkAllowlistEnabled(false);
+      setAgentNetworkAllowlistEnabled(false);
       setFeedbackAdminEnabled(false);
       setSession({ authenticated: false });
     });
@@ -6187,7 +6187,7 @@ export default function App({
           initialThreadsNextCursor={bootstrapThreadsNextCursor}
           voiceEnabled={voiceEnabled}
           backgroundWorkEnabled={backgroundWorkEnabled}
-          workbenchNetworkAllowlistEnabled={workbenchNetworkAllowlistEnabled}
+          agentNetworkAllowlistEnabled={agentNetworkAllowlistEnabled}
           feedbackAdminEnabled={feedbackAdminEnabled}
           onActiveWorkspaceChange={setConsentWorkspaceId}
           onSignOut={handleSignOut}

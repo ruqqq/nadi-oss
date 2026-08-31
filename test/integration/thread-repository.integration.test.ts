@@ -2,7 +2,7 @@ import { env } from "cloudflare:test";
 import { eq } from "drizzle-orm";
 import { drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { WorkbenchRepository } from "../../src/db/repositories/workbenches";
+import { AgentRepository } from "../../src/db/repositories/agents";
 import { ProjectRepository } from "../../src/db/repositories/projects";
 import * as schema from "../../src/db/schema";
 import { ThreadRepository } from "../../src/db/repositories/threads";
@@ -72,7 +72,7 @@ async function seedProject(
 async function seedEnvironment(
   db: TestDb,
   input: {
-    workbenchId: string;
+    agentId: string;
     workspaceId: string;
     name?: string;
     setupScript?: string;
@@ -80,10 +80,10 @@ async function seedEnvironment(
     createdAt: number;
   },
 ) {
-  await new WorkbenchRepository(db).create({
-    id: input.workbenchId,
+  await new AgentRepository(db).create({
+    id: input.agentId,
     workspaceId: input.workspaceId,
-    name: input.name ?? input.workbenchId,
+    name: input.name ?? input.agentId,
     // An environment IS an agent now, so seeding one means seeding the columns
     // `agents` requires.
     systemPrompt: "You are Nadi.",
@@ -98,8 +98,8 @@ async function seedEnvironment(
   });
 }
 
-// Workbench repositories are self-contained (no workspace-level catalog): tests
-// record intended repo config by id, then assign it directly to a workbench.
+// Agent repositories are self-contained (no workspace-level catalog): tests
+// record intended repo config by id, then assign it directly to an agent.
 type SeededRepoConfig = {
   name: string;
   url: string;
@@ -140,24 +140,21 @@ async function seedWorkspaceRepository(
 async function assignRepositoriesToEnvironment(
   db: TestDb,
   input: {
-    workbenchId: string;
+    agentId: string;
     workspaceId: string;
     repositoryIds: string[];
     createdAt: number;
   },
 ) {
-  // Insert workbench_repositories rows directly with id = repositoryId so the
+  // Insert agent_repositories rows directly with id = repositoryId so the
   // resulting snapshot ids stay deterministic (`${threadId}:${repositoryId}`).
-  await new WorkbenchRepository(db).assertActiveWorkbenchInWorkspace(
-    input.workbenchId,
-    input.workspaceId,
-  );
+  await new AgentRepository(db).assertActiveAgentInWorkspace(input.agentId, input.workspaceId);
   for (const repositoryId of input.repositoryIds) {
     const config = seededRepoConfigs.get(repositoryId);
     if (!config) throw new Error(`unknown seeded repo config: ${repositoryId}`);
     await db.insert(schema.agentRepositories).values({
       id: repositoryId,
-      agentId: input.workbenchId,
+      agentId: input.agentId,
       source: "url",
       name: config.name,
       url: config.url,
@@ -209,7 +206,7 @@ describe("ThreadRepository", () => {
     expect(row).toMatchObject({ title: "Renamed", titleSet: true, updatedAt: 1_800_000_000_123 });
   });
 
-  it("createWithWorkbench with null leaves the thread unassigned", async () => {
+  it("createWithAgent with null leaves the thread unassigned", async () => {
     const createdAt = 1_800_000_000_200;
     await seedWorkspace(env.REGISTRY_DB, { workspaceId: "workspace-a", createdAt });
     await seedAgent(env.REGISTRY_DB, {
@@ -220,7 +217,7 @@ describe("ThreadRepository", () => {
     const db = drizzle(env.REGISTRY_DB, { schema });
     const repo = new ThreadRepository(db);
 
-    const created = await repo.createWithWorkbench(
+    const created = await repo.createWithAgent(
       {
         id: "thr_unassigned",
         workspaceId: "workspace-a",
@@ -250,7 +247,7 @@ describe("ThreadRepository", () => {
     );
   });
 
-  it("createWithWorkbench with an environment persists the assignment", async () => {
+  it("createWithAgent with an environment persists the assignment", async () => {
     const createdAt = 1_800_000_000_300;
     await seedWorkspace(env.REGISTRY_DB, { workspaceId: "workspace-a", createdAt });
     await seedAgent(env.REGISTRY_DB, {
@@ -259,20 +256,20 @@ describe("ThreadRepository", () => {
       createdAt,
     });
     const db = drizzle(env.REGISTRY_DB, { schema });
-    await seedEnvironment(db, { workbenchId: "env-a", workspaceId: "workspace-a", createdAt });
+    await seedEnvironment(db, { agentId: "env-a", workspaceId: "workspace-a", createdAt });
     await seedWorkspaceRepository(db, {
       repositoryId: "repo-a",
       workspaceId: "workspace-a",
       createdAt,
     });
     await assignRepositoriesToEnvironment(db, {
-      workbenchId: "env-a",
+      agentId: "env-a",
       workspaceId: "workspace-a",
       repositoryIds: ["repo-a"],
       createdAt,
     });
 
-    await new ThreadRepository(runTransactionsInline(db)).createWithWorkbench(
+    await new ThreadRepository(runTransactionsInline(db)).createWithAgent(
       {
         id: "thr_env_a",
         workspaceId: "workspace-a",
@@ -298,7 +295,7 @@ describe("ThreadRepository", () => {
     );
     // The environment's repositories are read LIVE at use time; nothing is
     // copied onto the thread.
-    await expect(new WorkbenchRepository(db).listRepositories("env-a")).resolves.toEqual([
+    await expect(new AgentRepository(db).listRepositories("env-a")).resolves.toEqual([
       expect.objectContaining({ id: "repo-a", agentId: "env-a" }),
     ]);
   });
@@ -313,19 +310,19 @@ describe("ThreadRepository", () => {
     });
     const db = drizzle(env.REGISTRY_DB, { schema });
     await seedProject(db, { projectId: "project-a", workspaceId: "workspace-a", createdAt });
-    await seedEnvironment(db, { workbenchId: "env-a", workspaceId: "workspace-a", createdAt });
+    await seedEnvironment(db, { agentId: "env-a", workspaceId: "workspace-a", createdAt });
     await seedWorkspaceRepository(db, {
       repositoryId: "repo-a",
       workspaceId: "workspace-a",
       createdAt,
     });
     await assignRepositoriesToEnvironment(db, {
-      workbenchId: "env-a",
+      agentId: "env-a",
       workspaceId: "workspace-a",
       repositoryIds: ["repo-a"],
       createdAt,
     });
-    await new ThreadRepository(runTransactionsInline(db)).createWithWorkbench(
+    await new ThreadRepository(runTransactionsInline(db)).createWithAgent(
       {
         id: "thr_summary",
         workspaceId: "workspace-a",
@@ -354,7 +351,7 @@ describe("ThreadRepository", () => {
         id: "thr_summary",
         projectId: "project-a",
         projectName: "project-a",
-        repositorySnapshotCount: 1,
+        repositoryCount: 1,
       }),
     );
   });
@@ -378,7 +375,7 @@ describe("ThreadRepository", () => {
         id: "thr_unassigned_summary",
         projectId: null,
         projectName: null,
-        repositorySnapshotCount: 0,
+        repositoryCount: 0,
       }),
     );
   });
@@ -394,13 +391,13 @@ describe("ThreadRepository", () => {
     const db = drizzle(env.REGISTRY_DB, { schema });
 
     await seedEnvironment(db, {
-      workbenchId: "env-old",
+      agentId: "env-old",
       workspaceId: "workspace-a",
       resourceProfile: "small",
       createdAt,
     });
     await seedEnvironment(db, {
-      workbenchId: "env-new",
+      agentId: "env-new",
       workspaceId: "workspace-a",
       resourceProfile: "medium",
       createdAt,
@@ -416,13 +413,13 @@ describe("ThreadRepository", () => {
       createdAt,
     });
     await assignRepositoriesToEnvironment(db, {
-      workbenchId: "env-old",
+      agentId: "env-old",
       workspaceId: "workspace-a",
       repositoryIds: ["repo-a", "repo-b"],
       createdAt,
     });
 
-    await new ThreadRepository(runTransactionsInline(db)).createWithWorkbench(
+    await new ThreadRepository(runTransactionsInline(db)).createWithAgent(
       {
         id: "thr_mid_switch",
         workspaceId: "workspace-a",
@@ -446,22 +443,22 @@ describe("ThreadRepository", () => {
     // row-multiplying join on the profile.
     const onOld = await new ThreadRepository(db).getSummaryRowById("thr_mid_switch");
     expect(onOld?.snapshotResourceProfile).toBe("small");
-    expect(onOld?.repositorySnapshotCount).toBe(2);
+    expect(onOld?.repositoryCount).toBe(2);
 
     // Retarget: configuration is LIVE, so the reported profile follows
     // immediately, with no snapshot and no handshake.
-    await new ThreadRepository(db).updateWorkbench("thr_mid_switch", "env-new", createdAt + 1);
+    await new ThreadRepository(db).updateAgent("thr_mid_switch", "env-new", createdAt + 1);
 
     const row = await new ThreadRepository(db).getSummaryRowById("thr_mid_switch");
     expect(row).toBeTruthy();
     expect(row?.agentId).toBe("env-new");
     expect(row?.snapshotResourceProfile).toBe("medium");
     // env-new has no repositories, so the count follows the live list too.
-    expect(row?.repositorySnapshotCount).toBe(0);
+    expect(row?.repositoryCount).toBe(0);
 
     const summary = serializeThread(row!);
     expect(summary.resourceProfile).toBe("medium");
-    expect(summary.repositorySnapshotCount).toBe(0);
+    expect(summary.repositoryCount).toBe(0);
   });
 
   it("updateProject only changes the project label, leaving the environment untouched", async () => {
@@ -475,19 +472,19 @@ describe("ThreadRepository", () => {
     const db = drizzle(env.REGISTRY_DB, { schema });
     await seedProject(db, { projectId: "project-a", workspaceId: "workspace-a", createdAt });
     await seedProject(db, { projectId: "project-b", workspaceId: "workspace-a", createdAt });
-    await seedEnvironment(db, { workbenchId: "env-a", workspaceId: "workspace-a", createdAt });
+    await seedEnvironment(db, { agentId: "env-a", workspaceId: "workspace-a", createdAt });
     await seedWorkspaceRepository(db, {
       repositoryId: "repo-a",
       workspaceId: "workspace-a",
       createdAt,
     });
     await assignRepositoriesToEnvironment(db, {
-      workbenchId: "env-a",
+      agentId: "env-a",
       workspaceId: "workspace-a",
       repositoryIds: ["repo-a"],
       createdAt,
     });
-    await new ThreadRepository(runTransactionsInline(db)).createWithWorkbench(
+    await new ThreadRepository(runTransactionsInline(db)).createWithAgent(
       {
         id: "thr_relabel",
         workspaceId: "workspace-a",
@@ -519,7 +516,7 @@ describe("ThreadRepository", () => {
     );
   });
 
-  it("updateWorkbench moves the thread to another environment", async () => {
+  it("updateAgent moves the thread to another environment", async () => {
     const createdAt = 1_800_000_000_400;
     await seedWorkspace(env.REGISTRY_DB, { workspaceId: "workspace-a", createdAt });
     await seedAgent(env.REGISTRY_DB, {
@@ -528,8 +525,8 @@ describe("ThreadRepository", () => {
       createdAt,
     });
     const db = drizzle(env.REGISTRY_DB, { schema });
-    await seedEnvironment(db, { workbenchId: "env-a", workspaceId: "workspace-a", createdAt });
-    await seedEnvironment(db, { workbenchId: "env-b", workspaceId: "workspace-a", createdAt });
+    await seedEnvironment(db, { agentId: "env-a", workspaceId: "workspace-a", createdAt });
+    await seedEnvironment(db, { agentId: "env-b", workspaceId: "workspace-a", createdAt });
     await seedWorkspaceRepository(db, {
       repositoryId: "repo-a",
       workspaceId: "workspace-a",
@@ -541,18 +538,18 @@ describe("ThreadRepository", () => {
       createdAt,
     });
     await assignRepositoriesToEnvironment(db, {
-      workbenchId: "env-a",
+      agentId: "env-a",
       workspaceId: "workspace-a",
       repositoryIds: ["repo-a"],
       createdAt,
     });
     await assignRepositoriesToEnvironment(db, {
-      workbenchId: "env-b",
+      agentId: "env-b",
       workspaceId: "workspace-a",
       repositoryIds: ["repo-b"],
       createdAt,
     });
-    await new ThreadRepository(runTransactionsInline(db)).createWithWorkbench(
+    await new ThreadRepository(runTransactionsInline(db)).createWithAgent(
       {
         id: "thr_move",
         workspaceId: "workspace-a",
@@ -573,22 +570,22 @@ describe("ThreadRepository", () => {
       "env-a",
     );
 
-    await new ThreadRepository(db).updateWorkbench("thr_move", "env-b", createdAt + 50);
+    await new ThreadRepository(db).updateAgent("thr_move", "env-b", createdAt + 50);
 
     await expect(new ThreadRepository(db).getById("thr_move")).resolves.toEqual(
       expect.objectContaining({ agentId: "env-b", updatedAt: createdAt + 50 }),
     );
     // The move changes only the pointer: env-b's repositories are its own and
     // are read live, and env-a's are untouched.
-    await expect(new WorkbenchRepository(db).listRepositories("env-b")).resolves.toEqual([
+    await expect(new AgentRepository(db).listRepositories("env-b")).resolves.toEqual([
       expect.objectContaining({ id: "repo-b" }),
     ]);
-    await expect(new WorkbenchRepository(db).listRepositories("env-a")).resolves.toEqual([
+    await expect(new AgentRepository(db).listRepositories("env-a")).resolves.toEqual([
       expect.objectContaining({ id: "repo-a" }),
     ]);
   });
 
-  it("updateWorkbench unassigns the thread's environment", async () => {
+  it("updateAgent unassigns the thread's environment", async () => {
     const createdAt = 1_800_000_000_500;
     await seedWorkspace(env.REGISTRY_DB, { workspaceId: "workspace-a", createdAt });
     await seedAgent(env.REGISTRY_DB, {
@@ -597,19 +594,19 @@ describe("ThreadRepository", () => {
       createdAt,
     });
     const db = drizzle(env.REGISTRY_DB, { schema });
-    await seedEnvironment(db, { workbenchId: "env-a", workspaceId: "workspace-a", createdAt });
+    await seedEnvironment(db, { agentId: "env-a", workspaceId: "workspace-a", createdAt });
     await seedWorkspaceRepository(db, {
       repositoryId: "repo-a",
       workspaceId: "workspace-a",
       createdAt,
     });
     await assignRepositoriesToEnvironment(db, {
-      workbenchId: "env-a",
+      agentId: "env-a",
       workspaceId: "workspace-a",
       repositoryIds: ["repo-a"],
       createdAt,
     });
-    await new ThreadRepository(runTransactionsInline(db)).createWithWorkbench(
+    await new ThreadRepository(runTransactionsInline(db)).createWithAgent(
       {
         id: "thr_clear",
         workspaceId: "workspace-a",
@@ -631,17 +628,13 @@ describe("ThreadRepository", () => {
     );
 
     // Retargeting to a different agent, since there is no "unassign" any more.
-    await new ThreadRepository(db).updateWorkbench(
-      "thr_clear",
-      "agent-workspace-a",
-      createdAt + 60,
-    );
+    await new ThreadRepository(db).updateAgent("thr_clear", "agent-workspace-a", createdAt + 60);
 
     await expect(new ThreadRepository(db).getById("thr_clear")).resolves.toEqual(
       expect.objectContaining({ agentId: "agent-workspace-a", updatedAt: createdAt + 60 }),
     );
     // Retargeting never deletes the old agent's own repositories.
-    await expect(new WorkbenchRepository(db).listRepositories("env-a")).resolves.toEqual([
+    await expect(new AgentRepository(db).listRepositories("env-a")).resolves.toEqual([
       expect.objectContaining({ id: "repo-a" }),
     ]);
   });

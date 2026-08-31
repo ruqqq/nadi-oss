@@ -1194,7 +1194,7 @@ describe("retention: preserve by default, discard only on proof", () => {
    * The two deciders must agree about an EMPTY workspace. `confirmWorkSaved`
    * accepts `no_repo{hasFiles:false}` and sets the bit ("Workspace is empty"),
    * so the release path treating the same state as recoverable meant every
-   * workbench-less thread that ran a single `exec` — a bare command leaves
+   * repo-less thread that ran a single `exec` — a bare command leaves
    * /workspace empty, and a chat thread never calls `confirm_work_saved` —
    * held a 24h recovery snapshot for nothing.
    */

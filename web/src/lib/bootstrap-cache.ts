@@ -99,7 +99,7 @@ function isBootstrapData(value: unknown): value is BootstrapData {
     typeof data.workersAiEnabled === "boolean" &&
     typeof data.feedbackAdminEnabled === "boolean" &&
     typeof data.backgroundWorkEnabled === "boolean" &&
-    typeof data.workbenchNetworkAllowlistEnabled === "boolean"
+    typeof data.agentNetworkAllowlistEnabled === "boolean"
   );
 }
 

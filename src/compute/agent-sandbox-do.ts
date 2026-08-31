@@ -181,7 +181,7 @@ export class AgentSandbox extends DurableObject<Env> {
         const result = await prepareRepositories();
         // A SKIP is not an error, so nothing throws and the `catch` around this
         // call never fires — which is exactly how a provider-contract mismatch
-        // left every workbench sandbox with an empty /workspace while the logs
+        // left every fresh agent sandbox with an empty /workspace while the logs
         // stayed clean. Skips are the interesting outcome here; say so, or the
         // next such break is invisible too.
         if (result.skipped?.length) {

@@ -10,7 +10,7 @@ function mockFetch(status: number, body: unknown): typeof fetch {
 }
 
 describe("getProject", () => {
-  it("parses a project detail payload including its default workbench id", async () => {
+  it("parses a project detail payload including its default agent id", async () => {
     const project = await getProject(
       "proj-1",
       mockFetch(200, {
@@ -20,7 +20,7 @@ describe("getProject", () => {
           name: "Project 1",
           description: "",
           customInstructions: "",
-          defaultWorkbenchId: "env-1",
+          defaultAgentId: "env-1",
           archivedAt: null,
           createdAt: 1,
           updatedAt: 2,
@@ -28,7 +28,7 @@ describe("getProject", () => {
       }),
     );
 
-    expect(project.defaultWorkbenchId).toBe("env-1");
+    expect(project.defaultAgentId).toBe("env-1");
   });
 
   it("throws a human-readable error on a non-ok response", async () => {

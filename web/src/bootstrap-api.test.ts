@@ -27,7 +27,7 @@ describe("getBootstrap", () => {
           workersAi: true,
           feedbackAdmin: true,
           backgroundWork: true,
-          workbenchNetworkAllowlist: true,
+          agentNetworkAllowlist: true,
         },
       }),
     );
@@ -43,7 +43,7 @@ describe("getBootstrap", () => {
     expect(data.workersAiEnabled).toBe(true);
     expect(data.feedbackAdminEnabled).toBe(true);
     expect(data.backgroundWorkEnabled).toBe(true);
-    expect(data.workbenchNetworkAllowlistEnabled).toBe(true);
+    expect(data.agentNetworkAllowlistEnabled).toBe(true);
   });
 
   it("normalizes an unauthenticated payload and defaults settings/threads/projects", async () => {
@@ -54,7 +54,7 @@ describe("getBootstrap", () => {
     expect(data.threads).toEqual([]);
     expect(data.projects).toEqual([]);
     expect(data.backgroundWorkEnabled).toBe(false);
-    expect(data.workbenchNetworkAllowlistEnabled).toBe(false);
+    expect(data.agentNetworkAllowlistEnabled).toBe(false);
   });
 
   it("treats a present session flag without a user as unauthenticated", async () => {

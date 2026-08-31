@@ -6,7 +6,7 @@ import * as schema from "../../src/db/schema";
 import { applyRegistryTestSchema } from "./helpers/registry";
 import { WorkspaceRepository } from "../../src/db/repositories/workspaces";
 import { AutomatonRepository } from "../../src/db/repositories/automata";
-import { WorkbenchRepository } from "../../src/db/repositories/workbenches";
+import { AgentRepository } from "../../src/db/repositories/agents";
 import { startAutomatonRun } from "../../src/automata/fire-due";
 import {
   AutomatonService,
@@ -58,9 +58,8 @@ async function seedWorkspace(suffix: string) {
   return { workspaceId, ownerUserId, agentId };
 }
 
-// Seeds a second active AGENT in the workspace and returns its id. An agent is
-// what a workbench became.
-async function seedWorkbench(workspaceId: string) {
+// Seeds a second active AGENT in the workspace and returns its id.
+async function seedAgentRow(workspaceId: string) {
   const id = `wbk_${crypto.randomUUID()}`;
   await db().insert(schema.agents).values({
     id,
@@ -80,7 +79,7 @@ async function seedWorkbench(workspaceId: string) {
 }
 
 // Seeds a project with the given default agent and returns its id.
-async function seedProject(workspaceId: string, defaultWorkbenchId: string) {
+async function seedProject(workspaceId: string, defaultAgentId: string) {
   const id = `prj_${crypto.randomUUID()}`;
   await db().insert(schema.projects).values({
     id,
@@ -88,7 +87,7 @@ async function seedProject(workspaceId: string, defaultWorkbenchId: string) {
     name: id,
     description: "",
     customInstructions: "",
-    defaultAgentId: defaultWorkbenchId,
+    defaultAgentId: defaultAgentId,
     archivedAt: null,
     createdAt: now,
     updatedAt: now,
@@ -354,13 +353,13 @@ describe("AutomatonService", () => {
 
   it("persists an explicit agent override on create", async () => {
     const seeded = await seedWorkspace("wb-create");
-    const wb = await seedWorkbench(seeded.workspaceId);
+    const wb = await seedAgentRow(seeded.workspaceId);
     const row = await service(seeded).create({
       name: "wb",
       prompt: "p",
       timezone: "UTC",
       schedule: { kind: "hourly", minute: 0 },
-      workbenchId: wb,
+      agentId: wb,
     });
     expect(row.agentId).toBe(wb);
   });
@@ -379,18 +378,18 @@ describe("AutomatonService", () => {
     expect(row.agentId).toBe(seeded.agentId);
   });
 
-  it("resets to the workspace's agent when workbenchId is null on update", async () => {
+  it("resets to the workspace's agent when agentId is null on update", async () => {
     const seeded = await seedWorkspace("wb-clear");
-    const wb = await seedWorkbench(seeded.workspaceId);
+    const wb = await seedAgentRow(seeded.workspaceId);
     const created = await service(seeded).create({
       name: "wb",
       prompt: "p",
       timezone: "UTC",
       schedule: { kind: "hourly", minute: 0 },
-      workbenchId: wb,
+      agentId: wb,
     });
     expect(created.agentId).toBe(wb);
-    const updated = await service(seeded).update(created.id, { workbenchId: null });
+    const updated = await service(seeded).update(created.id, { agentId: null });
     expect(updated.agentId).toBe(seeded.agentId);
   });
 
@@ -401,7 +400,7 @@ describe("AutomatonService", () => {
   // against a different set of repositories and secrets, with nothing to say so.
   it("falls back to the PROJECT's default agent, not the workspace agent, on create", async () => {
     const seeded = await seedWorkspace("wb-project-default");
-    const wbA = await seedWorkbench(seeded.workspaceId);
+    const wbA = await seedAgentRow(seeded.workspaceId);
     const projectId = await seedProject(seeded.workspaceId, wbA);
     const row = await service(seeded).create({
       name: "wb",
@@ -416,8 +415,8 @@ describe("AutomatonService", () => {
 
   it("prefers an explicit agent over the project's default on create", async () => {
     const seeded = await seedWorkspace("wb-explicit-over-default");
-    const wbDefault = await seedWorkbench(seeded.workspaceId);
-    const wbExplicit = await seedWorkbench(seeded.workspaceId);
+    const wbDefault = await seedAgentRow(seeded.workspaceId);
+    const wbExplicit = await seedAgentRow(seeded.workspaceId);
     const projectId = await seedProject(seeded.workspaceId, wbDefault);
     const row = await service(seeded).create({
       name: "wb",
@@ -425,18 +424,18 @@ describe("AutomatonService", () => {
       timezone: "UTC",
       schedule: { kind: "hourly", minute: 0 },
       projectId,
-      workbenchId: wbExplicit,
+      agentId: wbExplicit,
     });
     expect(row.agentId).toBe(wbExplicit);
   });
 
   it("degrades to the workspace agent when the project's default is archived", async () => {
     const seeded = await seedWorkspace("wb-default-archived");
-    const wbA = await seedWorkbench(seeded.workspaceId);
+    const wbA = await seedAgentRow(seeded.workspaceId);
     const projectId = await seedProject(seeded.workspaceId, wbA);
     // Archived AFTER being set as the default: the caller never asked for it,
     // so this must degrade rather than 404 the write.
-    await new WorkbenchRepository(db()).archive(wbA, now + 1);
+    await new AgentRepository(db()).archive(wbA, now + 1);
     const row = await service(seeded).create({
       name: "wb",
       prompt: "p",
@@ -449,9 +448,9 @@ describe("AutomatonService", () => {
 
   it("resolves a null agent on update against the project the patch leaves behind", async () => {
     const seeded = await seedWorkspace("wb-update-default");
-    const wbExplicit = await seedWorkbench(seeded.workspaceId);
-    const wbOldDefault = await seedWorkbench(seeded.workspaceId);
-    const wbNewDefault = await seedWorkbench(seeded.workspaceId);
+    const wbExplicit = await seedAgentRow(seeded.workspaceId);
+    const wbOldDefault = await seedAgentRow(seeded.workspaceId);
+    const wbNewDefault = await seedAgentRow(seeded.workspaceId);
     const oldProject = await seedProject(seeded.workspaceId, wbOldDefault);
     const newProject = await seedProject(seeded.workspaceId, wbNewDefault);
 
@@ -461,7 +460,7 @@ describe("AutomatonService", () => {
       timezone: "UTC",
       schedule: { kind: "hourly", minute: 0 },
       projectId: oldProject,
-      workbenchId: wbExplicit,
+      agentId: wbExplicit,
     });
     expect(created.agentId).toBe(wbExplicit);
 
@@ -469,7 +468,7 @@ describe("AutomatonService", () => {
     // NEW project's default, not the old one's and not the workspace agent.
     const updated = await service(seeded).update(created.id, {
       projectId: newProject,
-      workbenchId: null,
+      agentId: null,
     });
     expect(updated.agentId).toBe(wbNewDefault);
   });
@@ -482,15 +481,15 @@ describe("AutomatonService", () => {
         prompt: "p",
         timezone: "UTC",
         schedule: { kind: "hourly", minute: 0 },
-        workbenchId: "wb_does_not_exist",
+        agentId: "wb_does_not_exist",
       }),
     ).rejects.toThrow();
   });
 
   it("fires against the override agent, not the project default", async () => {
     const seeded = await seedWorkspace("wb-fire");
-    const wbA = await seedWorkbench(seeded.workspaceId);
-    const wbB = await seedWorkbench(seeded.workspaceId);
+    const wbA = await seedAgentRow(seeded.workspaceId);
+    const wbB = await seedAgentRow(seeded.workspaceId);
     const projectId = await seedProject(seeded.workspaceId, wbA); // default = A
     const created = await service(seeded).create({
       name: "wb",
@@ -498,7 +497,7 @@ describe("AutomatonService", () => {
       timezone: "UTC",
       schedule: { kind: "hourly", minute: 0 },
       projectId,
-      workbenchId: wbB,
+      agentId: wbB,
     });
     const automaton = await new AutomatonRepository(db()).getById(created.id);
     const { threadId } = await startAutomatonRun(env, db(), automaton!, {
@@ -524,8 +523,8 @@ describe("AutomatonService", () => {
   // repositories and secrets.
   it("fires against the project default it was created under, frozen at write time", async () => {
     const seeded = await seedWorkspace("wb-fire-inherit");
-    const wbA = await seedWorkbench(seeded.workspaceId);
-    const wbLater = await seedWorkbench(seeded.workspaceId);
+    const wbA = await seedAgentRow(seeded.workspaceId);
+    const wbLater = await seedAgentRow(seeded.workspaceId);
     const projectId = await seedProject(seeded.workspaceId, wbA);
     const created = await service(seeded).create({
       name: "wb",

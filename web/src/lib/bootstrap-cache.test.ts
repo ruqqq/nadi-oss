@@ -23,7 +23,7 @@ function signedIn(): BootstrapData {
     workersAiEnabled: true,
     feedbackAdminEnabled: false,
     backgroundWorkEnabled: false,
-    workbenchNetworkAllowlistEnabled: false,
+    agentNetworkAllowlistEnabled: false,
   };
 }
 
@@ -211,8 +211,8 @@ describe("bootstrap-cache", () => {
     expect(readCachedBootstrap()).toBeNull();
   });
 
-  test("returns null when workbenchNetworkAllowlistEnabled is missing", () => {
-    const { workbenchNetworkAllowlistEnabled: _missing, ...data } = signedIn();
+  test("returns null when agentNetworkAllowlistEnabled is missing", () => {
+    const { agentNetworkAllowlistEnabled: _missing, ...data } = signedIn();
     localStorage.setItem(
       BOOTSTRAP_CACHE_KEY,
       JSON.stringify({ v: BOOTSTRAP_CACHE_VERSION, cachedAt: 0, data }),

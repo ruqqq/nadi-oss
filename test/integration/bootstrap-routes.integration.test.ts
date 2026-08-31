@@ -149,6 +149,7 @@ describe("bootstrap route", () => {
       settings: { workspace: { id: string }; agent: { model: string }; providers: unknown[] };
       threads: Array<{ threadId: string; title: string }>;
       projects: Array<{ id: string; name: string; archivedAt: number | null }>;
+      agents: Array<{ id: string; name: string }>;
     };
 
     expect(body.session).toEqual({
@@ -166,6 +167,11 @@ describe("bootstrap route", () => {
         name: "Active project",
         archivedAt: null,
       }),
+    ]);
+    // Task 5: bootstrap gains the workspace's agent list, for the client's
+    // agent pickers — no separate `GET /api/agents` round trip on first paint.
+    expect(body.agents).toEqual([
+      expect.objectContaining({ id: "agent-default", name: "Default" }),
     ]);
   });
 
@@ -256,33 +262,33 @@ describe("bootstrap route", () => {
     }
   });
 
-  it("reports workbenchNetworkAllowlist off when the workspace flag is unset", async () => {
+  it("reports agentNetworkAllowlist off when the workspace flag is unset", async () => {
     const { token } = await seedOwner();
 
     const res = await SELF.fetch("https://nadi.test/api/bootstrap", { headers: cookie(token) });
 
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
-      features: { workbenchNetworkAllowlist: boolean };
+      features: { agentNetworkAllowlist: boolean };
     };
-    expect(body.features.workbenchNetworkAllowlist).toBe(false);
+    expect(body.features.agentNetworkAllowlist).toBe(false);
   });
 
-  it("reports workbenchNetworkAllowlist on when the workspace flag is set", async () => {
+  it("reports agentNetworkAllowlist on when the workspace flag is set", async () => {
     const { token, workspaceId } = await seedOwner();
     const db = drizzle(env.REGISTRY_DB, { schema });
     await db
       .update(schema.workspaces)
-      .set({ flagsJson: JSON.stringify({ workbenchNetworkAllowlist: true }) })
+      .set({ flagsJson: JSON.stringify({ agentNetworkAllowlist: true }) })
       .where(eq(schema.workspaces.id, workspaceId));
 
     const res = await SELF.fetch("https://nadi.test/api/bootstrap", { headers: cookie(token) });
 
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
-      features: { workbenchNetworkAllowlist: boolean };
+      features: { agentNetworkAllowlist: boolean };
     };
-    expect(body.features.workbenchNetworkAllowlist).toBe(true);
+    expect(body.features.agentNetworkAllowlist).toBe(true);
   });
 
   it("reports the authenticated workspace backgroundWork override when deployment is off", async () => {

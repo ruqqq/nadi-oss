@@ -15,14 +15,14 @@ import { miscHandlers } from "./misc";
 import { projectHandlers } from "./projects";
 import { settingsHandlers } from "./settings";
 import { threadHandlers } from "./threads";
-import { workbenchHandlers } from "./workbenches";
+import { agentHandlers } from "./agents";
 
 export const restHandlers: RequestHandler[] = [
   ...bootstrapHandlers,
   ...feedbackHandlers,
   ...settingsHandlers,
   ...projectHandlers,
-  ...workbenchHandlers,
+  ...agentHandlers,
   ...automataHandlers,
   ...artifactHandlers,
   ...miscHandlers,

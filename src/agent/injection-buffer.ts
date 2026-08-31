@@ -5,11 +5,7 @@ import type { UIMessage } from "ai";
 // by ThinkThreadAgent's deliverInjection router + beforeStep drain (see
 // docs/superpowers/specs/2026-07-07-mid-turn-steering-injection-design.md).
 
-export type InjectionKind =
-  | "watcher-completion"
-  | "subagent-completion"
-  | "user-message"
-  | "workbench-switch";
+export type InjectionKind = "watcher-completion" | "subagent-completion" | "user-message";
 
 export interface InjectionEntry {
   kind: InjectionKind;

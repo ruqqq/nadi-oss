@@ -168,7 +168,7 @@ const EXEC_URL_MARKERS = /\b(?:https?|wss?):\/\/|\?|(?:^|[^A-Za-z])env=/i;
  * An exec-upgrade transport error, cut back to the part that cannot carry a
  * secret.
  *
- * The exec URL's query holds `env=GH_TOKEN=ghs_…` and every other workbench
+ * The exec URL's query holds `env=GH_TOKEN=ghs_…` and every other agent
  * secret, and this message reaches the MODEL (as `compute-tools.ts`'s `detail`),
  * the persisted transcript, and the logs — so it may not carry the URL. It used
  * to withhold the message entirely for that reason, which is safe and also made
@@ -886,7 +886,7 @@ class SpritesHttpClient implements SpritesClient {
     } catch (error) {
       // SECRET SAFETY: the transport error is NOT interpolated. workerd's fetch
       // rejections routinely embed the request URL, and the exec URL carries
-      // `env=GH_TOKEN=ghs_…` plus every workbench secret (see `execUrl`). This
+      // `env=GH_TOKEN=ghs_…` plus every agent secret (see `execUrl`). This
       // message is returned to the MODEL as `compute-tools.ts`'s `detail` and
       // lands in the persisted transcript and the logs, so nothing derived from
       // the transport may appear in it. Only the abort/non-abort distinction is

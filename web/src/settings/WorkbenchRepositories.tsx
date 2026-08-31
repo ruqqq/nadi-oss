@@ -24,7 +24,7 @@ import {
   listInstallationRepositories,
   type GithubRepo,
 } from "../github-api";
-import type { WorkbenchRepositoryInput } from "../workbenches-api";
+import type { AgentRepositoryInput as WorkbenchRepositoryInput } from "../agents-api";
 
 // Mono config fields hold literal values (URLs, paths, branches, commands), so
 // the keyboard must not autocorrect, auto-capitalize, or spell-check them.

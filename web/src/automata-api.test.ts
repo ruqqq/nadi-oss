@@ -60,14 +60,14 @@ describe("listAutomata", () => {
     await expect(listAutomata(fetchImpl)).resolves.toEqual([{ id: "auto_1", lastRun }]);
   });
 
-  it("surfaces workbenchId for an automaton with a per-automaton workbench override", async () => {
+  it("surfaces agentId for an automaton with a per-automaton agent override", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ automata: [{ id: "auto_1", workbenchId: "wbk_1" }] }), {
+      new Response(JSON.stringify({ automata: [{ id: "auto_1", agentId: "wbk_1" }] }), {
         status: 200,
       }),
     );
     const [parsed] = await listAutomata(fetchImpl);
-    expect(parsed?.workbenchId).toBe("wbk_1");
+    expect(parsed?.agentId).toBe("wbk_1");
   });
 });
 

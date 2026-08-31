@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { ArrowSquareOut, CaretDown, Check, Toolbox } from "../../icons";
 import { useMediaQuery } from "../../lib/use-media-query";
 import { useVisualViewportInset } from "../../lib/use-visual-viewport-inset";
-import type { WorkbenchSummary } from "../../workbenches-api";
+import type { AgentSummary } from "../../agents-api";
 import { Button } from "../ui/button";
 import {
   Command,
@@ -34,7 +34,7 @@ export function WorkbenchPicker({
   compact,
 }: {
   value: "none" | string;
-  workbenches: WorkbenchSummary[];
+  workbenches: AgentSummary[];
   /**
    * Label for the current value when the list doesn't carry it — a disabled
    * picker never opens its list, so its caller can name the selection directly

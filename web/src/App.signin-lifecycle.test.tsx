@@ -28,9 +28,9 @@ vi.mock("./lib/bootstrap-cache", async (importOriginal) => ({
 }));
 
 vi.mock("./Settings", () => ({
-  Settings: ({ workbenchNetworkAllowlistEnabled }: { workbenchNetworkAllowlistEnabled: boolean }) => (
+  Settings: ({ agentNetworkAllowlistEnabled }: { agentNetworkAllowlistEnabled: boolean }) => (
     <div data-testid="allowlist-capability">
-      {workbenchNetworkAllowlistEnabled ? "enabled" : "disabled"}
+      {agentNetworkAllowlistEnabled ? "enabled" : "disabled"}
     </div>
   ),
 }));
@@ -60,7 +60,7 @@ const authenticatedBootstrap = {
   workersAiEnabled: false,
   feedbackAdminEnabled: false,
   backgroundWorkEnabled: false,
-  workbenchNetworkAllowlistEnabled: true,
+  agentNetworkAllowlistEnabled: true,
 };
 
 describe("App sign-in lifecycle", () => {
@@ -91,7 +91,7 @@ describe("App sign-in lifecycle", () => {
         session: { authenticated: false },
         settings: null,
         threads: [],
-        workbenchNetworkAllowlistEnabled: false,
+        agentNetworkAllowlistEnabled: false,
       })
       .mockResolvedValueOnce(authenticatedBootstrap);
     mocks.requestEmailOtp.mockResolvedValue(undefined);

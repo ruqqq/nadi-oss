@@ -75,16 +75,21 @@ export const threadHandlers = [
       reasoningEffort?: string;
       modelSupportsReasoning?: boolean | null;
       projectId?: string | null;
-      workbenchId?: string | null;
+      agentId?: string | null;
     };
     const project = store.projects.find((p) => p.id === input.projectId);
-    const workbench = store.workbenches.find((w) => w.id === input.workbenchId);
+    // Same precedence the server resolves at write time: explicit agentId ->
+    // the project's default agent -> the workspace's own agent.
+    const agent =
+      store.agents.find((w) => w.id === input.agentId) ??
+      store.agents.find((w) => w.id === project?.defaultAgentId) ??
+      store.agents.find((w) => w.id === (store.settings?.agent.id ?? "agent_mock"));
     const now = Date.now();
     const thread: ThreadSummary = {
       threadId: mockId("thr"),
       kind: "regular",
       workspaceId: store.settings?.workspace.id ?? "ws_mock",
-      agentId: store.settings?.agent.id ?? "agent_mock",
+      agentId: agent?.id ?? store.settings?.agent.id ?? "agent_mock",
       provider: input.provider ?? store.settings?.agent.provider ?? "anthropic",
       model: input.model ?? store.settings?.agent.model ?? "claude-sonnet-4-5",
       modelInputModalities: input.modelInputModalities ?? ["text"],
@@ -108,15 +113,14 @@ export const threadHandlers = [
       status: "active",
       projectId: project?.id ?? null,
       projectName: project?.name ?? null,
-      workbenchId: workbench?.id ?? null,
-      workbenchName: workbench?.name ?? null,
-      resourceProfile: workbench?.resourceProfile ?? "small",
+      agentName: agent?.name ?? null,
+      resourceProfile: agent?.resourceProfile ?? "small",
       automatonId: null,
       automatonName: null,
       automatonNotifyMode: null,
       outcomeDismissedAt: null,
       recentDismissedAt: null,
-      repositorySnapshotCount: 0,
+      repositoryCount: agent?.repositories.length ?? 0,
       lastContextTokens: null,
       lastContextWindow: null,
       lastCompactAfterTokens: null,
@@ -160,7 +164,7 @@ export const threadHandlers = [
     const patch = (await request.json().catch(() => ({}))) as {
       title?: string;
       projectId?: string | null;
-      workbenchId?: string | null;
+      agentId?: string | null;
       reasoningEffort?: string;
     };
     if (typeof patch.title === "string") thread.title = patch.title;
@@ -179,13 +183,19 @@ export const threadHandlers = [
       thread.projectId = project?.id ?? null;
       thread.projectName = project?.name ?? null;
     }
-    if (patch.workbenchId !== undefined) {
-      const nextWorkbench = store.workbenches.find((w) => w.id === patch.workbenchId);
+    if (patch.agentId !== undefined && patch.agentId !== null) {
+      const nextAgent = store.agents.find((w) => w.id === patch.agentId);
       // Configuration is live: the switch applies immediately and the sandbox
-      // size moves with it, exactly as the server now does it.
-      thread.workbenchId = nextWorkbench?.id ?? null;
-      thread.workbenchName = nextWorkbench?.name ?? null;
-      thread.resourceProfile = nextWorkbench?.resourceProfile ?? "small";
+      // size moves with it, exactly as the server now does it. Unlike the
+      // retired `workbenchId`, `agentId` is never optional — a thread always
+      // has an agent, so a `null` patch is refused the same way the real
+      // route refuses it, by leaving the thread unchanged.
+      if (nextAgent) {
+        thread.agentId = nextAgent.id;
+        thread.agentName = nextAgent.name;
+        thread.resourceProfile = nextAgent.resourceProfile;
+        thread.repositoryCount = nextAgent.repositories.length;
+      }
     }
     thread.updatedAt = Date.now();
     return HttpResponse.json({ thread });

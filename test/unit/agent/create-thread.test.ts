@@ -6,18 +6,18 @@ function fakeDb() {
   return {} as never;
 }
 
-describe("createThreadWithWorkbench", () => {
+describe("createThreadWithAgent", () => {
   it("writes the environment assignment as part of the row", async () => {
     vi.resetModules();
-    const createWithWorkbench = vi.fn().mockResolvedValue(undefined);
+    const createWithAgent = vi.fn().mockResolvedValue(undefined);
     vi.doMock("../../../src/db/repositories/threads", () => ({
       ThreadRepository: class {
-        createWithWorkbench = createWithWorkbench;
+        createWithAgent = createWithAgent;
       },
     }));
-    const { createThreadWithWorkbench } = await import("../../../src/agent/create-thread");
-    await createThreadWithWorkbench(fakeDb(), thread, "env_1");
-    expect(createWithWorkbench).toHaveBeenCalledWith(thread, "env_1");
+    const { createThreadWithAgent } = await import("../../../src/agent/create-thread");
+    await createThreadWithAgent(fakeDb(), thread, "env_1");
+    expect(createWithAgent).toHaveBeenCalledWith(thread, "env_1");
   });
 
   /**
@@ -31,14 +31,12 @@ describe("createThreadWithWorkbench", () => {
     const del = vi.fn().mockResolvedValue(undefined);
     vi.doMock("../../../src/db/repositories/threads", () => ({
       ThreadRepository: class {
-        createWithWorkbench = vi.fn().mockRejectedValue(new Error("insert boom"));
+        createWithAgent = vi.fn().mockRejectedValue(new Error("insert boom"));
         delete = del;
       },
     }));
-    const { createThreadWithWorkbench } = await import("../../../src/agent/create-thread");
-    await expect(createThreadWithWorkbench(fakeDb(), thread, "env_1")).rejects.toThrow(
-      /insert boom/,
-    );
+    const { createThreadWithAgent } = await import("../../../src/agent/create-thread");
+    await expect(createThreadWithAgent(fakeDb(), thread, "env_1")).rejects.toThrow(/insert boom/);
     expect(del).not.toHaveBeenCalled();
   });
 });

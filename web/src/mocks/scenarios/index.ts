@@ -20,7 +20,7 @@ import type {
   SettingsProvider,
 } from "../../settings-api";
 import type { ThreadSummary } from "../../threads-api";
-import type { WorkbenchSummary } from "../../workbenches-api";
+import type { AgentSummary } from "../../agents-api";
 import type { MockArtifact, MockAttachment, MockFaults, MockStore } from "../store";
 import { TOOL_RUN_THREAD_ID, TOOL_WRITE_THREAD_ID } from "../chat/tool-run-transcript";
 import { MID_TURN_THREAD_ID } from "../chat/mid-turn-transcript";
@@ -69,15 +69,14 @@ export function makeThread(overrides: Partial<ThreadSummary> = {}): ThreadSummar
     status: "active",
     projectId: null,
     projectName: null,
-    workbenchId: null,
-    workbenchName: null,
+    agentName: null,
     resourceProfile: "small",
     automatonId: null,
     automatonName: null,
     automatonNotifyMode: null,
     outcomeDismissedAt: null,
     recentDismissedAt: null,
-    repositorySnapshotCount: 0,
+    repositoryCount: 0,
     lastContextTokens: null,
     lastContextWindow: null,
     lastCompactAfterTokens: null,
@@ -94,7 +93,7 @@ export function makeProject(overrides: Partial<ProjectSummary> = {}): ProjectSum
     name: "Untitled project",
     description: "",
     customInstructions: "",
-    defaultWorkbenchId: null,
+    defaultAgentId: null,
     archivedAt: null,
     createdAt: NOW - 30 * DAY,
     updatedAt: NOW - DAY,
@@ -102,11 +101,11 @@ export function makeProject(overrides: Partial<ProjectSummary> = {}): ProjectSum
   };
 }
 
-export function makeWorkbench(overrides: Partial<WorkbenchSummary> = {}): WorkbenchSummary {
+export function makeAgent(overrides: Partial<AgentSummary> = {}): AgentSummary {
   return {
     id: "wb_mock",
     workspaceId: WORKSPACE_ID,
-    name: "Untitled workbench",
+    name: "Untitled agent",
     description: "",
     setupScript: "",
     resourceProfile: "small",
@@ -128,9 +127,6 @@ export function makeAutomaton(overrides: Partial<AutomatonSummary> = {}): Automa
     ownerUserId: USER.id,
     agentId: AGENT_ID,
     projectId: null,
-    // Per-automaton workbench override (ffccbb16). Null = inherit the project
-    // default, which is the common case.
-    workbenchId: null,
     name: "Untitled automaton",
     prompt: "Summarize what changed today.",
     modelProvider: null,
@@ -311,7 +307,7 @@ function emptyFeedback(): MockStore["feedback"] {
 }
 
 function noFeatures(): MockStore["features"] {
-  return { feedbackAdmin: false, backgroundWork: false, workbenchNetworkAllowlist: false };
+  return { feedbackAdmin: false, backgroundWork: false, agentNetworkAllowlist: false };
 }
 
 /** Workspace override explicitly enables background work. */
@@ -320,11 +316,11 @@ function backgroundWorkEnabledStore(): MockStore {
   return { ...base, features: { ...base.features, backgroundWork: true } };
 }
 
-function workbenchNetworkAllowlistStore(): MockStore {
+function agentNetworkAllowlistStore(): MockStore {
   const base = defaultStore();
   return {
     ...base,
-    features: { ...base.features, workbenchNetworkAllowlist: true },
+    features: { ...base.features, agentNetworkAllowlist: true },
   };
 }
 
@@ -645,7 +641,7 @@ function emptyStore(): MockStore {
     settings: makeSettings(),
     threads: [],
     projects: [],
-    workbenches: [],
+    agents: [],
     automata: [],
     skills: [],
     memories: [],
@@ -738,7 +734,7 @@ function onboardingEmpowerComposioNoCalendarStore(): MockStore {
 
 const PROJECT_TITLES: Record<string, string[]> = {
   prj_platform: [
-    "Migrate D1 schema for workbenches",
+    "Migrate D1 schema for agents",
     "Trace the cold-start latency regression",
     "Durable Object RPC bypasses onStart",
     "Token ledger drifts after compaction",
@@ -759,8 +755,8 @@ function defaultStore(): MockStore {
     makeProject({ id: "prj_ops", name: "Ops", description: "Deploys, secrets, and sandboxes." }),
   ];
 
-  const workbenches = [
-    makeWorkbench({
+  const agents = [
+    makeAgent({
       id: "wb_nadi",
       name: "nadi",
       description: "Main monorepo checkout.",
@@ -770,7 +766,7 @@ function defaultStore(): MockStore {
       repositories: [
         {
           id: "wbr_nadi",
-          workbenchId: "wb_nadi",
+          agentId: "wb_nadi",
           source: "github",
           name: "nadi-labs/nadi",
           url: "https://github.com/nadi-labs/nadi.git",
@@ -786,7 +782,7 @@ function defaultStore(): MockStore {
         },
       ],
     }),
-    makeWorkbench({ id: "wb_docs", name: "docs-site", description: "Marketing + docs." }),
+    makeAgent({ id: "wb_docs", name: "docs-site", description: "Marketing + docs." }),
   ];
 
   const threads: ThreadSummary[] = [];
@@ -801,8 +797,8 @@ function defaultStore(): MockStore {
           title,
           projectId,
           projectName: project?.name ?? null,
-          workbenchId: "wb_nadi",
-          workbenchName: "nadi",
+          agentId: "wb_nadi",
+          agentName: "nadi",
           lastMessagePreview: `Working through "${title}" — here is where it stands.`,
           lastContextTokens: 12_000 + index * 900,
           lastContextWindow: 200_000,
@@ -854,7 +850,7 @@ function defaultStore(): MockStore {
     settings: makeSettings(),
     threads,
     projects,
-    workbenches,
+    agents,
     ...richExtras(),
     features: noFeatures(),
     feedback: emptyFeedback(),
@@ -880,10 +876,10 @@ function defaultStore(): MockStore {
         id: "atm_triage",
         name: "Issue triage",
         projectId: "prj_platform",
-        // Exercises the workbench override (ffccbb16): this one pins a
-        // workbench instead of inheriting the project default, so the picker
-        // renders a selected value rather than only the empty state.
-        workbenchId: "wb_docs",
+        // Exercises the agent override (ffccbb16): this one pins an agent
+        // instead of inheriting the project default, so the picker renders a
+        // selected value rather than only the empty state.
+        agentId: "wb_docs",
         // The custom-cron path, so the panel's advanced section is reachable.
         scheduleJson: JSON.stringify({ kind: "cron", expr: "*/30 9-18 * * 1-5" }),
         enabled: false,
@@ -1515,5 +1511,5 @@ export const SCENARIOS: Record<string, () => MockStore> = {
   "cloudflare-managed": cloudflareManagedStore,
   "cloudflare-blocked": cloudflareBlockedStore,
   "background-work-enabled": backgroundWorkEnabledStore,
-  "workbench-network-allowlist": workbenchNetworkAllowlistStore,
+  "agent-network-allowlist": agentNetworkAllowlistStore,
 };

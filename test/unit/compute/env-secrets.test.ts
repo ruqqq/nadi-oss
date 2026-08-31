@@ -56,7 +56,7 @@ describe("ComputeEnvSecretsStore", () => {
     expect(await s.deleteWorkspace("ws1", "GH_TOKEN")).toBe(true);
     expect(await s.listWorkspaceNames("ws1")).toEqual([]);
   });
-  // The `sbxenv-env:` (workbench) scope is gone — its values were re-encrypted
+  // The `sbxenv-env:` (agent) scope is gone — its values were re-encrypted
   // into the agent scope. These two cases replace the isolation/delete cases it
   // used to have, one scope down.
   it("isolates agent secrets by agentId and from workspace scope", async () => {

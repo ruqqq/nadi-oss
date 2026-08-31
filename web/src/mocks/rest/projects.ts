@@ -32,7 +32,7 @@ export const projectHandlers = [
       name,
       description: input.description ?? "",
       customInstructions: input.customInstructions ?? "",
-      defaultWorkbenchId: null,
+      defaultAgentId: null,
       archivedAt: null,
       createdAt: now,
       updatedAt: now,
@@ -57,8 +57,8 @@ export const projectHandlers = [
     if (typeof patch.customInstructions === "string") {
       project.customInstructions = patch.customInstructions;
     }
-    if (patch.defaultWorkbenchId !== undefined) {
-      project.defaultWorkbenchId = patch.defaultWorkbenchId;
+    if (patch.defaultAgentId !== undefined) {
+      project.defaultAgentId = patch.defaultAgentId;
     }
     project.updatedAt = Date.now();
     // Threads carry a denormalized project name; leaving it stale is exactly the

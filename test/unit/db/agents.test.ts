@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const now = 1_800_000_000_000;
 
-// `workbenches` is gone: this repository reads and writes `agents` now, so the
+// `workbenches` is gone: this repository reads and writes `agents`, so the
 // mocked schema module has to offer the table it actually queries.
 const agents = {
   __table: "agents",
@@ -33,7 +33,7 @@ const agentRepositories = {
   createdAt: "created_at",
 };
 
-// Imported by workbenches.ts but not exercised by any test in this file —
+// Imported by agents.ts but not exercised by any test in this file —
 // stubbed so the mocked schema module shape matches the real one.
 const agentSecretNames = {
   __table: "agent_secret_names",
@@ -60,7 +60,7 @@ vi.mock("../../../src/db/schema", () => ({
   agentSecretNames,
 }));
 
-interface WorkbenchRow {
+interface AgentRow {
   id: string;
   workspace_id: string;
   name: string;
@@ -88,12 +88,12 @@ interface AgentRepositoryRow {
   created_at: number;
 }
 
-type Row = WorkbenchRow | AgentRepositoryRow;
+type Row = AgentRow | AgentRepositoryRow;
 type Condition = (row: Record<string, any>) => boolean;
 type SortSpec = { column: string; dir: string };
 
-class WorkbenchRepositoryTestDb {
-  workbenches = new Map<string, WorkbenchRow>();
+class AgentRepositoryTestDb {
+  agentRows = new Map<string, AgentRow>();
   agentRepositories = new Map<string, AgentRepositoryRow>();
 
   select(projection?: Record<string, any>) {
@@ -141,7 +141,7 @@ class WorkbenchRepositoryTestDb {
 
   private denormalizeRow(table: { __table: string }, row: Row): any {
     if (table.__table === "agents") {
-      return denormalizeWorkbenchRow(row as WorkbenchRow);
+      return denormalizeAgentRow(row as AgentRow);
     } else if (table.__table === "agent_repositories") {
       return denormalizeAgentRepositoryRow(row as AgentRepositoryRow);
     }
@@ -164,8 +164,8 @@ class WorkbenchRepositoryTestDb {
           const rows = Array.isArray(row) ? row : [row];
           for (const r of rows) {
             if (table.__table === "agents") {
-              const wbRow = normalizeWorkbenchRow(r);
-              self.workbenches.set(wbRow.id, wbRow);
+              const wbRow = normalizeAgentRow(r);
+              self.agentRows.set(wbRow.id, wbRow);
             } else if (table.__table === "agent_repositories") {
               const wbrRow = normalizeAgentRepositoryRow(r);
               self.agentRepositories.set(wbrRow.id, wbrRow);
@@ -185,7 +185,7 @@ class WorkbenchRepositoryTestDb {
         where: (condition: Condition) => {
           const promise = new Promise<void>((resolve) => {
             if (table.__table === "agents") {
-              for (const [id, row] of self.workbenches.entries()) {
+              for (const [id, row] of self.agentRows.entries()) {
                 if (condition(row)) {
                   const normalizedPatch: any = {};
                   if (patch.archivedAt !== undefined)
@@ -198,7 +198,7 @@ class WorkbenchRepositoryTestDb {
                     normalizedPatch.setup_script = patch.setupScript;
                   if (patch.sandboxEnvVarsJson !== undefined)
                     normalizedPatch.sandbox_env_vars_json = patch.sandboxEnvVarsJson;
-                  self.workbenches.set(id, { ...row, ...normalizedPatch } as WorkbenchRow);
+                  self.agentRows.set(id, { ...row, ...normalizedPatch } as AgentRow);
                 }
               }
             }
@@ -238,7 +238,7 @@ class WorkbenchRepositoryTestDb {
   private read(table: { __table: string }, condition?: Condition) {
     let rows: Row[] = [];
     if (table.__table === "agents") {
-      rows = [...this.workbenches.values()] as Row[];
+      rows = [...this.agentRows.values()] as Row[];
     } else if (table.__table === "agent_repositories") {
       rows = [...this.agentRepositories.values()] as Row[];
     }
@@ -259,11 +259,11 @@ class WorkbenchRepositoryTestDb {
   }
 }
 
-function newWorkbenchRow(workspaceId: string): typeof agents.$inferInsert {
+function newAgentRow(workspaceId: string): typeof agents.$inferInsert {
   return {
     id: `wb_${Math.random().toString(36).substr(2, 9)}`,
     workspaceId,
-    name: "Test Workbench",
+    name: "Test Agent",
     systemPrompt: "You are Nadi.",
     provider: "mock",
     model: "mock",
@@ -275,7 +275,7 @@ function newWorkbenchRow(workspaceId: string): typeof agents.$inferInsert {
   };
 }
 
-function normalizeWorkbenchRow(row: any): WorkbenchRow {
+function normalizeAgentRow(row: any): AgentRow {
   return {
     id: row.id,
     workspace_id: row.workspaceId || row.workspace_id,
@@ -289,7 +289,7 @@ function normalizeWorkbenchRow(row: any): WorkbenchRow {
   };
 }
 
-function denormalizeWorkbenchRow(row: WorkbenchRow): any {
+function denormalizeAgentRow(row: AgentRow): any {
   return {
     id: row.id,
     workspaceId: row.workspace_id,
@@ -353,33 +353,33 @@ function entry(name: string, overrides: Partial<Record<string, unknown>> = {}) {
   };
 }
 
-describe("WorkbenchRepository", () => {
-  let db: WorkbenchRepositoryTestDb;
-  let WorkbenchRepository: typeof import("../../../src/db/repositories/workbenches").WorkbenchRepository;
+describe("AgentRepository", () => {
+  let db: AgentRepositoryTestDb;
+  let AgentRepository: typeof import("../../../src/db/repositories/agents").AgentRepository;
 
   beforeEach(async () => {
     vi.resetModules();
-    ({ WorkbenchRepository } = await import("../../../src/db/repositories/workbenches"));
-    db = new WorkbenchRepositoryTestDb();
+    ({ AgentRepository } = await import("../../../src/db/repositories/agents"));
+    db = new AgentRepositoryTestDb();
   });
 
-  it("creates and retrieves a workbench", async () => {
-    const repo = new WorkbenchRepository(db as never);
-    const input = newWorkbenchRow("workspace-1");
+  it("creates and retrieves an agent", async () => {
+    const repo = new AgentRepository(db as never);
+    const input = newAgentRow("workspace-1");
     const wb = await repo.create(input);
 
     expect(wb.id).toBe(input.id);
-    expect(wb.name).toBe("Test Workbench");
+    expect(wb.name).toBe("Test Agent");
     expect(wb.workspaceId).toBe("workspace-1");
 
     const retrieved = await repo.getById(wb.id);
     expect(retrieved).toEqual(wb);
   });
 
-  it("lists active workbenches for a workspace", async () => {
-    const repo = new WorkbenchRepository(db as never);
-    const wb1 = await repo.create(newWorkbenchRow("workspace-1"));
-    const wb2 = await repo.create(newWorkbenchRow("workspace-1"));
+  it("lists active agents for a workspace", async () => {
+    const repo = new AgentRepository(db as never);
+    const wb1 = await repo.create(newAgentRow("workspace-1"));
+    const wb2 = await repo.create(newAgentRow("workspace-1"));
 
     const active = await repo.listForWorkspace("workspace-1", "active");
     expect(active).toHaveLength(2);
@@ -387,10 +387,10 @@ describe("WorkbenchRepository", () => {
     expect(active.map((e) => e.id)).toContain(wb2.id);
   });
 
-  it("excludes archived workbenches from active list", async () => {
-    const repo = new WorkbenchRepository(db as never);
-    const wb1 = await repo.create(newWorkbenchRow("workspace-1"));
-    const wb2 = await repo.create(newWorkbenchRow("workspace-1"));
+  it("excludes archived agents from active list", async () => {
+    const repo = new AgentRepository(db as never);
+    const wb1 = await repo.create(newAgentRow("workspace-1"));
+    const wb2 = await repo.create(newAgentRow("workspace-1"));
 
     await repo.archive(wb2.id, now + 1);
 
@@ -399,29 +399,29 @@ describe("WorkbenchRepository", () => {
     expect(active[0]?.id).toBe(wb1.id);
   });
 
-  it("throws when asserting an archived workbench", async () => {
-    const repo = new WorkbenchRepository(db as never);
-    const wb = await repo.create(newWorkbenchRow("workspace-1"));
+  it("throws when asserting an archived agent", async () => {
+    const repo = new AgentRepository(db as never);
+    const wb = await repo.create(newAgentRow("workspace-1"));
 
     await repo.archive(wb.id, now + 1);
 
-    await expect(repo.assertActiveWorkbenchInWorkspace(wb.id, "workspace-1")).rejects.toThrow(
-      "workbench_not_found",
+    await expect(repo.assertActiveAgentInWorkspace(wb.id, "workspace-1")).rejects.toThrow(
+      "agent_not_found",
     );
   });
 
-  it("rejects a workbench from a foreign workspace", async () => {
-    const repo = new WorkbenchRepository(db as never);
-    const wb = await repo.create(newWorkbenchRow("workspace-1"));
+  it("rejects an agent from a foreign workspace", async () => {
+    const repo = new AgentRepository(db as never);
+    const wb = await repo.create(newAgentRow("workspace-1"));
 
-    await expect(repo.assertActiveWorkbenchInWorkspace(wb.id, "workspace-2")).rejects.toThrow(
-      "workbench_not_found",
+    await expect(repo.assertActiveAgentInWorkspace(wb.id, "workspace-2")).rejects.toThrow(
+      "agent_not_found",
     );
   });
 
-  it("updates workbench fields", async () => {
-    const repo = new WorkbenchRepository(db as never);
-    const wb = await repo.create(newWorkbenchRow("workspace-1"));
+  it("updates agent fields", async () => {
+    const repo = new AgentRepository(db as never);
+    const wb = await repo.create(newAgentRow("workspace-1"));
 
     await repo.update(wb.id, {
       name: "Updated Name",
@@ -436,8 +436,8 @@ describe("WorkbenchRepository", () => {
   });
 
   it("replaces repository entries, inserting full config with generated ids", async () => {
-    const repo = new WorkbenchRepository(db as never);
-    const wb = await repo.create(newWorkbenchRow("workspace-1"));
+    const repo = new AgentRepository(db as never);
+    const wb = await repo.create(newAgentRow("workspace-1"));
 
     await repo.replaceRepositories(
       wb.id,
@@ -467,8 +467,8 @@ describe("WorkbenchRepository", () => {
   });
 
   it("replacing repositories again drops the previous set", async () => {
-    const repo = new WorkbenchRepository(db as never);
-    const wb = await repo.create(newWorkbenchRow("workspace-1"));
+    const repo = new AgentRepository(db as never);
+    const wb = await repo.create(newAgentRow("workspace-1"));
 
     await repo.replaceRepositories(wb.id, "workspace-1", [entry("repo-a")], now);
     await repo.replaceRepositories(wb.id, "workspace-1", [entry("repo-b")], now + 1);
@@ -477,12 +477,12 @@ describe("WorkbenchRepository", () => {
     expect(rows.map((r) => r.name)).toEqual(["repo-b"]);
   });
 
-  it("rejects replacing repositories on a workbench outside the workspace", async () => {
-    const repo = new WorkbenchRepository(db as never);
-    const wb = await repo.create(newWorkbenchRow("workspace-1"));
+  it("rejects replacing repositories on an agent outside the workspace", async () => {
+    const repo = new AgentRepository(db as never);
+    const wb = await repo.create(newAgentRow("workspace-1"));
 
     await expect(
       repo.replaceRepositories(wb.id, "workspace-other", [entry("repo-a")], now),
-    ).rejects.toThrow("workbench_not_found");
+    ).rejects.toThrow("agent_not_found");
   });
 });

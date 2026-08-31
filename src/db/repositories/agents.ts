@@ -11,7 +11,7 @@ import {
 } from "../schema";
 import type { ProjectStatus } from "./projects";
 
-export type WorkbenchRepositoryEntry = {
+export type AgentRepositoryEntry = {
   source: "github" | "url";
   name: string;
   url: string;
@@ -27,20 +27,14 @@ export type WorkbenchRepositoryEntry = {
 /**
  * The sandbox configuration an AGENT carries — setup script, repositories,
  * secrets, env vars, resource profile, network allowlist.
- *
- * Still named for the workbench it replaced. `workbenches` is gone: the
- * migration turned each workbench into an agent and moved every key that
- * pointed at one, so these queries read and write `agents`. The rename of the
- * class, its file and the routes above it is the next task; nothing about the
- * DATA is provisional.
  */
-export class WorkbenchRepository {
+export class AgentRepository {
   constructor(private readonly db: DrizzleD1Database<typeof schema>) {}
 
   async create(input: typeof agents.$inferInsert): Promise<AgentConfig> {
     await this.db.insert(agents).values(input);
     const row = await this.getById(input.id);
-    if (!row) throw new Error("workbench_not_found");
+    if (!row) throw new Error("agent_not_found");
     return row;
   }
 
@@ -95,32 +89,25 @@ export class WorkbenchRepository {
       .where(and(eq(agents.id, id), isNull(agents.archivedAt)));
   }
 
-  async assertActiveWorkbenchInWorkspace(
-    workbenchId: string,
-    workspaceId: string,
-  ): Promise<AgentConfig> {
+  async assertActiveAgentInWorkspace(agentId: string, workspaceId: string): Promise<AgentConfig> {
     const row = await this.db
       .select()
       .from(agents)
       .where(
-        and(
-          eq(agents.id, workbenchId),
-          eq(agents.workspaceId, workspaceId),
-          isNull(agents.archivedAt),
-        ),
+        and(eq(agents.id, agentId), eq(agents.workspaceId, workspaceId), isNull(agents.archivedAt)),
       )
       .get();
-    if (!row) throw new Error("workbench_not_found");
+    if (!row) throw new Error("agent_not_found");
     return row;
   }
 
   async replaceRepositories(
     agentId: string,
     workspaceId: string,
-    entries: WorkbenchRepositoryEntry[],
+    entries: AgentRepositoryEntry[],
     createdAt: number,
   ): Promise<void> {
-    await this.assertActiveWorkbenchInWorkspace(agentId, workspaceId);
+    await this.assertActiveAgentInWorkspace(agentId, workspaceId);
     const del = this.db.delete(agentRepositories).where(eq(agentRepositories.agentId, agentId));
     const statements: [BatchItem<"sqlite">, ...BatchItem<"sqlite">[]] = [del];
     if (entries.length > 0) {

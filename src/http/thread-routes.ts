@@ -19,8 +19,8 @@ import { decodeThreadCursor, encodeThreadCursor, fingerprintThreadQuery } from "
 import { notifyWorkspaceMembers } from "../agent/notify-user";
 import { normalizeThreadRuntime } from "../agent/thread-runtime";
 import { archiveThreadCore } from "../agent/archive-thread";
-import { createThreadWithWorkbench } from "../agent/create-thread";
-import { WorkbenchRepository } from "../db/repositories/workbenches";
+import { createThreadWithAgent } from "../agent/create-thread";
+import { AgentRepository } from "../db/repositories/agents";
 import { ArchivedMessageRepository } from "../db/repositories/archived-messages";
 import { ArchivedCompactionRepository } from "../db/repositories/archived-compactions";
 import { ThreadSearchProjectionRepository } from "../db/repositories/thread-search-projection";
@@ -61,7 +61,7 @@ type ThreadModelSnapshotInput = {
   reasoningEffort?: unknown;
   modelSupportsReasoning?: unknown;
   projectId?: unknown;
-  workbenchId?: unknown;
+  agentId?: unknown;
 };
 
 export async function routeThreads(
@@ -407,14 +407,14 @@ export async function selectThreadSummariesForUser(
       archivedAt: threadIndex.archivedAt,
       projectId: threadIndex.projectId,
       projectName: projects.name,
-      workbenchName: agents.name,
+      agentName: agents.name,
       snapshotResourceProfile: agents.resourceProfile,
       automatonId: threadIndex.automatonId,
       automatonName: automata.name,
       outcomeDismissedAt: threadIndex.outcomeDismissedAt,
       recentDismissedAt: threadIndex.recentDismissedAt,
       automatonNotifyMode: automata.notifyMode,
-      repositorySnapshotCount: sql<number>`count(${agentRepositories.id})`,
+      repositoryCount: sql<number>`count(${agentRepositories.id})`,
       lastContextTokens: threadIndex.lastContextTokens,
       lastContextWindow: threadIndex.lastContextWindow,
       lastCompactAfterTokens: threadIndex.lastCompactAfterTokens,
@@ -1019,14 +1019,14 @@ async function createThread(req: Request, env: Env, ctx: ExecutionContext): Prom
     (body.body ?? {}) as ThreadModelSnapshotInput,
   );
   if (!projectId.ok) return projectId.response;
-  const workbenchId = await resolveThreadWorkbenchId(
+  const agentId = await resolveThreadAgentId(
     db,
     target.workspaceId,
     projectId.value,
     (body.body ?? {}) as ThreadModelSnapshotInput,
     target.agentId,
   );
-  if (!workbenchId.ok) return workbenchId.response;
+  if (!agentId.ok) return agentId.response;
 
   const createdAt = Date.now();
   const thread = {
@@ -1050,7 +1050,7 @@ async function createThread(req: Request, env: Env, ctx: ExecutionContext): Prom
     createdAt,
     updatedAt: createdAt,
   };
-  await createThreadWithWorkbench(db, thread, workbenchId.value);
+  await createThreadWithAgent(db, thread, agentId.value);
 
   const summary = await selectThreadSummaryForMember(env, session.user.id, thread.id);
   if (!summary) return new Response("Not found", { status: 404 });
@@ -1101,23 +1101,18 @@ async function renameThread(
   const patch = body as {
     title?: unknown;
     projectId?: unknown;
-    workbenchId?: unknown;
+    agentId?: unknown;
     reasoningEffort?: unknown;
   };
   const title = parseThreadTitlePatch(patch.title);
   if (!title.ok) return title.response;
   const projectId = await resolveThreadProjectPatch(db, thread.workspaceId, patch.projectId);
   if (!projectId.ok) return projectId.response;
-  const workbenchId = await resolveThreadWorkbenchPatch(db, thread.workspaceId, patch.workbenchId);
-  if (!workbenchId.ok) return workbenchId.response;
+  const agentId = await resolveThreadAgentPatch(db, thread.workspaceId, patch.agentId);
+  if (!agentId.ok) return agentId.response;
   const reasoningEffort = parseThreadReasoningEffortPatch(patch.reasoningEffort);
   if (!reasoningEffort.ok) return reasoningEffort.response;
-  if (
-    !title.hasValue &&
-    !projectId.hasValue &&
-    !workbenchId.hasValue &&
-    !reasoningEffort.hasValue
-  ) {
+  if (!title.hasValue && !projectId.hasValue && !agentId.hasValue && !reasoningEffort.hasValue) {
     return new Response("No valid fields to update", { status: 400 });
   }
 
@@ -1131,11 +1126,11 @@ async function renameThread(
   if (projectId.hasValue) {
     await repo.updateProject(threadId, projectId.value, updatedAt);
   }
-  if (workbenchId.hasValue) {
+  if (agentId.hasValue) {
     // A plain column write, live compute or not: configuration is LIVE, so the
     // next turn's preparation reads the new environment. There is no snapshot
     // to move and therefore no save-your-work handshake to run first.
-    await repo.updateWorkbench(threadId, workbenchId.value, updatedAt);
+    await repo.updateAgent(threadId, agentId.value, updatedAt);
   }
 
   const updated = await selectThreadSummaryForMember(env, session.user.id, threadId);
@@ -1379,7 +1374,7 @@ async function resolveThreadProjectPatch(
 }
 
 /**
- * Resolves the AGENT a newly created thread runs as. An explicit `workbenchId`
+ * Resolves the AGENT a newly created thread runs as. An explicit `agentId`
  * on the request wins; otherwise the project's default agent; otherwise the
  * workspace's own agent, which the caller has already resolved.
  *
@@ -1389,14 +1384,14 @@ async function resolveThreadProjectPatch(
  * for the same reason: an optional one would let a caller create a thread with
  * no agent, which reads as a thread that silently clones nothing.
  */
-async function resolveThreadWorkbenchId(
+async function resolveThreadAgentId(
   db: ReturnType<typeof registryDb>,
   workspaceId: string,
   projectId: string | null,
   input: ThreadModelSnapshotInput,
   fallbackAgentId: string,
 ): Promise<{ ok: true; value: string } | { ok: false; response: Response }> {
-  const explicit = await resolveThreadWorkbenchPatch(db, workspaceId, input.workbenchId);
+  const explicit = await resolveThreadAgentPatch(db, workspaceId, input.agentId);
   if (!explicit.ok) return explicit;
   if (explicit.hasValue) return { ok: true, value: explicit.value };
 
@@ -1409,14 +1404,14 @@ async function resolveThreadWorkbenchId(
   // default) must not be adopted, nor 400 the thread create over a default the
   // caller never explicitly requested — fall back to the workspace's agent.
   try {
-    await new WorkbenchRepository(db).assertActiveWorkbenchInWorkspace(defaultAgentId, workspaceId);
+    await new AgentRepository(db).assertActiveAgentInWorkspace(defaultAgentId, workspaceId);
     return { ok: true, value: defaultAgentId };
   } catch {
     return { ok: true, value: fallbackAgentId };
   }
 }
 
-async function resolveThreadWorkbenchPatch(
+async function resolveThreadAgentPatch(
   db: ReturnType<typeof registryDb>,
   workspaceId: string,
   value: unknown,
@@ -1433,7 +1428,7 @@ async function resolveThreadWorkbenchPatch(
   if (typeof value !== "string") {
     return {
       ok: false,
-      response: new Response("workbenchId must be a string", { status: 400 }),
+      response: new Response("agentId must be a string", { status: 400 }),
     };
   }
 
@@ -1441,7 +1436,7 @@ async function resolveThreadWorkbenchPatch(
   if (!clean) {
     return {
       ok: false,
-      response: new Response("workbenchId must be a string", { status: 400 }),
+      response: new Response("agentId must be a string", { status: 400 }),
     };
   }
 
@@ -1449,10 +1444,7 @@ async function resolveThreadWorkbenchPatch(
     // Loads and validates the row anyway, so returning its `name` alongside
     // the id (for the save-work message the live-sandbox switch path sends)
     // costs no extra query.
-    const row = await new WorkbenchRepository(db).assertActiveWorkbenchInWorkspace(
-      clean,
-      workspaceId,
-    );
+    const row = await new AgentRepository(db).assertActiveAgentInWorkspace(clean, workspaceId);
     return { ok: true, hasValue: true, value: clean, name: row.name };
   } catch {
     return { ok: false, response: new Response("Not found", { status: 404 }) };

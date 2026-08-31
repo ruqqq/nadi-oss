@@ -20,8 +20,8 @@ describe("mergeSecretValuesIntoEnv", () => {
     expect(result).toEqual({ NODE_ENV: "prod", SHARED: "wsSecret", GH_TOKEN: "agent" });
   });
 
-  // The `environment` (workbench) layer that used to sit between workspace and
-  // agent is gone: the workbench IS the agent now, so it was the same values in
+  // The `environment` layer that used to sit between workspace and agent is
+  // gone: the agent carries what it carried now, so it was the same values in
   // two slots. What remains is four layers, and the ordering rules that mattered
   // — secrets over editable, agent over workspace — are unchanged.
   it("layers agent over workspace, and secrets over editable", () => {
@@ -90,10 +90,10 @@ describe("resolveEffectiveComputeConfig (resource profile)", () => {
     },
   };
 
-  it("takes the resource profile from the thread's workbench snapshot", () => {
+  it("takes the resource profile from the thread's agent", () => {
     const result = resolveEffectiveComputeConfig({
       ...baseInput,
-      workbenchResourceProfile: "medium",
+      agentResourceProfile: "medium",
     });
     expect(result.enabled).toBe(true);
     expect(result.enabled && result.value.resourceProfile).toBe("medium");
@@ -102,12 +102,12 @@ describe("resolveEffectiveComputeConfig (resource profile)", () => {
   it("falls back to small when the snapshot predates the profile column", () => {
     const result = resolveEffectiveComputeConfig({
       ...baseInput,
-      workbenchResourceProfile: null,
+      agentResourceProfile: null,
     });
     expect(result.enabled && result.value.resourceProfile).toBe("small");
   });
 
-  it("validates the source of the workbench's profile, not the default", () => {
+  it("validates the source of the agent's profile, not the default", () => {
     const result = resolveEffectiveComputeConfig({
       ...baseInput,
       workspace: {
@@ -121,7 +121,7 @@ describe("resolveEffectiveComputeConfig (resource profile)", () => {
         },
       },
       daytonaProfiles: { small: { kind: "snapshot", value: "ok" }, medium: null },
-      workbenchResourceProfile: "medium",
+      agentResourceProfile: "medium",
     });
     expect(result.enabled).toBe(false);
     expect(!result.enabled && result.reason).toBe("missing_source");
@@ -132,7 +132,7 @@ describe("resolveEffectiveComputeConfig (resource profile)", () => {
       ...baseInput,
       daytonaCredentialPresent: true,
       daytonaProfiles: { small: { kind: "snapshot", value: "ok" }, medium: null },
-      workbenchResourceProfile: "medium",
+      agentResourceProfile: "medium",
     });
 
     expect(result.enabled).toBe(false);

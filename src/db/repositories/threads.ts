@@ -31,7 +31,7 @@ export class ThreadRepository {
 
   /**
    * Environment assignment is `agent_id` itself now — the agent IS the
-   * environment. There is no separate workbench column and no per-thread
+   * environment. There is no separate environment column and no per-thread
    * configuration snapshot.
    *
    * `agentId` is REQUIRED, not optional-with-a-null-fallback: it is a NOT NULL
@@ -39,7 +39,7 @@ export class ThreadRepository {
    * caller that forgets it must fail to compile rather than produce a thread
    * that silently clones nothing.
    */
-  async createWithWorkbench(input: typeof threadIndex.$inferInsert, agentId: string) {
+  async createWithAgent(input: typeof threadIndex.$inferInsert, agentId: string) {
     const row = { ...input, agentId };
     await this.create(row);
     return row;
@@ -112,11 +112,11 @@ export class ThreadRepository {
     const enrichment = await this.db
       .select({
         projectName: projects.name,
-        workbenchName: agents.name,
+        agentName: agents.name,
         automatonName: automata.name,
         automatonNotifyMode: automata.notifyMode,
         repositoryCount: sql<number>`count(${agentRepositories.id})`,
-        workbenchResourceProfile: agents.resourceProfile,
+        agentResourceProfile: agents.resourceProfile,
       })
       .from(threadIndex)
       .leftJoin(projects, eq(projects.id, threadIndex.projectId))
@@ -134,11 +134,11 @@ export class ThreadRepository {
     return {
       ...base,
       projectName: enrichment?.projectName ?? null,
-      workbenchName: enrichment?.workbenchName ?? null,
+      agentName: enrichment?.agentName ?? null,
       automatonName: enrichment?.automatonName ?? null,
       automatonNotifyMode: enrichment?.automatonNotifyMode ?? null,
-      repositorySnapshotCount: enrichment?.repositoryCount ?? 0,
-      snapshotResourceProfile: enrichment?.workbenchResourceProfile ?? null,
+      repositoryCount: enrichment?.repositoryCount ?? 0,
+      snapshotResourceProfile: enrichment?.agentResourceProfile ?? null,
     };
   }
 
@@ -271,7 +271,7 @@ export class ThreadRepository {
   /**
    * Retargets a thread's project. Repository access no longer flows through
    * projects — it is keyed on the thread's `agentId` (see
-   * {@link updateWorkbench}) — so this is a plain column update.
+   * {@link updateAgent}) — so this is a plain column update.
    */
   async updateProject(
     threadId: string,
@@ -303,7 +303,7 @@ export class ThreadRepository {
    *
    * There is no "no agent" state to retarget to: `agent_id` is NOT NULL.
    */
-  async updateWorkbench(threadId: string, agentId: string, updatedAt: number): Promise<void> {
+  async updateAgent(threadId: string, agentId: string, updatedAt: number): Promise<void> {
     const thread = await this.db
       .select()
       .from(threadIndex)

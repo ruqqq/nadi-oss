@@ -46,7 +46,7 @@ const projectIdSchema = z
   .string()
   .min(1)
   .describe(
-    "Exact project id from a previous result's `thread.projectId`. Not a project name, and not a workbench id. Pass null to cover every project in the workspace.",
+    "Exact project id from a previous result's `thread.projectId`. Not a project name, and not an agent id. Pass null to cover every project in the workspace.",
   );
 const includeAutomataSchema = z
   .boolean()

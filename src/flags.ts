@@ -100,11 +100,11 @@ export function anyBackgroundWorkEnabled(capabilities: BackgroundCapabilities): 
   return capabilities.backgroundExec || capabilities.subagents;
 }
 
-export function resolveWorkspaceWorkbenchNetworkAllowlist(flagsJson: string): boolean {
+export function resolveWorkspaceAgentNetworkAllowlist(flagsJson: string): boolean {
   try {
     const parsed: unknown = JSON.parse(flagsJson);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
-    return (parsed as Record<string, unknown>).workbenchNetworkAllowlist === true;
+    return (parsed as Record<string, unknown>).agentNetworkAllowlist === true;
   } catch {
     return false;
   }

@@ -25,7 +25,7 @@ type BootstrapPayload = {
     workersAi?: boolean;
     feedbackAdmin?: boolean;
     backgroundWork?: boolean;
-    workbenchNetworkAllowlist?: boolean;
+    agentNetworkAllowlist?: boolean;
   };
 };
 
@@ -49,7 +49,7 @@ export interface BootstrapData {
   workersAiEnabled: boolean;
   feedbackAdminEnabled: boolean;
   backgroundWorkEnabled: boolean;
-  workbenchNetworkAllowlistEnabled: boolean;
+  agentNetworkAllowlistEnabled: boolean;
 }
 
 export async function getBootstrap(fetchImpl: FetchLike = appFetch): Promise<BootstrapData> {
@@ -79,6 +79,6 @@ export function parseBootstrap(data: BootstrapPayload): BootstrapData {
     workersAiEnabled: data.features?.workersAi ?? false,
     feedbackAdminEnabled: data.features?.feedbackAdmin ?? false,
     backgroundWorkEnabled: data.features?.backgroundWork ?? false,
-    workbenchNetworkAllowlistEnabled: data.features?.workbenchNetworkAllowlist ?? false,
+    agentNetworkAllowlistEnabled: data.features?.agentNetworkAllowlist ?? false,
   };
 }

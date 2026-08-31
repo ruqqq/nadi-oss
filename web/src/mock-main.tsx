@@ -88,7 +88,7 @@ localStorage.setItem(
       workersAiEnabled: false,
       feedbackAdminEnabled: store.features.feedbackAdmin,
       backgroundWorkEnabled: store.features.backgroundWork,
-      workbenchNetworkAllowlistEnabled: store.features.workbenchNetworkAllowlist,
+      agentNetworkAllowlistEnabled: store.features.agentNetworkAllowlist,
     },
   }),
 );

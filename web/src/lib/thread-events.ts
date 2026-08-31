@@ -75,9 +75,8 @@ export function parseUserEvent(raw: string): UserEvent | null {
       ("projectName" in thread &&
         (thread as { projectName?: unknown }).projectName !== null &&
         typeof (thread as { projectName?: unknown }).projectName !== "string") ||
-      ("repositorySnapshotCount" in thread &&
-        typeof (thread as { repositorySnapshotCount?: unknown }).repositorySnapshotCount !==
-          "number")
+      ("repositoryCount" in thread &&
+        typeof (thread as { repositoryCount?: unknown }).repositoryCount !== "number")
     ) {
       return null;
     }

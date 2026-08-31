@@ -8,10 +8,11 @@ import type { EffectiveComputeConfig } from "./types";
  * Pure merge with the design's four-layer precedence (low to high):
  * workspace editable < agent editable < workspace secrets < agent secrets.
  *
- * The `environment` layer between them is GONE, not defaulted to empty. It was
- * the workbench, and the workbench is the agent now: keeping both would have
- * carried the same values in two slots, and the one place they could differ —
- * a name set in both — would have silently flipped which one wins.
+ * The `environment` layer between them is GONE, not defaulted to empty. It used
+ * to be the workbench, and the agent carries what the workbench carried now:
+ * keeping both would have carried the same values in two slots, and the one
+ * place they could differ — a name set in both — would have silently flipped
+ * which one wins.
  */
 export function mergeSecretValuesIntoEnv(input: {
   workspaceEditable: Record<string, string>;

@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import { getAgentByName } from "agents";
-import { createThreadWithWorkbench } from "../agent/create-thread";
+import { createThreadWithAgent } from "../agent/create-thread";
 import { registryDb } from "../db/client";
 import { AutomatonRepository } from "../db/repositories/automata";
 import { ProjectRepository } from "../db/repositories/projects";
@@ -111,11 +111,12 @@ export async function startAutomatonRun(
     const label =
       opts.dueAt === null ? "Manual run" : formatDueDate(opts.dueAt, automaton.timezone);
     // `agent_id` IS the environment now, and it is NOT NULL, so there is no
-    // separate workbench to resolve and nothing to degrade to. The project's
+    // separate agent to resolve and nothing to degrade to. The project's
     // default is not consulted at fire time any more: it was only ever the
-    // fallback for an automaton with no workbench override, and the migration
-    // resolved that inheritance into `agent_id` itself. An automaton names the
-    // agent it runs as, exactly as it already did for prompt and model.
+    // fallback for an automaton with no explicit agent override, and the
+    // migration resolved that inheritance into `agent_id` itself. An automaton
+    // names the agent it runs as, exactly as it already did for prompt and
+    // model.
     //
     // A dangling project id still fails loudly, as before.
     if (automaton.projectId) {
@@ -124,7 +125,7 @@ export async function startAutomatonRun(
         automaton.workspaceId,
       );
     }
-    await createThreadWithWorkbench(
+    await createThreadWithAgent(
       db,
       {
         id: threadId,

@@ -31,7 +31,6 @@ export interface AutomatonSummary {
   ownerUserId: string;
   agentId: string;
   projectId: string | null;
-  workbenchId: string | null;
   name: string;
   prompt: string;
   /** Null means the automaton runs on the workspace agent's model. */
@@ -87,7 +86,7 @@ export type CreateAutomatonInput = {
   schedule: AutomatonSchedule;
   timezone: string;
   projectId?: string | null;
-  workbenchId?: string | null;
+  agentId?: string | null;
   enabled?: boolean;
   notifyMode?: "all" | "failures_only";
   /** Send both, or both null to fall back to the workspace agent's model. */

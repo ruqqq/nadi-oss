@@ -160,7 +160,7 @@ export async function routeGithub(
   const db = registryDb(env);
   const installRepo = new GithubInstallationRepository(db);
   await installRepo.markStatus(target.workspaceId, body.installationId, "disconnected");
-  // TODO: reconcile access_status on workbench_repositories referencing this installation (deferred)
+  // TODO: reconcile access_status on agent_repositories referencing this installation (deferred)
   return Response.json({ ok: true });
 }
 
@@ -208,7 +208,7 @@ async function listInstallationRepositories(
         installationId,
         "disconnected",
       );
-      // TODO: reconcile access_status on workbench_repositories referencing this installation (deferred)
+      // TODO: reconcile access_status on agent_repositories referencing this installation (deferred)
       return Response.json({ error: "installation_disconnected" }, { status: 409 });
     }
     throw error;

@@ -9,7 +9,7 @@ import { formatCreatedAt, formatRelativeTime } from "../../lib/thread-time";
 import { WorkbenchPicker } from "../workbenches/WorkbenchPicker";
 import type { ProjectSummary } from "../../projects-api";
 import type { ThreadSummary } from "../../threads-api";
-import type { WorkbenchSummary } from "../../workbenches-api";
+import type { AgentSummary as WorkbenchSummary } from "../../agents-api";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -156,10 +156,10 @@ export function ThreadDetailsSheet({
                   onCreateProjectForThread?.(thread.threadId, name) ?? Promise.resolve()
                 }
               />
-              {thread.projectId && thread.repositorySnapshotCount > 0 && (
+              {thread.projectId && thread.repositoryCount > 0 && (
                 <p className="text-muted-foreground text-xs">
-                  {thread.repositorySnapshotCount}{" "}
-                  {thread.repositorySnapshotCount === 1 ? "repository" : "repositories"}
+                  {thread.repositoryCount}{" "}
+                  {thread.repositoryCount === 1 ? "repository" : "repositories"}
                 </p>
               )}
             </>
@@ -174,14 +174,14 @@ export function ThreadDetailsSheet({
           <Label>Workbench</Label>
           {onSwitchWorkbench && !thread.readOnly ? (
             <WorkbenchPicker
-              value={thread.workbenchId ?? "none"}
+              value={thread.agentId ?? "none"}
               workbenches={workbenches}
-              selectedName={thread.workbenchName ?? undefined}
+              selectedName={thread.agentName ?? undefined}
               onValueChange={(next) => setPendingWorkbenchId(next)}
             />
           ) : (
             <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-foreground text-sm">
-              {thread.workbenchName ?? "No workbench"}
+              {thread.agentName ?? "No workbench"}
             </div>
           )}
           <p className="text-sm text-muted-foreground">

@@ -149,8 +149,8 @@ import {
 import { createBaseNativeThreadTools } from "./thread-tools";
 import {
   createComputeTools,
-  readThreadWorkbenchResourceProfile,
-  hasThreadWorkbench,
+  readThreadAgentResourceProfile,
+  hasThreadRepositoryWork,
   type ComputeToolDeps,
 } from "./compute-tools";
 import {
@@ -561,10 +561,10 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
    * and misled a later refactor.)
    */
   private currentTurnMaxSteps?: number;
-  /** Resolved workbench presence of the in-flight turn, stashed alongside
+  /** Resolved repository-work presence of the in-flight turn, stashed alongside
    *  `currentTurnMaxSteps` so `beforeStep` can log the wind-down without paying
    *  the D1 lookup that produced it again on every step. */
-  private currentTurnHasWorkbench?: boolean;
+  private currentTurnHasRepositoryWork?: boolean;
   private _cachedWorkspaceId?: string;
   /** Memoized MCP connect-readiness. Kicked in the background from `onStart` and
    *  awaited in `beforeTurn` so remote MCP handshakes never block the WS
@@ -887,17 +887,17 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
       // same way `resolveComputeService` does it. Resolving against the default
       // `small` on a workspace whose Daytona config sets only a `medium` source
       // yields `missing_source` -> `enabled === false`, which disabled the
-      // skill-script runner for EVERY thread — including medium-workbench
+      // skill-script runner for EVERY thread — including medium-resourced
       // threads whose exec tools resolve fine.
-      const [workbenchResourceProfile, hasEnabledScript] = await Promise.all([
-        readThreadWorkbenchResourceProfile(this.env, this.name),
+      const [agentResourceProfile, hasEnabledScript] = await Promise.all([
+        readThreadAgentResourceProfile(this.env, this.name),
         repo.hasEnabledScriptSkill({ workspaceId, agentId }),
       ]);
       const config = await resolveComputeConfigForAgent({
         env: this.env,
         workspaceId,
         agentId,
-        workbenchResourceProfile,
+        agentResourceProfile,
       });
       const hasScript = config.enabled ? hasEnabledScript : false;
       if (!shouldEnableScriptRunner(config.enabled, hasScript) || !config.enabled) return null;
@@ -1411,7 +1411,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
       }
     }
     this.currentTurnSetupReminders = turnSetupReminders;
-    let hasWorkbench = false;
+    let hasRepositoryWork = false;
     // Cleared BEFORE the open, not after it. The session is an RPC stub, and a
     // failed open (or anything else that throws out of the wave below) used to
     // leave the PREVIOUS turn's value readable by this turn's `beforeStep` —
@@ -1421,11 +1421,11 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
     this._turnSandbox = null;
     try {
       // Joined into the same wave as the sandbox session rather than added as
-      // a separate sequential await: hasWorkbench is needed below for the
+      // a separate sequential await: hasRepositoryWork is needed below for the
       // tool-step budget, and neither read depends on the other's result.
-      const [turnSandbox, workbenchAssigned] = await Promise.all([
+      const [turnSandbox, threadHasRepositoryWork] = await Promise.all([
         this.openSandbox(),
-        hasThreadWorkbench(this.env, this.name),
+        hasThreadRepositoryWork(this.env, this.name),
       ]);
       // Held for the TURN — one session for `beforeStep`'s per-step auto-watch
       // sweep and for the tool set built below, instead of paying the several
@@ -1433,7 +1433,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
       // A turn is one invocation, so the stub does not outlive the invocation
       // that opened it; `onChatResponse` / `onChatError` null it at the end.
       this._turnSandbox = turnSandbox ?? null;
-      hasWorkbench = workbenchAssigned;
+      hasRepositoryWork = threadHasRepositoryWork;
       await turnSandbox?.service.cleanupExpiredRecoverableCompute();
     } finally {
       this.currentTurnSetupReminders = undefined;
@@ -1450,11 +1450,11 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
         : preparedMessages;
 
     // Resolve the turn's tool-step budget once and stash it: the turn must wind
-    // down at the SAME budget it started on, and re-reading the workbench (a D1
+    // down at the SAME budget it started on, and re-reading the agent's repos (a D1
     // lookup) on every step would be far too expensive.
-    const maxSteps = this._testMaxToolSteps ?? resolveToolStepBudget(hasWorkbench);
+    const maxSteps = this._testMaxToolSteps ?? resolveToolStepBudget(hasRepositoryWork);
     this.currentTurnMaxSteps = maxSteps;
-    this.currentTurnHasWorkbench = hasWorkbench;
+    this.currentTurnHasRepositoryWork = hasRepositoryWork;
 
     // Config-aware: `{}` when sandbox execution is disabled/incomplete, which
     // keeps every `exec_*` tool out of both the turn tool set and the model's
@@ -1556,7 +1556,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
       partTailChars: contextBudget.partTailChars,
       headMaxChars: contextBudget.headMaxChars,
       maxSteps,
-      hasWorkbench,
+      hasRepositoryWork,
     });
     // configureSession runs ONCE (in onStart), so the threshold it passed to
     // compactAfter is frozen — a mid-thread model switch would never update it.
@@ -1691,7 +1691,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
     this.currentTurnStartedAt = Date.now();
     this.currentTurnAttentionRequiredRecorded = false;
     this.currentTurnMaxSteps = 8;
-    this.currentTurnHasWorkbench = false;
+    this.currentTurnHasRepositoryWork = false;
     this.currentTurnWindDownSystem = FEEDBACK_SYSTEM_PROMPT;
     this._turnSandbox = null;
     this._currentContextWindow = undefined;
@@ -1762,7 +1762,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
       log.info("think_thread.tool_budget_exhausted", {
         threadId: this.name,
         maxSteps,
-        hasWorkbench: this.currentTurnHasWorkbench ?? false,
+        hasRepositoryWork: this.currentTurnHasRepositoryWork ?? false,
       });
     }
     const injected =
@@ -6514,7 +6514,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
   async isComputeLive(): Promise<boolean> {
     const resolved = await this.openSandbox();
     // Widened deliberately: a sandbox still `acquiring` must defer the switch,
-    // or it comes up cloned from the OLD workbench with no marker to fix it.
+    // or it comes up cloned from the OLD agent's environment with no marker to fix it.
     return (await resolved?.service.isComputeLiveOrAcquiring()) ?? false;
   }
 

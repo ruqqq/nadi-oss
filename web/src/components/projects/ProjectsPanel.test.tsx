@@ -35,7 +35,7 @@ const PROJECT: ProjectSummary = {
   name: "Project One",
   description: "",
   customInstructions: "",
-  defaultWorkbenchId: null,
+  defaultAgentId: null,
   archivedAt: null,
   createdAt: 1,
   updatedAt: 1,
@@ -60,15 +60,14 @@ function thread(over: Partial<ThreadSummary> & { threadId: string }): ThreadSumm
     status: "active",
     projectId: "p1",
     projectName: "Project One",
-    workbenchId: null,
-    workbenchName: null,
+    agentName: null,
     resourceProfile: "small",
     automatonId: null,
     automatonName: null,
     automatonNotifyMode: null,
     outcomeDismissedAt: null,
     recentDismissedAt: null,
-    repositorySnapshotCount: 0,
+    repositoryCount: 0,
     createdAt: 1,
     updatedAt: 1,
     lastContextTokens: null,
@@ -83,7 +82,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 /** Routes the shared global fetch stub across the three endpoints the panel
- *  hits: /api/workbenches (mount), /api/projects/:id (mount, once a project
+ *  hits: /api/agents (mount), /api/projects/:id (mount, once a project
  *  is selected), and /api/threads (the Chats tab's useThreadQuery). Only the
  *  threads route is interesting per test — the others are fixed boilerplate
  *  every test needs regardless of what it's asserting. */
@@ -91,8 +90,8 @@ function buildFetch(onThreads: (url: string) => Response | Promise<Response>) {
   return vi.fn((input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url.startsWith("/api/threads")) return Promise.resolve(onThreads(url));
-    if (url.startsWith("/api/workbenches")) {
-      return Promise.resolve(jsonResponse({ workbenches: [] }));
+    if (url.startsWith("/api/agents")) {
+      return Promise.resolve(jsonResponse({ agents: [] }));
     }
     if (url.startsWith("/api/projects/")) {
       return Promise.resolve(jsonResponse({ project: PROJECT }));

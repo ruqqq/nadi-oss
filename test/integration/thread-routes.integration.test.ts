@@ -33,7 +33,7 @@ const defaultThreadActivityFields = {
   // The wire keeps the old names, but the value is the thread's AGENT — the
   // agent IS the environment, and it is never null. Filled in per-thread at the
   // call site, since it varies with the seeded workspace.
-  workbenchName: "Default",
+  agentName: "Default",
   resourceProfile: "small" as const,
   // A thread a human started carries no automaton provenance.
   automatonId: null,
@@ -89,7 +89,7 @@ async function ensureThreadNotificationSchema() {
 async function clearRegistry() {
   const db = drizzle(env.REGISTRY_DB, { schema });
   await db.delete(schema.threadIndex);
-  // Referenced by workspaces(id); the "live sandbox" workbench-switch tests
+  // Referenced by workspaces(id); the "live sandbox" agent-retarget tests
   // seed a row here and it must not survive to block the workspaces delete
   // below (FK constraint) on the next test's cleanup.
   await db.delete(schema.workspaceSandboxSettings);
@@ -176,15 +176,15 @@ async function insertThread(input: {
   reasoningEffort?: string;
   archivedAt?: number | null;
   projectId?: string | null;
-  workbenchId?: string | null;
+  threadAgentId?: string | null;
 }) {
   const db = drizzle(env.REGISTRY_DB, { schema });
   await db.insert(schema.threadIndex).values({
     id: input.id,
     workspaceId: input.workspaceId,
-    // The agent IS the environment: a seed that names a `workbenchId` is
+    // The agent IS the environment: a seed that names a `threadAgentId` is
     // naming the agent the thread runs as.
-    agentId: input.workbenchId ?? input.agentId,
+    agentId: input.threadAgentId ?? input.agentId,
     projectId: input.projectId ?? null,
     modelProvider: input.modelProvider ?? "mock",
     model: input.model ?? "mock",
@@ -231,14 +231,14 @@ async function insertEnvironment(input: {
 }
 
 async function assignRepositoryToEnvironment(input: {
-  workbenchId: string;
+  agentId: string;
   repositoryId: string;
   createdAt: number;
 }) {
   const db = drizzle(env.REGISTRY_DB, { schema });
   await db.insert(schema.agentRepositories).values({
     id: input.repositoryId,
-    agentId: input.workbenchId,
+    agentId: input.agentId,
     source: "url",
     name: input.repositoryId,
     url: `https://github.com/acme/${input.repositoryId}.git`,
@@ -255,7 +255,7 @@ async function insertProject(input: {
   id: string;
   workspaceId: string;
   name: string;
-  defaultWorkbenchId?: string | null;
+  defaultAgentId?: string | null;
   createdAt: number;
   archivedAt?: number | null;
 }) {
@@ -274,14 +274,14 @@ async function insertProject(input: {
     name: input.name,
     description: "",
     customInstructions: "",
-    defaultAgentId: input.defaultWorkbenchId ?? null,
+    defaultAgentId: input.defaultAgentId ?? null,
     archivedAt: input.archivedAt ?? null,
     createdAt: input.createdAt,
     updatedAt: input.createdAt,
   });
 }
 
-// The workspace-level repository catalog was removed; workbench repositories are
+// The workspace-level repository catalog was removed; agent repositories are
 // now self-contained and seeded directly via assignRepositoryToEnvironment.
 async function insertRepository(_input: { id: string; workspaceId: string; createdAt: number }) {}
 
@@ -434,19 +434,19 @@ describe("thread routes", () => {
     expect(serializeThread({ ...baseThread, projectId: null })).toMatchObject({
       projectId: null,
       projectName: null,
-      repositorySnapshotCount: 0,
+      repositoryCount: 0,
     });
     expect(
       serializeThread({
         ...baseThread,
         projectId: "project-1",
         projectName: "Nadi",
-        repositorySnapshotCount: 2,
+        repositoryCount: 2,
       }),
     ).toMatchObject({
       projectId: "project-1",
       projectName: "Nadi",
-      repositorySnapshotCount: 2,
+      repositoryCount: 2,
     });
     expect(
       serializeThread({
@@ -520,7 +520,6 @@ describe("thread routes", () => {
           modelSupportsReasoning: null,
           runtime: "legacy",
           ...defaultThreadActivityFields,
-          workbenchId: seeded.agentId,
           title: "New",
           source: "manual",
           lastMessagePreview: "newer preview",
@@ -529,7 +528,7 @@ describe("thread routes", () => {
           status: "active",
           projectId: null,
           projectName: null,
-          repositorySnapshotCount: 0,
+          repositoryCount: 0,
           lastContextTokens: null,
           lastContextWindow: null,
           lastCompactAfterTokens: null,
@@ -547,7 +546,6 @@ describe("thread routes", () => {
           modelSupportsReasoning: null,
           runtime: "legacy",
           ...defaultThreadActivityFields,
-          workbenchId: seeded.agentId,
           title: "Old",
           source: "manual",
           lastMessagePreview: "older preview",
@@ -556,7 +554,7 @@ describe("thread routes", () => {
           status: "active",
           projectId: null,
           projectName: null,
-          repositorySnapshotCount: 0,
+          repositoryCount: 0,
           lastContextTokens: null,
           lastContextWindow: null,
           lastCompactAfterTokens: null,
@@ -604,7 +602,7 @@ describe("thread routes", () => {
       threads: Array<{
         threadId: string;
         projectId: string | null;
-        repositorySnapshotCount: number;
+        repositoryCount: number;
       }>;
     };
     expect(body.threads.map((thread) => thread.threadId)).toEqual([
@@ -659,7 +657,7 @@ describe("thread routes", () => {
           threadId: "thr_project_a",
           projectId: "project-a",
           projectName: "Project A",
-          repositorySnapshotCount: 0,
+          repositoryCount: 0,
         },
       ],
     });
@@ -704,7 +702,7 @@ describe("thread routes", () => {
           threadId: "thr_project_unassigned",
           projectId: null,
           projectName: null,
-          repositorySnapshotCount: 0,
+          repositoryCount: 0,
         },
       ],
     });
@@ -966,7 +964,7 @@ describe("thread routes", () => {
       id: "project-create",
       workspaceId: seeded.workspaceId,
       name: "Create Project",
-      defaultWorkbenchId: "env-create",
+      defaultAgentId: "env-create",
       createdAt: now,
     });
     await insertRepository({
@@ -980,12 +978,12 @@ describe("thread routes", () => {
       createdAt: now + 1,
     });
     await assignRepositoryToEnvironment({
-      workbenchId: "env-create",
+      agentId: "env-create",
       repositoryId: "repo-create-1",
       createdAt: now,
     });
     await assignRepositoryToEnvironment({
-      workbenchId: "env-create",
+      agentId: "env-create",
       repositoryId: "repo-create-2",
       createdAt: now + 1,
     });
@@ -1005,13 +1003,13 @@ describe("thread routes", () => {
         threadId: string;
         projectId: string | null;
         projectName: string | null;
-        repositorySnapshotCount: number;
+        repositoryCount: number;
       };
     };
     expect(body.thread).toMatchObject({
       projectId: "project-create",
       projectName: "Create Project",
-      repositorySnapshotCount: 2,
+      repositoryCount: 2,
     });
 
     const db = drizzle(env.REGISTRY_DB, { schema });
@@ -1024,7 +1022,7 @@ describe("thread routes", () => {
     expect(row?.agentId).toBe("env-create");
   });
 
-  it("an explicit workbenchId overrides the project's defaultWorkbenchId", async () => {
+  it("an explicit agentId overrides the project's defaultAgentId", async () => {
     const seeded = await seedUserWorkspace({
       userId: "user-thread-create-env-explicit",
       token: "thread-create-env-explicit-token",
@@ -1046,7 +1044,7 @@ describe("thread routes", () => {
       id: "project-env-explicit",
       workspaceId: seeded.workspaceId,
       name: "Explicit Env Project",
-      defaultWorkbenchId: "env-explicit-a",
+      defaultAgentId: "env-explicit-a",
       createdAt: now,
     });
 
@@ -1056,7 +1054,7 @@ describe("thread routes", () => {
         cookie: `better-auth.session_token=${seeded.token}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ projectId: "project-env-explicit", workbenchId: "env-explicit-b" }),
+      body: JSON.stringify({ projectId: "project-env-explicit", agentId: "env-explicit-b" }),
     });
 
     expect(res.status).toBe(201);
@@ -1071,7 +1069,7 @@ describe("thread routes", () => {
     expect(row?.agentId).toBe("env-explicit-b");
   });
 
-  it("seeds the project's defaultWorkbenchId when workbenchId is omitted", async () => {
+  it("seeds the project's defaultAgentId when agentId is omitted", async () => {
     const seeded = await seedUserWorkspace({
       userId: "user-thread-create-env-default",
       token: "thread-create-env-default-token",
@@ -1087,7 +1085,7 @@ describe("thread routes", () => {
       id: "project-env-default",
       workspaceId: seeded.workspaceId,
       name: "Default Env Project",
-      defaultWorkbenchId: "env-default-a",
+      defaultAgentId: "env-default-a",
       createdAt: now,
     });
 
@@ -1157,7 +1155,7 @@ describe("thread routes", () => {
       id: "project-env-default-archived",
       workspaceId: seeded.workspaceId,
       name: "Default Archived Env Project",
-      defaultWorkbenchId: "env-default-archived",
+      defaultAgentId: "env-default-archived",
       createdAt: now,
     });
 
@@ -1604,7 +1602,7 @@ describe("thread routes", () => {
   // environment and `agent_id` is NOT NULL. An explicit null is REFUSED rather
   // than quietly substituting a default, because substituting one would move
   // the thread onto a different agent's repositories and secrets.
-  it("REFUSES a PATCH that sets workbenchId to null", async () => {
+  it("REFUSES a PATCH that sets agentId to null", async () => {
     const seeded = await seedUserWorkspace({
       userId: "user-thread-patch-clear-project",
       token: "thread-patch-clear-project-token",
@@ -1622,7 +1620,7 @@ describe("thread routes", () => {
       createdAt: now,
     });
     await assignRepositoryToEnvironment({
-      workbenchId: "env-clear",
+      agentId: "env-clear",
       repositoryId: "repo-clear-1",
       createdAt: now,
     });
@@ -1631,7 +1629,7 @@ describe("thread routes", () => {
       workspaceId: seeded.workspaceId,
       agentId: seeded.agentId,
       title: "Clear Project",
-      workbenchId: "env-clear",
+      threadAgentId: "env-clear",
       updatedAt: now,
     });
     const res = await SELF.fetch("https://nadi.test/api/threads/thr_clear_project", {
@@ -1640,7 +1638,7 @@ describe("thread routes", () => {
         cookie: `better-auth.session_token=${seeded.token}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ workbenchId: null }),
+      body: JSON.stringify({ agentId: null }),
     });
 
     expect(res.status).toBe(400);
@@ -1653,9 +1651,9 @@ describe("thread routes", () => {
 
   it("retargets the environment with a plain column write", async () => {
     const seeded = await seedUserWorkspace({
-      userId: "user-thread-patch-workbench-no-sandbox",
-      token: "thread-patch-workbench-no-sandbox-token",
-      workspaceId: "workspace-thread-patch-workbench-no-sandbox",
+      userId: "user-thread-patch-agent-no-sandbox",
+      token: "thread-patch-agent-no-sandbox-token",
+      workspaceId: "workspace-thread-patch-agent-no-sandbox",
     });
     await insertEnvironment({
       id: "wb_new_no_sandbox",
@@ -1663,7 +1661,7 @@ describe("thread routes", () => {
       name: "New Bench",
       createdAt: now,
     });
-    const threadId = "thr_patch_workbench_no_sandbox";
+    const threadId = "thr_patch_agent_no_sandbox";
     await insertThread({
       id: threadId,
       workspaceId: seeded.workspaceId,
@@ -1673,7 +1671,7 @@ describe("thread routes", () => {
       runtime: "think",
     });
 
-    const res = await patchThread(threadId, { workbenchId: "wb_new_no_sandbox" }, seeded.token);
+    const res = await patchThread(threadId, { agentId: "wb_new_no_sandbox" }, seeded.token);
     expect(res.status).toBe(200);
 
     const thread = await readThread(threadId);
@@ -1688,11 +1686,11 @@ describe("thread routes", () => {
    * dial — so the assertion is on the thing that actually changed: whether
    * the binding is touched at all.
    */
-  it("never dials THINK_THREAD_AGENT for a workbench PATCH", async () => {
+  it("never dials THINK_THREAD_AGENT for an agent PATCH", async () => {
     const seeded = await seedUserWorkspace({
-      userId: "user-thread-patch-workbench-legacy-no-dial",
-      token: "thread-patch-workbench-legacy-no-dial-token",
-      workspaceId: "workspace-thread-patch-workbench-legacy-no-dial",
+      userId: "user-thread-patch-agent-legacy-no-dial",
+      token: "thread-patch-agent-legacy-no-dial-token",
+      workspaceId: "workspace-thread-patch-agent-legacy-no-dial",
     });
     await insertEnvironment({
       id: "wb_new_legacy_no_dial",
@@ -1700,7 +1698,7 @@ describe("thread routes", () => {
       name: "New Bench Legacy No Dial",
       createdAt: now,
     });
-    const threadId = "thr_patch_workbench_legacy_no_dial";
+    const threadId = "thr_patch_agent_legacy_no_dial";
     await insertThread({
       id: threadId,
       workspaceId: seeded.workspaceId,
@@ -1738,7 +1736,7 @@ describe("thread routes", () => {
           cookie: `better-auth.session_token=${seeded.token}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ workbenchId: "wb_new_legacy_no_dial" }),
+        body: JSON.stringify({ agentId: "wb_new_legacy_no_dial" }),
       }),
       envWithSpy,
       makeExecutionContext(),

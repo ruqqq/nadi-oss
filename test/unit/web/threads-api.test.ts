@@ -29,6 +29,7 @@ import {
   renameThread,
   reconcileThreads,
   sendThreadMessage,
+  switchThreadAgent,
   updateThreadReasoningEffort,
   type ThreadSummary,
 } from "../../../web/src/threads-api";
@@ -61,15 +62,14 @@ const thread: ThreadSummary = {
   status: "active",
   projectId: null,
   projectName: null,
-  workbenchId: null,
-  workbenchName: null,
+  agentName: null,
   resourceProfile: "small",
   automatonId: null,
   automatonName: null,
   automatonNotifyMode: null,
   outcomeDismissedAt: null,
   recentDismissedAt: null,
-  repositorySnapshotCount: 0,
+  repositoryCount: 0,
   lastContextTokens: null,
   lastContextWindow: null,
   lastCompactAfterTokens: null,
@@ -222,6 +222,19 @@ describe("thread api helpers", () => {
 
     expect(fetch).toHaveBeenCalledWith("/api/threads/thr_1%2Fwith%20slash", {
       credentials: "include",
+    });
+  });
+
+  it("switches a thread's agent by PATCHing agentId on the wire", async () => {
+    const fetch = vi.fn(async () => Response.json({ thread }));
+
+    await expect(switchThreadAgent("thr_1", "agent-2", fetch)).resolves.toEqual(thread);
+
+    expect(fetch).toHaveBeenCalledWith("/api/threads/thr_1", {
+      method: "PATCH",
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ agentId: "agent-2" }),
     });
   });
 

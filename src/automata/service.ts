@@ -4,7 +4,7 @@ import type * as schema from "../db/schema";
 import { automata } from "../db/schema";
 import { AutomatonRepository } from "../db/repositories/automata";
 import { ProjectRepository } from "../db/repositories/projects";
-import { WorkbenchRepository } from "../db/repositories/workbenches";
+import { AgentRepository } from "../db/repositories/agents";
 import type { Env } from "../env";
 import {
   isSupportedAgentProvider,
@@ -65,7 +65,7 @@ export interface CreateAutomatonInput {
   timezone: unknown;
   schedule: unknown;
   projectId?: unknown;
-  workbenchId?: unknown;
+  agentId?: unknown;
   notifyMode?: unknown;
   enabled?: unknown;
   modelProvider?: unknown;
@@ -79,7 +79,7 @@ export interface UpdateAutomatonPatch {
   timezone?: unknown;
   schedule?: unknown;
   projectId?: unknown;
-  workbenchId?: unknown;
+  agentId?: unknown;
   notifyMode?: unknown;
   enabled?: unknown;
   modelProvider?: unknown;
@@ -127,13 +127,13 @@ async function resolveProjectId(
 // The agent a run executes as. `undefined` leaves it unset; `null` resets it to
 // the workspace's own agent; a string must name an active agent here.
 //
-// `null` used to mean "clear, and inherit the project's default workbench at
+// `null` used to mean "clear, and inherit the project's default agent at
 // fire time". `automata.agent_id` is NOT NULL, so there is no stored value that
 // can mean "inherit" any more — but the workspace's agent is exactly what that
 // inheritance degraded to whenever the project had no default, so null resolves
 // to it eagerly instead of being rejected. Returns null for that case rather
 // than the id, because only the caller knows the context's agent.
-async function resolveWorkbenchId(
+async function resolveExplicitAgentId(
   db: Db,
   workspaceId: string,
   value: unknown,
@@ -141,21 +141,21 @@ async function resolveWorkbenchId(
   if (value === undefined) return { set: false, value: null };
   if (value === null) return { set: true, value: null };
   if (typeof value !== "string" || !value.trim()) {
-    throw new AutomatonValidationError("workbenchId must be an agent id or null.");
+    throw new AutomatonValidationError("agentId must be an agent id or null.");
   }
   const clean = value.trim();
   try {
-    await new WorkbenchRepository(db).assertActiveWorkbenchInWorkspace(clean, workspaceId);
+    await new AgentRepository(db).assertActiveAgentInWorkspace(clean, workspaceId);
   } catch {
     // 404, not 403: never confirm another workspace's agent exists.
-    throw new AutomatonProjectNotFoundError("Workbench not found.");
+    throw new AutomatonProjectNotFoundError("Agent not found.");
   }
   return { set: true, value: clean };
 }
 
 /**
  * The agent an automaton's runs execute as, at the SAME precedence thread
- * creation uses (`resolveThreadWorkbenchId` in `http/thread-routes.ts`):
+ * creation uses (`resolveThreadAgentId` in `http/thread-routes.ts`):
  *
  *     explicit agent  ->  the project's default agent  ->  the workspace's agent
  *
@@ -182,7 +182,7 @@ async function resolveAutomatonAgentId(
     (await new ProjectRepository(db).getById(projectId))?.defaultAgentId ?? null;
   if (defaultAgentId === null) return fallbackAgentId;
   try {
-    await new WorkbenchRepository(db).assertActiveWorkbenchInWorkspace(defaultAgentId, workspaceId);
+    await new AgentRepository(db).assertActiveAgentInWorkspace(defaultAgentId, workspaceId);
     return defaultAgentId;
   } catch {
     return fallbackAgentId;
@@ -325,7 +325,11 @@ export class AutomatonService {
     }
 
     const project = await resolveProjectId(this.db, this.ctx.workspaceId, input.projectId);
-    const workbench = await resolveWorkbenchId(this.db, this.ctx.workspaceId, input.workbenchId);
+    const explicitAgent = await resolveExplicitAgentId(
+      this.db,
+      this.ctx.workspaceId,
+      input.agentId,
+    );
     const notifyMode = parseNotifyMode(input.notifyMode);
     const model = await resolveModelSelection(
       this.ctx.env,
@@ -341,7 +345,7 @@ export class AutomatonService {
       this.db,
       this.ctx.workspaceId,
       projectId,
-      workbench,
+      explicitAgent,
       this.ctx.agentId,
     );
 
@@ -392,8 +396,12 @@ export class AutomatonService {
     const project = await resolveProjectId(this.db, automaton.workspaceId, input.projectId);
     if (project.set) patch.projectId = project.value;
 
-    const workbench = await resolveWorkbenchId(this.db, automaton.workspaceId, input.workbenchId);
-    if (workbench.set) {
+    const explicitAgent = await resolveExplicitAgentId(
+      this.db,
+      automaton.workspaceId,
+      input.agentId,
+    );
+    if (explicitAgent.set) {
       // Same precedence as create. The project to resolve against is the one
       // this patch LEAVES BEHIND, not the one the row had: clearing the agent
       // and moving the project in one PATCH must land on the new project's
@@ -402,7 +410,7 @@ export class AutomatonService {
         this.db,
         automaton.workspaceId,
         project.set ? project.value : automaton.projectId,
-        workbench,
+        explicitAgent,
         this.ctx.agentId,
       );
     }

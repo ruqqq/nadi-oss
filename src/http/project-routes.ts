@@ -1,7 +1,7 @@
 import type { Env } from "../env";
 import { validateRequestSession, type ValidatedSession } from "../auth/session";
 import { registryDb } from "../db/client";
-import { WorkbenchRepository } from "../db/repositories/workbenches";
+import { AgentRepository } from "../db/repositories/agents";
 import { ProjectRepository, type ProjectStatus } from "../db/repositories/projects";
 import type { Project } from "../db/schema";
 import { WorkspaceRepository } from "../db/repositories/workspaces";
@@ -11,21 +11,16 @@ type ProjectBody = {
   name?: unknown;
   description?: unknown;
   customInstructions?: unknown;
-  defaultWorkbenchId?: unknown;
+  defaultAgentId?: unknown;
 };
 
 /**
- * A project's default is an AGENT now — the column is `default_agent_id`. The
- * wire field keeps its old name here because renaming it is a wire-contract
- * change, and a wire contract is changed together with `web/src/mocks/`, in the
- * task that owns the route surface. Serializing through one function rather
- * than returning the row keeps that rename to a single place.
+ * A project's default is an AGENT now — the column is `default_agent_id`, and
+ * the wire field matches it, so this is a pass-through kept as a named
+ * function so every caller serializes the row the same way.
  */
-function serializeProject(row: Project): Omit<Project, "defaultAgentId"> & {
-  defaultWorkbenchId: string | null;
-} {
-  const { defaultAgentId, ...rest } = row;
-  return { ...rest, defaultWorkbenchId: defaultAgentId };
+function serializeProject(row: Project): Project {
+  return { ...row };
 }
 
 export async function routeProjects(req: Request, env: Env): Promise<Response | null> {
@@ -169,16 +164,10 @@ async function updateProject(req: Request, env: Env, projectId: string): Promise
     patch.customInstructions = customInstructions.value;
   }
 
-  if (body?.defaultWorkbenchId !== undefined) {
-    const defaultWorkbenchId = await parseDefaultWorkbenchId(
-      db,
-      project.workspaceId,
-      body.defaultWorkbenchId,
-    );
-    if (!defaultWorkbenchId.ok) return defaultWorkbenchId.response;
-    // Wire name unchanged, column changed: a project now defaults to an AGENT.
-    // The rename of the wire field belongs with the rest of the route surface.
-    patch.defaultAgentId = defaultWorkbenchId.value;
+  if (body?.defaultAgentId !== undefined) {
+    const defaultAgentId = await parseDefaultAgentId(db, project.workspaceId, body.defaultAgentId);
+    if (!defaultAgentId.ok) return defaultAgentId.response;
+    patch.defaultAgentId = defaultAgentId.value;
   }
 
   if (Object.keys(patch).length === 0) {
@@ -257,7 +246,7 @@ function parseOptionalString(
   return { ok: true, value: value.trim() };
 }
 
-async function parseDefaultWorkbenchId(
+async function parseDefaultAgentId(
   db: ReturnType<typeof registryDb>,
   workspaceId: string,
   value: unknown,
@@ -266,13 +255,13 @@ async function parseDefaultWorkbenchId(
   if (typeof value !== "string" || !value.trim()) {
     return {
       ok: false,
-      response: new Response("defaultWorkbenchId must be a string or null", { status: 400 }),
+      response: new Response("defaultAgentId must be a string or null", { status: 400 }),
     };
   }
 
   const clean = value.trim();
   try {
-    await new WorkbenchRepository(db).assertActiveWorkbenchInWorkspace(clean, workspaceId);
+    await new AgentRepository(db).assertActiveAgentInWorkspace(clean, workspaceId);
     return { ok: true, value: clean };
   } catch {
     return { ok: false, response: new Response("Not found", { status: 404 }) };

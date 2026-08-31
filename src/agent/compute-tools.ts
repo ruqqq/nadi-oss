@@ -30,7 +30,7 @@ import {
   DEFAULT_COMPUTE_ALLOWED_HOSTS,
   defaultProviderConfig,
   isComputeResourceProfile,
-  needsWorkbenchResourceProfile,
+  needsAgentResourceProfile,
   parseDomainList,
 } from "../compute/config";
 import type { ComputeResourceProfile } from "../compute/backend";
@@ -41,7 +41,7 @@ import type { WorkLedgerSink } from "./work-ledger-store";
 import { getGithubAppConfig } from "../github/config";
 import { applyGithubToken } from "./github-token-wiring";
 import { ThreadRepository } from "../db/repositories/threads";
-import { WorkbenchRepository } from "../db/repositories/workbenches";
+import { AgentRepository } from "../db/repositories/agents";
 import {
   probeWorkspaceCleanliness,
   type WorkspaceCleanliness,
@@ -239,38 +239,36 @@ export function unionAllowlistWithSkillDomains(
  * Configuration is live: there is no per-thread snapshot any more, so editing
  * the environment's size takes effect on the next acquire.
  */
-export async function readThreadWorkbenchResourceProfile(
+export async function readThreadAgentResourceProfile(
   env: Env,
   threadId: string,
 ): Promise<ComputeResourceProfile | null> {
   const db = registryDb(env);
-  const workbenchId = (await new ThreadRepository(db).getById(threadId))?.agentId ?? null;
-  if (workbenchId === null) return null;
-  const workbench = await new WorkbenchRepository(db).getById(workbenchId);
-  return workbench && isComputeResourceProfile(workbench.resourceProfile)
-    ? workbench.resourceProfile
-    : null;
+  const agentId = (await new ThreadRepository(db).getById(threadId))?.agentId ?? null;
+  if (agentId === null) return null;
+  const agent = await new AgentRepository(db).getById(agentId);
+  return agent && isComputeResourceProfile(agent.resourceProfile) ? agent.resourceProfile : null;
 }
 
 /**
  * Whether this thread does REPOSITORY work — the gate on the large tool-step
  * budget (see `tool-step-limit.ts`).
  *
- * It used to be "does the thread have a workbench assigned", which no longer
- * distinguishes anything: every thread has an agent, and `agent_id` is NOT
- * NULL, so the old test would hand every thread the coding budget. The
+ * It used to be "does the thread have an environment assigned", which no
+ * longer distinguishes anything: every thread has an agent, and `agent_id` is
+ * NOT NULL, so the old test would hand every thread the coding budget. The
  * configuration-level statement it was actually making — this thread clones
  * repositories and runs a setup script — is asked directly instead.
  *
- * Deliberately independent of {@link readThreadWorkbenchResourceProfile}: that
+ * Deliberately independent of {@link readThreadAgentResourceProfile}: that
  * helper returns `null` both for a missing agent and for one whose stored
  * profile fails validation, and neither means "no repository work".
  */
-export async function hasThreadWorkbench(env: Env, threadId: string): Promise<boolean> {
+export async function hasThreadRepositoryWork(env: Env, threadId: string): Promise<boolean> {
   const db = registryDb(env);
   const agentId = (await new ThreadRepository(db).getById(threadId))?.agentId ?? null;
   if (agentId === null) return false;
-  const repo = new WorkbenchRepository(db);
+  const repo = new AgentRepository(db);
   const [agent, repositories] = await Promise.all([
     repo.getById(agentId),
     repo.listRepositories(agentId),
@@ -297,19 +295,20 @@ export async function resolveComputeService(hostDeps: ComputeServiceHostDeps): P
   const { workspaceId, agentId } = await deps.resolveRuntimeConfig();
 
   // The D1-backed config inputs (workspace/agent settings, MCP hosts, secret
-  // names, credential presence) are independent of the workbench profile, so
-  // fetch them exactly once regardless of how many times we resolve below.
+  // names, credential presence) are independent of the agent's resource
+  // profile, so fetch them exactly once regardless of how many times we
+  // resolve below.
   const inputs = await loadComputeConfigInputs({ env: deps.env, workspaceId, agentId });
   // Resolve once with NO profile to learn whether compute is even enabled for
   // this workspace/agent, without paying for the thread's environment
   // query. The enabled/disabled decision (aside from `missing_source`, which
   // itself depends on the profile) never consults the profile — see
-  // `needsWorkbenchResourceProfile`. This is what keeps a compute-DISABLED
+  // `needsAgentResourceProfile`. This is what keeps a compute-DISABLED
   // workspace from paying an extra D1 round-trip for a value it will never use.
   const preliminary = computeConfigFromInputs(inputs, null);
-  if (!needsWorkbenchResourceProfile(preliminary)) return null;
+  if (!needsAgentResourceProfile(preliminary)) return null;
 
-  // `threadWorkbenchId` is the thread's AGENT — what used to be a separate
+  // `threadAgentId` is the thread's AGENT — what used to be a separate
   // environment bundle (repositories/env-vars/setup-script) is the agent
   // itself. Distinct from the `environmentId` local below, which names the base
   // OS image for the selected resource profile. Read LIVE from
@@ -318,21 +317,21 @@ export async function resolveComputeService(hostDeps: ComputeServiceHostDeps): P
   // compute could actually be enabled (see above), so this query is paid
   // exactly once and never on the disabled path.
   //
-  // `agentId` is NOT NULL, so unlike the workbench it replaced there is no
-  // "no environment" case here — but the row lookup can still miss, and the
-  // null-guards below are kept for exactly that.
-  const threadWorkbenchId =
+  // `agentId` is NOT NULL, so there is no "no environment" case here — but the
+  // row lookup can still miss, and the null-guards below are kept for exactly
+  // that.
+  const threadAgentId =
     (await new ThreadRepository(registryDb(deps.env)).getById(deps.threadId))?.agentId ?? null;
   // One read serves both the profile and the env-vars/allowlist below.
-  const workbenchRow = threadWorkbenchId
-    ? ((await new WorkbenchRepository(registryDb(deps.env)).getById(threadWorkbenchId)) ?? null)
+  const agentRow = threadAgentId
+    ? ((await new AgentRepository(registryDb(deps.env)).getById(threadAgentId)) ?? null)
     : null;
-  const workbenchResourceProfile =
-    workbenchRow && isComputeResourceProfile(workbenchRow.resourceProfile)
-      ? workbenchRow.resourceProfile
+  const agentResourceProfile =
+    agentRow && isComputeResourceProfile(agentRow.resourceProfile)
+      ? agentRow.resourceProfile
       : null;
 
-  const config = computeConfigFromInputs(inputs, workbenchResourceProfile);
+  const config = computeConfigFromInputs(inputs, agentResourceProfile);
   if (!config.enabled) return null;
 
   const skillDomains = await new AgentSkillRepository(registryDb(deps.env)).listEnabledSkillDomains(
@@ -372,20 +371,18 @@ export async function resolveComputeService(hostDeps: ComputeServiceHostDeps): P
   // they now arrive through `config.agentEditableEnv` / `config.secretEnvNames`
   // (see `loadComputeConfigInputs`), which read the same agent row. Collecting
   // them twice would have put the same values in two precedence slots.
-  const workbenchNetworkHosts = workbenchRow
-    ? parseDomainList(workbenchRow.sandboxNetworkDomainAllowlist)
-    : [];
+  const agentNetworkHosts = agentRow ? parseDomainList(agentRow.sandboxNetworkDomainAllowlist) : [];
 
   const baseAllowlist =
     config.value.provider === "daytona" &&
     config.value.allowedHosts === null &&
-    workbenchNetworkHosts.length > 0
+    agentNetworkHosts.length > 0
       ? DEFAULT_COMPUTE_ALLOWED_HOSTS
       : config.value.allowedHosts;
   const widenedAllowlist = unionAllowlistWithSkillDomains(baseAllowlist, [
     ...inputs.mcpHosts,
     ...skillDomains,
-    ...workbenchNetworkHosts,
+    ...agentNetworkHosts,
   ]);
 
   const effectiveConfig: EffectiveComputeConfig = {
@@ -436,8 +433,8 @@ export async function resolveComputeService(hostDeps: ComputeServiceHostDeps): P
     // LIVE repository list for the thread's AGENT — the token is minted for
     // whatever it currently declares, not a frozen snapshot. Same key as every
     // other repository read: `thread.agentId`.
-    const repositories = threadWorkbenchId
-      ? await new WorkbenchRepository(registryDb(deps.env)).listRepositories(threadWorkbenchId)
+    const repositories = threadAgentId
+      ? await new AgentRepository(registryDb(deps.env)).listRepositories(threadAgentId)
       : [];
     effectiveEnv = await applyGithubToken({
       db: registryDb(deps.env),

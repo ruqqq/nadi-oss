@@ -1,14 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentRepositoryRow } from "../../../src/db/schema";
 
-const { registryDbMock, getThreadMock, listRepositoriesMock, getWorkbenchMock } = vi.hoisted(
-  () => ({
-    registryDbMock: vi.fn(),
-    getThreadMock: vi.fn(),
-    listRepositoriesMock: vi.fn(),
-    getWorkbenchMock: vi.fn(),
-  }),
-);
+const { registryDbMock, getThreadMock, listRepositoriesMock, getAgentMock } = vi.hoisted(() => ({
+  registryDbMock: vi.fn(),
+  getThreadMock: vi.fn(),
+  listRepositoriesMock: vi.fn(),
+  getAgentMock: vi.fn(),
+}));
 
 vi.mock("../../../src/db/client", () => ({
   registryDb: registryDbMock,
@@ -20,10 +18,10 @@ vi.mock("../../../src/db/repositories/threads", () => ({
   },
 }));
 
-vi.mock("../../../src/db/repositories/workbenches", () => ({
-  WorkbenchRepository: class {
+vi.mock("../../../src/db/repositories/agents", () => ({
+  AgentRepository: class {
     listRepositories = listRepositoriesMock;
-    getById = getWorkbenchMock;
+    getById = getAgentMock;
   },
 }));
 
@@ -77,7 +75,7 @@ describe("createRepositoryPreparation", () => {
     // Every case runs against a thread whose AGENT is `env-1` — the agent IS
     // the environment, and `agent_repositories.agent_id` is keyed on it.
     getThreadMock.mockResolvedValue({ id: "thread-1", agentId: "env-1" });
-    getWorkbenchMock.mockResolvedValue(undefined);
+    getAgentMock.mockResolvedValue(undefined);
   });
 
   it("clones when the checkout path test exits non-zero for a missing path", async () => {
@@ -122,7 +120,7 @@ describe("createRepositoryPreparation", () => {
    * ("ran to completion, whatever the code"), so a missing repo fell through to
    * the `error` branch and was SKIPPED instead of cloned.
    *
-   * The result: every fresh workbench sandbox came up with an empty /workspace
+   * The result: every fresh agent sandbox came up with an empty /workspace
    * and the model had to improvise a clone by hand. The skip was invisible —
    * `onFreshRuntimeAcquired` discards the returned summary. Observed live on
    * thr_92e0b60c: `test -e /workspace/nadi` returned status `failed`, exitCode 1.
@@ -377,7 +375,7 @@ describe("createRepositoryPreparation", () => {
         setupCommand: "echo a\necho b",
       }),
     ]);
-    getWorkbenchMock.mockResolvedValue({
+    getAgentMock.mockResolvedValue({
       id: "env-1",
       workspaceId: "workspace-1",
       name: "env",
@@ -422,7 +420,7 @@ describe("createRepositoryPreparation", () => {
     expect(calls).not.toContain("echo env-setup");
 
     // The environment script runs exactly once.
-    expect(getWorkbenchMock).toHaveBeenCalledTimes(1);
+    expect(getAgentMock).toHaveBeenCalledTimes(1);
 
     // It runs after both repos' clone + setup (by call index).
     const envSetupIndex = calls.length - 1;

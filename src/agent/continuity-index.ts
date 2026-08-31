@@ -29,7 +29,7 @@ export type ContinuityIndex = {
   filesRead: string[];
   filesWritten: string[];
   sandboxId?: string;
-  workbenchId?: string;
+  agentId?: string;
   branch?: string;
   subagents: ContinuitySubagent[];
   artifacts: ContinuityArtifact[];
@@ -125,8 +125,8 @@ export function extractContinuity(messages: readonly LooseMessage[]): Continuity
       // wins: a thread can be reset onto a new sandbox mid-run.
       const sandboxId = str(output.sandboxId);
       if (sandboxId !== undefined) index.sandboxId = sandboxId;
-      const workbenchId = str(output.workbenchId);
-      if (workbenchId !== undefined) index.workbenchId = workbenchId;
+      const agentId = str(output.agentId);
+      if (agentId !== undefined) index.agentId = agentId;
       const branch = str(output.branch);
       if (branch !== undefined) index.branch = branch;
     }
@@ -162,7 +162,7 @@ export function mergeContinuity(previous: ContinuityIndex, next: ContinuityIndex
     if (!artifacts.some((a) => a.url === artifact.url)) artifacts.push(artifact);
   }
   const sandboxId = next.sandboxId ?? previous.sandboxId;
-  const workbenchId = next.workbenchId ?? previous.workbenchId;
+  const agentId = next.agentId ?? previous.agentId;
   const branch = next.branch ?? previous.branch;
   return {
     filesRead: mergeUnique(previous.filesRead, next.filesRead),
@@ -170,7 +170,7 @@ export function mergeContinuity(previous: ContinuityIndex, next: ContinuityIndex
     subagents,
     artifacts,
     ...(sandboxId !== undefined ? { sandboxId } : {}),
-    ...(workbenchId !== undefined ? { workbenchId } : {}),
+    ...(agentId !== undefined ? { agentId } : {}),
     ...(branch !== undefined ? { branch } : {}),
   };
 }
@@ -209,7 +209,7 @@ export function renderContinuity(index: ContinuityIndex): string {
   const lines: string[] = [];
   const env = [
     index.branch !== undefined ? `branch ${index.branch}` : null,
-    index.workbenchId !== undefined ? `workbench ${index.workbenchId}` : null,
+    index.agentId !== undefined ? `agent ${index.agentId}` : null,
     index.sandboxId !== undefined ? `sandbox ${index.sandboxId}` : null,
   ].filter((v): v is string => v !== null);
   if (env.length > 0) lines.push(`- Environment: ${env.join(", ")}`);

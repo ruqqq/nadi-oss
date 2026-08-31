@@ -21,10 +21,7 @@ import { DEFAULT_TOOL_OUTPUT_CAP_CHARS } from "../../src/agent/tool-output-cap";
 import { CODING_MAX_TOOL_STEPS, MAX_TOOL_STEPS } from "../../src/agent/tool-step-limit";
 import { AttachmentRepository } from "../../src/db/attachment-repository";
 import { AgentSkillRepository } from "../../src/db/repositories/agent-skills";
-import {
-  WorkbenchRepository,
-  type WorkbenchRepositoryEntry,
-} from "../../src/db/repositories/workbenches";
+import { AgentRepository, type AgentRepositoryEntry } from "../../src/db/repositories/agents";
 import { ProjectRepository } from "../../src/db/repositories/projects";
 import { ThreadRepository } from "../../src/db/repositories/threads";
 import * as posthogObservability from "../../src/observability/posthog";
@@ -234,9 +231,9 @@ async function seedFeedbackRuntimeThread(input: {
     .where(eq(schema.threadIndex.id, input.threadId));
 }
 
-// Workbench repositories are now self-contained (no workspace-level catalog).
-// Tests record intended repo config by id, then assign it to a workbench.
-const workbenchRepoConfigs = new Map<string, WorkbenchRepositoryEntry>();
+// Agent repositories are now self-contained (no workspace-level catalog).
+// Tests record intended repo config by id, then assign it to an agent.
+const agentRepoConfigs = new Map<string, AgentRepositoryEntry>();
 
 async function seedWorkspaceRepository(
   _db: TestDb,
@@ -253,7 +250,7 @@ async function seedWorkspaceRepository(
     createdAt: number;
   },
 ) {
-  workbenchRepoConfigs.set(input.repositoryId, {
+  agentRepoConfigs.set(input.repositoryId, {
     source: "url",
     name: input.name,
     url: input.url,
@@ -265,17 +262,17 @@ async function seedWorkspaceRepository(
   });
 }
 
-async function assignWorkbenchRepos(
+async function assignAgentRepos(
   db: TestDb,
-  input: { workbenchId: string; workspaceId: string; repositoryIds: string[]; createdAt: number },
+  input: { agentId: string; workspaceId: string; repositoryIds: string[]; createdAt: number },
 ) {
   const entries = input.repositoryIds.map((id) => {
-    const entry = workbenchRepoConfigs.get(id);
-    if (!entry) throw new Error(`unknown workbench repo config: ${id}`);
+    const entry = agentRepoConfigs.get(id);
+    if (!entry) throw new Error(`unknown agent repo config: ${id}`);
     return entry;
   });
-  await new WorkbenchRepository(db).replaceRepositories(
-    input.workbenchId,
+  await new AgentRepository(db).replaceRepositories(
+    input.agentId,
     input.workspaceId,
     entries,
     input.createdAt,
@@ -562,7 +559,7 @@ beforeAll(async () => {
     packageManager: "npm",
     createdAt: promptCreatedAt,
   });
-  await new WorkbenchRepository(db).create({
+  await new AgentRepository(db).create({
     id: "env-think-context",
     workspaceId: "workspace-think-project-context",
     name: "Think context env",
@@ -576,7 +573,7 @@ beforeAll(async () => {
     createdAt: promptCreatedAt,
     updatedAt: promptCreatedAt,
   });
-  await new WorkbenchRepository(db).create({
+  await new AgentRepository(db).create({
     id: "env-think-archived",
     workspaceId: "workspace-think-project-context",
     name: "Think archived env",
@@ -590,24 +587,24 @@ beforeAll(async () => {
     createdAt: promptCreatedAt,
     updatedAt: promptCreatedAt,
   });
-  await assignWorkbenchRepos(db, {
-    workbenchId: "env-think-context",
+  await assignAgentRepos(db, {
+    agentId: "env-think-context",
     workspaceId: "workspace-think-project-context",
     repositoryIds: ["repo-think-snapshot"],
     createdAt: promptCreatedAt,
   });
-  await assignWorkbenchRepos(db, {
-    workbenchId: "env-think-archived",
+  await assignAgentRepos(db, {
+    agentId: "env-think-archived",
     workspaceId: "workspace-think-project-context",
     repositoryIds: ["repo-think-snapshot"],
     createdAt: promptCreatedAt,
   });
-  await new ThreadRepository(db).updateWorkbench(
+  await new ThreadRepository(db).updateAgent(
     "think-project-context-assigned",
     "env-think-context",
     promptCreatedAt + 1,
   );
-  await new ThreadRepository(db).updateWorkbench(
+  await new ThreadRepository(db).updateAgent(
     "think-project-context-archived",
     "env-think-archived",
     promptCreatedAt + 2,
@@ -619,8 +616,8 @@ beforeAll(async () => {
   // Reassign the environment's repositories AFTER the thread was assigned to
   // it. Configuration is LIVE, so the prompt must pick this change up — the
   // per-thread snapshot that used to freeze it is gone.
-  await assignWorkbenchRepos(db, {
-    workbenchId: "env-think-context",
+  await assignAgentRepos(db, {
+    agentId: "env-think-context",
     workspaceId: "workspace-think-project-context",
     repositoryIds: ["repo-think-current"],
     createdAt: promptCreatedAt + 11,
@@ -1604,7 +1601,7 @@ describe("ThinkThreadAgent spike", () => {
     expect(result.system).toContain("- nadi\n  URL: https://github.com/acme/nadi.git");
   });
 
-  it("resolves the coding budget from the workbench, not a declaration", async () => {
+  it("resolves the coding budget from the agent's repository work, not a declaration", async () => {
     // "think-project-context-assigned" is assigned to `env-think-context` in
     // beforeAll; the budget is resolved from that assignment, not from any
     // per-thread declaration.
@@ -1620,7 +1617,7 @@ describe("ThinkThreadAgent spike", () => {
     expect(result.maxSteps).toBe(CODING_MAX_TOOL_STEPS);
   });
 
-  it("resolves the default budget for a workbench-less thread", async () => {
+  it("resolves the default budget for a thread with no repository work", async () => {
     // "think-registry-model" has no environment, so the default budget applies.
     const stub = env.THINK_THREAD_AGENT.get(
       env.THINK_THREAD_AGENT.idFromName("think-registry-model"),

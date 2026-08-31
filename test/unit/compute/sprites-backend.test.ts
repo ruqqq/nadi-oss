@@ -567,7 +567,7 @@ describe("SpritesComputeBackend.runCommand", () => {
 /**
  * LIVE (2026-08-04): a sprite created with `environment:{PROBE_ENV:"…"}` ran
  * `echo "[$PROBE_ENV]"` and printed `[]` — the create-time environment reaches
- * no command. Everything below exists because that made workbench env vars and
+ * no command. Everything below exists because that made agent env vars and
  * the GitHub App's minted `GH_TOKEN` invisible to every command the agent ran.
  */
 describe("SpritesComputeBackend runtime environment", () => {

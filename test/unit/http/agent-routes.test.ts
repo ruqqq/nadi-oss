@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseRepositoryEntries } from "../../../src/http/workbench-routes";
+import { parseRepositoryEntries } from "../../../src/http/agent-routes";
 
 function validEntry(overrides: Record<string, unknown> = {}) {
   return {

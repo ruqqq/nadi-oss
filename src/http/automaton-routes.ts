@@ -15,12 +15,12 @@ import type { Automaton } from "../db/schema";
 import type { Env } from "../env";
 
 /**
- * An automaton's environment is its AGENT now — the `workbench_id` column is
- * gone. The wire field keeps its old name here, and is renamed together with
- * `web/src/mocks/` in the task that owns the route surface.
+ * An automaton's environment is its AGENT now — there is no separate
+ * environment identifier to serialize; `agentId` is `automata.agent_id`
+ * itself, already present on the row.
  */
-function serializeAutomaton(row: Automaton): Automaton & { workbenchId: string } {
-  return { ...row, workbenchId: row.agentId };
+function serializeAutomaton(row: Automaton): Automaton {
+  return { ...row };
 }
 
 const LIST_PATH = "/api/automata";
@@ -117,7 +117,7 @@ async function createAutomaton(req: Request, env: Env): Promise<Response> {
       timezone: body.timezone,
       schedule: body.schedule,
       projectId: body.projectId,
-      workbenchId: body.workbenchId,
+      agentId: body.agentId,
       notifyMode: body.notifyMode,
       enabled: body.enabled,
       modelProvider: body.modelProvider,
@@ -189,7 +189,7 @@ async function updateAutomaton(req: Request, env: Env, id: string): Promise<Resp
       timezone: body.timezone,
       schedule: body.schedule,
       projectId: body.projectId,
-      workbenchId: body.workbenchId,
+      agentId: body.agentId,
       notifyMode: body.notifyMode,
       enabled: body.enabled,
       modelProvider: body.modelProvider,

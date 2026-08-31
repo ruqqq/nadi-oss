@@ -3,7 +3,7 @@ import { ThreadRepository } from "../../src/db/repositories/threads";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeAll, describe, expect, it } from "vitest";
 import { resolveThreadRuntimeConfigForAgent } from "../../src/agent/thread-agent-config";
-import { WorkbenchRepository } from "../../src/db/repositories/workbenches";
+import { AgentRepository } from "../../src/db/repositories/agents";
 import { ProjectRepository } from "../../src/db/repositories/projects";
 import * as schema from "../../src/db/schema";
 import { applyRegistryTestSchema, seedRegistryThread } from "./helpers/registry";
@@ -40,7 +40,7 @@ async function seedProjectRuntimeContext() {
     createdAt,
     updatedAt: createdAt,
   });
-  await new WorkbenchRepository(db).create({
+  await new AgentRepository(db).create({
     id: "env-runtime",
     workspaceId: "workspace-project-runtime",
     name: "Runtime env",
@@ -54,7 +54,7 @@ async function seedProjectRuntimeContext() {
     createdAt,
     updatedAt: createdAt,
   });
-  await new WorkbenchRepository(db).replaceRepositories(
+  await new AgentRepository(db).replaceRepositories(
     "env-runtime",
     "workspace-project-runtime",
     [
@@ -87,11 +87,7 @@ async function seedProjectRuntimeContext() {
     createdAt: createdAt + 1,
     updatedAt: createdAt + 1,
   });
-  await new ThreadRepository(db).updateWorkbench(
-    "legacy-project-runtime",
-    "env-runtime",
-    createdAt,
-  );
+  await new ThreadRepository(db).updateAgent("legacy-project-runtime", "env-runtime", createdAt);
 }
 
 beforeAll(async () => {

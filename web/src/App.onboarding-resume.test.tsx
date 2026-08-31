@@ -40,7 +40,7 @@ const cachedBootstrap = {
   workersAiEnabled: false,
   feedbackAdminEnabled: false,
   backgroundWorkEnabled: false,
-  workbenchNetworkAllowlistEnabled: false,
+  agentNetworkAllowlistEnabled: false,
 };
 
 vi.mock("./lib/bootstrap-cache", async (importOriginal) => ({

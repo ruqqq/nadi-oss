@@ -16,9 +16,9 @@ vi.mock("./user-preferences-api", async (importOriginal) => ({
   getUserPreferences: (...args: unknown[]) => getUserPreferences(...args),
 }));
 
-vi.mock("./workbenches-api", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("./workbenches-api")>()),
-  listWorkbenches: () => Promise.resolve([]),
+vi.mock("./agents-api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./agents-api")>()),
+  listAgents: () => Promise.resolve([]),
 }));
 
 vi.mock("./lib/bootstrap-cache", async (importOriginal) => ({

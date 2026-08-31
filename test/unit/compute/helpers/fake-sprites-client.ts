@@ -548,7 +548,7 @@ export class FakeSpritesClient implements SpritesClient {
  * A fresh backend wired to a fresh fake client, exposing both.
  *
  * `env` is the runtime environment the registry passes at construction — the
- * production path for workbench vars and the minted `GH_TOKEN`.
+ * production path for agent vars and the minted `GH_TOKEN`.
  */
 export function createFakeSpritesBackend(env?: Record<string, string>): {
   backend: SpritesComputeBackend;

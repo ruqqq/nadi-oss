@@ -13,9 +13,9 @@ vi.mock("./lib/new-thread-send", async (importOriginal) => ({
   createNewThread: (...args: unknown[]) => createNewThread(...args),
 }));
 
-vi.mock("./workbenches-api", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("./workbenches-api")>()),
-  listWorkbenches: (...args: unknown[]) => listWorkbenches(...args),
+vi.mock("./agents-api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./agents-api")>()),
+  listAgents: (...args: unknown[]) => listWorkbenches(...args),
 }));
 
 // Seeds the new-chat provider/model synchronously on mount, so the composer is
@@ -68,14 +68,14 @@ const CREATED_THREAD = {
   status: "active",
   projectId: null,
   projectName: null,
-  workbenchId: null,
-  workbenchName: null,
+  agentName: null,
   resourceProfile: "small",
   automatonId: null,
   automatonName: null,
   automatonNotifyMode: null,
   outcomeDismissedAt: null,
-  repositorySnapshotCount: 0,
+  recentDismissedAt: null,
+  repositoryCount: 0,
   createdAt: 1,
   updatedAt: 1,
   lastContextTokens: null,
@@ -177,7 +177,7 @@ describe("new-chat workbench selection", () => {
     fireEvent.submit(form);
 
     await waitFor(() => expect(createNewThread).toHaveBeenCalled());
-    expect(createNewThread.mock.calls[0]?.[1]).toMatchObject({ workbenchId: "wb_1" });
+    expect(createNewThread.mock.calls[0]?.[1]).toMatchObject({ agentId: "wb_1" });
   });
 });
 

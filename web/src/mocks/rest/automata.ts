@@ -15,7 +15,7 @@ type AutomatonInput = {
   schedule?: AutomatonSchedule;
   timezone?: string;
   projectId?: string | null;
-  workbenchId?: string | null;
+  agentId?: string | null;
   enabled?: boolean;
   notifyMode?: "all" | "failures_only";
   modelProvider?: string | null;
@@ -71,10 +71,9 @@ export const automataHandlers = [
       id: mockId("atm"),
       workspaceId: store.settings?.workspace.id ?? "ws_mock",
       ownerUserId: store.session.authenticated ? store.session.user.id : "user_mock",
-      agentId: store.settings?.agent.id ?? "agent_mock",
       projectId: input.projectId ?? null,
-      // Echo the workbench override back so the form's picker round-trips.
-      workbenchId: input.workbenchId ?? null,
+      // Echo the agent override back so the form's picker round-trips.
+      agentId: input.agentId ?? store.settings?.agent.id ?? "agent_mock",
       name,
       prompt: input.prompt ?? "",
       modelProvider: input.modelProvider ?? null,
@@ -114,7 +113,7 @@ export const automataHandlers = [
     }
     if (typeof patch.timezone === "string") automaton.timezone = patch.timezone;
     if (patch.projectId !== undefined) automaton.projectId = patch.projectId;
-    if (patch.workbenchId !== undefined) automaton.workbenchId = patch.workbenchId;
+    if (patch.agentId !== undefined && patch.agentId !== null) automaton.agentId = patch.agentId;
     if (typeof patch.enabled === "boolean") {
       if (patch.enabled) {
         const schedule = JSON.parse(automaton.scheduleJson) as AutomatonSchedule;
@@ -173,15 +172,14 @@ export const automataHandlers = [
       status: "active",
       projectId: automaton.projectId,
       projectName: store.projects.find((p) => p.id === automaton.projectId)?.name ?? null,
-      workbenchId: null,
-      workbenchName: null,
+      agentName: store.agents.find((w) => w.id === automaton.agentId)?.name ?? null,
       resourceProfile: "small",
       automatonId: automaton.id,
       automatonName: automaton.name,
       automatonNotifyMode: automaton.notifyMode,
       outcomeDismissedAt: null,
       recentDismissedAt: null,
-      repositorySnapshotCount: 0,
+      repositoryCount: 0,
       lastContextTokens: null,
       lastContextWindow: null,
       lastCompactAfterTokens: null,

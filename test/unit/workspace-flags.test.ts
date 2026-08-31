@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   anyBackgroundWorkEnabled,
   resolveWorkspaceBackgroundCapabilities,
-  resolveWorkspaceWorkbenchNetworkAllowlist,
+  resolveWorkspaceAgentNetworkAllowlist,
 } from "../../src/flags";
 
 const caps = (flagsJson: string, deploymentEnabled = false) =>
@@ -85,14 +85,14 @@ describe("anyBackgroundWorkEnabled", () => {
   });
 });
 
-describe("resolveWorkspaceWorkbenchNetworkAllowlist", () => {
+describe("resolveWorkspaceAgentNetworkAllowlist", () => {
   it.each([
-    ['{"workbenchNetworkAllowlist":true}', true],
-    ['{"workbenchNetworkAllowlist":false}', false],
+    ['{"agentNetworkAllowlist":true}', true],
+    ['{"agentNetworkAllowlist":false}', false],
     ["{}", false],
     ["not-json", false],
-    ['{"workbenchNetworkAllowlist":"true"}', false],
+    ['{"agentNetworkAllowlist":"true"}', false],
   ])("resolves %s to %s", (flagsJson, expected) => {
-    expect(resolveWorkspaceWorkbenchNetworkAllowlist(flagsJson)).toBe(expected);
+    expect(resolveWorkspaceAgentNetworkAllowlist(flagsJson)).toBe(expected);
   });
 });

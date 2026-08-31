@@ -5,7 +5,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ThreadSummary } from "../../threads-api";
-import type { WorkbenchSummary } from "../../workbenches-api";
+import type { AgentSummary as WorkbenchSummary } from "../../agents-api";
 import { ThreadDetailsSheet } from "./ThreadDetailsSheet";
 
 // jsdom has no matchMedia; useMediaQuery reads it synchronously on mount.
@@ -49,7 +49,6 @@ function makeThread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
     threadId: "thr_1",
     kind: "regular",
     workspaceId: "ws_1",
-    agentId: "agent_1",
     provider: "anthropic",
     model: "claude-sonnet-4-5",
     modelInputModalities: ["text"],
@@ -64,15 +63,15 @@ function makeThread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
     status: "active",
     projectId: null,
     projectName: null,
-    workbenchId: "wb_nadi",
-    workbenchName: "nadi",
+    agentId: "wb_nadi",
+    agentName: "nadi",
     resourceProfile: "small",
     automatonId: null,
     automatonName: null,
     automatonNotifyMode: null,
     outcomeDismissedAt: null,
     recentDismissedAt: null,
-    repositorySnapshotCount: 0,
+    repositoryCount: 0,
     lastContextTokens: null,
     lastContextWindow: null,
     lastCompactAfterTokens: null,
@@ -173,8 +172,8 @@ describe("ThreadDetailsSheet workbench switch", () => {
       <ThreadDetailsSheet
         {...baseProps}
         thread={makeThread({
-          workbenchId: "wb_docs",
-          workbenchName: "Docs",
+          agentId: "wb_docs",
+          agentName: "Docs",
         })}
         onSwitchWorkbench={vi.fn()}
       />,

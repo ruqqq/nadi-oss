@@ -20,7 +20,7 @@ import {
   updateProject,
   type ProjectSummary,
 } from "../../projects-api";
-import { listWorkbenches, type WorkbenchSummary } from "../../workbenches-api";
+import { listAgents as listWorkbenches, type AgentSummary as WorkbenchSummary } from "../../agents-api";
 import { listThreads, type ThreadSummary } from "../../threads-api";
 import { isNetworkFailure } from "../../lib/offline-state";
 import { isThreadListEmpty, THREAD_PAGE_SIZE } from "../../lib/thread-list-state";
@@ -51,7 +51,7 @@ type ProjectFormState = {
   name: string;
   description: string;
   customInstructions: string;
-  defaultWorkbenchId: string | null;
+  defaultAgentId: string | null;
 };
 
 type ProjectDetailTab = "configure" | "chats";
@@ -64,7 +64,7 @@ const EMPTY_PROJECT_FORM: ProjectFormState = {
   name: "",
   description: "",
   customInstructions: "",
-  defaultWorkbenchId: null,
+  defaultAgentId: null,
 };
 
 
@@ -271,7 +271,7 @@ export function ProjectsPanel({
       name: selectedProject.name,
       description: selectedProject.description,
       customInstructions: selectedProject.customInstructions,
-      defaultWorkbenchId: selectedProject.defaultWorkbenchId,
+      defaultAgentId: selectedProject.defaultAgentId,
     });
   }, [selectedProject]);
 
@@ -289,7 +289,7 @@ export function ProjectsPanel({
         if (!active) return;
         setProjectForm((current) => ({
           ...current,
-          defaultWorkbenchId: project.defaultWorkbenchId,
+          defaultAgentId: project.defaultAgentId,
         }));
       })
       .catch((error: unknown) => {
@@ -303,7 +303,7 @@ export function ProjectsPanel({
   }, [selectedProjectId]);
 
   const handleProjectField = useCallback(
-    (field: keyof Omit<ProjectFormState, "defaultWorkbenchId">, value: string) => {
+    (field: keyof Omit<ProjectFormState, "defaultAgentId">, value: string) => {
       setProjectForm((current) => ({ ...current, [field]: value }));
     },
     [],
@@ -312,7 +312,7 @@ export function ProjectsPanel({
   const handleDefaultWorkbenchChange = useCallback((value: string) => {
     setProjectForm((current) => ({
       ...current,
-      defaultWorkbenchId: value === "none" ? null : value,
+      defaultAgentId: value === "none" ? null : value,
     }));
   }, []);
 
@@ -357,7 +357,7 @@ export function ProjectsPanel({
         name: projectForm.name,
         description: projectForm.description,
         customInstructions: projectForm.customInstructions,
-        defaultWorkbenchId: projectForm.defaultWorkbenchId,
+        defaultAgentId: projectForm.defaultAgentId,
       };
       const savedProject = selectedProjectId
         ? await updateProject(selectedProjectId, payload)
@@ -565,7 +565,7 @@ export function ProjectsPanel({
                         </button>
                       ) : (
                         <Select
-                          value={projectForm.defaultWorkbenchId ?? "none"}
+                          value={projectForm.defaultAgentId ?? "none"}
                           onValueChange={handleDefaultWorkbenchChange}
                         >
                           <SelectTrigger id="project-default-workbench" className="w-full">

@@ -10,12 +10,12 @@ function tools() {
 }
 
 describe("createAutomatonManagementTools", () => {
-  it("exposes the CRUD tools plus list_workbenches", () => {
+  it("exposes the CRUD tools plus list_agents", () => {
     expect(Object.keys(tools()).sort()).toEqual([
       "create_automaton",
       "get_automaton",
+      "list_agents",
       "list_automata",
-      "list_workbenches",
       "update_automaton",
     ]);
   });
@@ -26,7 +26,7 @@ describe("createAutomatonManagementTools", () => {
     expect(t.update_automaton!.needsApproval).toBe(true);
     expect(t.list_automata!.needsApproval ?? false).toBe(false);
     expect(t.get_automaton!.needsApproval ?? false).toBe(false);
-    expect(t.list_workbenches!.needsApproval ?? false).toBe(false);
+    expect(t.list_agents!.needsApproval ?? false).toBe(false);
   });
 
   it("the schedule schema accepts every preset, once, and a cron expression", () => {

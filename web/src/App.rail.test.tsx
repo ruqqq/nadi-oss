@@ -74,15 +74,14 @@ function thread(over: Partial<ThreadSummary> & { threadId: string }): ThreadSumm
     status: "active",
     projectId: null,
     projectName: null,
-    workbenchId: null,
-    workbenchName: null,
+    agentName: null,
     resourceProfile: "small",
     automatonId: null,
     automatonName: null,
     automatonNotifyMode: null,
     outcomeDismissedAt: null,
     recentDismissedAt: null,
-    repositorySnapshotCount: 0,
+    repositoryCount: 0,
     createdAt: 1,
     updatedAt: 1,
     lastContextTokens: null,
@@ -362,14 +361,13 @@ describe("ChatApp cold-launch cursor seed", () => {
       status: "active",
       projectId: null,
       projectName: null,
-      workbenchId: null,
-      workbenchName: null,
+      agentName: null,
       resourceProfile: "small",
       automatonId: null,
       automatonName: null,
       automatonNotifyMode: null,
       outcomeDismissedAt: null,
-      repositorySnapshotCount: 0,
+      repositoryCount: 0,
       createdAt: 1,
       updatedAt: 1,
       lastContextTokens: null,
@@ -427,8 +425,8 @@ describe("ChatApp feedback route", () => {
             Response.json({ invites: [], quota: { used: 0, limit: 5 }, isSuperuser: false, waitingList: [] }),
           );
         }
-        if (url.startsWith("/api/workbenches")) {
-          return Promise.resolve(Response.json({ workbenches: [] }));
+        if (url.startsWith("/api/agents")) {
+          return Promise.resolve(Response.json({ agents: [] }));
         }
         if (url.startsWith("/api/projects")) {
           return Promise.resolve(Response.json({ projects: [] }));
@@ -519,8 +517,8 @@ describe("ChatApp feedback inbox route", () => {
           Response.json({ invites: [], quota: { used: 0, limit: 5 }, isSuperuser: false, waitingList: [] }),
         );
       }
-      if (url.startsWith("/api/workbenches")) {
-        return Promise.resolve(Response.json({ workbenches: [] }));
+      if (url.startsWith("/api/agents")) {
+        return Promise.resolve(Response.json({ agents: [] }));
       }
       if (url.startsWith("/api/projects")) {
         return Promise.resolve(Response.json({ projects: [] }));
@@ -564,8 +562,8 @@ describe("ChatApp archive synchronization", () => {
     // Settings history entry so Back couldn't return to whatever opened it.
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.startsWith("/api/workbenches"))
-        return Promise.resolve(Response.json({ workbenches: [] }));
+      if (url.startsWith("/api/agents"))
+        return Promise.resolve(Response.json({ agents: [] }));
       if (url.startsWith("/api/projects")) return Promise.resolve(Response.json({ projects: [] }));
       if (url.startsWith("/api/invites"))
         return Promise.resolve(
@@ -628,8 +626,8 @@ describe("ChatApp archive synchronization", () => {
       if (url === "/api/invites") {
         return Promise.resolve(Response.json({ invites: [], quota: { used: 0, limit: 5 }, isSuperuser: false, waitingList: [] }));
       }
-      if (url.startsWith("/api/workbenches")) {
-        return Promise.resolve(Response.json({ workbenches: [] }));
+      if (url.startsWith("/api/agents")) {
+        return Promise.resolve(Response.json({ agents: [] }));
       }
       if (url.startsWith("/api/projects")) {
         return Promise.resolve(Response.json({ projects: [] }));
@@ -670,8 +668,8 @@ describe("ChatApp archive synchronization", () => {
       if (url === "/api/invites") {
         return Promise.resolve(Response.json({ invites: [], quota: { used: 0, limit: 5 }, isSuperuser: false, waitingList: [] }));
       }
-      if (url.startsWith("/api/workbenches")) {
-        return Promise.resolve(Response.json({ workbenches: [] }));
+      if (url.startsWith("/api/agents")) {
+        return Promise.resolve(Response.json({ agents: [] }));
       }
       if (url.startsWith("/api/projects")) {
         return Promise.resolve(Response.json({ projects: [] }));
@@ -711,8 +709,8 @@ describe("ChatApp archive synchronization", () => {
       if (url === "/api/invites") {
         return Promise.resolve(Response.json({ invites: [], quota: { used: 0, limit: 5 }, isSuperuser: false, waitingList: [] }));
       }
-      if (url.startsWith("/api/workbenches")) {
-        return Promise.resolve(Response.json({ workbenches: [] }));
+      if (url.startsWith("/api/agents")) {
+        return Promise.resolve(Response.json({ agents: [] }));
       }
       if (url.startsWith("/api/projects")) {
         return Promise.resolve(Response.json({ projects: [] }));
@@ -752,8 +750,8 @@ describe("ChatApp archive synchronization", () => {
       if (url === "/api/invites") {
         return Promise.resolve(Response.json({ invites: [], quota: { used: 0, limit: 5 }, isSuperuser: false, waitingList: [] }));
       }
-      if (url.startsWith("/api/workbenches")) {
-        return Promise.resolve(Response.json({ workbenches: [] }));
+      if (url.startsWith("/api/agents")) {
+        return Promise.resolve(Response.json({ agents: [] }));
       }
       if (url.startsWith("/api/projects")) {
         return Promise.resolve(Response.json({ projects: [] }));
@@ -780,8 +778,8 @@ describe("ChatApp archive synchronization", () => {
       if (url === "/api/invites") {
         return Promise.resolve(Response.json({ invites: [], quota: { used: 0, limit: 5 }, isSuperuser: false, waitingList: [] }));
       }
-      if (url.startsWith("/api/workbenches")) {
-        return Promise.resolve(Response.json({ workbenches: [] }));
+      if (url.startsWith("/api/agents")) {
+        return Promise.resolve(Response.json({ agents: [] }));
       }
       if (url.startsWith("/api/projects")) {
         return Promise.resolve(Response.json({ projects: [] }));
@@ -951,8 +949,7 @@ describe("a thread deleted while it is open", () => {
       status: "active",
       projectId: null,
       projectName: null,
-      workbenchId: null,
-      workbenchName: null,
+      agentName: null,
       ...over,
     } as ThreadSummary;
   }
@@ -972,7 +969,7 @@ describe("a thread deleted while it is open", () => {
             Response.json({ invites: [], quota: { used: 0, limit: 5 }, isSuperuser: false, waitingList: [] }),
           );
         }
-        if (url.startsWith("/api/workbenches")) return Promise.resolve(Response.json({ workbenches: [] }));
+        if (url.startsWith("/api/agents")) return Promise.resolve(Response.json({ agents: [] }));
         if (url.startsWith("/api/projects")) return Promise.resolve(Response.json({ projects: [] }));
         if (url.startsWith("/api/threads")) {
           return Promise.resolve(Response.json({ threads: [target], nextCursor: null }));
@@ -1073,8 +1070,8 @@ describe("ChatApp rail toggle badge", () => {
             }),
           );
         }
-        if (url.startsWith("/api/workbenches")) {
-          return Promise.resolve(Response.json({ workbenches: [] }));
+        if (url.startsWith("/api/agents")) {
+          return Promise.resolve(Response.json({ agents: [] }));
         }
         if (url.startsWith("/api/projects")) {
           return Promise.resolve(Response.json({ projects: [] }));
@@ -1196,8 +1193,8 @@ describe("ChatApp dismiss of the open thread", () => {
             }),
           );
         }
-        if (url.startsWith("/api/workbenches")) {
-          return Promise.resolve(Response.json({ workbenches: [] }));
+        if (url.startsWith("/api/agents")) {
+          return Promise.resolve(Response.json({ agents: [] }));
         }
         if (url.startsWith("/api/projects")) {
           return Promise.resolve(Response.json({ projects: [] }));

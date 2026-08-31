@@ -45,7 +45,7 @@ import {
 import { SETTINGS_PROVIDER_MODEL_PLACEHOLDERS } from "../../settings-ui-config";
 import { ModelPicker } from "../model/ModelPicker";
 import type { ProjectSummary } from "../../projects-api";
-import { listWorkbenches, type WorkbenchSummary } from "../../workbenches-api";
+import { listAgents as listWorkbenches, type AgentSummary as WorkbenchSummary } from "../../agents-api";
 import { WorkbenchPicker } from "../workbenches/WorkbenchPicker";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Badge } from "../ui/badge";
@@ -210,7 +210,7 @@ function formFromAutomaton(automaton: AutomatonSummary): AutomatonFormState {
     prompt: automaton.prompt,
     timezone: automaton.timezone,
     projectId: automaton.projectId ?? "none",
-    workbenchId: automaton.workbenchId ?? "inherit",
+    workbenchId: automaton.agentId ?? "inherit",
     enabled: automaton.enabled,
     notifyMode: automaton.notifyMode,
     // A provider the workspace no longer offers is dropped back to the agent
@@ -603,7 +603,7 @@ export function AutomataPanel({
         schedule: scheduleFromForm(form),
         timezone,
         projectId: form.projectId === "none" ? null : form.projectId,
-        workbenchId: form.workbenchId === "inherit" ? null : form.workbenchId,
+        agentId: form.workbenchId === "inherit" ? null : form.workbenchId,
         enabled: form.enabled,
         notifyMode: form.notifyMode,
         // Half an override is no override: a provider with an empty model box

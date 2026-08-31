@@ -4,7 +4,7 @@ import { createRepositoryPreparation } from "../../src/agent/repository-preparat
 import { applyRegistryTestSchema, seedRegistryThread } from "./helpers/registry";
 
 /**
- * The live gate on the workbench -> agent data migration.
+ * The live gate on the workbench -> agent data migration (Task 4).
  *
  * Every other check on it is a typecheck or a mocked unit test, and neither can
  * see the failure this migration is most able to cause: `agent_repositories`

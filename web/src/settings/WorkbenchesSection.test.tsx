@@ -5,12 +5,17 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState, type ReactElement, type ReactNode } from "react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import type { WorkbenchSummary } from "../workbenches-api";
+import type { AgentSummary as WorkbenchSummary } from "../agents-api";
 import { SettingsFooterContext } from "./footer-slot";
 
 // The api module is imported for its side-effecting calls (fetch wrappers). Mock
 // it wholesale so the component renders without a Worker; each test seeds the
 // GET response and inspects the save payloads.
+//
+// Module renamed server-side to agents-api (Task 5). Kept these local names
+// (WorkbenchesSection.tsx aliases the real exports back to them) rather than
+// renaming every `api.xxx` call site below — Task 6 owns the Agents section
+// redesign and will do that rename as part of its visual pass.
 const api = vi.hoisted(() => ({
   listWorkbenches: vi.fn(),
   createWorkbench: vi.fn(),
@@ -22,9 +27,19 @@ const api = vi.hoisted(() => ({
   deleteWorkbenchSecret: vi.fn(),
 }));
 
-vi.mock("../workbenches-api", async () => {
-  const actual = await vi.importActual<typeof import("../workbenches-api")>("../workbenches-api");
-  return { ...actual, ...api };
+vi.mock("../agents-api", async () => {
+  const actual = await vi.importActual<typeof import("../agents-api")>("../agents-api");
+  return {
+    ...actual,
+    listAgents: api.listWorkbenches,
+    createAgent: api.createWorkbench,
+    updateAgent: api.updateWorkbench,
+    archiveAgent: api.archiveWorkbench,
+    setAgentRepositories: api.setWorkbenchRepositories,
+    setAgentEnvVars: api.setWorkbenchEnvVars,
+    setAgentSecret: api.setWorkbenchSecret,
+    deleteAgentSecret: api.deleteWorkbenchSecret,
+  };
 });
 
 import { WorkbenchesSection } from "./WorkbenchesSection";

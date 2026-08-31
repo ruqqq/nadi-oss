@@ -297,7 +297,7 @@ async function resolveWorkspaceSpritesConfiguration(
   });
 }
 
-/** The D1-backed inputs {@link resolveEffectiveComputeConfig} needs, independent of the workbench profile. */
+/** The D1-backed inputs {@link resolveEffectiveComputeConfig} needs, independent of the agent's resource profile. */
 export interface ComputeConfigInputs {
   workspace: WorkspaceComputeSettings | null;
   agent: AgentComputeSettings | null;
@@ -309,9 +309,9 @@ export interface ComputeConfigInputs {
 
 /**
  * Fetches every D1-backed input {@link resolveEffectiveComputeConfig} needs,
- * EXCEPT the workbench resource profile — that is the caller's concern (e.g.
- * a per-thread snapshot lookup) so it can be fetched lazily, or not at all on
- * a workspace that turns out to be disabled. See {@link needsWorkbenchResourceProfile}.
+ * EXCEPT the agent's resource profile — that is the caller's concern (e.g.
+ * a per-thread D1 lookup) so it can be fetched lazily, or not at all on
+ * a workspace that turns out to be disabled. See {@link needsAgentResourceProfile}.
  */
 export async function loadComputeConfigInputs(input: {
   env: Env;
@@ -338,14 +338,15 @@ export async function loadComputeConfigInputs(input: {
 
 /**
  * Pure (no I/O) resolution from already-fetched {@link ComputeConfigInputs}
- * plus a workbench profile. Split out from {@link resolveComputeConfigForAgent}
- * so a caller can resolve twice — once with no profile to decide whether the
- * profile is even needed, then again with the real one — while paying the D1
- * cost of {@link loadComputeConfigInputs} exactly once.
+ * plus the agent's resource profile. Split out from
+ * {@link resolveComputeConfigForAgent} so a caller can resolve twice — once
+ * with no profile to decide whether the profile is even needed, then again
+ * with the real one — while paying the D1 cost of
+ * {@link loadComputeConfigInputs} exactly once.
  */
 export function computeConfigFromInputs(
   inputs: ComputeConfigInputs,
-  workbenchResourceProfile?: ComputeResourceProfile | null,
+  agentResourceProfile?: ComputeResourceProfile | null,
 ) {
   return resolveEffectiveComputeConfig({
     workspace: inputs.workspace,
@@ -356,7 +357,7 @@ export function computeConfigFromInputs(
     mcpHosts: inputs.mcpHosts,
     workspaceSecretEnvNames: inputs.secretNames.workspace.map((secret) => secret.name),
     agentSecretEnvNames: inputs.secretNames.agent.map((secret) => secret.name),
-    workbenchResourceProfile,
+    agentResourceProfile,
   });
 }
 
@@ -364,11 +365,11 @@ export async function resolveComputeConfigForAgent(input: {
   env: Env;
   workspaceId: string;
   agentId: string;
-  /** The thread's frozen workbench profile; forwarded as-is, undefined included. */
-  workbenchResourceProfile?: ComputeResourceProfile | null;
+  /** The thread's agent's resource profile; forwarded as-is, undefined included. */
+  agentResourceProfile?: ComputeResourceProfile | null;
 }) {
   const inputs = await loadComputeConfigInputs(input);
-  return computeConfigFromInputs(inputs, input.workbenchResourceProfile);
+  return computeConfigFromInputs(inputs, input.agentResourceProfile);
 }
 
 /**
@@ -465,7 +466,7 @@ export async function getComputeSettingsView(input: {
   // No thread context here — this view is workspace/agent-scoped settings,
   // not a per-thread resolution — so `effective.resourceProfile` reports
   // `resolveEffectiveComputeConfig`'s default (DEFAULT_COMPUTE_RESOURCE_PROFILE)
-  // rather than any real thread's frozen workbench profile. That is
+  // rather than any real thread's actual agent profile. That is
   // deliberate: nothing renders `effective.resourceProfile` from this
   // endpoint today, and there is no caller that could supply a real one.
   const effective = resolveEffectiveComputeConfig({

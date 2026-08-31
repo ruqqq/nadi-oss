@@ -31,9 +31,8 @@ export interface ThreadSummary {
   status: "active" | "archived";
   projectId: string | null;
   projectName: string | null;
-  workbenchId: string | null;
-  workbenchName: string | null;
-  /** The workbench's sandbox size, read live: configuration is not
+  agentName: string | null;
+  /** The agent's sandbox size, read live: configuration is not
    * snapshotted per thread, so editing it takes effect on the next turn. */
   resourceProfile: "small" | "medium";
   automatonId: string | null;
@@ -45,7 +44,7 @@ export interface ThreadSummary {
    * `lib/thread-dismissal.ts`. Required, not optional: an optional field would
    * let a fixture omit it and render a state the server can no longer produce. */
   recentDismissedAt: number | null;
-  repositorySnapshotCount: number;
+  repositoryCount: number;
   lastContextTokens: number | null;
   lastContextWindow: number | null;
   /** The compaction trigger the last turn ran with. NULL = no warning threshold. */
@@ -67,7 +66,7 @@ export type CreateThreadInput = {
   /** `null` clears the capability back to unknown. */
   modelSupportsReasoning?: boolean | null;
   projectId?: string | null;
-  workbenchId?: string | null;
+  agentId?: string | null;
 };
 
 export type ThreadListStatus = "active" | "archived" | "all";
@@ -348,19 +347,19 @@ export async function moveThreadToProject(
   return body.thread;
 }
 
-export async function switchThreadWorkbench(
+export async function switchThreadAgent(
   threadId: string,
-  workbenchId: string | null,
+  agentId: string | null,
   fetchImpl: FetchLike = appFetch,
 ): Promise<ThreadSummary> {
   const res = await fetchImpl(`/api/threads/${encodeURIComponent(threadId)}`, {
     method: "PATCH",
     credentials: "include",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ workbenchId }),
+    body: JSON.stringify({ agentId }),
   });
   if (!res.ok) {
-    throw await errorFromResponse(res, "switch this chat's workbench");
+    throw await errorFromResponse(res, "switch this chat's agent");
   }
   const body = (await res.json()) as { thread: ThreadSummary };
   return body.thread;

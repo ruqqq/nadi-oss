@@ -680,7 +680,7 @@ describe("sandbox settings routes", () => {
       maxProcessRuntimeMs: 650_000,
     });
 
-    // `defaultResourceProfile` was deliberately removed — the workbench is
+    // `defaultResourceProfile` was deliberately removed — the agent is
     // now the only handle on sandbox size. This only proves something
     // because the assertions above already establish `view.workspace` is a
     // real, well-formed settings payload.
@@ -742,9 +742,9 @@ describe("sandbox settings routes", () => {
     expect(view.agent).not.toHaveProperty("resourceProfile");
     expect(view.agent).not.toHaveProperty("image");
     expect(view.agent).not.toHaveProperty("snapshot");
-    // The agent-level override no longer exists — only the thread's workbench
-    // snapshot drives resolution (Task 3). This settings view has no thread
-    // context, so the effective profile is the bare default.
+    // The agent-level override no longer exists — only the thread's agent
+    // resource profile, read live, drives resolution (Task 3). This settings
+    // view has no thread context, so the effective profile is the bare default.
     expect(view.effective).toMatchObject({ enabled: true, value: { resourceProfile: "small" } });
   });
 

@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { Env } from "../env";
 import { registryDb } from "../db/client";
 import { WorkspaceRepository } from "../db/repositories/workspaces";
-import { WorkbenchRepository } from "../db/repositories/workbenches";
+import { AgentRepository } from "../db/repositories/agents";
 import type { resolveThreadRuntimeConfigForAgent } from "./thread-agent-config";
 import { describeSchedule, parseSchedule } from "../automata/schedule";
 import {
@@ -151,7 +151,7 @@ export function createAutomatonManagementTools(input: { env: Env; threadId: stri
               enabled: row.enabled,
               nextDueAt: row.nextDueAt,
               projectId: row.projectId,
-              workbenchId: row.agentId,
+              agentId: row.agentId,
               lastRun: row.lastRun,
             })),
           };
@@ -161,21 +161,21 @@ export function createAutomatonManagementTools(input: { env: Env; threadId: stri
       },
     }),
 
-    list_workbenches: tool({
+    list_agents: tool({
       description:
-        "List the workspace's agents. An agent carries the prompt, model, repositories and setup an automaton's run works against. Returns each agent's id, name, and description. Pass an agent id as `workbenchId` to create_automaton/update_automaton to choose which agent the runs execute as.",
+        "List the workspace's agents. An agent carries the prompt, model, repositories and setup an automaton's run works against. Returns each agent's id, name, and description. Pass an agent id as `agentId` to create_automaton/update_automaton to choose which agent the runs execute as.",
       inputSchema: z.object({}),
       execute: async () => {
         const resolved = await resolveService();
         if (!resolved.ok) return { ok: false, error: resolved.error };
         try {
-          const rows = await new WorkbenchRepository(resolved.db).listForWorkspace(
+          const rows = await new AgentRepository(resolved.db).listForWorkspace(
             resolved.workspaceId,
             "active",
           );
           return {
             ok: true,
-            workbenches: rows.map((w) => ({
+            agents: rows.map((w) => ({
               id: w.id,
               name: w.name,
               description: w.description,
@@ -209,7 +209,7 @@ export function createAutomatonManagementTools(input: { env: Env; threadId: stri
               nextDueAt: automaton.nextDueAt,
               lastFiredAt: automaton.lastFiredAt,
               projectId: automaton.projectId,
-              workbenchId: automaton.agentId,
+              agentId: automaton.agentId,
               notifyMode: automaton.notifyMode,
             },
             runs: runs.map((r) => ({
@@ -242,11 +242,11 @@ export function createAutomatonManagementTools(input: { env: Env; threadId: stri
             .nullable()
             .optional()
             .describe("Optional project id to scope runs to, or null for none."),
-          workbenchId: z
+          agentId: z
             .string()
             .optional()
             .describe(
-              "Optional agent id (from list_workbenches) naming which agent this automaton's runs execute as. Defaults to the workspace's agent.",
+              "Optional agent id (from list_agents) naming which agent this automaton's runs execute as. Defaults to the workspace's agent.",
             ),
           notifyMode: notifyModeSchema.optional().describe("Defaults to 'all'."),
           enabled: z.boolean().optional().describe("Defaults to true."),
@@ -287,10 +287,10 @@ export function createAutomatonManagementTools(input: { env: Env; threadId: stri
           timezone: z.string().optional(),
           schedule: automatonScheduleSchema.optional(),
           projectId: z.string().nullable().optional(),
-          workbenchId: z
+          agentId: z
             .string()
             .optional()
-            .describe("Agent id from list_workbenches naming which agent the runs execute as."),
+            .describe("Agent id from list_agents naming which agent the runs execute as."),
           notifyMode: notifyModeSchema.optional(),
           enabled: z.boolean().optional().describe("false disables, true enables."),
           modelProvider: modelProviderSchema,

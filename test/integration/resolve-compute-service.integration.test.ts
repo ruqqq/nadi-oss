@@ -3,7 +3,7 @@
  * not a reimplementation of its two-call resolve pattern. The old unit test
  * (`test/unit/compute/env-resolve.test.ts`) defined a local
  * `resolveWithLazyProfile` helper that reimplemented the "resolve once with no
- * profile, bail early, resolve again with the workbench profile" wiring and
+ * profile, bail early, resolve again with the agent profile" wiring and
  * then tested the helper — a change to the REAL wiring in
  * `resolveComputeService` could never fail those tests, because they never
  * imported it. These two cases drive the exported function directly, over a
@@ -235,15 +235,15 @@ describe("resolveComputeService (real D1 + real DO storage)", () => {
     });
     await seedComputeEnabledWorkspace(workspaceId);
 
-    const workbenchId = "wb_resolve_snapshot_profile";
+    const mediumAgentId = "wb_resolve_snapshot_profile";
     await env.REGISTRY_DB.prepare(
       `INSERT INTO agents (id, workspace_id, name, system_prompt, provider, model, resource_profile, sandbox_env_vars_json, created_at, updated_at)
-       VALUES (?, ?, 'Medium bench', 'You are Nadi.', 'mock', 'mock', 'medium', '{}', ?, ?)`,
+       VALUES (?, ?, 'Medium agent', 'You are Nadi.', 'mock', 'mock', 'medium', '{}', ?, ?)`,
     )
-      .bind(workbenchId, workspaceId, NOW, NOW)
+      .bind(mediumAgentId, workspaceId, NOW, NOW)
       .run();
     await env.REGISTRY_DB.prepare(`UPDATE thread_index SET agent_id = ? WHERE id = ?`)
-      .bind(workbenchId, threadId)
+      .bind(mediumAgentId, threadId)
       .run();
 
     const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
@@ -253,15 +253,15 @@ describe("resolveComputeService (real D1 + real DO storage)", () => {
       // `store.getComputeState()?.resourceProfile` cannot mask what this task
       // changed: the profile threaded from the snapshot into `config.value`.
       const resolved = await resolveComputeService(
-        baseDeps(threadId, workspaceId, agentId, storage),
+        baseDeps(threadId, workspaceId, mediumAgentId, storage),
       );
       expect(resolved).not.toBeNull();
       expect(resolved?.config.resourceProfile).toBe("medium");
     });
   });
 
-  it("unions the workbench allowlist into allowedHosts, and drops the agent override", async () => {
-    const threadId = "thr_resolve_workbench_allowlist";
+  it("unions the agent allowlist into allowedHosts, and drops the agent override", async () => {
+    const threadId = "thr_resolve_agent_allowlist";
     const { workspaceId, agentId } = await seedRegistryThread(env.REGISTRY_DB, {
       threadId,
       runtime: "think",
@@ -283,33 +283,33 @@ describe("resolveComputeService (real D1 + real DO storage)", () => {
       .bind(agentId)
       .run();
 
-    const workbenchId = "wb_resolve_allowlist";
+    const allowlistAgentId = "wb_resolve_allowlist";
     await env.REGISTRY_DB.prepare(
       `INSERT INTO agents (id, workspace_id, name, system_prompt, provider, model, resource_profile, sandbox_env_vars_json, sandbox_network_domain_allowlist, created_at, updated_at)
-       VALUES (?, ?, 'Bench', 'You are Nadi.', 'mock', 'mock', 'small', '{}', 'wb.example.com', ?, ?)`,
+       VALUES (?, ?, 'Agent', 'You are Nadi.', 'mock', 'mock', 'small', '{}', 'agent-only.example.com', ?, ?)`,
     )
-      .bind(workbenchId, workspaceId, NOW, NOW)
+      .bind(allowlistAgentId, workspaceId, NOW, NOW)
       .run();
     await env.REGISTRY_DB.prepare(`UPDATE thread_index SET agent_id = ? WHERE id = ?`)
-      .bind(workbenchId, threadId)
+      .bind(allowlistAgentId, threadId)
       .run();
 
     const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
     await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
       const storage = storageOf(agent);
       const resolved = await resolveComputeService(
-        baseDeps(threadId, workspaceId, agentId, storage),
+        baseDeps(threadId, workspaceId, allowlistAgentId, storage),
       );
       expect(resolved).not.toBeNull();
       const hosts = resolved?.config.allowedHosts ?? [];
       expect(hosts).toContain("ws.example.com");
-      expect(hosts).toContain("wb.example.com");
+      expect(hosts).toContain("agent-only.example.com");
       expect(hosts).not.toContain("agent.example.com");
     });
   });
 
-  it("activates Daytona restrictions from a workbench allowlist and preserves default, skill, and enabled MCP hosts", async () => {
-    const threadId = "thr_resolve_daytona_workbench_allowlist";
+  it("activates Daytona restrictions from an agent allowlist and preserves default, skill, and enabled MCP hosts", async () => {
+    const threadId = "thr_resolve_daytona_agent_allowlist";
     const { workspaceId, agentId } = await seedRegistryThread(env.REGISTRY_DB, {
       threadId,
       runtime: "think",
@@ -339,21 +339,21 @@ describe("resolveComputeService (real D1 + real DO storage)", () => {
     await writer.ensureWorkspaceDek(workspaceId);
     await writer.set(workspaceId, "sandbox:daytona", "test-key");
 
-    const workbenchId = "wb_daytona_allowlist";
+    const daytonaAgentId = "wb_daytona_allowlist";
     await env.REGISTRY_DB.prepare(
       `INSERT INTO agents (id, workspace_id, name, system_prompt, provider, model, resource_profile, sandbox_env_vars_json, sandbox_network_domain_allowlist, created_at, updated_at)
-       VALUES (?, ?, 'Daytona bench', 'You are Nadi.', 'mock', 'mock', 'small', '{}', 'api.workbench.test', ?, ?)`,
+       VALUES (?, ?, 'Daytona agent', 'You are Nadi.', 'mock', 'mock', 'small', '{}', 'api.agent.test', ?, ?)`,
     )
-      .bind(workbenchId, workspaceId, NOW, NOW)
+      .bind(daytonaAgentId, workspaceId, NOW, NOW)
       .run();
     await env.REGISTRY_DB.prepare(`UPDATE thread_index SET agent_id = ? WHERE id = ?`)
-      .bind(workbenchId, threadId)
+      .bind(daytonaAgentId, threadId)
       .run();
     await env.REGISTRY_DB.prepare(
       `INSERT INTO skills (id, workspace_id, agent_id, name, description, body, enabled, network_domains, created_at, updated_at)
        VALUES ('skill_daytona_allowlist', ?, ?, 'Network skill', '', '', 1, '["api.skill.test"]', ?, ?)`,
     )
-      .bind(workspaceId, agentId, NOW, NOW)
+      .bind(workspaceId, daytonaAgentId, NOW, NOW)
       .run();
     await env.REGISTRY_DB.prepare(
       `INSERT INTO mcp_servers (id, workspace_id, name, url, enabled, created_at)
@@ -367,13 +367,13 @@ describe("resolveComputeService (real D1 + real DO storage)", () => {
     const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
     await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
       const resolved = await resolveComputeService(
-        baseDeps(threadId, workspaceId, agentId, storageOf(agent)),
+        baseDeps(threadId, workspaceId, daytonaAgentId, storageOf(agent)),
       );
       expect(resolved).not.toBeNull();
       expect(resolved!.config.allowedHosts).toEqual(
         expect.arrayContaining([
           ...DEFAULT_COMPUTE_ALLOWED_HOSTS,
-          "api.workbench.test",
+          "api.agent.test",
           "api.skill.test",
           "mcp.example.test",
         ]),
@@ -456,9 +456,9 @@ describe("resolveComputeService (real D1 + real DO storage)", () => {
         .run();
     }
 
-    const assignTo = async (workbenchId: string) => {
+    const assignTo = async (agentId: string) => {
       await env.REGISTRY_DB.prepare(`UPDATE thread_index SET agent_id = ? WHERE id = ?`)
-        .bind(workbenchId, threadId)
+        .bind(agentId, threadId)
         .run();
     };
 

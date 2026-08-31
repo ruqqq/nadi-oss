@@ -29,15 +29,14 @@ function thread(over: Partial<ThreadSummary> = {}): ThreadSummary {
     status: "active",
     projectId: null,
     projectName: null,
-    workbenchId: null,
-    workbenchName: null,
+    agentName: null,
     resourceProfile: "small",
     automatonId: null,
     automatonName: null,
     automatonNotifyMode: null,
     outcomeDismissedAt: null,
     recentDismissedAt: null,
-    repositorySnapshotCount: 0,
+    repositoryCount: 0,
     createdAt: 1,
     updatedAt: 1,
     lastContextTokens: null,
@@ -195,21 +194,21 @@ describe("applyUserEvent", () => {
   });
   test("updated preserves project fields from the latest summary", () => {
     const result = applyUserEvent(
-      [thread({ threadId: "x", projectId: null, projectName: null, repositorySnapshotCount: 0 })],
+      [thread({ threadId: "x", projectId: null, projectName: null, repositoryCount: 0 })],
       {
         type: "thread.updated",
         thread: thread({
           threadId: "x",
           projectId: "proj_1",
           projectName: "Project 1",
-          repositorySnapshotCount: 3,
+          repositoryCount: 3,
         }),
       },
     );
     expect(result[0]).toMatchObject({
       projectId: "proj_1",
       projectName: "Project 1",
-      repositorySnapshotCount: 3,
+      repositoryCount: 3,
     });
   });
   test("a repeated create is idempotent", () => {

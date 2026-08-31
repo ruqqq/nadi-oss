@@ -403,7 +403,7 @@ export class SpritesComputeBackend implements ComputeBackend {
    * `echo "[$PROBE_ENV]"` and printed `[]`. Sending the same pair as the exec
    * `env` query param printed the value. So the create-time environment is,
    * for our purposes, write-only — and passing `spec.env` to `createSprite`
-   * (the only place it went before) meant workbench env vars and the GitHub
+   * (the only place it went before) meant agent env vars and the GitHub
    * App's minted `GH_TOKEN` reached NO command at all. A private-repo clone
    * would have failed as an auth error with nothing pointing at the cause.
    *
@@ -447,7 +447,7 @@ export class SpritesComputeBackend implements ComputeBackend {
 
     const spriteName = `nadi-${crypto.randomUUID()}`;
     // Deliberately created with NO `environment`. It does not reach commands
-    // (see `runtimeEnv`), so sending it would write every workbench secret and
+    // (see `runtimeEnv`), so sending it would write every agent secret and
     // the minted `GH_TOKEN` into a provider-side record that nothing ever
     // reads. The env is carried per-exec instead.
     await this.client.createSprite(spriteName, {});

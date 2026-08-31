@@ -10,7 +10,7 @@ export interface ProjectSummary {
   name: string;
   description: string;
   customInstructions: string;
-  defaultWorkbenchId: string | null;
+  defaultAgentId: string | null;
   archivedAt: number | null;
   createdAt: number;
   updatedAt: number;
@@ -27,7 +27,7 @@ export type CreateProjectInput = {
 };
 
 export type UpdateProjectInput = Partial<CreateProjectInput> & {
-  defaultWorkbenchId?: string | null;
+  defaultAgentId?: string | null;
 };
 
 export async function listProjects(

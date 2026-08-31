@@ -348,7 +348,7 @@ describe("project routes", () => {
     expect(thread?.projectId).toBe("project-archive");
   });
 
-  it("sets and returns a project's default workbench", async () => {
+  it("sets and returns a project's default agent", async () => {
     const seeded = await seedUserWorkspace();
     await insertProject({
       id: "project-default-env",
@@ -366,24 +366,24 @@ describe("project routes", () => {
     const patchRes = await SELF.fetch("https://nadi.test/api/projects/project-default-env", {
       method: "PATCH",
       headers: { ...cookie(seeded.token), "Content-Type": "application/json" },
-      body: JSON.stringify({ defaultWorkbenchId: "env-default" }),
+      body: JSON.stringify({ defaultAgentId: "env-default" }),
     });
 
     expect(patchRes.status).toBe(200);
     const patchBody = (await patchRes.json()) as {
-      project: { defaultWorkbenchId: string | null };
+      project: { defaultAgentId: string | null };
     };
-    expect(patchBody.project.defaultWorkbenchId).toBe("env-default");
+    expect(patchBody.project.defaultAgentId).toBe("env-default");
 
     const getRes = await SELF.fetch("https://nadi.test/api/projects/project-default-env", {
       headers: cookie(seeded.token),
     });
     expect(getRes.status).toBe(200);
-    const getBody = (await getRes.json()) as { project: { defaultWorkbenchId: string | null } };
-    expect(getBody.project.defaultWorkbenchId).toBe("env-default");
+    const getBody = (await getRes.json()) as { project: { defaultAgentId: string | null } };
+    expect(getBody.project.defaultAgentId).toBe("env-default");
   });
 
-  it("rejects a defaultWorkbenchId for a foreign or nonexistent environment", async () => {
+  it("rejects a defaultAgentId for a foreign or nonexistent environment", async () => {
     const seeded = await seedUserWorkspace();
     await insertProject({
       id: "project-bad-env",
@@ -408,19 +408,19 @@ describe("project routes", () => {
     const foreignRes = await SELF.fetch("https://nadi.test/api/projects/project-bad-env", {
       method: "PATCH",
       headers: { ...cookie(seeded.token), "Content-Type": "application/json" },
-      body: JSON.stringify({ defaultWorkbenchId: "env-foreign" }),
+      body: JSON.stringify({ defaultAgentId: "env-foreign" }),
     });
     expect(foreignRes.status).toBe(404);
 
     const missingRes = await SELF.fetch("https://nadi.test/api/projects/project-bad-env", {
       method: "PATCH",
       headers: { ...cookie(seeded.token), "Content-Type": "application/json" },
-      body: JSON.stringify({ defaultWorkbenchId: "env-does-not-exist" }),
+      body: JSON.stringify({ defaultAgentId: "env-does-not-exist" }),
     });
     expect(missingRes.status).toBe(404);
   });
 
-  it("clears a project's default workbench when set to null", async () => {
+  it("clears a project's default agent when set to null", async () => {
     const seeded = await seedUserWorkspace();
     await insertProject({
       id: "project-clear-env",
@@ -437,20 +437,20 @@ describe("project routes", () => {
     const setRes = await SELF.fetch("https://nadi.test/api/projects/project-clear-env", {
       method: "PATCH",
       headers: { ...cookie(seeded.token), "Content-Type": "application/json" },
-      body: JSON.stringify({ defaultWorkbenchId: "env-clear" }),
+      body: JSON.stringify({ defaultAgentId: "env-clear" }),
     });
     expect(setRes.status).toBe(200);
 
     const clearRes = await SELF.fetch("https://nadi.test/api/projects/project-clear-env", {
       method: "PATCH",
       headers: { ...cookie(seeded.token), "Content-Type": "application/json" },
-      body: JSON.stringify({ defaultWorkbenchId: null }),
+      body: JSON.stringify({ defaultAgentId: null }),
     });
 
     expect(clearRes.status).toBe(200);
     const clearBody = (await clearRes.json()) as {
-      project: { defaultWorkbenchId: string | null };
+      project: { defaultAgentId: string | null };
     };
-    expect(clearBody.project.defaultWorkbenchId).toBeNull();
+    expect(clearBody.project.defaultAgentId).toBeNull();
   });
 });

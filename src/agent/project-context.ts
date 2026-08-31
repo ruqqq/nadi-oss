@@ -1,6 +1,6 @@
 import { registryDb } from "../db/client";
 import { ProjectRepository } from "../db/repositories/projects";
-import { WorkbenchRepository } from "../db/repositories/workbenches";
+import { AgentRepository } from "../db/repositories/agents";
 import type { Env } from "../env";
 
 export interface ProjectPromptRepositoryContext {
@@ -45,7 +45,7 @@ export async function resolveProjectPromptContext(input: {
   // Read LIVE from the AGENT's repository list — the per-thread snapshot is
   // gone. Same ordering (by id) the snapshot rows had. Keyed on the thread's
   // agent id, which is what `agent_repositories.agent_id` now holds.
-  const repositories = await new WorkbenchRepository(db).listRepositories(input.thread.agentId);
+  const repositories = await new AgentRepository(db).listRepositories(input.thread.agentId);
 
   return {
     name: project.name,

@@ -918,7 +918,7 @@ describe("execCollect", () => {
     );
   });
 
-  // The exec URL's query carries every workbench secret, and this message
+  // The exec URL's query carries every agent secret, and this message
   // reaches the model, the transcript and the logs. It must stay diagnostic
   // WITHOUT ever carrying the URL, so both halves are asserted.
   describe("upgrade transport errors", () => {
@@ -1164,7 +1164,7 @@ describe("execCollect", () => {
   });
 
   // SECRET LEAK REGRESSION. The exec URL carries `env=GH_TOKEN=ghs_…` and every
-  // workbench secret, and workerd's fetch rejections routinely embed the
+  // agent secret, and workerd's fetch rejections routinely embed the
   // request URL in their message. That message is NOT swallowed: it is returned
   // to the model as `compute-tools.ts`'s `detail`, so it lands in the persisted
   // transcript and the logs.

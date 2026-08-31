@@ -9,7 +9,7 @@ function project(id: string, name: string): ProjectSummary {
     name,
     description: "",
     customInstructions: "",
-    defaultWorkbenchId: null,
+    defaultAgentId: null,
     archivedAt: null,
     createdAt: 0,
     updatedAt: 0,

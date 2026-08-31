@@ -362,10 +362,9 @@ export async function seedRegistryThread(
     provider?: string;
     model?: string;
     projectId?: string | null;
-    /** The agent the thread runs as, when it differs from `agentId`. The agent
-     *  IS the environment now, so this is what a workbench used to name. The
+    /** The agent the thread runs as, when it differs from `agentId`. The
      *  caller must have inserted the matching `agents` row. */
-    workbenchId?: string | null;
+    threadAgentId?: string | null;
     createdAt?: number;
     updatedAt?: number;
     archivedAt?: number | null;
@@ -395,7 +394,7 @@ export async function seedRegistryThread(
     .bind(
       threadId,
       workspaceId,
-      input?.workbenchId ?? agentId,
+      input?.threadAgentId ?? agentId,
       input?.projectId ?? null,
       input?.title ?? "Test Thread",
       input?.titleSet ? 1 : 0,

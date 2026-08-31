@@ -564,13 +564,13 @@ describe("automaton routes", () => {
     expect(row?.ownerUserId).toBe(seeded.userId);
   });
 
-  it("accepts and persists workbenchId on create", async () => {
+  it("accepts and persists agentId on create", async () => {
     const seeded = await seedUserWorkspace();
-    const workbenchId = "wbk_routes_test";
+    const agentId = "wbk_routes_test";
     await db().insert(schema.agents).values({
-      id: workbenchId,
+      id: agentId,
       workspaceId: seeded.workspaceId,
-      name: "Routes test workbench",
+      name: "Routes test agent",
       // An environment IS an agent now.
       systemPrompt: "You are Nadi.",
       provider: "mock",
@@ -591,16 +591,16 @@ describe("automaton routes", () => {
         prompt: "Give me my briefing.",
         timezone: "UTC",
         schedule: { kind: "hourly", minute: 0 },
-        workbenchId,
+        agentId,
       }),
     });
 
     expect(res.status).toBe(201);
-    const body = (await res.json()) as { automaton: { workbenchId: string | null } };
-    expect(body.automaton.workbenchId).toBe(workbenchId);
+    const body = (await res.json()) as { automaton: { agentId: string | null } };
+    expect(body.automaton.agentId).toBe(agentId);
   });
 
-  it("rejects a workbenchId that is not an active workbench in the workspace", async () => {
+  it("rejects an agentId that is not an active agent in the workspace", async () => {
     const seeded = await seedUserWorkspace();
 
     const res = await SELF.fetch("https://nadi.test/api/automata", {
@@ -611,7 +611,7 @@ describe("automaton routes", () => {
         prompt: "Give me my briefing.",
         timezone: "UTC",
         schedule: { kind: "hourly", minute: 0 },
-        workbenchId: "wbk_missing",
+        agentId: "wbk_missing",
       }),
     });
 

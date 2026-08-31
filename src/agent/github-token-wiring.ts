@@ -50,7 +50,7 @@ export async function applyGithubToken(
     ...(input.log ? { log: input.log } : {}),
     onInstallationGone: async (installationId) => {
       await installRepo.markStatus(input.workspaceId, installationId, "disconnected");
-      // TODO: reconcile access_status on workbench_repositories referencing this installation (deferred)
+      // TODO: reconcile access_status on agent_repositories referencing this installation (deferred)
     },
   });
 }

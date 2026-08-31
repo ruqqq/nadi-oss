@@ -16,8 +16,8 @@ vi.mock("../../../src/db/repositories/projects", () => ({
   },
 }));
 
-vi.mock("../../../src/db/repositories/workbenches", () => ({
-  WorkbenchRepository: class {
+vi.mock("../../../src/db/repositories/agents", () => ({
+  AgentRepository: class {
     listRepositories = listRepositoriesMock;
   },
 }));

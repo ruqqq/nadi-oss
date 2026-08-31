@@ -3,19 +3,23 @@ import { toast } from "sonner";
 import { Archive, ArrowLeft, CaretRight, GitBranch, Plus, Toolbox } from "../icons";
 import { useMediaQuery } from "../lib/use-media-query";
 import {
-  archiveWorkbench,
-  createWorkbench,
-  deleteWorkbenchSecret,
-  listWorkbenches,
-  setWorkbenchEnvVars,
-  setWorkbenchRepositories,
-  setWorkbenchSecret,
-  updateWorkbench,
-  type WorkbenchRepository,
-  type WorkbenchRepositoryInput,
-  type WorkbenchResourceProfile,
-  type WorkbenchSummary,
-} from "../workbenches-api";
+  // Renamed server-side to agents-api (Task 5, the wire-contract rename).
+  // Aliased back to the pre-merge names here rather than shotgun-renaming
+  // this file's ~120 internal references — Task 6 owns the Agents section
+  // redesign and will do that rename as part of its visual pass.
+  archiveAgent as archiveWorkbench,
+  createAgent as createWorkbench,
+  deleteAgentSecret as deleteWorkbenchSecret,
+  listAgents as listWorkbenches,
+  setAgentEnvVars as setWorkbenchEnvVars,
+  setAgentRepositories as setWorkbenchRepositories,
+  setAgentSecret as setWorkbenchSecret,
+  updateAgent as updateWorkbench,
+  type AgentRepository as WorkbenchRepository,
+  type AgentRepositoryInput as WorkbenchRepositoryInput,
+  type AgentResourceProfile as WorkbenchResourceProfile,
+  type AgentSummary as WorkbenchSummary,
+} from "../agents-api";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { Card } from "../components/ui/card";
@@ -254,11 +258,11 @@ function WorkbenchDetailPage({
         {networkAllowlistEnabled && (
           <Field
             label="Allowed domains"
-            htmlFor={`workbench-network-allowlist-${id}`}
+            htmlFor={`agent-network-allowlist-${id}`}
             hint="One host per line. On Daytona, these are added to Nadi's default allowed hosts and outbound access is restricted to the combined list."
           >
             <Textarea
-              id={`workbench-network-allowlist-${id}`}
+              id={`agent-network-allowlist-${id}`}
               className="min-h-20 font-mono text-xs"
               autoCapitalize="off"
               autoCorrect="off"

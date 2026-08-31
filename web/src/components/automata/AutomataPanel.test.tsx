@@ -21,8 +21,8 @@ vi.mock("../../automata-api", async () => {
 });
 
 const listWorkbenches = vi.fn();
-vi.mock("../../workbenches-api", () => ({
-  listWorkbenches: (...a: unknown[]) => listWorkbenches(...a),
+vi.mock("../../agents-api", () => ({
+  listAgents: (...a: unknown[]) => listWorkbenches(...a),
 }));
 
 const getDefaultAgentSettings = vi.fn();
@@ -99,7 +99,6 @@ beforeEach(() => {
     ownerUserId: "u1",
     agentId: "agent1",
     projectId: null,
-    workbenchId: null,
     name: "Daily briefing",
     prompt: "Give me my briefing",
     modelProvider: null,
@@ -124,7 +123,6 @@ beforeEach(() => {
       ownerUserId: "u1",
       agentId: "agent1",
       projectId: null,
-      workbenchId: null,
       name: "Daily briefing",
       prompt: "Give me my briefing",
       modelProvider: null,
@@ -188,7 +186,7 @@ describe("AutomataPanel workbench override", () => {
 
     await waitFor(() => expect(createAutomaton).toHaveBeenCalled());
     const payload = createAutomaton.mock.calls[0]![0];
-    expect(payload.workbenchId).toBe("wbk_1");
+    expect(payload.agentId).toBe("wbk_1");
   });
 
   it("submits null when left on Inherit from project", async () => {
@@ -200,6 +198,6 @@ describe("AutomataPanel workbench override", () => {
 
     await waitFor(() => expect(createAutomaton).toHaveBeenCalled());
     const payload = createAutomaton.mock.calls[0]![0];
-    expect(payload.workbenchId).toBeNull();
+    expect(payload.agentId).toBeNull();
   });
 });

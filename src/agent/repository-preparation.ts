@@ -1,7 +1,7 @@
 import { posix as path } from "node:path";
 import { registryDb } from "../db/client";
 import { ThreadRepository } from "../db/repositories/threads";
-import { WorkbenchRepository } from "../db/repositories/workbenches";
+import { AgentRepository } from "../db/repositories/agents";
 import type { Env } from "../env";
 import type { ThreadComputeService } from "../compute/thread-service";
 
@@ -59,7 +59,7 @@ export function createRepositoryPreparation(input: {
     if (configId === null) {
       return { summary: "No project repositories are configured for this thread." };
     }
-    const environmentRepo = new WorkbenchRepository(db);
+    const environmentRepo = new AgentRepository(db);
     // Ordered by id — the same order the snapshot rows were built and read in.
     const repositories = await environmentRepo.listRepositories(configId);
     // Preserved exactly: with no repositories configured this returns BEFORE
@@ -194,7 +194,7 @@ export function createRepositoryPreparation(input: {
 // `null` (skipped silently) when the thread has no environment bundle or the
 // bundle has no setup script configured. Read LIVE, like the repository list.
 async function runEnvironmentSetup(
-  environmentRepo: WorkbenchRepository,
+  environmentRepo: AgentRepository,
   configId: string,
   service: RepositoryExecService,
 ): Promise<string | null> {
@@ -339,7 +339,7 @@ async function isGitRepository(
  * says "no" as `failed`/1 and NEVER produces `exited`/1. Probes written against
  * the Daytona shape therefore read every negative answer on Cloudflare as a
  * broken probe: a missing checkout was skipped instead of cloned, so every fresh
- * workbench sandbox came up with an empty /workspace and the model had to
+ * agent sandbox came up with an empty /workspace and the model had to
  * improvise a clone by hand.
  *
  * Returns null only when the command did not reach a terminal state at all

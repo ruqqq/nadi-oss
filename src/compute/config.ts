@@ -106,8 +106,8 @@ export function validateSandboxDomain(value: string): string {
 
 /**
  * Whether producing a final {@link ComputeConfigResult} for this PRELIMINARY
- * result (one resolved with no workbench profile) requires fetching the
- * thread's actual workbench profile. `true` for anything that will end up
+ * result (one resolved with no agent profile) requires fetching the
+ * thread's actual agent profile. `true` for anything that will end up
  * enabled, and for the one bail reason (`missing_source`) that itself depends
  * on the profile — every other bail (`missing_workspace_settings`,
  * `disabled`, `unsupported_provider`, `missing_secret`) is decided before the
@@ -116,7 +116,7 @@ export function validateSandboxDomain(value: string): string {
  * separate, potentially-expensive profile lookup (e.g. a per-thread D1 query)
  * use this to skip that lookup entirely on a genuinely-disabled workspace.
  */
-export function needsWorkbenchResourceProfile(preliminary: ComputeConfigResult): boolean {
+export function needsAgentResourceProfile(preliminary: ComputeConfigResult): boolean {
   return preliminary.enabled || preliminary.reason === "missing_source";
 }
 
@@ -129,8 +129,8 @@ export function resolveEffectiveComputeConfig(input: {
   mcpHosts?: string[];
   workspaceSecretEnvNames?: string[];
   agentSecretEnvNames?: string[];
-  /** The thread's frozen workbench profile. Null/absent = no workbench. */
-  workbenchResourceProfile?: ComputeResourceProfile | null | undefined;
+  /** The thread's agent's resource profile, read live. */
+  agentResourceProfile?: ComputeResourceProfile | null | undefined;
 }): ComputeConfigResult {
   const { workspace, agent } = input;
   if (!workspace) return { enabled: false, reason: "missing_workspace_settings" };
@@ -145,10 +145,10 @@ export function resolveEffectiveComputeConfig(input: {
     return { enabled: false, reason: "missing_secret" };
   }
 
-  // The workbench snapshot is the only source of sandbox size. Workbench-less
-  // threads get the default. Resolved BEFORE the missing_source check below so
-  // validation sees the profile that will actually be acquired.
-  const resourceProfile = input.workbenchResourceProfile ?? DEFAULT_COMPUTE_RESOURCE_PROFILE;
+  // The agent's own resource profile is the only source of sandbox size, and
+  // every thread has an agent. Resolved BEFORE the missing_source check below
+  // so validation sees the profile that will actually be acquired.
+  const resourceProfile = input.agentResourceProfile ?? DEFAULT_COMPUTE_RESOURCE_PROFILE;
   if (
     workspace.providerConfig.kind === "daytona" &&
     input.daytonaProfiles[resourceProfile] === null
@@ -158,10 +158,9 @@ export function resolveEffectiveComputeConfig(input: {
 
   // The workspace toggle is the master switch. When on, the allowlist is the
   // workspace domains (or the sensible defaults if none) unioned with enabled
-  // MCP server hosts. Workbench-specific additions are layered on later at
-  // compute acquisition (they need the thread's workbench, unknown here); the
-  // agent-level override was retired in favor of that. When off, the network is
-  // unrestricted (null).
+  // MCP server hosts. Agent-specific additions are layered on later at
+  // compute acquisition (they need the thread's agent, unknown here). When
+  // off, the network is unrestricted (null).
   let allowedHosts: string[] | null = null;
   if (workspace.networkRestrictionEnabled) {
     const configured = parseDomainList(workspace.networkDomainAllowlist);

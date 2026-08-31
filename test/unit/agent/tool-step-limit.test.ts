@@ -17,7 +17,7 @@ describe("tool-step-limit", () => {
     expect(CODING_MAX_TOOL_STEPS).toBe(500);
   });
 
-  it("resolves the budget from whether the thread has a workbench", () => {
+  it("resolves the budget from whether the thread does repository work", () => {
     expect(resolveToolStepBudget(true)).toBe(CODING_MAX_TOOL_STEPS);
     expect(resolveToolStepBudget(false)).toBe(MAX_TOOL_STEPS);
   });

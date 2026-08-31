@@ -108,7 +108,7 @@ export function Settings({
   closeLabel,
   onClose,
   voiceEnabled = false,
-  workbenchNetworkAllowlistEnabled = false,
+  agentNetworkAllowlistEnabled = false,
   tab,
   onTabChange,
   routePath,
@@ -121,7 +121,7 @@ export function Settings({
   /** VOICE_INPUT_ENABLED. Off means there is no dictation anywhere, so the
    *  language card has nothing to configure. */
   voiceEnabled?: boolean;
-  workbenchNetworkAllowlistEnabled?: boolean;
+  agentNetworkAllowlistEnabled?: boolean;
   /** The tab in the URL — so it can be linked to, and survives an OAuth redirect. */
   tab: SettingsTab;
   onTabChange: (tab: SettingsTab) => void;
@@ -339,7 +339,7 @@ export function Settings({
 
             <TabsContent value="workbenches">
               <WorkbenchesSection
-                networkAllowlistEnabled={workbenchNetworkAllowlistEnabled}
+                networkAllowlistEnabled={agentNetworkAllowlistEnabled}
                 selectedId={workbenchesSelectedId}
                 onSelectWorkbench={onSelectWorkbench}
                 onNewWorkbench={onNewWorkbench}

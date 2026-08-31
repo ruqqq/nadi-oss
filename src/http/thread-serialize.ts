@@ -37,12 +37,7 @@ export interface ThreadSummary {
   status: "active" | "archived";
   projectId: string | null;
   projectName: string | null;
-  /** The thread's AGENT — the same value as `agentId`, under the wire name the
-   * client still reads. Kept nullable on the wire only because the client's
-   * type says so; it is never null now, since `thread_index.agent_id` is NOT
-   * NULL. Renamed with the rest of the surface in the routes task. */
-  workbenchId: string | null;
-  workbenchName: string | null;
+  agentName: string | null;
   /** The agent's sandbox size, read LIVE: configuration is not snapshotted per
    * thread, so editing it takes effect on the next acquire. */
   resourceProfile: ComputeResourceProfile;
@@ -54,7 +49,7 @@ export interface ThreadSummary {
    * rail hides it only while `recentDismissedAt >= updatedAt`; every other
    * surface ignores this field. See `thread_index.recent_dismissed_at`. */
   recentDismissedAt: number | null;
-  repositorySnapshotCount: number;
+  repositoryCount: number;
   /** NULL means "not tracked" — a pre-feature thread, or one that never ran a turn. NOT zero. */
   lastContextTokens: number | null;
   lastContextWindow: number | null;
@@ -87,7 +82,7 @@ export function serializeThread(input: {
   archivedAt?: number | null;
   projectId?: string | null;
   projectName?: string | null;
-  workbenchName?: string | null;
+  agentName?: string | null;
   /** Raw `agents.resource_profile`, validated and defaulted below. Still
    * optional: a caller that serializes a bare `thread_index` row without the
    * agent join has no value for it. */
@@ -97,7 +92,7 @@ export function serializeThread(input: {
   automatonNotifyMode?: "all" | "failures_only" | null;
   outcomeDismissedAt?: number | null;
   recentDismissedAt?: number | null;
-  repositorySnapshotCount?: number | null;
+  repositoryCount?: number | null;
   lastContextTokens?: number | null;
   lastContextWindow?: number | null;
   lastCompactAfterTokens?: number | null;
@@ -129,11 +124,7 @@ export function serializeThread(input: {
     status: input.archivedAt == null ? "active" : "archived",
     projectId: input.projectId ?? null,
     projectName: input.projectName ?? null,
-    // The agent IS the environment now, so this is `agentId` rather than a
-    // separate column. Sourced here rather than at each call site so no caller
-    // can serialize a thread whose two identifiers disagree.
-    workbenchId: input.agentId,
-    workbenchName: input.workbenchName ?? null,
+    agentName: input.agentName ?? null,
     resourceProfile:
       input.snapshotResourceProfile != null &&
       isComputeResourceProfile(input.snapshotResourceProfile)
@@ -144,7 +135,7 @@ export function serializeThread(input: {
     automatonNotifyMode: input.automatonNotifyMode ?? null,
     outcomeDismissedAt: input.outcomeDismissedAt ?? null,
     recentDismissedAt: input.recentDismissedAt ?? null,
-    repositorySnapshotCount: input.repositorySnapshotCount ?? 0,
+    repositoryCount: input.repositoryCount ?? 0,
     lastContextTokens: input.lastContextTokens ?? null,
     lastContextWindow: input.lastContextWindow ?? null,
     lastCompactAfterTokens: input.lastCompactAfterTokens ?? null,
