@@ -39,7 +39,6 @@
     { "tag": "v2", "new_sqlite_classes": ["UserHub"] },
     { "tag": "v3", "new_sqlite_classes": ["ThinkThreadAgent"] },
     { "tag": "v4", "new_sqlite_classes": ["VoiceAgent"] },
-    { "tag": "v5", "new_sqlite_classes": ["AgentSandbox"] },
     // v5 created RegistryDatabase, the DO that held the whole registry while
     // celld had no D1. celld v0.3.0 has one, so the registry is a real
     // `d1_databases` binding below and the class is gone.
@@ -51,6 +50,11 @@
     // class nothing exports, measured at ~16 attempts/second forever. Delete
     // the cell prefix and restart the node — docs/self-hosting-celld.md,
     // "Upgrading celld".
+    //
+    // v5 and v6 are retired tags (above) — reusing them here would collide
+    // with a deployment that already recorded them as applied, so this picks
+    // up at v7.
+    { "tag": "v7", "new_sqlite_classes": ["AgentSandbox"] },
   ],
   // celld v0.3.0 runs D1, and a D1 database is a cell — so this gets the same
   // fencing, replication and durable write acknowledgement as any other cell.
