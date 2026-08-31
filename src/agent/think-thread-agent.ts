@@ -4435,11 +4435,6 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
   }
 
   /**
-   * Wiring the thread DO passes to the native sandbox tools and the eviction
-   * callback: DO SQLite storage, the runtime config resolver, the SDK-scheduler
-   * bridge for idle eviction, and the deferred system-reminder delivery hook.
-   */
-  /**
    * (Re)arm this thread's single idle-eviction alarm. The ONE implementation:
    * `sandboxHostDeps().scheduleEviction` calls it, and so does
    * {@link scheduleSandboxEviction} on behalf of the sandbox DO. Throws on
@@ -4592,6 +4587,11 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
     }
   }
 
+  /**
+   * Wiring the thread DO passes to the native sandbox tools and the eviction
+   * callback: DO SQLite storage, the runtime config resolver, the SDK-scheduler
+   * bridge for idle eviction, and the deferred system-reminder delivery hook.
+   */
   private sandboxHostDeps(backgroundWorkAdmission?: boolean): ComputeToolHostDeps {
     const attachedRuntime = this.attachedRuntimeForThisAgent();
     const processMonitorEnabled = backgroundWorkAdmission ?? this.processMonitorEnabled();
