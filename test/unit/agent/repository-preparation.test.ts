@@ -457,4 +457,63 @@ describe("createRepositoryPreparation", () => {
       expect.objectContaining({ command: expect.stringContaining("pnpm install") }),
     );
   });
+
+  // The two "nothing to do" branches. Neither had a test in any project, and
+  // both are the exact shape a MIS-KEYED repository lookup degrades into: the
+  // result carries no `skipped` entries, so the `log.warn` in
+  // `agent-sandbox-do.ts` never fires either, and a thread that silently clones
+  // nothing is indistinguishable from a thread that was never meant to clone
+  // anything. Asserting the ABSENCE of `prepared`/`skipped` (toEqual, not
+  // toMatchObject) is the point — the summary string alone cannot tell the two
+  // apart. The key the lookup is made with is asserted for the same reason.
+  it("returns the no-repositories summary WITHOUT resolving compute when the thread has no environment assigned", async () => {
+    getThreadMock.mockResolvedValue({ id: "thread-1", workbenchId: null });
+    const resolveComputeService = vi.fn();
+
+    const prepareRepositories = createRepositoryPreparation({
+      env: {} as never,
+      threadId: "thread-1",
+      resolveComputeService,
+    });
+
+    await expect(prepareRepositories()).resolves.toEqual({
+      summary: "No project repositories are configured for this thread.",
+    });
+    expect(listRepositoriesMock).not.toHaveBeenCalled();
+    expect(resolveComputeService).not.toHaveBeenCalled();
+  });
+
+  it("returns the no-repositories summary WITHOUT resolving compute when the thread row is missing", async () => {
+    getThreadMock.mockResolvedValue(undefined);
+    const resolveComputeService = vi.fn();
+
+    const prepareRepositories = createRepositoryPreparation({
+      env: {} as never,
+      threadId: "thread-1",
+      resolveComputeService,
+    });
+
+    await expect(prepareRepositories()).resolves.toEqual({
+      summary: "No project repositories are configured for this thread.",
+    });
+    expect(listRepositoriesMock).not.toHaveBeenCalled();
+    expect(resolveComputeService).not.toHaveBeenCalled();
+  });
+
+  it("returns the no-repositories summary WITHOUT resolving compute when the environment declares none", async () => {
+    listRepositoriesMock.mockResolvedValue([]);
+    const resolveComputeService = vi.fn();
+
+    const prepareRepositories = createRepositoryPreparation({
+      env: {} as never,
+      threadId: "thread-1",
+      resolveComputeService,
+    });
+
+    await expect(prepareRepositories()).resolves.toEqual({
+      summary: "No project repositories are configured for this thread.",
+    });
+    expect(listRepositoriesMock).toHaveBeenCalledWith("env-1");
+    expect(resolveComputeService).not.toHaveBeenCalled();
+  });
 });
