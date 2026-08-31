@@ -176,7 +176,10 @@ function setup(input: {
     name: "thr_test",
     env: {},
     primeAttachedContext: vi.fn(async () => undefined),
-    sandboxHostDeps: () => ({ scheduleEviction, getWorkHorizon }),
+    // The compute session `runSandboxEviction` opens (the sandbox DO's, in
+    // production) and the one arm site its fallback reaches.
+    openSandbox: async () => holder.resolved ?? null,
+    armComputeEviction: scheduleEviction,
     // The sweep's own decisions are covered by reaper.test.ts; here it must only
     // not interfere with the arm decision.
     runWorkLedgerSweep: vi.fn(async () => ({ classified: [], terminalized: [], redelivered: [] })),

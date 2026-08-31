@@ -9,6 +9,7 @@ import { MAX_THREAD_PAGE, routeThreads } from "../../src/http/thread-routes";
 import { serializeThread } from "../../src/http/thread-serialize";
 import { ArchivedMessageRepository } from "../../src/db/repositories/archived-messages";
 import { ThinkThreadAgent } from "../../src/agent/think-thread-agent";
+import type { AgentSandbox } from "../../src/compute/agent-sandbox-do";
 import { ThreadComputeStore } from "../../src/compute/thread-store";
 import { saveDaytonaApiKey } from "../../src/compute/settings";
 import type { Env } from "../../src/env";
@@ -342,7 +343,7 @@ async function readWorkbenchSnapshot(threadId: string) {
 }
 
 /**
- * Marks the thread's `ThinkThreadAgent` DO as having a genuinely live
+ * Marks the thread's `AgentSandbox` DO as having a genuinely live
  * sandbox, the same way a real `acquire()` would: a daytona-enabled
  * workspace (so `resolveComputeService` doesn't bail out early on
  * `missing_workspace_settings`) plus an `active` compute state written
@@ -350,6 +351,11 @@ async function readWorkbenchSnapshot(threadId: string) {
  * stores config (no network call), so this reaches `isComputeLive()` without
  * a fake/overridden backend.
  */
+/** `idFromName`: AGENT_SANDBOX is a plain DurableObject with no `onStart`. */
+function sandboxStubFor(threadId: string) {
+  return env.AGENT_SANDBOX.get(env.AGENT_SANDBOX.idFromName(threadId));
+}
+
 async function makeComputeLive(threadId: string, workspaceId: string): Promise<void> {
   const providerConfigJson = JSON.stringify({
     kind: "daytona",
@@ -373,8 +379,11 @@ async function makeComputeLive(threadId: string, workspaceId: string): Promise<v
     value: "dt_test_secret",
   });
 
-  const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
-  await runInDurableObject(stub, async (_instance: ThinkThreadAgent, state) => {
+  // The AGENT_SANDBOX DO's storage, not the thread's: the compute store lives
+  // in the sandbox Durable Object, and a row written on the thread would be a
+  // second brain that `isComputeLive()` no longer even looks at.
+  const stub = sandboxStubFor(threadId);
+  await runInDurableObject(stub, async (_instance: AgentSandbox, state) => {
     const store = new ThreadComputeStore(state.storage);
     store.migrate();
     store.markActive({ provider: "daytona", version: 1, payload: { sandboxId: "sbx-live" } }, now);
@@ -389,8 +398,8 @@ async function makeComputeLive(threadId: string, workspaceId: string): Promise<v
  */
 async function makeComputeAcquiring(threadId: string, workspaceId: string): Promise<void> {
   await makeComputeLive(threadId, workspaceId);
-  const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
-  await runInDurableObject(stub, async (_instance: ThinkThreadAgent, state) => {
+  const stub = sandboxStubFor(threadId);
+  await runInDurableObject(stub, async (_instance: AgentSandbox, state) => {
     const store = new ThreadComputeStore(state.storage);
     store.migrate();
     store.markAcquiring({ provider: "daytona", resourceProfile: "small", now });

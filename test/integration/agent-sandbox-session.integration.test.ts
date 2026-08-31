@@ -118,8 +118,19 @@ function stub(threadId: string) {
   return env.AGENT_SANDBOX.get(env.AGENT_SANDBOX.idFromName(threadId));
 }
 
+/**
+ * The caller's identity, which `session()` requires rather than deriving from
+ * `threadId`: a `SubAgent` runs under a run id with no `thread_index` row and
+ * borrows its parent's workspace/agent.
+ */
+const RUNTIME_CONFIG = { workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+
 async function openSession(threadId: string, supportsProcessMonitor = true) {
-  const opened = await stub(threadId).session({ threadId, supportsProcessMonitor });
+  const opened = await stub(threadId).session({
+    threadId,
+    supportsProcessMonitor,
+    runtimeConfig: RUNTIME_CONFIG,
+  });
   if (!opened.ok) throw new Error(`session failed: ${opened.error.code}`);
   if (!opened.value) throw new Error("expected compute to be enabled");
   return opened.value;
@@ -152,7 +163,11 @@ describe("AgentSandbox.session", () => {
   it("says compute is DISABLED with a null value, not a failure", async () => {
     const threadId = "thr_sess_disabled";
     await seedComputeDisabledThread(threadId);
-    const opened = await stub(threadId).session({ threadId, supportsProcessMonitor: true });
+    const opened = await stub(threadId).session({
+      threadId,
+      supportsProcessMonitor: true,
+      runtimeConfig: { workspaceId: DISABLED_WORKSPACE_ID, agentId: DISABLED_AGENT_ID },
+    });
     // `null` is the signal callers must keep treating as "hide every compute
     // tool". Collapsing it into `ok: false` would make a disabled workspace
     // indistinguishable from a broken resolve.
@@ -160,18 +175,34 @@ describe("AgentSandbox.session", () => {
   });
 
   it("ENCODES a failure instead of throwing when the resolve itself breaks", async () => {
-    const opened = await stub("thr_sess_missing").session({
-      threadId: "thr_sess_missing",
-      supportsProcessMonitor: true,
+    // The break is a backend that will not construct — a real failure mode of
+    // `resolveComputeService` (a missing/undecryptable provider credential
+    // reaches it the same way). It used to be a missing thread row, but the
+    // caller now STATES its workspace/agent, so the resolve no longer reads one.
+    const threadId = "thr_sess_resolve_breaks";
+    await seedComputeEnabledThread(threadId);
+    setComputeHostTestOverrides(threadId, {
+      buildBackend: async () => {
+        throw new Error("backend_unavailable: no credential");
+      },
     });
-    expect(opened.ok).toBe(false);
-    if (opened.ok) return;
-    // Encoded by `encodeSandboxError`, not hand-rolled: a plain `Error` gets
-    // the synthetic code with its message INTACT — no `session_failed:` prefix
-    // wrapped around it — and a `ComputeError` thrown out of the resolve would
-    // keep its real code and class instead.
-    expect(opened.error.code).toBe("sandbox_call_failed");
-    expect(opened.error.message).toBe("thread_not_found: thr_sess_missing");
+    try {
+      const opened = await stub(threadId).session({
+        threadId,
+        supportsProcessMonitor: true,
+        runtimeConfig: RUNTIME_CONFIG,
+      });
+      expect(opened.ok).toBe(false);
+      if (opened.ok) return;
+      // Encoded by `encodeSandboxError`, not hand-rolled: a plain `Error` gets
+      // the synthetic code with its message INTACT — no `session_failed:` prefix
+      // wrapped around it — and a `ComputeError` thrown out of the resolve would
+      // keep its real code and class instead.
+      expect(opened.error.code).toBe("sandbox_call_failed");
+      expect(opened.error.message).toBe("backend_unavailable: no credential");
+    } finally {
+      clearComputeHostTestOverrides(threadId);
+    }
   });
 
   /**
@@ -185,7 +216,10 @@ describe("AgentSandbox.session", () => {
     it("rebuilds a plain ComputeError with its code", async () => {
       const threadId = "thr_sess_err_code";
       await seedComputeEnabledThread(threadId);
-      const resolved = await openSandboxSession(env, threadId, { supportsProcessMonitor: true });
+      const resolved = await openSandboxSession(env, threadId, {
+        supportsProcessMonitor: true,
+        runtimeConfig: RUNTIME_CONFIG,
+      });
       expect(resolved).not.toBeNull();
       await expect(
         resolved!.service.execWatch({ processId: "proc_does_not_exist" }),
@@ -198,7 +232,10 @@ describe("AgentSandbox.session", () => {
     it("rebuilds a ComputeStaleFileError WITH its path and current hash", async () => {
       const threadId = "thr_sess_err_stale";
       await seedComputeEnabledThread(threadId);
-      const resolved = await openSandboxSession(env, threadId, { supportsProcessMonitor: true });
+      const resolved = await openSandboxSession(env, threadId, {
+        supportsProcessMonitor: true,
+        runtimeConfig: RUNTIME_CONFIG,
+      });
       const written = await resolved!.service.files.writeFile({
         path: "note.txt",
         content: "first\n",
@@ -240,7 +277,10 @@ describe("AgentSandbox.session", () => {
     });
     expect(wrote.ok).toBe(true);
 
-    const resolved = await openSandboxSession(env, threadId, { supportsProcessMonitor: true });
+    const resolved = await openSandboxSession(env, threadId, {
+      supportsProcessMonitor: true,
+      runtimeConfig: RUNTIME_CONFIG,
+    });
     const read = await resolved!.service.files.readFile({ path: "a/b.txt" });
     // `readFile` returns line-numbered content, so match on the line body.
     expect(read.content).toContain("hello");

@@ -127,6 +127,9 @@ export class SandboxSession extends RpcTarget {
   alarmArmCount(): Call<"alarmArmCount"> {
     return guard(() => this.service.alarmArmCount());
   }
+  backgroundExecEnabled(): Call<"backgroundExecEnabled"> {
+    return guard(() => this.service.backgroundExecEnabled());
+  }
   getGeneration(): Call<"getGeneration"> {
     return guard(() => this.service.getGeneration());
   }
@@ -177,8 +180,12 @@ export class SandboxSession extends RpcTarget {
   execStop(input: Arg<"execStop", 0>): Call<"execStop"> {
     return guard(() => this.service.execStop(input));
   }
+  // `input?`, not `input`: the service declares `mode: StopMode = "terminate"`,
+  // and `Arg<>` derives the TYPE but not the optionality — so a required
+  // parameter here would take the default away from every near-side caller
+  // (the turn-cancel path calls it with no argument).
   stopAllRunningProcesses(
-    input: Arg<"stopAllRunningProcesses", 0>,
+    input?: Arg<"stopAllRunningProcesses", 0>,
   ): Call<"stopAllRunningProcesses"> {
     return guard(() => this.service.stopAllRunningProcesses(input));
   }

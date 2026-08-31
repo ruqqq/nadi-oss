@@ -147,17 +147,20 @@ import {
   windDownSystemPrompt,
 } from "./tool-step-limit";
 import { createBaseNativeThreadTools } from "./thread-tools";
-import { createRepositoryPreparation } from "./repository-preparation";
 import {
   createComputeTools,
-  resolveComputeService,
-  adoptCommittedWorkbenchResourceProfile,
   readThreadWorkbenchResourceProfile,
   hasThreadWorkbench,
   scheduleComputeEviction,
   cancelComputeEviction,
-  type ComputeToolHostDeps,
+  type ComputeToolDeps,
 } from "./compute-tools";
+import {
+  adoptCommittedResourceProfileOnSandbox,
+  openSandboxSession,
+  type SandboxSessionClient,
+  type SandboxSessionResolution,
+} from "../compute/agent-sandbox-client";
 import {
   createSubagentTools,
   deriveRunLabel,
@@ -167,7 +170,7 @@ import {
 } from "./subagent-tools";
 import { SUBAGENT_DETACHED } from "./subagent-config";
 import { teardownThreadBeforeDestroy } from "./thread-destroy-teardown";
-import { WorkLedgerStore, localWorkLedgerSink } from "./work-ledger-store";
+import { WorkLedgerStore } from "./work-ledger-store";
 import { ToolCallTimingStore, type ToolCallTimingRow } from "./tool-call-timing-store";
 import { stampToolCallDurations, toolCallIdsIn, wrapToolsWithTiming } from "./tool-call-timing";
 import {
@@ -230,10 +233,9 @@ import {
   commitWorkbenchSwitchIfPending,
   type WorkbenchSwitchCommitDeps,
 } from "./workbench-switch-commit";
-import { MIN_STEP_WATCH_AGE_MS, type ThreadComputeService } from "../compute/thread-service";
+import { MIN_STEP_WATCH_AGE_MS } from "../compute/thread-service";
 import type { BackendReference, ComputeSpec } from "../compute/backend";
 import { DEFAULT_MONITOR_POLL_INTERVAL_MS } from "../compute/watchers";
-import { probeWorkspaceCleanliness } from "../compute/workspace-cleanliness";
 import { sha256Hex } from "../compute/files/hash";
 import {
   PRESIGN_EXPIRES_SECONDS,
@@ -630,10 +632,20 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
   /** One-shot legacy lease migration; see `ensureLegacySubagentBackfill`. */
   private legacyBackfillPromise?: Promise<void>;
   private _activeTurnInjections: ModelMessage[] = [];
-  /** Sandbox service resolved once per turn in `beforeTurn` (resolveComputeService
-   *  is expensive), reused by the per-step auto-watch sweep in `beforeStep` so a
-   *  long-running process gets a watcher mid-turn instead of only at turn end. */
-  private _turnSandboxService: ThreadComputeService | null = null;
+  /**
+   * The compute session `beforeTurn` opened on this thread's `AgentSandbox`,
+   * held for the turn because opening one costs several D1 reads plus a GitHub
+   * App token mint. Reused by the tool set and by the per-step auto-watch sweep
+   * in `beforeStep`, so a long-running process gets a watcher mid-turn instead
+   * of only at turn end.
+   *
+   * `service` is an RPC STUB, so this field is the one place in the class that
+   * holds one, and it holds it for exactly one turn — which is one invocation.
+   * It is nulled at BOTH ends: at the top of `beforeTurn` (so a failed open
+   * cannot leave the previous turn's disposed stub readable by this turn's
+   * `beforeStep`) and in `onChatResponse` / `onChatError`.
+   */
+  private _turnSandbox: SandboxSessionResolution | null = null;
   private _contextBudget: { key: string; budget: ContextBudget } | null = null;
   /** The runtime config `beforeTurn` already resolved for the turn in flight.
    * Session runs the compaction tokenCounter on EVERY appendMessage/updateMessage,
@@ -899,7 +911,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
       if (!shouldEnableScriptRunner(config.enabled, hasScript) || !config.enabled) return null;
       return new ComputeSkillScriptRunner({
         getService: async () => {
-          const resolved = await resolveComputeService(this.sandboxHostDeps());
+          const resolved = await this.openSandbox();
           return resolved ? resolved.service : null;
         },
         allowlist: config.value.allowedHosts,
@@ -1408,17 +1420,27 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
     }
     this.currentTurnSetupReminders = turnSetupReminders;
     let hasWorkbench = false;
+    // Cleared BEFORE the open, not after it. The session is an RPC stub, and a
+    // failed open (or anything else that throws out of the wave below) used to
+    // leave the PREVIOUS turn's value readable by this turn's `beforeStep` —
+    // where it is now a disposed stub whose every call rejects with
+    // "RPC stub used after being disposed." and kills the turn. Nulling here
+    // means the field is only ever this turn's session or nothing.
+    this._turnSandbox = null;
     try {
-      // Joined into the same wave as resolveComputeService rather than added as
+      // Joined into the same wave as the sandbox session rather than added as
       // a separate sequential await: hasWorkbench is needed below for the
       // tool-step budget, and neither read depends on the other's result.
       const [turnSandbox, workbenchAssigned] = await Promise.all([
-        resolveComputeService(this.sandboxHostDeps()),
+        this.openSandbox(),
         hasThreadWorkbench(this.env, this.name),
       ]);
-      // Cache for the per-step auto-watch sweep (see beforeStep); avoids
-      // re-running the expensive resolveComputeService on every step.
-      this._turnSandboxService = turnSandbox?.service ?? null;
+      // Held for the TURN — one session for `beforeStep`'s per-step auto-watch
+      // sweep and for the tool set built below, instead of paying the several
+      // D1 reads and the GitHub App token mint the resolve costs on every step.
+      // A turn is one invocation, so the stub does not outlive the invocation
+      // that opened it; `onChatResponse` / `onChatError` null it at the end.
+      this._turnSandbox = turnSandbox ?? null;
       hasWorkbench = workbenchAssigned;
       await turnSandbox?.service.cleanupExpiredRecoverableCompute();
     } finally {
@@ -1445,7 +1467,10 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
     // Config-aware: `{}` when sandbox execution is disabled/incomplete, which
     // keeps every `exec_*` tool out of both the turn tool set and the model's
     // allowlist (design spec: hide all exec tools when unconfigured).
-    const sandboxTools = await createComputeTools(this.sandboxHostDeps());
+    // Over the session `beforeTurn` already opened, not a second one: the
+    // resolve costs several D1 reads and a GitHub App token mint, and this used
+    // to pay all of it twice per turn.
+    const sandboxTools = await createComputeTools(this._turnSandbox, this.computeToolDeps());
     const sandboxToolNames = Object.keys(sandboxTools);
 
     // The agent's memories go in the prompt itself: recall must not depend on the
@@ -1676,7 +1701,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
     this.currentTurnMaxSteps = 8;
     this.currentTurnHasWorkbench = false;
     this.currentTurnWindDownSystem = FEEDBACK_SYSTEM_PROMPT;
-    this._turnSandboxService = null;
+    this._turnSandbox = null;
     this._currentContextWindow = undefined;
     this._currentCompactAfterTokens = undefined;
 
@@ -1719,9 +1744,9 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
     // "running" filter intact, so quick commands that already finished are not
     // watched) gives it a watcher at the next step. Reuses the turn's cached
     // service (cheap store sweep); gated + error-swallowed like the turn-end one.
-    if (this.processMonitorEnabled() && this._turnSandboxService) {
+    if (this.processMonitorEnabled() && this._turnSandbox) {
       try {
-        await this._turnSandboxService.autoWatchRunningProcesses({
+        await this._turnSandbox.service.autoWatchRunningProcesses({
           minAgeMs: MIN_STEP_WATCH_AGE_MS,
         });
       } catch (error) {
@@ -1953,7 +1978,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
     // must still stop the processes it launched.
     try {
       if (cancelled || monitor) {
-        const resolved = await resolveComputeService(this.sandboxHostDeps(monitor));
+        const resolved = await this.openSandbox(monitor);
         if (resolved) {
           if (cancelled) {
             const { stopped, failed } = await resolved.service.stopAllRunningProcesses();
@@ -1975,6 +2000,9 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
         error: String(error),
       });
     }
+    // The turn is over: drop the session with it. It holds an RPC stub, and
+    // everything below this line opens its own — nothing here reads the turn's.
+    this._turnSandbox = null;
     // Turn-end flush: if injections arrived too late to be drained by a
     // beforeStep this turn (or arrived after the last step ran), kick a fresh
     // turn so they aren't stranded in the buffer until the next unrelated event.
@@ -2113,6 +2141,10 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
     // which runs before `beforeTurn` re-pins — resolve its budget from the model
     // the thread was on before the user switched away from it.
     this._turnRuntimeConfig = null;
+    // The turn's sandbox session with it — Think skips `onChatResponse`
+    // entirely when a turn dies before any assistant part is persisted, so this
+    // is the only place a dead turn's stub is dropped.
+    this._turnSandbox = null;
     // Clear the turn's budget pins with it: a later turn that dies before
     // `beforeTurn` re-pins them must not stamp the gauge with THIS turn's window.
     this._currentContextWindow = undefined;
@@ -2268,7 +2300,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
 
   /**
    * Hook for a rehydrated facet to prime whatever context it needs BEFORE
-   * `attachedRuntimeForThisAgent()`/`sandboxHostDeps()` are consulted
+   * `attachedRuntimeForThisAgent()`/`openSandbox()` are consulted
    * outside a normal turn (e.g. the alarm-driven `runSandboxEviction`, which
    * never goes through `beforeTurn`). No-op by default; overridden in
    * {@link SubAgent} to pull+cache the parent's shared runtime reference (see H2).
@@ -2431,9 +2463,9 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
       // fold below both need this service, and resolving twice costs a second
       // round of D1 reads. Mirrors `getCurrentGeneration`'s contract — an
       // unresolvable service degrades to "unknown", never to a throw.
-      let resolved: Awaited<ReturnType<typeof resolveComputeService>>;
+      let resolved: SandboxSessionResolution | null;
       try {
-        resolved = await resolveComputeService(this.sandboxHostDeps());
+        resolved = await this.openSandbox();
       } catch {
         resolved = null;
       }
@@ -2734,7 +2766,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
   async debugExecStart(command: string): Promise<{ processId: string; status: string }> {
     const admission = await this.backgroundExecAdmitted();
     if (!admission) throw new Error("background_work_disabled");
-    const resolved = await resolveComputeService(this.sandboxHostDeps(admission));
+    const resolved = await this.openSandbox(admission);
     if (!resolved) throw new Error("sandbox_disabled");
     // Debug endpoint intentionally bypasses sync-first exec so diagnostics can
     // reproduce attached/background process behavior directly.
@@ -2754,7 +2786,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
   async debugCancelTurn(
     waitMs = 4000,
   ): Promise<{ processId: string; statusBefore: string; statusAfter: string; exitCode: unknown }> {
-    const resolved = await resolveComputeService(this.sandboxHostDeps());
+    const resolved = await this.openSandbox();
     if (!resolved) throw new Error("sandbox_disabled");
     const started = await resolved.service.execStart({ command: "sleep 600" });
     const statusBefore = started.status;
@@ -2794,7 +2826,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
     uploads = 0,
   ): Promise<{ elapsedMs: number; uploadMs: number; result: unknown }> {
     const admission = await this.backgroundExecAdmitted();
-    const resolved = await resolveComputeService(this.sandboxHostDeps(admission));
+    const resolved = await this.openSandbox(admission);
     if (!resolved) throw new Error("sandbox_disabled");
     // Optionally do file uploads FIRST, in this same invocation — the one thing
     // the skill-script runner did that exec never does. If exec only wedges with
@@ -2822,7 +2854,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
   async debugExecStatus(
     processId: string,
   ): Promise<{ status: string; exitCode: number | null; elapsedMs: number }> {
-    const resolved = await resolveComputeService(this.sandboxHostDeps());
+    const resolved = await this.openSandbox();
     if (!resolved) throw new Error("sandbox_disabled");
     const start = Date.now();
     const fresh = await resolved.service.execStatus({ processId });
@@ -2837,7 +2869,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
   async debugExecOutput(
     processId: string,
   ): Promise<{ status: string; exitCode: number | null; stdout: string; stderr: string }> {
-    const resolved = await resolveComputeService(this.sandboxHostDeps());
+    const resolved = await this.openSandbox();
     if (!resolved) throw new Error("sandbox_disabled");
     const out = await resolved.service.execOutput({ processId, stream: "stdout" });
     const err = await resolved.service.execOutput({ processId, stream: "stderr" });
@@ -2863,7 +2895,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
     const sleep = Math.min(Math.max(Math.trunc(sleepSeconds), 0), 60);
     const runner = new ComputeSkillScriptRunner({
       getService: async () => {
-        const resolved = await resolveComputeService(this.sandboxHostDeps());
+        const resolved = await this.openSandbox();
         return resolved ? resolved.service : null;
       },
       allowlist: null,
@@ -2901,7 +2933,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
    * hide the rest. Writes only under `/workspace/.nadi-debug-file-tools/`.
    */
   async debugFileTools(): Promise<{ steps: Array<{ step: string; ok: boolean; detail: string }> }> {
-    const resolved = await resolveComputeService(this.sandboxHostDeps());
+    const resolved = await this.openSandbox();
     if (!resolved) throw new Error("sandbox_disabled");
     const files = resolved.service.files;
     const dir = ".nadi-debug-file-tools";
@@ -3244,7 +3276,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
 
   /** Destroy this thread's sandbox (reclaim the org's shared disk quota). */
   async debugShutdown(): Promise<unknown> {
-    const resolved = await resolveComputeService(this.sandboxHostDeps());
+    const resolved = await this.openSandbox();
     if (!resolved) throw new Error("sandbox_disabled");
     return resolved.service.execShutdown({ confirm: true });
   }
@@ -3386,7 +3418,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
     step: (name: string, ok: boolean, detail: string) => void,
   ): Promise<void> {
     try {
-      const resolved = await resolveComputeService(this.sandboxHostDeps());
+      const resolved = await this.openSandbox();
       const result = await resolved?.service.execShutdown({ confirm: true });
       step("clean: execShutdown", true, JSON.stringify(result ?? { skipped: "compute_disabled" }));
     } catch (error) {
@@ -3501,7 +3533,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
     let reminderText: string | null = null;
     let terminalViaExplicitSweep = false;
 
-    const resolved = await resolveComputeService(this.sandboxHostDeps());
+    const resolved = await this.openSandbox();
     if (!resolved) throw new Error("sandbox_disabled");
     const service = resolved.service;
     const provider = resolved.config.provider;
@@ -3602,9 +3634,9 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
         v.kind === "unknown" || (v.kind === "known" && v.nonce === generationBefore);
       while (Date.now() < probeDeadline && unsettled(view)) {
         await sleep(2_000);
-        view = (await (
-          await resolveComputeService(this.sandboxHostDeps())
-        )?.service.getGenerationView()) ?? { kind: "unknown" };
+        view = (await (await this.openSandbox())?.service.getGenerationView()) ?? {
+          kind: "unknown",
+        };
       }
       generationAfter = view.kind === "known" ? view.nonce : null;
       generationState = view.kind;
@@ -3803,7 +3835,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
     let reason: string | null = null;
     let faultText: string | null = null;
 
-    const resolved = await resolveComputeService(this.sandboxHostDeps());
+    const resolved = await this.openSandbox();
     if (!resolved) throw new Error("sandbox_disabled");
     const service = resolved.service;
     const provider = resolved.config.provider;
@@ -4226,7 +4258,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
     if (!admission) {
       return { attached: [], watchers: [], runningProcesses: [] };
     }
-    const resolved = await resolveComputeService(this.sandboxHostDeps(admission));
+    const resolved = await this.openSandbox(admission);
     if (!resolved) return { attached: [], watchers: [], runningProcesses: [] };
     const before = await resolved.service.execList({ status: "all", limit: 50 });
     const swept = await resolved.service.autoWatchRunningProcesses();
@@ -4254,7 +4286,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
 
   /** DEBUG: raw Daytona command dump for a process (diagnose exit-detection). */
   async debugRawProcessStatus(processId: string): Promise<unknown> {
-    const resolved = await resolveComputeService(this.sandboxHostDeps());
+    const resolved = await this.openSandbox();
     if (!resolved) return { error: "sandbox_disabled" };
     return resolved.service.debugRawProcessStatus(processId);
   }
@@ -4400,7 +4432,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
       threadId: this.name,
       logPrefix: "think_thread",
       cancelActiveSubagents: () => this.cancelActiveSubagentsForDestroy(),
-      resolveComputeService: () => resolveComputeService(this.sandboxHostDeps()),
+      resolveComputeService: () => this.openSandbox(),
     });
     await super.destroy();
   }
@@ -4432,7 +4464,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
 
   /**
    * (Re)arm this thread's single idle-eviction alarm. The ONE implementation:
-   * `sandboxHostDeps().scheduleEviction` calls it, and so does
+   * the sandbox DO's `scheduleEviction` back-call reaches it, and so does
    * {@link scheduleSandboxEviction} on behalf of the sandbox DO. Throws on
    * failure — the in-process callers depend on that.
    */
@@ -4458,7 +4490,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
 
   /**
    * Deliver a hidden system-reminder into this thread. The ONE implementation
-   * behind both the in-process `sandboxHostDeps().deliverSystemReminder` closure
+   * behind both the sandbox DO's `deliverSystemReminder` back-call
    * and the {@link deliverSystemReminderFromSandbox} RPC.
    *
    * THROWS on failure, deliberately: the work ledger's retry path is built on
@@ -4669,18 +4701,48 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
   }
 
   /**
-   * {@link SandboxThreadHost} - is a CHILD SUBAGENT holding this machine?
+   * Is a CHILD SUBAGENT holding this machine? The idle-eviction /
+   * `exec_shutdown` gate, and the same answer `confirm_workbench_switch` asks
+   * for — ONE implementation, reached both in-process (the tool deps, the
+   * workbench-switch backstop) and over RPC (`sandboxHasBlockingWork`).
    *
-   * Stays here because the answer is derived from this thread's subagent runs
-   * (and their legacy backfill), which the sandbox DO cannot see. Identical
-   * body to the closure `sandboxHostDeps` wired; see the long comment there for
-   * why it is scoped to subagent rows and why the backfill is awaited in the
-   * reader itself.
+   * Lives on the thread DO because the answer is derived from this thread's
+   * subagent runs (and their legacy backfill), which the sandbox DO cannot see.
+   *
+   * Scoped to SUBAGENT rows, deliberately NOT "any open row". Process rows are
+   * already covered where it matters and counting them here only does damage:
+   *  - idle eviction: `runAlarm` returns at `countWatchers() > 0` BEFORE
+   *    reaching `releaseIfIdle`, so a watched process already defers eviction;
+   *    an open process row adds nothing.
+   *  - `releaseIfReclaimable`: gated on running processes AND
+   *    `countWatchers() > 0` first — again already covered.
+   *  - `execShutdown`: this gate THROWS `compute_children_active`. It runs
+   *    before the running-process `needsConfirmation` flow, so counting process
+   *    rows would make that flow dead code — the model could no longer shut its
+   *    own sandbox down while anything is watched, not even with
+   *    `confirm: true` — and would break thread destroy, which calls
+   *    `execShutdown({ confirm: true })` and would leak the container.
+   * "Blocking work" here means a CHILD AGENT is on this machine (hence the
+   * error's name); a background process is the owner's own work, and it has its
+   * own affordances.
+   *
+   * The backfill is awaited HERE, in the reader itself, rather than at some seam
+   * upstream that merely happens to run first today. A subagent that was in
+   * flight across the deploy has no row until it runs, so a `hasBlockingWork`
+   * that answered before it would answer `false` and let `releaseIfIdle` delete
+   * the shared container out from under a live child. Making the reader the seam
+   * is what makes that unorderable-by-mistake. It is memoized and, once the
+   * legacy keys are gone, costs one storage miss per instance.
    */
+  private async hasBlockingWorkForSandbox(): Promise<boolean> {
+    await this.ensureLegacySubagentBackfill();
+    return this.openSubagentRunIds().length > 0;
+  }
+
+  /** {@link SandboxThreadHost} - the RPC face of {@link hasBlockingWorkForSandbox}. */
   async sandboxHasBlockingWork(): Promise<SandboxCallResult<boolean>> {
     try {
-      await this.ensureLegacySubagentBackfill();
-      return { ok: true, value: this.openSubagentRunIds().length > 0 };
+      return { ok: true, value: await this.hasBlockingWorkForSandbox() };
     } catch (error) {
       log.warn("think_thread.sandbox_has_blocking_work_failed", {
         threadId: this.name,
@@ -4736,136 +4798,98 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
   }
 
   /**
-   * Wiring the thread DO passes to the native sandbox tools and the eviction
-   * callback: DO SQLite storage, the runtime config resolver, the SDK-scheduler
-   * bridge for idle eviction, and the deferred system-reminder delivery hook.
+   * Opens the turn's (or this call's) compute session on the thread's
+   * `AgentSandbox`.
+   *
+   * This replaced `sandboxHostDeps()`, which built a whole `ThreadComputeService`
+   * against `this.ctx.storage`. The thread DO no longer has a compute store, a
+   * backend, or any way to name one: everything that used to be wired here now
+   * lives in `AgentSandbox`, reached either through the returned session or, for
+   * the capabilities that belong to the CONVERSATION rather than the machine,
+   * through the `SandboxThreadHost` back-calls this class implements.
+   *
+   * `backgroundWorkAdmission` overrides the process-monitor answer for callers
+   * that already resolved admission (the direct background RPCs). Both this and
+   * `attachedRuntime` are stated on every call: the sandbox DO requires
+   * `supportsProcessMonitor` and derives `backgroundLongRunningExec` from the
+   * pair, precisely so neither can be acquired by forgetting to say it.
+   *
+   * LIFETIME: the `service` it returns is an RPC stub. Use it inside the
+   * invocation that opened it. The one field that holds one — `_turnSandbox`
+   * — holds it for one turn, which is one invocation, and is nulled at both ends.
    */
-  private sandboxHostDeps(backgroundWorkAdmission?: boolean): ComputeToolHostDeps {
+  private async openSandbox(
+    backgroundWorkAdmission?: boolean,
+  ): Promise<SandboxSessionResolution | null> {
+    const attachedRuntime = this.attachedRuntimeForThisAgent();
+    // THIS agent's answer, not a D1 lookup on `this.name`: `SubAgent` overrides
+    // `resolveRuntimeConfigForThink` to resolve its PARENT thread's row, and its
+    // own facet name has no `thread_index` row at all. Cached per DO wake.
+    const { workspaceId, agentId } = await this.resolveRuntimeConfigForThink();
+    return openSandboxSession(this.env, this.name, {
+      // Think can drive a proactive turn (see `raiseSystemReminder`), so watcher
+      // exit reminders are surfaced instead of silently dropped.
+      supportsProcessMonitor: backgroundWorkAdmission ?? this.processMonitorEnabled(),
+      runtimeConfig: { workspaceId, agentId },
+      ...(attachedRuntime ? { attachedRuntime } : {}),
+    });
+  }
+
+  /**
+   * What the model-facing compute tools need from the THREAD, beside the
+   * session. Everything here is either plain data or a capability that lives on
+   * the conversation; note the absence of a store.
+   */
+  private computeToolDeps(backgroundWorkAdmission?: boolean): ComputeToolDeps {
     const attachedRuntime = this.attachedRuntimeForThisAgent();
     const processMonitorEnabled = backgroundWorkAdmission ?? this.processMonitorEnabled();
     return {
       env: this.env,
       threadId: this.name,
-      storage: this.ctx.storage,
-      // Think can drive a proactive turn (see deliverSystemReminder below), so
-      // watcher exit reminders are surfaced instead of silently dropped.
       supportsProcessMonitor: processMonitorEnabled,
+      // Stated, never defaulted: `createComputeTools` used to fall back to
+      // `!attachedRuntime` alone, which would let a runtime that cannot deliver
+      // a completion reminder background a long-running exec anyway. Same
+      // derivation the sandbox DO makes for the service itself, so the tool
+      // surface and the service agree.
       backgroundLongRunningExec: processMonitorEnabled && !attachedRuntime,
-      resolveRuntimeConfig: async () => {
-        const config = await this.resolveRuntimeConfigForThink();
-        return { workspaceId: config.workspaceId, agentId: config.agentId };
-      },
       ...(attachedRuntime ? { attachedRuntime } : {}),
-      // All three delegate to the methods below, which are ALSO the RPC surface
-      // `AgentSandbox` calls back on (see src/compute/sandbox-thread-host.ts).
-      // One implementation, two callers — the closure is deleted once the tools
-      // move into the sandbox DO.
-      scheduleEviction: (timestampMs) => this.armComputeEviction(timestampMs),
-      cancelEviction: () => this.disarmComputeEviction(),
-      deliverSystemReminder: (body, mode, options) => this.raiseSystemReminder(body, mode, options),
       // Defer idle eviction of the shared machine while any subagent is live.
-      // DERIVED from the ledger now (an open `kind: "subagent"` row IS the
-      // lease), so a reaped run releases the hold with nothing to forget.
-      // SubAgent inherits this harmlessly: its own storage's ledger has no
-      // subagent rows (they live on the PARENT's storage), so it resolves
-      // false, and releaseIfIdle no-ops in attached mode regardless.
-      //
-      // Scoped to SUBAGENT rows, deliberately NOT "any open row". Process rows
-      // are already covered where it matters and counting them here only does
-      // damage:
-      //  - idle eviction: `runAlarm` returns at `countWatchers() > 0` BEFORE
-      //    reaching `releaseIfIdle`, so a watched process already defers
-      //    eviction; an open process row adds nothing.
-      //  - `releaseIfReclaimable`: gated on running processes AND
-      //    `countWatchers() > 0` first — again already covered.
-      //  - `execShutdown`: this gate THROWS `compute_children_active`. It runs
-      //    before the running-process `needsConfirmation` flow, so counting
-      //    process rows would make that flow dead code — the model could no
-      //    longer shut its own sandbox down while anything is watched, not even
-      //    with `confirm: true` — and would break thread destroy, which calls
-      //    `execShutdown({ confirm: true })` and would leak the container.
-      // "Blocking work" here means a CHILD AGENT is on this machine (hence the
-      // error's name); a background process is the owner's own work, and it has
-      // its own affordances.
-      // The backfill is awaited HERE, in the reader itself, rather than at some
-      // seam upstream that merely happens to run first today. A subagent that
-      // was in flight across the deploy has no row until it runs, so a
-      // `hasBlockingWork` that answered before it would answer `false` and let
-      // `releaseIfIdle` delete the shared container out from under a live child.
-      // Making the reader the seam is what makes that unorderable-by-mistake.
-      // It is memoized and, once the legacy keys are gone, costs one storage
-      // miss per instance.
-      hasBlockingWork: async () => {
-        await this.ensureLegacySubagentBackfill();
-        return this.openSubagentRunIds().length > 0;
-      },
-      markSandboxDirty: () => this.clearSandboxDeclaredClean(),
+      // DERIVED from the ledger (an open `kind: "subagent"` row IS the lease),
+      // so a reaped run releases the hold with nothing to forget. Same body as
+      // `sandboxHasBlockingWork`, which is the RPC face of this — see there for
+      // why it is scoped to SUBAGENT rows and why the backfill is awaited in the
+      // reader itself.
+      hasBlockingWork: () => this.hasBlockingWorkForSandbox(),
       setSandboxDeclaredClean: (clean) => this.setSandboxDeclaredClean(clean),
-      isSandboxDeclaredClean: () => this.getSandboxDeclaredClean(),
-      probeWorkspaceCleanliness: async () => {
-        const resolved = await resolveComputeService(this.sandboxHostDeps());
-        if (!resolved) return { state: "probe_failed", reason: "no_compute_service" };
-        return probeWorkspaceCleanliness((command, timeoutMs) =>
-          resolved.service.execRun({ command, timeoutMs, label: "workspace cleanliness" }),
-        );
-      },
-      workLedger: localWorkLedgerSink(this.workLedger),
-      // The reaper piggybacks the compute service's single alarm: this horizon
-      // is min-folded into `nextWakeAt` alongside watcher polls and the release
-      // time. It must never be a SECOND arm — `scheduleComputeEviction` is
-      // cancel-then-set on one stored id, so a second arm point replaces the
-      // watcher poll rather than adding to it. The alarm callback's fallback
-      // arm is not a second arm: it is gated on `alarmArmCount()` not moving,
-      // i.e. it fires only when this min-fold never ran.
-      getWorkHorizon: async () => this.workHorizon(Date.now()),
-      // Automatic preparation on a genuinely fresh sandbox (never a recovery
-      // restore — see ThreadComputeService.readOrAcquireRuntime). It already
-      // no-ops when the thread has no repository snapshots, so a
-      // workbench-less thread pays nothing extra.
-      onFreshRuntimeAcquired: (() => {
-        const prepareRepositories = createRepositoryPreparation({
-          env: this.env,
-          threadId: this.name,
-          resolveComputeService: () => resolveComputeService(this.sandboxHostDeps()),
-        });
-        return async () => {
-          const result = await prepareRepositories();
-          // A SKIP is not an error, so nothing throws and the `catch` around
-          // this call never fires — which is exactly how a provider-contract
-          // mismatch left every workbench sandbox with an empty /workspace
-          // while the logs stayed clean. Skips are the interesting outcome
-          // here; say so, or the next such break is invisible too.
-          if (result.skipped?.length) {
-            log.warn("compute.repository_preparation_skipped", {
-              threadId: this.name,
-              skipped: result.skipped.map((entry) => `${entry.name}: ${entry.reason}`),
-            });
-          }
-        };
-      })(),
+      adoptCommittedResourceProfile: () =>
+        adoptCommittedResourceProfileOnSandbox(this.env, this.name),
     };
   }
 
   /**
    * Deps for the turn-end workbench-switch commit backstop (see
-   * `onChatResponse`). Reuses `sandboxHostDeps().hasBlockingWork` — the same
+   * `onChatResponse`). Reuses {@link hasBlockingWorkForSandbox} — the same
    * child-subagent gate `execShutdown` itself consults — so this never invents
    * a second way to ask "is it safe to tear this sandbox down".
    */
   private workbenchSwitchCommitDeps(): WorkbenchSwitchCommitDeps {
-    const hostDeps = this.sandboxHostDeps();
     return {
       threadId: this.name,
       now: () => Date.now(),
       commitWorkbenchSwitch: (threadId, at) =>
         new ThreadRepository(registryDb(this.env)).commitWorkbenchSwitch(threadId, at),
       execShutdown: async () => {
-        const resolved = await resolveComputeService(hostDeps);
+        const resolved = await this.openSandbox();
         if (!resolved) return { ok: true, terminated: false, alreadyGone: true };
         return resolved.service.execShutdown({ confirm: true });
       },
-      hasBlockingWork: async () => (await hostDeps.hasBlockingWork?.()) === true,
-      adoptCommittedResourceProfile: () => adoptCommittedWorkbenchResourceProfile(hostDeps),
+      hasBlockingWork: () => this.hasBlockingWorkForSandbox(),
+      // The store write lands in the sandbox DO — the thread has no store to
+      // rewrite. This was the SECOND independent `ThreadComputeStore`
+      // construction the thread used to make.
+      adoptCommittedResourceProfile: () =>
+        adoptCommittedResourceProfileOnSandbox(this.env, this.name),
       onTeardownFailure: (error) =>
         log.warn("think_thread.workbench_switch_teardown_failed", {
           threadId: this.name,
@@ -5200,7 +5224,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
     // Left `undefined` if resolution itself never completed (thread
     // unregistered, resolve threw) — the sweep then falls back to its own
     // independent resolve, isolated from whatever failed here.
-    let resolved: Awaited<ReturnType<typeof resolveComputeService>> | undefined;
+    let resolved: SandboxSessionResolution | null | undefined;
     // The FACT the fallback below gates on: did anything actually arm this
     // pass? Never inferred from "the tick did not throw" — a tick can throw
     // after arming (fallback would then overwrite a nearer alarm) and can
@@ -5211,9 +5235,9 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
       // release-if-idle attached no-op won't trip and could delete the shared
       // machine (H2). A rehydrated SubAgent instance hasn't gone through
       // beforeTurn (which primes subagentContext()), so prime it here before
-      // sandboxHostDeps() reads attachedRuntimeForThisAgent().
+      // openSandbox() reads attachedRuntimeForThisAgent().
       await this.primeAttachedContext();
-      resolved = await resolveComputeService(this.sandboxHostDeps());
+      resolved = await this.openSandbox();
     } catch (error) {
       log.warn("think_thread.sandbox_eviction_failed", {
         threadId: this.name,
@@ -5316,7 +5340,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
         workHorizon === null || (watcherHorizon !== null && watcherHorizon < workHorizon)
           ? watcherHorizon
           : workHorizon;
-      if (horizon !== null) await this.sandboxHostDeps().scheduleEviction(horizon);
+      if (horizon !== null) await this.armComputeEviction(horizon);
     } catch (error) {
       log.warn("think_thread.work_ledger_rearm_failed", {
         threadId: this.name,
@@ -5344,8 +5368,8 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
     terminal: WorkTerminal;
     kind: WorkKind;
     lastAliveAt: number;
-    resolvedService: Awaited<ReturnType<typeof resolveComputeService>> | undefined;
-  }): Promise<{ service: ThreadComputeService | null }> {
+    resolvedService: SandboxSessionResolution | null | undefined;
+  }): Promise<{ service: SandboxSessionClient | null }> {
     const { id, terminal, kind } = input;
     const silentMs = Math.max(0, terminal.at - input.lastAliveAt);
     const facts = await this.workFacts(id, kind, input.resolvedService);
@@ -5412,7 +5436,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
     id: string,
     terminal: WorkTerminal,
     kind: WorkKind,
-    resolvedService?: Awaited<ReturnType<typeof resolveComputeService>>,
+    resolvedService?: SandboxSessionResolution | null,
   ): Promise<boolean> {
     const row = this.workLedger.get(id);
     if (!this.workLedger.terminalize(id, terminal)) return false;
@@ -5451,8 +5475,8 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
   private async workFacts(
     id: string,
     kind: WorkKind,
-    resolvedService?: Awaited<ReturnType<typeof resolveComputeService>>,
-  ): Promise<{ label: string; command: string; service: ThreadComputeService | null }> {
+    resolvedService?: SandboxSessionResolution | null,
+  ): Promise<{ label: string; command: string; service: SandboxSessionClient | null }> {
     if (kind === "subagent") {
       let label = id;
       try {
@@ -5470,10 +5494,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
       return { label, command: "", service: null };
     }
     try {
-      const resolved =
-        resolvedService !== undefined
-          ? resolvedService
-          : await resolveComputeService(this.sandboxHostDeps());
+      const resolved = resolvedService !== undefined ? resolvedService : await this.openSandbox();
       const service = resolved?.service ?? null;
       const view = (await service?.processReapView(id)) ?? null;
       return { label: view?.label ?? id, command: view?.command ?? "", service };
@@ -5507,7 +5528,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
    * every direct/test caller of this method wants.
    */
   async runWorkLedgerSweep(
-    resolvedService?: Awaited<ReturnType<typeof resolveComputeService>>,
+    resolvedService?: SandboxSessionResolution | null,
   ): Promise<WorkSweepResult> {
     // Also awaited here, not only in `hasBlockingWork`: with compute disabled or
     // unresolvable that gate may never be reached, and a legacy run would then
@@ -5686,9 +5707,9 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
    * GitHub token mint plus several D1 reads — none of it a backend touch, so
    * this keeps the reaper's never-block-on-a-dead-sandbox property.
    */
-  private async resolveForSweep(): Promise<Awaited<ReturnType<typeof resolveComputeService>>> {
+  private async resolveForSweep(): Promise<SandboxSessionResolution | null> {
     try {
-      return await resolveComputeService(this.sandboxHostDeps());
+      return await this.openSandbox();
     } catch {
       return null;
     }
@@ -5711,13 +5732,10 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
    * without re-resolving.
    */
   private async getCurrentGeneration(
-    resolvedService?: Awaited<ReturnType<typeof resolveComputeService>>,
+    resolvedService?: SandboxSessionResolution | null,
   ): Promise<CurrentGeneration> {
     try {
-      const resolved =
-        resolvedService !== undefined
-          ? resolvedService
-          : await resolveComputeService(this.sandboxHostDeps());
+      const resolved = resolvedService !== undefined ? resolvedService : await this.openSandbox();
       return (await resolved?.service.getGenerationView()) ?? { kind: "unknown" };
     } catch {
       return { kind: "unknown" };
@@ -5736,7 +5754,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
       // wrote and has not yet committed/pushed. Never give it up under a turn,
       // even though no process/watcher/subagent is running.
       if (this.isTurnActive() || this.hasActiveTurn()) return false;
-      const resolved = await resolveComputeService(this.sandboxHostDeps());
+      const resolved = await this.openSandbox();
       if (!resolved) return false;
       return await resolved.service.releaseIfReclaimable();
     } catch {
@@ -5762,7 +5780,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
    */
   async getSubagentContext(): Promise<SubagentContext> {
     const { workspaceId, agentId } = await this.resolveRuntimeConfigForThink();
-    const resolved = await resolveComputeService(this.sandboxHostDeps());
+    const resolved = await this.openSandbox();
     if (!resolved) throw new Error("subagent_sandbox_disabled");
     // Backend references are JSON at runtime; narrow the `unknown` payload to the
     // serializable form the RPC boundary requires.
@@ -5784,7 +5802,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
       deadlineAt: number;
     }>
   > {
-    const resolved = await resolveComputeService(this.sandboxHostDeps());
+    const resolved = await this.openSandbox();
     if (!resolved) return [];
     return await resolved.service.listActiveWatchersView();
   }
@@ -5854,7 +5872,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
     // falls back to the row id for the label, whereas `undefined` would make
     // it resolve independently per row — re-paying (and re-throwing on) the
     // same failure once per row instead of once for the whole list.
-    const resolved = await resolveComputeService(this.sandboxHostDeps(admission)).catch(() => null);
+    const resolved = await this.openSandbox(admission).catch(() => null);
     const out: Array<{
       id: string;
       kind: WorkKind;
@@ -5944,7 +5962,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
       if (!admission) return null;
       const row = this.workLedger.get(processId);
       if (!row || row.kind !== "process") return null;
-      const resolved = await resolveComputeService(this.sandboxHostDeps(admission));
+      const resolved = await this.openSandbox(admission);
       if (!resolved) return null;
       return await resolved.service.execOutputHeadTail({ processId, stream });
     } catch {
@@ -5992,7 +6010,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
         await this.cancelSubagentRun(id, "user");
         return { ok: true };
       }
-      const resolved = await resolveComputeService(this.sandboxHostDeps(admission));
+      const resolved = await this.openSandbox(admission);
       if (!resolved) return { ok: false, reason: "sandbox_disabled" };
       await resolved.service.execStop({ processId: id });
       return { ok: true };
@@ -6192,10 +6210,20 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
     return this.currentTurnTelemetryEnabled;
   }
 
+  /**
+   * @internal for tests only — the model-facing compute tool set, built exactly
+   * the way `beforeTurn` builds it. Exists so a test can run a real tool
+   * end-to-end without driving a whole turn, and so that the wiring under test
+   * is the production wiring rather than a hand-built stand-in.
+   */
+  async computeToolsForTest(): Promise<ToolSet> {
+    return createComputeTools(await this.openSandbox(), this.computeToolDeps());
+  }
+
   /** @internal for tests only — resolves the same sandbox service used by model-facing exec tools. */
   async resolveComputeServiceForTest() {
     const admission = await this.backgroundExecAdmitted();
-    return resolveComputeService(this.sandboxHostDeps(admission));
+    return this.openSandbox(admission);
   }
 
   /** @internal for tests only — exposes the same fresh/pinned capabilities the
@@ -6699,14 +6727,17 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
   // the turn. When idle, deliverInjection kicks a fresh turn (a normal send).
 
   /**
-   * Resolves the thread's compute service the same way model-facing exec
-   * tools do (`resolveComputeService(this.sandboxHostDeps())`) and reports
-   * whether a sandbox is actually live. `resolveComputeService` needs this
-   * DO's own storage, so this is exposed as an RPC for `thread-routes.ts`'s
-   * PATCH handler rather than resolved from the Worker directly.
+   * Opens the thread's compute session the same way the model-facing exec tools
+   * do and reports whether a sandbox is actually live.
+   *
+   * Still an RPC on the thread DO rather than something `thread-routes.ts` does
+   * itself: the session's inputs are this agent's answers —
+   * `processMonitorEnabled()`, `attachedRuntimeForThisAgent()` and its own
+   * runtime config, which a `SubAgent` resolves from its PARENT — and the Worker
+   * has none of them.
    */
   async isComputeLive(): Promise<boolean> {
-    const resolved = await resolveComputeService(this.sandboxHostDeps());
+    const resolved = await this.openSandbox();
     // Widened deliberately: a sandbox still `acquiring` must defer the switch,
     // or it comes up cloned from the OLD workbench with no marker to fix it.
     return (await resolved?.service.isComputeLiveOrAcquiring()) ?? false;
@@ -7245,7 +7276,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
 
   /**
    * Invalidate the clean bit for the sandbox THIS agent is about to write to.
-   * Wired as `sandboxHostDeps().markSandboxDirty`, i.e. it runs on the write
+   * Wired as the sandbox DO's `markSandboxDirty` back-call, i.e. it runs on the write
    * itself, before the command reaches the machine.
    *
    * Overridable because "the sandbox this agent writes to" and "this agent's

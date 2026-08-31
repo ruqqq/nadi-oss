@@ -62,7 +62,7 @@ async function threadHostStub(env: Env, threadId: string): Promise<SandboxThread
 }
 
 /**
- * The subset of `ComputeToolHostDeps` that the sandbox DO cannot satisfy from
+ * The subset of `ComputeServiceHostDeps` that the sandbox DO cannot satisfy from
  * its own storage, wired to call back into the thread DO that owns `threadId`.
  *
  * Best-effort BY DEFAULT: a failure (thread DO gone, RPC error, encoded failure

@@ -33,7 +33,7 @@ import {
   clearComputeHostTestOverrides,
   setComputeHostTestOverrides,
 } from "../../src/compute/host-test-overrides";
-import { ThreadComputeService } from "../../src/compute/thread-service";
+import type { SandboxSessionResolution } from "../../src/compute/agent-sandbox-client";
 import { DEFAULT_MONITOR_POLL_INTERVAL_MS } from "../../src/compute/watchers";
 import { applyRegistryTestSchema, seedRegistryThread } from "./helpers/registry";
 import { FEEDBACK_MODEL_ID, FEEDBACK_MODEL_PROVIDER } from "../../src/agent/feedback-mode";
@@ -51,10 +51,11 @@ type InitializableAgent = ThinkThreadAgentType & {
 type TestDb = DrizzleD1Database<typeof schema>;
 
 type SandboxServiceTestableAgent = InitializableAgent & {
-  resolveComputeServiceForTest(): Promise<{
-    service: ThreadComputeService;
-    workspaceId: string;
-  } | null>;
+  // `SandboxSessionResolution`, not `{ service: ThreadComputeService }`: the
+  // service lives in the `AgentSandbox` DO and what comes back is the near-side
+  // client. Declaring the real class here would let a test reach for a member
+  // the session does not forward and only find out at runtime.
+  resolveComputeServiceForTest(): Promise<SandboxSessionResolution | null>;
   watcherCompletionsForTest(): TestMessage[];
 };
 
@@ -1008,12 +1009,15 @@ describe("ThinkThreadAgent spike", () => {
           const testInstance = instance as unknown as {
             processMonitorEnabled(): boolean;
             subagentSpawnEnabled(): boolean;
-            sandboxHostDeps(): { backgroundLongRunningExec?: boolean };
+            computeToolDeps(): { backgroundLongRunningExec?: boolean };
           };
           return {
             processMonitorEnabled: testInstance.processMonitorEnabled(),
             subagentSpawnEnabled: testInstance.subagentSpawnEnabled(),
-            backgroundLongRunningExec: testInstance.sandboxHostDeps().backgroundLongRunningExec,
+            // The thread-side derivation the tool surface and the sandbox DO
+            // both use. It used to be read off `sandboxHostDeps()`, which the
+            // cutover deleted along with the thread-local service.
+            backgroundLongRunningExec: testInstance.computeToolDeps().backgroundLongRunningExec,
           };
         });
 
@@ -1056,9 +1060,11 @@ describe("ThinkThreadAgent spike", () => {
           if (!resolved) throw new Error("expected sandbox service");
           const execResult = await resolved.service.exec({ command: "sleep 300", label: "build" });
           return {
-            backgroundLongRunningExec: (
-              resolved.service as unknown as { deps: { backgroundLongRunningExec?: boolean } }
-            ).deps.backgroundLongRunningExec,
+            // Read off the SERVICE the sandbox DO resolved, not off a private
+            // field of an object that now lives in another Durable Object: a
+            // `.deps` reach through the session client silently answers with a
+            // proxy method, which would make this assertion vacuous.
+            backgroundLongRunningExec: await resolved.service.backgroundExecEnabled(),
             execResult,
             activeWatchers: await resolved.service.listActiveWatchersView(),
             runCommandCalls: provider.runCommandCalls,
@@ -1191,11 +1197,9 @@ describe("ThinkThreadAgent spike", () => {
         return {
           watcherAdmission: (await testInstance.backgroundCapabilitiesForTest()).backgroundExec,
           backstop: await instance.debugRunBackstop(),
-          execAdmission: (
-            resolved.service as unknown as {
-              deps: { backgroundLongRunningExec?: boolean };
-            }
-          ).deps.backgroundLongRunningExec,
+          // See the note on the other `backgroundExecEnabled()` read: the
+          // service is in another DO and a `.deps` reach goes quietly vacuous.
+          execAdmission: await resolved.service.backgroundExecEnabled(),
         };
       });
       expect(result).toEqual({
@@ -1267,13 +1271,7 @@ describe("ThinkThreadAgent spike", () => {
           capabilities,
           // The compute layer must agree: with exec refused, a long-running
           // command may not detach.
-          execBackgrounding: resolved
-            ? (
-                resolved.service as unknown as {
-                  deps: { backgroundLongRunningExec?: boolean };
-                }
-              ).deps.backgroundLongRunningExec
-            : undefined,
+          execBackgrounding: resolved ? await resolved.service.backgroundExecEnabled() : undefined,
           // The exec-only RPC must refuse for exactly this reason, while the
           // kind-agnostic dock read still answers (a subagent row belongs in it).
           push: await instance.reportProcessCompletion({ processId: "proc_nope", exitCode: 0 }),
@@ -1710,7 +1708,13 @@ describe("ThinkThreadAgent spike", () => {
       const testInstance = instance as SandboxServiceTestableAgent;
       await testInstance.__unsafe_ensureInitialized();
       const provider = new FakeComputeBackend();
-      let now = 1000;
+      // A REALISTIC epoch, not 1000. The sandbox arms its idle/watcher alarm off
+      // this clock and the thread DO schedules against the real one, so an epoch
+      // near zero arms an alarm in 1970 — it fires immediately, the reaper sweeps,
+      // and the watcher this test is about is torn down before the first
+      // assertion reads it. Same skew existed before the service moved out of
+      // this DO; the RPC hops are what made it observable.
+      let now = 1_800_000_000_000;
       const turnQueueHolder = testInstance as unknown as { _turnQueue?: { isActive: boolean } };
       try {
         // Approach: the thread-keyed host-override registry. `provider.finishProcess`

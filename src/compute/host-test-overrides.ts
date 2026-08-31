@@ -1,4 +1,4 @@
-import type { ComputeToolHostDeps } from "../agent/compute-tools";
+import type { ComputeServiceHostDeps } from "../agent/compute-tools";
 
 /**
  * The host-dep knobs a test may substitute: the backend factory plus the clock
@@ -6,7 +6,7 @@ import type { ComputeToolHostDeps } from "../agent/compute-tools";
  * set `ThinkThreadAgent._testSandboxServiceOverrides` used to carry.
  */
 export type ComputeHostTestOverrides = Pick<
-  ComputeToolHostDeps,
+  ComputeServiceHostDeps,
   "buildBackend" | "now" | "execForegroundTimeoutMs" | "execForegroundPollIntervalMs" | "sleep"
 >;
 

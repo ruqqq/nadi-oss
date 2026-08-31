@@ -114,7 +114,10 @@ function setup(input: {
   const agent = {
     name: "thr_test",
     env: {},
-    sandboxHostDeps: () => ({}),
+    openSandbox: async () => {
+      if (holder.resolveThrows) throw new Error("resolve failed");
+      return holder.resolved ?? null;
+    },
     workLedger: ledger,
     deliverInjection: (entry: Injection) => void injections.push(entry),
     cancelSubagentRun: vi.fn(input.cancelSubagentRun ?? (async () => undefined)),

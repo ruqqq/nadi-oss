@@ -50,6 +50,18 @@ export type SandboxSessionClient = SandboxSessionMethods & {
   files: SandboxFileClient;
 };
 
+/**
+ * What an opened session hands back — deliberately the same shape
+ * `resolveComputeService` returned to the thread DO, so the ~35 call sites
+ * changed their ACQUISITION line and nothing else. `null` means compute is
+ * disabled for the thread.
+ */
+export type SandboxSessionResolution = {
+  service: SandboxSessionClient;
+  workspaceId: string;
+  config: EffectiveComputeConfig;
+};
+
 const FILE_METHODS = ["readFile", "writeFile", "applyPatch"] as const;
 
 /**
@@ -87,6 +99,39 @@ function unwrapping(session: object): SandboxSessionClient {
 }
 
 /**
+ * The thread's sandbox DO.
+ *
+ * `idFromName` (not `getAgentByName`) is deliberate: `AgentSandbox` is a plain
+ * Durable Object with no `onStart` to bypass, unlike the thread agent — whose
+ * transcript hydrates in `onStart` and which must therefore be reached with
+ * `getAgentByName`. Both are right; do not harmonize them.
+ */
+function agentSandboxFor(env: Env, threadId: string) {
+  return env.AGENT_SANDBOX.get(env.AGENT_SANDBOX.idFromName(threadId));
+}
+
+/**
+ * Rewrites the sandbox's persisted resource profile to the one the thread's
+ * CURRENT workbench snapshot declares, after a workbench switch commits.
+ *
+ * A second entry point rather than a session method because it must run when
+ * there is no session and may run when compute is disabled: it reads and
+ * rewrites the STORE, which lives in the sandbox DO, and it is the only other
+ * thing on the thread DO's side that ever wanted a `ThreadComputeStore`.
+ *
+ * Best-effort, like the commit backstop that calls it: the stored profile ages
+ * into correctness on the next acquire, so a failure here must not fail the
+ * switch it is decorating.
+ */
+export async function adoptCommittedResourceProfileOnSandbox(
+  env: Env,
+  threadId: string,
+): Promise<void> {
+  const result = await agentSandboxFor(env, threadId).adoptCommittedResourceProfile({ threadId });
+  if (!result.ok) throw decodeSandboxError(result.error);
+}
+
+/**
  * Opens ONE per-turn compute session on the thread's `AgentSandbox`.
  *
  * Deliberately shaped like `resolveComputeService`: `{ service, workspaceId,
@@ -95,28 +140,36 @@ function unwrapping(session: object): SandboxSessionClient {
  * A resolve that FAILED throws instead, so a broken resolve is never mistaken
  * for a disabled one.
  *
- * `idFromName` (not `getAgentByName`) is deliberate: `AgentSandbox` is a plain
- * Durable Object with no `onStart` to bypass, unlike the thread agent.
+ * Addressed via {@link agentSandboxFor} — see there for why `idFromName`.
  *
  * LIFETIME: the returned `service` is an RPC stub. Open it inside the
  * invocation that uses it and let it go at the end; do NOT stash it in a
- * Durable Object instance field to be read by a later invocation. See
+ * Durable Object instance field to be read by a later invocation. The one
+ * caller that holds it at all (`ThinkThreadAgent._turnSandbox`) holds it
+ * for the span of ONE turn, which is one invocation, and nulls it at both ends.
+ * See
  * `test/integration/agent-sandbox-session.integration.test.ts` for what a
  * dropped stub does at the call site.
  */
 export async function openSandboxSession(
   env: Env,
   threadId: string,
-  options: { supportsProcessMonitor: boolean; attachedRuntime?: BackendReference },
-): Promise<{
-  service: SandboxSessionClient;
-  workspaceId: string;
-  config: EffectiveComputeConfig;
-} | null> {
-  const sandbox = env.AGENT_SANDBOX.get(env.AGENT_SANDBOX.idFromName(threadId));
+  options: {
+    supportsProcessMonitor: boolean;
+    /**
+     * The CALLER's workspace/agent. Required, because `threadId` does not
+     * determine it: a `SubAgent`'s id is a run id with no thread row, and its
+     * config is its parent's. See `AgentSandbox.session`.
+     */
+    runtimeConfig: { workspaceId: string; agentId: string };
+    attachedRuntime?: BackendReference;
+  },
+): Promise<SandboxSessionResolution | null> {
+  const sandbox = agentSandboxFor(env, threadId);
   const opened = await sandbox.session({
     threadId,
     supportsProcessMonitor: options.supportsProcessMonitor,
+    runtimeConfig: options.runtimeConfig,
     ...(options.attachedRuntime ? { attachedRuntime: options.attachedRuntime } : {}),
   });
   if (!opened.ok) throw decodeSandboxError(opened.error);

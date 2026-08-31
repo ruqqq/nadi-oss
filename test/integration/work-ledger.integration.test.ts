@@ -3,6 +3,7 @@ import { drizzle } from "drizzle-orm/d1";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import * as schema from "../../src/db/schema";
 import type { ThinkThreadAgent } from "../../src/agent/think-thread-agent";
+import type { AgentSandbox } from "../../src/compute/agent-sandbox-do";
 import {
   PROCESS_STALE_AFTER_MS,
   SUBAGENT_DEADLINE_MS,
@@ -60,19 +61,15 @@ function ledgerOf(instance: ThinkThreadAgent): WorkLedgerStore {
   return (instance as unknown as { workLedger: WorkLedgerStore }).workLedger;
 }
 
-/** The real host deps the agent builds for compute + the reaper. */
-function hostDepsOf(instance: ThinkThreadAgent): {
-  hasBlockingWork?: () => Promise<boolean>;
-  scheduleEviction: (timestampMs: number) => Promise<void>;
-} {
-  return (
-    instance as unknown as {
-      sandboxHostDeps(): {
-        hasBlockingWork?: () => Promise<boolean>;
-        scheduleEviction: (timestampMs: number) => Promise<void>;
-      };
-    }
-  ).sandboxHostDeps();
+/**
+ * The real child-subagent hold the sandbox consults, read through the same RPC
+ * face `AgentSandbox` calls back on — one implementation, so this observes what
+ * idle eviction and `exec_shutdown` actually see.
+ */
+async function hasBlockingWorkOf(instance: ThinkThreadAgent): Promise<boolean> {
+  const result = await instance.sandboxHasBlockingWork();
+  if (!result.ok) throw new Error(`sandboxHasBlockingWork failed: ${result.error.message}`);
+  return result.value;
 }
 
 function injectionsOf(instance: ThinkThreadAgent): Array<{ kind: string; text: string }> {
@@ -203,6 +200,32 @@ function stubFor(threadId: string) {
   return env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
 }
 
+/**
+ * The thread's `AgentSandbox`, which owns the compute store. `idFromName`: a
+ * plain DurableObject with no `onStart` to bypass, unlike the thread agent.
+ */
+function sandboxStubFor(threadId: string) {
+  return env.AGENT_SANDBOX.get(env.AGENT_SANDBOX.idFromName(threadId));
+}
+
+/** Bump the live generation nonce through the real store, in the DO that holds it. */
+async function setSandboxGeneration(threadId: string, nonce: string): Promise<void> {
+  await runInDurableObject(sandboxStubFor(threadId), async (_instance: AgentSandbox, state) => {
+    const store = new ThreadComputeStore(state.storage);
+    store.migrate();
+    store.setGeneration({ kind: "known", nonce }, Date.now());
+  });
+}
+
+/** Read the real compute state out of the DO that owns it. */
+async function sandboxComputeState(threadId: string) {
+  return runInDurableObject(sandboxStubFor(threadId), async (_instance: AgentSandbox, state) => {
+    const store = new ThreadComputeStore(state.storage);
+    store.migrate();
+    return store.getComputeState();
+  });
+}
+
 /** The agent's own thread id — the key the host-override registry is keyed by. */
 function threadIdOf(instance: ThinkThreadAgent): string {
   const name = (instance as unknown as { name?: string }).name;
@@ -295,11 +318,16 @@ describe("work ledger (DO integration)", () => {
      */
     it("faults a watched process and a subagent run together, as sandbox_reset", async () => {
       const stub = stubFor(THREADS.generation);
-      const result = await runInDurableObject(stub, async (instance: ThinkThreadAgent, state) => {
-        const testInstance = instance as LedgerTestableAgent;
-        await testInstance.__unsafe_ensureInitialized();
-        const cleanup = primeCompute(instance, new FakeComputeBackend());
-        try {
+      // Split across three invocations, deliberately: the nonce bump is written
+      // into the compute store, which lives in the `AgentSandbox` Durable Object
+      // now, and reaching another DO means leaving this one.
+      let cleanup = () => {};
+      let result;
+      try {
+        const before = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
+          const testInstance = instance as LedgerTestableAgent;
+          await testInstance.__unsafe_ensureInitialized();
+          cleanup = primeCompute(instance, new FakeComputeBackend());
           const { processId, generation } = await startWatchedProcess(instance);
 
           // A subagent row alongside the process row, registered under the SAME
@@ -325,31 +353,30 @@ describe("work ledger (DO integration)", () => {
           const generationBefore = await (
             await testInstance.resolveComputeServiceForTest()
           )?.service.getGenerationView();
-
-          // The reset: the container came back on a different nonce under both
-          // still-open rows. Written through the REAL durable compute store, which
-          // is exactly where a genuine re-provision writes it.
-          const store = new ThreadComputeStore(state.storage);
-          store.migrate();
-          store.setGeneration({ kind: "known", nonce: "gen-after-reset" }, Date.now());
-
-          const sweep = await instance.runWorkLedgerSweep();
-
           return {
             processId,
             runId,
             openBefore: openBefore.map((row) => ({ id: row.id, kind: row.kind })),
             generationBefore,
-            sweep,
-            rowsAfter: ledgerOf(instance)
-              .listAll()
-              .map((row) => ({ id: row.id, kind: row.kind, terminal: row.terminal })),
-            injections: injectionsOf(instance),
           };
-        } finally {
-          cleanup();
-        }
-      });
+        });
+
+        // The container came back on a different nonce under both still-open
+        // rows. Written through the REAL durable compute store, in the DO that
+        // owns it — exactly where a genuine re-provision writes it.
+        await setSandboxGeneration(THREADS.generation, "gen-after-reset");
+
+        result = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => ({
+          ...before,
+          sweep: await instance.runWorkLedgerSweep(),
+          rowsAfter: ledgerOf(instance)
+            .listAll()
+            .map((row) => ({ id: row.id, kind: row.kind, terminal: row.terminal })),
+          injections: injectionsOf(instance),
+        }));
+      } finally {
+        cleanup();
+      }
 
       // ANTI-VACUITY: an empty ledger, or a sweep that threw on its first line,
       // also returns `{classified:[],terminalized:[]}`. Pin that both rows existed,
@@ -516,9 +543,9 @@ describe("work ledger (DO integration)", () => {
             deliveredAt: null,
           });
 
-          const holdBefore = await hostDepsOf(instance).hasBlockingWork?.();
+          const holdBefore = await hasBlockingWorkOf(instance);
           const sweep = await instance.runWorkLedgerSweep();
-          const holdAfter = await hostDepsOf(instance).hasBlockingWork?.();
+          const holdAfter = await hasBlockingWorkOf(instance);
           return { runId, holdBefore, sweep, holdAfter };
         } finally {
           cleanup();
@@ -840,29 +867,40 @@ describe("work ledger (DO integration)", () => {
      */
     it("classifies and backfills under a LIVE container without touching the backend", async () => {
       const stub = stubFor(THREADS.sweepBackendFree);
-      const result = await runInDurableObject(stub, async (instance: ThinkThreadAgent, state) => {
-        const testInstance = instance as LedgerTestableAgent;
-        await testInstance.__unsafe_ensureInitialized();
-        const backend = new FakeComputeBackend();
-        const cleanup = primeCompute(instance, backend);
-        try {
-          // Provision for real, BEFORE the tripwire arms. This is what makes the
-          // test non-vacuous: `refreshGeneration` early-returns unless the store
-          // says `active` with a `runtimeRef`, so without a live container a probe
-          // smuggled into the sweep would make no call and the tripwire could
-          // never fire. Now it would.
+      const backend = new FakeComputeBackend();
+      const legacyRunId = "sub_legacy_backend_free";
+      // Split across invocations because the live-container precondition is read
+      // out of the compute store, which is the `AgentSandbox` DO's now. The
+      // tripwire is armed between the two, so the sweep still runs with every
+      // backend method recording-and-throwing.
+      let cleanup = () => {};
+      let result;
+      try {
+        const setup = await runInDurableObject(stub, async (instance: ThinkThreadAgent, state) => {
+          const testInstance = instance as LedgerTestableAgent;
+          await testInstance.__unsafe_ensureInitialized();
+          cleanup = primeCompute(instance, backend);
+          // Provision for real, BEFORE the tripwire arms. This is what makes
+          // the test non-vacuous: `refreshGeneration` early-returns unless the
+          // store says `active` with a `runtimeRef`, so without a live
+          // container a probe smuggled into the sweep would make no call and
+          // the tripwire could never fire. Now it would.
           const { processId, generation } = await startWatchedProcess(instance);
 
-          // The legacy keys, so `backfillLegacySubagentRuns` genuinely engages on
-          // this sweep instead of taking its `runIds.length === 0` exit.
-          const legacyRunId = "sub_legacy_backend_free";
+          // The legacy keys, so `backfillLegacySubagentRuns` genuinely engages
+          // on this sweep instead of taking its `runIds.length === 0` exit.
           await state.storage.put(LEGACY_SUBAGENT_LEASE_KEY, [legacyRunId]);
           await state.storage.put(LEGACY_SUBAGENT_TIMING_KEY, {
             [legacyRunId]: { startedAt: Date.now() },
           });
+          return { processId, generation };
+        });
 
-          const stateBefore = new ThreadComputeStore(state.storage).getComputeState();
-          const calls = tripwireBackend(backend);
+        const stateBefore = await sandboxComputeState(THREADS.sweepBackendFree);
+        const calls = tripwireBackend(backend);
+
+        result = await runInDurableObject(stub, async (instance: ThinkThreadAgent, state) => {
+          const testInstance = instance as LedgerTestableAgent;
           const sweep = await instance.runWorkLedgerSweep();
           const sweepCalls = [...calls];
 
@@ -874,8 +912,7 @@ describe("work ledger (DO integration)", () => {
           await (await testInstance.resolveComputeServiceForTest())?.service.refreshGeneration();
 
           return {
-            processId,
-            generation,
+            ...setup,
             legacyRunId,
             statusBefore: stateBefore?.status,
             hasRuntimeRefBefore: stateBefore?.runtimeRef != null,
@@ -891,10 +928,10 @@ describe("work ledger (DO integration)", () => {
             sweepCalls,
             probeCalls: calls,
           };
-        } finally {
-          cleanup();
-        }
-      });
+        });
+      } finally {
+        cleanup();
+      }
 
       // ANTI-VACUITY 1: the container really was live and really did carry a known
       // nonce when the sweep ran — the state in which a probe WOULD call out.

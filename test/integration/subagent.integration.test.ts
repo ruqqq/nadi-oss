@@ -523,7 +523,10 @@ describe("SubAgent", () => {
       // Cache the attached runtime the way beforeTurn does, so
       // attachedRuntimeForThisAgent() reads it synchronously.
       await (child as any).primeAttachedContext();
-      await (child as any).sandboxHostDeps().markSandboxDirty();
+      // The RPC face the sandbox DO's `markSandboxDirty` dep calls back on —
+      // the production path now that the compute service lives in AgentSandbox,
+      // and the one SubAgent overrides to reach the PARENT's bit.
+      await child.setSandboxDeclaredCleanFromSandbox({ clean: false });
     });
 
     const after = await (runInDurableObject as any)(parentStub, (parent: any) =>

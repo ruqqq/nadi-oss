@@ -49,7 +49,9 @@ function makeAgent() {
     currentTurnStartedAt: Date.now(),
     flushTurnUsage: vi.fn(async () => undefined),
     processMonitorEnabled: () => true,
-    sandboxHostDeps: () => ({}),
+    // The turn-end stop/watch branch opens a session on the sandbox DO.
+    openSandbox: async () => ({ service: resolved.service }),
+    _turnSandbox: null,
     injectionBuffer: () => ({ isEmpty: () => true }),
     // Read once at turn end for the approval probe and the push preview.
     getMessages: vi.fn(async () => []),

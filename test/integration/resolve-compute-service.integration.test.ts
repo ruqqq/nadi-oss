@@ -16,7 +16,7 @@ import type { ThinkThreadAgent } from "../../src/agent/think-thread-agent";
 import {
   adoptCommittedWorkbenchResourceProfile,
   resolveComputeService,
-  type ComputeToolHostDeps,
+  type ComputeServiceHostDeps,
 } from "../../src/agent/compute-tools";
 import { FakeComputeBackend } from "../../src/compute/backends/fake";
 import type {
@@ -53,7 +53,7 @@ function baseDeps(
   workspaceId: string,
   agentId: string,
   storage: DurableObjectStorage,
-): ComputeToolHostDeps {
+): ComputeServiceHostDeps {
   return {
     env: env as unknown as Env,
     threadId,
@@ -483,7 +483,7 @@ describe("resolveComputeService (real D1 + real DO storage)", () => {
     const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
     await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
       const storage = storageOf(agent);
-      const deps: ComputeToolHostDeps = {
+      const deps: ComputeServiceHostDeps = {
         ...baseDeps(threadId, workspaceId, agentId, storage),
         buildBackend: async () => backend,
       };

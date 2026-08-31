@@ -404,6 +404,24 @@ export class ThreadComputeService {
   }
 
   /**
+   * Whether THIS service will background a long-running `exec` past the
+   * foreground window, as resolved for it (never a default — see
+   * `AgentSandbox.resolveService`).
+   *
+   * A reader, not a knob: the value is derived once at construction from the
+   * caller's `supportsProcessMonitor` and `attachedRuntime`, and getting it
+   * wrong turns background work off (or back on) SILENTLY, with the tool
+   * surface merely changing shape and every test still green. The service now
+   * lives in another Durable Object, so "reach into `service.deps`" is no
+   * longer a way to check it — and reaching into a `SandboxSessionClient` for
+   * `deps` yields a proxy method, not `undefined`, so a test that kept doing it
+   * would go quietly vacuous rather than fail.
+   */
+  async backgroundExecEnabled(): Promise<boolean> {
+    return this.deps.backgroundLongRunningExec ?? true;
+  }
+
+  /**
    * The sandbox generation nonce for the current container, or null when
    * unknown. Persisted in the compute store (see `ThreadComputeStore.setGeneration`)
    * — NOT an instance field — because `ThreadComputeService` is constructed
@@ -876,7 +894,7 @@ export class ThreadComputeService {
   /**
    * Whether background work is ADMITTED for this thread at all — the
    * `BACKGROUND_WORK_ENABLED` deployment flag and its workspace override,
-   * threaded in by `sandboxHostDeps()` as `supportsProcessMonitor` (SubAgent
+   * threaded in by the sandbox session as `supportsProcessMonitor` (SubAgent
    * turns the same dep off for its own reasons; both mean "no watcher will
    * ever be registered here").
    *

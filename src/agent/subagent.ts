@@ -303,7 +303,7 @@ export class SubAgent extends ThinkThreadAgent {
 
   /**
    * Cache identity + the attached sandbox id BEFORE tools compose, so
-   * `sandboxHostDeps()` (consulted while building this turn's sandbox tools)
+   * `computeToolDeps()` (consulted while building this turn's sandbox tools)
    * sees the pulled `attachedRuntimeForThisAgent()` synchronously.
    */
   override async beforeTurn(ctx: TurnContext): Promise<TurnConfig> {

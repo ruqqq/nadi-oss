@@ -111,7 +111,7 @@ async function withParent(
       onAgentToolFinish: proto.onAgentToolFinish,
       serializeLeaseMutation: proto.serializeLeaseMutation,
       stampSubagentAlive: proto.stampSubagentAlive,
-      sandboxHostDeps: proto.sandboxHostDeps,
+      hasBlockingWorkForSandbox: proto.hasBlockingWorkForSandbox,
       workFacts: proto.workFacts,
       deliverWorkTerminal: proto.deliverWorkTerminal,
       terminalizeWork: proto.terminalizeWork,
@@ -138,7 +138,7 @@ const finish = (self: any, runId: string, result: Record<string, unknown>) =>
 
 /** The eviction hold, read the way the compute layer actually reads it. */
 const hasBlockingWork = async (self: any): Promise<boolean> =>
-  (await (proto.sandboxHostDeps as any).call(self).hasBlockingWork()) === true;
+  (await (proto.hasBlockingWorkForSandbox as any).call(self)) === true;
 
 describe("a subagent's lease IS its ledger row", () => {
   it("an open row holds the eviction hold; the terminal hook releases it", async () => {

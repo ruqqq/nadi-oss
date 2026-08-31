@@ -25,6 +25,7 @@ import {
   type ComputeQuotaGate,
 } from "../compute/container-quota";
 import { buildComputeFileToolDefs } from "./compute-file-tools";
+import type { SandboxSessionResolution } from "../compute/agent-sandbox-client";
 import {
   DEFAULT_COMPUTE_ALLOWED_HOSTS,
   defaultProviderConfig,
@@ -84,16 +85,29 @@ export function guessMimeFromFilename(filename: string): string | null {
 }
 
 /**
- * Everything a thread Durable Object must supply so the native compute exec tools
- * (and the idle-eviction alarm callback) can construct a fully wired
- * {@link ThreadComputeService} for the current thread. The DO owns the SQLite
- * storage, the alarm scheduler, and the conversation, so those capabilities are
- * injected rather than reached for globally — which also keeps the compute tool
- * layer testable with fakes.
+ * Everything the `AgentSandbox` Durable Object supplies so
+ * {@link resolveComputeService} can construct a fully wired
+ * {@link ThreadComputeService} for one thread.
+ *
+ * `AgentSandbox` IS THE ONLY PRODUCTION CONSTRUCTOR OF THIS TYPE, and that is
+ * the invariant the whole design rests on. `storage` below is the sandbox DO's
+ * own SQLite; a thread Durable Object that built one of these would create a
+ * SECOND `compute_state` row, in a second DO, pointing at a second provider
+ * sandbox — the model's `exec` on one machine, the eviction alarm on the other.
+ * The thread DO reaches compute through `openSandboxSession`
+ * (`src/compute/agent-sandbox-client.ts`) and has no way to name a store at all.
+ * `test/integration/compute-owned-by-sandbox-do.integration.test.ts` asserts
+ * both halves of that.
+ *
+ * The capabilities that live on the CONVERSATION rather than the machine
+ * (system reminders, the eviction schedule, the work ledger, the child-subagent
+ * lease, the "verified clean" bit) are RPC back-calls into the thread DO — see
+ * `createSandboxThreadHostDeps`.
  */
-export interface ComputeToolHostDeps {
+export interface ComputeServiceHostDeps {
   env: Env;
   threadId: string;
+  /** The `AgentSandbox` DO's own SQLite. See the type's doc: nothing else may supply this. */
   storage: DurableObjectStorage;
   resolveRuntimeConfig: () => Promise<{ workspaceId: string; agentId: string }>;
   /** Bridges {@link ThreadComputeService}'s `setAlarm` onto the Agents SDK scheduler. */
@@ -255,9 +269,18 @@ export async function hasThreadWorkbench(env: Env, threadId: string): Promise<bo
  * Falls back to the resolved config's profile when the thread has no snapshot
  * profile (an unassigned workbench), so the stored value always tracks whatever
  * the next acquire would otherwise resolve to.
+ *
+ * It writes the STORE, so like {@link resolveComputeService} it runs inside
+ * `AgentSandbox` and nowhere else; the thread DO reaches it through
+ * `adoptCommittedResourceProfileOnSandbox`. The parameter is narrowed to what
+ * it actually reads so it is legible as "a store write plus two config reads"
+ * rather than as another full host wiring.
  */
 export async function adoptCommittedWorkbenchResourceProfile(
-  deps: ComputeToolHostDeps,
+  deps: Pick<
+    ComputeServiceHostDeps,
+    "env" | "threadId" | "storage" | "resolveRuntimeConfig" | "now"
+  >,
 ): Promise<void> {
   const { workspaceId, agentId } = await deps.resolveRuntimeConfig();
   const inputs = await loadComputeConfigInputs({ env: deps.env, workspaceId, agentId });
@@ -284,7 +307,7 @@ export async function adoptCommittedWorkbenchResourceProfile(
  * effective configuration is incomplete — callers MUST treat `null` as "no
  * compute" (hide all compute exec tools, schedule no eviction alarm).
  */
-export async function resolveComputeService(hostDeps: ComputeToolHostDeps): Promise<{
+export async function resolveComputeService(hostDeps: ComputeServiceHostDeps): Promise<{
   service: ThreadComputeService;
   workspaceId: string;
   config: EffectiveComputeConfig;
@@ -732,6 +755,33 @@ export interface WorkbenchSwitchToolDeps {
   adoptCommittedResourceProfile: () => Promise<void>;
 }
 
+/**
+ * The compute surface the model-facing exec tools actually call.
+ *
+ * A `Pick` rather than `ThreadComputeService` itself for the same reason
+ * `ComputeFileToolTarget` is one: post-cutover the tools run on the THREAD
+ * Durable Object and hold a `SandboxSessionClient` — a structural stand-in for
+ * a service that lives in another DO — and `ThreadComputeService` has private
+ * fields, so TypeScript types it NOMINALLY and no stand-in is ever assignable
+ * to it. Naming the methods keeps the tools honest without a cast: add a call
+ * the session does not forward and this list, not a runtime failure, is what
+ * says so.
+ */
+export type ComputeExecToolTarget = Pick<
+  ThreadComputeService,
+  | "exec"
+  | "execList"
+  | "execOutput"
+  | "execOutputGrep"
+  | "execOutputRead"
+  | "execStop"
+  | "execShutdown"
+  | "execUploadFile"
+  | "execDownloadFile"
+  | "execPublishArtifact"
+  | "listActiveWatchersView"
+>;
+
 export interface BuildComputeToolDefsOptions {
   networkDomainAllowlist?: string[] | null;
   secretEnvVarNames?: string[];
@@ -745,7 +795,7 @@ export interface BuildComputeToolDefsOptions {
 }
 
 export function buildComputeToolDefs(
-  getService: () => Promise<ThreadComputeService>,
+  getService: () => Promise<ComputeExecToolTarget>,
   getFileContext: () => Promise<ComputeFileContext>,
   options: BuildComputeToolDefsOptions = {},
 ): ToolSet {
@@ -1138,18 +1188,60 @@ export function buildComputeToolDefs(
 }
 
 /**
- * Async, config-aware factory for the native compute exec tools. Returns an empty
- * tool set when compute execution is disabled or incomplete, so the runtime
- * hides all compute exec tools from the model (design spec: the model must not
- * see tools guaranteed to fail because no compute backend is configured).
+ * What the THREAD Durable Object supplies when it builds the model-facing
+ * compute tools. Deliberately not {@link ComputeServiceHostDeps}: the service
+ * is already resolved, in the sandbox DO, and everything left here is either
+ * plain data or a capability that belongs to the conversation.
+ *
+ * Note what is absent: `storage`. The tool layer has no store and cannot make
+ * one — see {@link ComputeServiceHostDeps}.
  */
-export async function createComputeTools(hostDeps: ComputeToolHostDeps): Promise<ToolSet> {
+export interface ComputeToolDeps {
+  env: Env;
+  threadId: string;
+  /** See {@link ComputeServiceHostDeps.supportsProcessMonitor}. Caller-stated; no default. */
+  supportsProcessMonitor: boolean;
+  /** See {@link ComputeServiceHostDeps.backgroundLongRunningExec}. Caller-stated; no default. */
+  backgroundLongRunningExec: boolean;
+  /** Present when this thread is an attached subagent sharing its parent's machine. */
+  attachedRuntime?: BackendReference;
+  /** Owner-side child-subagent gate; gates `confirm_workbench_switch`'s registration. */
+  hasBlockingWork?: () => Promise<boolean>;
+  /** Sets/clears the "workspace verified clean" bit; backs `confirm_work_saved`. */
+  setSandboxDeclaredClean?: (clean: boolean) => Promise<void>;
+  /**
+   * Rewrites the sandbox's persisted resource profile after a workbench switch
+   * commits. A callback because the write lands in the sandbox DO's store — see
+   * {@link adoptCommittedWorkbenchResourceProfile}.
+   */
+  adoptCommittedResourceProfile: () => Promise<void>;
+  /** @internal for tests only — the `work_saved` probe's clock. */
+  now?: () => number;
+}
+
+/**
+ * Async, config-aware factory for the native compute exec tools, over a session
+ * the caller has already opened on the thread's `AgentSandbox`.
+ *
+ * `session === null` means compute is disabled or incomplete for the thread, and
+ * the answer is an EMPTY tool set: the runtime hides all compute exec tools from
+ * the model (design spec: the model must not see tools guaranteed to fail
+ * because no compute backend is configured).
+ *
+ * The session is passed IN rather than opened here because `beforeTurn` already
+ * opens one for the turn, and resolving costs several D1 reads plus a GitHub App
+ * token mint. Opening a second one per turn would pay all of it twice.
+ */
+export async function createComputeTools(
+  session: SandboxSessionResolution | null,
+  toolDeps: ComputeToolDeps,
+): Promise<ToolSet> {
   // Same test-only substitution `resolveComputeService` applies — repeated here
   // because this factory reads `deps.now` itself (the `work_saved` probe's
   // clock) rather than only through the resolved service.
-  const deps = applyComputeHostTestOverrides(hostDeps);
+  const deps = applyComputeHostTestOverrides(toolDeps);
   const { supportsProcessMonitor, backgroundLongRunningExec, attachedRuntime } = deps;
-  const resolved = await resolveComputeService(deps);
+  const resolved = session;
   if (!resolved) return {};
   const execTools = buildComputeToolDefs(
     async () => resolved.service,
@@ -1159,14 +1251,14 @@ export async function createComputeTools(hostDeps: ComputeToolHostDeps): Promise
       secretEnvVarNames: resolved.config.secretEnvNames,
       envVarNames: Object.keys(resolved.config.editableEnv),
       supportsProcessMonitor,
-      ...(backgroundLongRunningExec === undefined ? {} : { backgroundLongRunningExec }),
+      backgroundLongRunningExec,
       attachedRuntime,
       // Gated on `attachedRuntime` being absent, the same way the tool this
       // replaced (`select_sandbox_package`) was hidden from attached
       // subagents: a subagent's `confirm_workbench_switch` call would resolve
       // against its OWN thread row, which never has a pending switch, so it
       // could only fail. `hasBlockingWork` alone doesn't distinguish this —
-      // `sandboxHostDeps()` sets it unconditionally — and checking "is a
+      // the thread's tool deps set it unconditionally — and checking "is a
       // switch actually pending for THIS thread" would cost a D1 round-trip on
       // every turn's tool build, which this codebase's latency budget (D1-from-DO
       // ~220ms, sequential wave count dominates) rules out. Attached-runtime is
@@ -1175,7 +1267,7 @@ export async function createComputeTools(hostDeps: ComputeToolHostDeps): Promise
         deps.hasBlockingWork && !attachedRuntime
           ? {
               hasBlockingWork: deps.hasBlockingWork,
-              adoptCommittedResourceProfile: () => adoptCommittedWorkbenchResourceProfile(deps),
+              adoptCommittedResourceProfile: deps.adoptCommittedResourceProfile,
             }
           : undefined,
       // Gated on `!attachedRuntime` for the same reason as `workbenchSwitch`:

@@ -2,9 +2,9 @@
  * END-TO-END coverage that the retention pieces from Tasks 1-4 are actually
  * WIRED together, through a real ThinkThreadAgent Durable Object over real DO
  * SQLite and a real D1-backed registry. Tasks 1-4 each proved their own piece
- * against fakes (a hand-built two-key `ComputeToolHostDeps`, or a
+ * against fakes (a hand-built two-key `ComputeServiceHostDeps`, or a
  * `createService()` fixture in the unit suite) — none of those can observe
- * whether `sandboxHostDeps()` in `think-thread-agent.ts` actually plumbs
+ * whether the thread DO's wiring actually plumbs
  * `markSandboxDirty` into every write path, or whether the `confirm_work_saved`
  * tool returned by the REAL `buildComputeToolDefs` map talks to the REAL
  * `ThreadComputeService.releaseIfIdle()`. This file drives exactly that seam.
@@ -17,15 +17,15 @@
  * bit, the tool wiring, the service's idle-release decision — is real.
  */
 import { env, runInDurableObject } from "cloudflare:test";
+import type { ToolSet } from "ai";
 import { beforeAll, describe, expect, it } from "vitest";
 import type { ThinkThreadAgent } from "../../src/agent/think-thread-agent";
-import { createComputeTools, type ComputeToolHostDeps } from "../../src/agent/compute-tools";
 import { FakeComputeBackend } from "../../src/compute/backends/fake";
 import {
   clearComputeHostTestOverrides,
   setComputeHostTestOverrides,
 } from "../../src/compute/host-test-overrides";
-import type { ThreadComputeService } from "../../src/compute/thread-service";
+import type { SandboxSessionResolution } from "../../src/compute/agent-sandbox-client";
 import { applyRegistryTestSchema, seedRegistryThread } from "./helpers/registry";
 
 const NOW = 1_800_000_000_000;
@@ -34,18 +34,19 @@ const IDLE_TIMEOUT_MS = 900_000;
 /** Matches the DO-internal test hooks think-thread-agent.ts exposes for exactly this purpose. */
 type TestableAgent = ThinkThreadAgent & {
   __unsafe_ensureInitialized(): Promise<void>;
-  resolveComputeServiceForTest(): Promise<{ service: ThreadComputeService } | null>;
+  resolveComputeServiceForTest(): Promise<SandboxSessionResolution | null>;
   getSandboxDeclaredClean(): Promise<boolean>;
   setSandboxDeclaredClean(clean: boolean): Promise<void>;
 };
 
 /**
- * The real host deps `createComputeTools` (and every model-facing tool) is
- * built from. Reached the same way `test/integration/work-ledger.integration.test.ts`
- * reaches it: an unsafe cast onto the instance, not a reimplementation.
+ * The REAL model-facing tool set, built the way `beforeTurn` builds it — over a
+ * session on the thread's `AgentSandbox`, with the thread's own tool deps.
+ * Reached through the instance's own test hook rather than reassembled here, so
+ * what this file drives is the production wiring.
  */
-function hostDepsOf(instance: ThinkThreadAgent): ComputeToolHostDeps {
-  return (instance as unknown as { sandboxHostDeps(): ComputeToolHostDeps }).sandboxHostDeps();
+function computeToolsOf(instance: ThinkThreadAgent): Promise<ToolSet> {
+  return (instance as unknown as { computeToolsForTest(): Promise<ToolSet> }).computeToolsForTest();
 }
 
 async function seedComputeEnabledWorkspace(
@@ -139,8 +140,8 @@ describe("sandbox retention loop (DO + D1 integration)", () => {
         await resolved!.service.ensureRuntimeReference();
 
         // Drive the REAL confirm_work_saved from the REAL buildComputeToolDefs
-        // map (via createComputeTools), not a hand-built stand-in.
-        const tools = await createComputeTools(hostDepsOf(instance));
+        // map (via createComputeTools, reached through the agent), not a stand-in.
+        const tools = await computeToolsOf(instance);
         expect(tools).toHaveProperty("confirm_work_saved");
 
         backend.setNextProcessResult({ status: "exited", exitCode: 0, stdout: DIRTY_PROBE_STDOUT });
