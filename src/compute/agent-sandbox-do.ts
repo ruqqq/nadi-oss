@@ -9,7 +9,12 @@ import { createRepositoryPreparation } from "../agent/repository-preparation";
 import { probeWorkspaceCleanliness } from "./workspace-cleanliness";
 import type { ThreadComputeService } from "./thread-service";
 import type { BackendReference } from "./backend";
-import { SandboxSession, sandboxFailure, type SandboxCallResult } from "./agent-sandbox-session";
+import {
+  SandboxSession,
+  encodeSandboxError,
+  sandboxFailure,
+  type SandboxCallResult,
+} from "./agent-sandbox-session";
 import type { EffectiveComputeConfig } from "./types";
 import { log } from "../log";
 
@@ -189,7 +194,14 @@ export class AgentSandbox extends DurableObject<Env> {
         threadId: input.threadId,
         error: String(error),
       });
-      return sandboxFailure("session_failed", String(error));
+      // The ENCODER, not `sandboxFailure`: a `ComputeError` thrown out of the
+      // resolve would otherwise reach the near side as an anonymous error with
+      // its code buried in a `session_failed:`-prefixed message, and
+      // `toErrorResult` would show the model a string it cannot act on.
+      // Latent today — `resolveComputeService` has no throw of its own — but
+      // this is the one place in the module that was not using the encoder it
+      // sits next to.
+      return { ok: false, error: encodeSandboxError(error) };
     }
   }
 

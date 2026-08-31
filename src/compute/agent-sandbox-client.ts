@@ -18,13 +18,28 @@ import {
  * answering to the same method names — and it is the ONLY place that has to
  * know an RPC boundary exists at all.
  */
-export type SandboxSessionClient = {
+type SandboxSessionMethods = {
   [K in keyof SandboxSession]: SandboxSession[K] extends (
     ...args: infer A
   ) => Promise<SandboxCallResult<infer R>>
     ? (...args: A) => Promise<R>
     : never;
-} & {
+};
+
+/**
+ * The regrouped file facet. Named off `SandboxSessionMethods` rather than off
+ * `SandboxSessionClient` so the alias is NOT circular: a self-referential
+ * `Pick<SandboxSessionClient, ...>` makes TypeScript bail out of the recursion
+ * and call the type assignable to things it is not — including
+ * `ComputeFileService`, whose private field is supposed to reject it. A type
+ * that is accidentally assignable to everything checks nothing.
+ */
+export type SandboxFileClient = Pick<
+  SandboxSessionMethods,
+  "readFile" | "writeFile" | "applyPatch"
+>;
+
+export type SandboxSessionClient = SandboxSessionMethods & {
   /**
    * Regrouped locally, NOT a nested stub. `ThreadComputeService.files` returns
    * a live `ComputeFileService` closing over non-cloneable deps, so it cannot
@@ -32,7 +47,7 @@ export type SandboxSessionClient = {
    * trip each) and are re-grouped here so `buildComputeFileToolDefs`, which
    * takes a `() => Promise<ComputeFileService>`, keeps the shape it has.
    */
-  files: Pick<SandboxSessionClient, "readFile" | "writeFile" | "applyPatch">;
+  files: SandboxFileClient;
 };
 
 const FILE_METHODS = ["readFile", "writeFile", "applyPatch"] as const;

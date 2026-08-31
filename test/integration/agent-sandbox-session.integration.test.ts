@@ -9,7 +9,22 @@ import {
   setComputeHostTestOverrides,
 } from "../../src/compute/host-test-overrides";
 import { ComputeError, ComputeStaleFileError } from "../../src/compute/errors";
-import { openSandboxSession } from "../../src/compute/agent-sandbox-client";
+import {
+  openSandboxSession,
+  type SandboxSessionClient,
+} from "../../src/compute/agent-sandbox-client";
+import { buildComputeFileToolDefs } from "../../src/agent/compute-file-tools";
+
+/**
+ * Compile-time, and the reason `buildComputeFileToolDefs` takes a structural
+ * target: `ComputeFileService` has a private field, so TypeScript compares it
+ * nominally and the client's regrouped `.files` could never satisfy it. This
+ * assertion is what makes Task 8's `async () => resolved.service.files` compile
+ * with no cast.
+ */
+const _assertFilesFitsTheToolTarget: Parameters<typeof buildComputeFileToolDefs>[0] = async () =>
+  (null as unknown as SandboxSessionClient).files;
+void _assertFilesFitsTheToolTarget;
 
 const now = 1_800_000_000_000;
 
@@ -151,7 +166,12 @@ describe("AgentSandbox.session", () => {
     });
     expect(opened.ok).toBe(false);
     if (opened.ok) return;
-    expect(opened.error.code).toBe("session_failed");
+    // Encoded by `encodeSandboxError`, not hand-rolled: a plain `Error` gets
+    // the synthetic code with its message INTACT — no `session_failed:` prefix
+    // wrapped around it — and a `ComputeError` thrown out of the resolve would
+    // keep its real code and class instead.
+    expect(opened.error.code).toBe("sandbox_call_failed");
+    expect(opened.error.message).toBe("thread_not_found: thr_sess_missing");
   });
 
   /**
@@ -369,8 +389,13 @@ describe("AgentSandbox.session", () => {
      * holds it is UNPROVEN here. The cutover must therefore open the session
      * inside the invocation that uses it and never stash it on an instance
      * field for a later one.
+     *
+     * This test is a RECORDED NEGATIVE, not protection: its primary assertion
+     * is a property of the TEST HARNESS, and no change under `src/` can break
+     * it. Do not count it as coverage of stub lifetime — nothing here covers
+     * that, which is the finding.
      */
-    it("cannot be tested across invocations here: runInDurableObject shares the caller's I/O context", async () => {
+    it("RECORDED NEGATIVE (not coverage): runInDurableObject shares the caller's I/O context", async () => {
       const threadId = "thr_sess_lifetime_held";
       await seedComputeEnabledThread(threadId);
       const holder = stub("thr_sess_lifetime_holder");
@@ -394,6 +419,13 @@ describe("AgentSandbox.session", () => {
 
       // And the stub held across `it()` boundaries above is still callable for
       // exactly the same reason — which is why it proves nothing either.
+      // Guarded, because it is set by an EARLIER `it()`: a reorder or an
+      // earlier failure would otherwise surface here as a null dereference
+      // instead of saying which test did not run.
+      expect(
+        leakedSession,
+        "leakedSession is set by the 'outlives the DO invocation that CREATED it' test; it did not run or did not reach the end",
+      ).not.toBeNull();
       expect((await leakedSession!.execRun({ command: "echo later" })).ok).toBe(true);
     });
   });

@@ -280,3 +280,22 @@ export class SandboxSession extends RpcTarget {
     return guard(() => this.service.files.applyPatch(input));
   }
 }
+
+/**
+ * COMPLETENESS. `Arg`/`Ret` above derive each forward's SIGNATURE, so a changed
+ * signature cannot drift — but the method NAMES are hand-written, so a method
+ * added to `ThreadComputeService` would simply be absent here and Task 8's
+ * cutover would discover it at runtime. `keyof` excludes private members, so
+ * this is exact: add a public method to the service without forwarding it and
+ * `pnpm run typecheck` fails, naming the method.
+ *
+ * `files` is excluded deliberately — it is a getter returning a live
+ * `ComputeFileService` that cannot cross the boundary, and it is represented
+ * here by the three flat facet methods instead.
+ */
+type _Unforwarded = Exclude<Exclude<keyof ThreadComputeService, "files">, keyof SandboxSession>;
+type _AssertEveryServiceMethodIsForwarded = _Unforwarded extends never
+  ? true
+  : ["unforwarded ThreadComputeService members", _Unforwarded];
+const _assertEveryServiceMethodIsForwarded: _AssertEveryServiceMethodIsForwarded = true;
+void _assertEveryServiceMethodIsForwarded;

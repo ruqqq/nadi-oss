@@ -49,12 +49,28 @@ function toFileErrorResult(error: unknown): FileErrorResult {
 }
 
 /**
+ * The three operations these tools actually call.
+ *
+ * Structural, not `ComputeFileService` itself: that class has a `private
+ * readonly deps`, which makes TypeScript compare it NOMINALLY, so nothing but a
+ * real instance can satisfy it. The sandbox session forwards these three
+ * methods flat over RPC and regroups them on the near side
+ * (`compute/agent-sandbox-client.ts`) — a regrouped object is exactly as good
+ * here, and widening the parameter is what stops the cutover casting around the
+ * nominal check.
+ */
+export type ComputeFileToolTarget = Pick<
+  ComputeFileService,
+  "readFile" | "writeFile" | "applyPatch"
+>;
+
+/**
  * AI SDK `tool()` definitions for the model-native file surface: `read_file`,
  * `write_file`, and `apply_patch`. Split out from the exec tools so the schemas
  * and error mapping can be unit-tested with a stub {@link ComputeFileService}.
  * `getFiles` resolves the thread's file service lazily, sharing the exec lease.
  */
-export function buildComputeFileToolDefs(getFiles: () => Promise<ComputeFileService>): ToolSet {
+export function buildComputeFileToolDefs(getFiles: () => Promise<ComputeFileToolTarget>): ToolSet {
   return {
     read_file: tool({
       description:
