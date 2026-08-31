@@ -41,9 +41,14 @@ export const bootstrapHandlers = [
       threadsNextCursor:
         active.length > BOOTSTRAP_PAGE_SIZE ? encodeCursor(BOOTSTRAP_PAGE_SIZE) : null,
       projects: store.projects.filter((p) => p.archivedAt === null),
-      // Same AgentSummary shape GET /api/agents returns (see mocks/rest/agents.ts)
-      // — bootstrap is a first-paint alias for the same list, not a lighter one.
-      agents: store.agents.filter((a) => a.archivedAt === null),
+      // The LEAN AgentListItem shape (see web/src/agents-api.ts), not the
+      // AgentSummary GET /api/agents returns — no repositories/envVars/
+      // secretEnvNames. `enabled` isn't modeled on the mock store's agent
+      // fixtures yet, so it's `true` here; nothing in the mock represents a
+      // disabled agent today.
+      agents: store.agents
+        .filter((a) => a.archivedAt === null)
+        .map((a) => ({ id: a.id, name: a.name, description: a.description, enabled: true })),
       features: {
         voiceInput: false,
         workersAi: false,

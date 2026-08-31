@@ -175,7 +175,7 @@ describe("bootstrap route", () => {
     ]);
   });
 
-  it("shapes bootstrap's agents like GET /api/agents' AgentSummary, not a bare agents row", async () => {
+  it("shapes bootstrap's agents as the LEAN AgentListItem, not AgentSummary or a bare row", async () => {
     const { token } = await seedOwner();
 
     const res = await SELF.fetch("https://nadi.test/api/bootstrap", { headers: cookie(token) });
@@ -184,22 +184,24 @@ describe("bootstrap route", () => {
 
     expect(body.agents).toHaveLength(1);
     const agent = body.agents[0]!;
-    // AgentSummary fields (see web/src/agents-api.ts and buildSummary in
-    // src/http/agent-routes.ts) — present because bootstrap serializes
-    // through the same buildSummary GET /api/agents uses, not a hand-rolled
-    // second mapping that could drift from it.
-    expect(agent).toHaveProperty("repositories");
-    expect(agent).toHaveProperty("envVars");
-    expect(agent).toHaveProperty("secretEnvNames");
-    expect(agent).toHaveProperty("networkDomainAllowlist");
-    expect(Array.isArray(agent.repositories)).toBe(true);
-    expect(typeof agent.envVars).toBe("object");
-    expect(Array.isArray(agent.secretEnvNames)).toBe(true);
-    // `networkDomainAllowlist` is buildSummary's derived field (NULL on
-    // `agents` folded to ""), not the raw `sandboxNetworkDomainAllowlist`
-    // column name — the exact mismatch that would leave an `AgentPicker`
-    // reading `undefined` for every agent's allowlist.
-    expect(agent.networkDomainAllowlist).toBe("");
+    // The EXACT key set, not just presence of the fields the picker reads:
+    // an added, renamed, or dropped key on either side (server's
+    // `toAgentListItem` in src/http/agent-routes.ts, or the client's
+    // `AgentListItem` in web/src/agents-api.ts) fails this immediately,
+    // where `toHaveProperty` checks alone would miss a stray extra field
+    // (e.g. a `systemPrompt` or `repositories` leaking back in).
+    expect(Object.keys(agent).sort()).toEqual(["description", "enabled", "id", "name"]);
+    expect(agent).toEqual({
+      id: "agent-default",
+      name: "Default",
+      description: "",
+      enabled: true,
+    });
+    // Pinned explicitly: `AgentConfig.systemPrompt` must never reach first
+    // paint. True by construction now (`toAgentListItem` builds a fresh
+    // object rather than spreading the row), but the whole point of this
+    // fix was that it wasn't true a build ago.
+    expect(agent).not.toHaveProperty("systemPrompt");
   });
 
   it("caps the bootstrap thread list at DEFAULT_THREAD_PAGE and returns a cursor for the rest", async () => {

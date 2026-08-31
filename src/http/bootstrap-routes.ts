@@ -14,7 +14,7 @@ import { agents, workspaceMembers, workspaces } from "../db/schema";
 import { resolveAgentScope } from "./agent-scope";
 import { ProjectRepository } from "../db/repositories/projects";
 import { AgentRepository } from "../db/repositories/agents";
-import { buildSummary, type AgentSummary } from "./agent-routes";
+import { toAgentListItem, type AgentListItem } from "./agent-routes";
 import { isFeedbackAdmin } from "../feedback/admin-auth";
 import { buildDefaultAgentSettingsForUser } from "./settings-routes";
 import { asc, eq } from "drizzle-orm";
@@ -103,17 +103,16 @@ async function selectProjectSummariesForUser(env: Env, userId: string) {
 
 /**
  * The workspace's active agents, for the client's agent pickers (project
- * defaults, thread creation, automaton targets). Serialized through the same
- * {@link buildSummary} `GET /api/agents` uses — every client-side agent type
- * is `AgentSummary` (`repositories`/`envVars`/`secretEnvNames`/
- * `networkDomainAllowlist`, not the raw `sandboxNetworkDomainAllowlist`
- * column), and a second hand-rolled mapping here is exactly how the two
- * would drift. This costs the same per-agent repositories/secret-names
- * queries `GET /api/agents` already pays; a workspace's agent count is small
- * enough that first paint is not the place to skip it and hand the client a
- * shape its own type disagrees with.
+ * defaults, thread creation, automaton targets) — the LEAN
+ * {@link AgentListItem} shape, not `AgentSummary`. `AgentSummary` costs
+ * `listRepositories` + `listSecretNames` (+ a KV read on a pre-backfill
+ * agent) PER ROW; bootstrap runs on every page load, so that cost multiplies
+ * by however many agents a workspace has, for fields no first-paint picker
+ * reads. `toAgentListItem` is pure — zero extra queries beyond the row list
+ * already fetched here. The full `AgentSummary` (repositories, env vars,
+ * secret names) stays behind `GET /api/agents/:id`, the drill-down.
  */
-async function selectAgentSummariesForUser(env: Env, userId: string): Promise<AgentSummary[]> {
+async function selectAgentSummariesForUser(env: Env, userId: string): Promise<AgentListItem[]> {
   const db = registryDb(env);
   const scope = await db
     .select({ workspaceId: workspaceMembers.workspaceId })
@@ -123,7 +122,6 @@ async function selectAgentSummariesForUser(env: Env, userId: string): Promise<Ag
     .orderBy(asc(workspaceMembers.createdAt), asc(agents.createdAt))
     .get();
   if (!scope) return [];
-  const repo = new AgentRepository(db);
-  const rows = await repo.listForWorkspace(scope.workspaceId, "active");
-  return Promise.all(rows.map((row) => buildSummary(env, repo, scope.workspaceId, row)));
+  const rows = await new AgentRepository(db).listForWorkspace(scope.workspaceId, "active");
+  return rows.map(toAgentListItem);
 }

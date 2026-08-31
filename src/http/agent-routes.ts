@@ -37,6 +37,29 @@ export type AgentSummary = AgentConfig & {
   networkDomainAllowlist: string;
 };
 
+/**
+ * The lean shape a picker needs at first paint — `id`/`name`/`description`/
+ * `enabled` and nothing else. Deliberately NOT `AgentSummary`: that type
+ * costs `listRepositories` + `listSecretNames` (+ a KV `listAgentNames` on a
+ * pre-backfill agent) per row, and carries `systemPrompt`/`sandboxEnvVarsJson`
+ * — fine for the one-agent `GET /api/agents/:id` drill-down, wrong for a
+ * bootstrap response built on every page load from rows already in hand.
+ * Add a field here only when you can name the first-paint consumer that
+ * needs it; `GET /api/agents` is where the rest lives.
+ */
+export type AgentListItem = {
+  id: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+};
+
+/** Builds {@link AgentListItem} from an already-fetched row — no I/O, so
+ *  callers with N rows in hand (e.g. bootstrap) pay zero extra queries. */
+export function toAgentListItem(row: AgentConfig): AgentListItem {
+  return { id: row.id, name: row.name, description: row.description, enabled: row.enabled };
+}
+
 export async function routeAgents(req: Request, env: Env): Promise<Response | null> {
   const url = new URL(req.url);
 

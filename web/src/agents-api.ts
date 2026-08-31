@@ -40,6 +40,22 @@ export interface AgentSummary {
   updatedAt: number;
 }
 
+/**
+ * The lean shape `GET /api/bootstrap` returns for its agent list — id/name/
+ * description/enabled, nothing repositories/env-vars/secrets-shaped. Kept in
+ * lockstep with the server's `AgentListItem`
+ * (`src/http/agent-routes.ts:toAgentListItem`) by a wire-shape test
+ * (`test/integration/bootstrap-routes.integration.test.ts`) rather than a
+ * shared import — `web/` does not build against the Worker source (see
+ * `bootstrap-api.ts`'s own note on this).
+ */
+export interface AgentListItem {
+  id: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+}
+
 export type AgentStatus = "active" | "archived" | "all";
 
 export type CreateAgentInput = {
