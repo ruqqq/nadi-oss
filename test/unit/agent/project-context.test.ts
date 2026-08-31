@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { registryDbMock, assertProjectInWorkspaceMock, listForThreadMock } = vi.hoisted(() => ({
+const { registryDbMock, assertProjectInWorkspaceMock, listRepositoriesMock } = vi.hoisted(() => ({
   registryDbMock: vi.fn(),
   assertProjectInWorkspaceMock: vi.fn(),
-  listForThreadMock: vi.fn(),
+  listRepositoriesMock: vi.fn(),
 }));
 
 vi.mock("../../../src/db/client", () => ({
@@ -16,9 +16,9 @@ vi.mock("../../../src/db/repositories/projects", () => ({
   },
 }));
 
-vi.mock("../../../src/db/repositories/thread-repository-snapshots", () => ({
-  ThreadRepositorySnapshotRepository: class {
-    listForThread = listForThreadMock;
+vi.mock("../../../src/db/repositories/workbenches", () => ({
+  WorkbenchRepository: class {
+    listRepositories = listRepositoriesMock;
   },
 }));
 
@@ -38,22 +38,23 @@ describe("resolveProjectPromptContext", () => {
           threadId: "thread-1",
           workspaceId: "workspace-1",
           projectId: null,
+          workbenchId: "env-1",
         },
       }),
     ).resolves.toBeUndefined();
 
     expect(registryDbMock).not.toHaveBeenCalled();
     expect(assertProjectInWorkspaceMock).not.toHaveBeenCalled();
-    expect(listForThreadMock).not.toHaveBeenCalled();
+    expect(listRepositoriesMock).not.toHaveBeenCalled();
   });
 
-  it("uses the provided thread context to resolve project and repository snapshots", async () => {
+  it("uses the environment's LIVE repository list, keyed on the thread's environment", async () => {
     assertProjectInWorkspaceMock.mockResolvedValue({
       name: "Nadi",
       description: "Main app",
       customInstructions: "Prefer focused tests.",
     });
-    listForThreadMock.mockResolvedValue([
+    listRepositoriesMock.mockResolvedValue([
       {
         name: "nadi",
         url: "https://github.com/acme/nadi.git",
@@ -72,6 +73,7 @@ describe("resolveProjectPromptContext", () => {
           threadId: "thread-1",
           workspaceId: "workspace-1",
           projectId: "project-1",
+          workbenchId: "env-1",
         },
       }),
     ).resolves.toEqual({
@@ -93,6 +95,6 @@ describe("resolveProjectPromptContext", () => {
 
     expect(registryDbMock).toHaveBeenCalledTimes(1);
     expect(assertProjectInWorkspaceMock).toHaveBeenCalledWith("project-1", "workspace-1");
-    expect(listForThreadMock).toHaveBeenCalledWith("thread-1");
+    expect(listRepositoriesMock).toHaveBeenCalledWith("env-1");
   });
 });

@@ -2,11 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../env";
 import { registryDb } from "../db/client";
 import { ThreadRepository } from "../db/repositories/threads";
-import {
-  adoptCommittedWorkbenchResourceProfile,
-  resolveComputeService,
-  type ComputeServiceHostDeps,
-} from "../agent/compute-tools";
+import { resolveComputeService, type ComputeServiceHostDeps } from "../agent/compute-tools";
 import { createSandboxThreadHostDeps, type SandboxSweepResolution } from "./sandbox-thread-host";
 import { runSandboxComputeAlarm } from "./sandbox-alarm";
 import { createRepositoryPreparation } from "../agent/repository-preparation";
@@ -339,41 +335,6 @@ export class AgentSandbox extends DurableObject<Env> {
       // anonymous error with its code buried in a `session_failed:`-prefixed
       // message, and `toErrorResult` would show the model a string it cannot
       // act on. Latent today — `resolveComputeService` has no throw of its own.
-      return { ok: false, error: encodeSandboxError(error) };
-    }
-  }
-
-  /**
-   * Rewrites this sandbox's persisted resource profile to the one the thread's
-   * CURRENT workbench snapshot declares, after a workbench switch commits.
-   *
-   * Here rather than on the thread DO because it WRITES THE STORE, and the
-   * store is this DO's. It was the second, independent `ThreadComputeStore`
-   * construction the thread DO used to make (reached from
-   * `confirm_workbench_switch` and from the turn-end commit backstop), so
-   * leaving it behind would have kept a second `compute_state` row alive on the
-   * thread — the exact split brain the cutover exists to remove.
-   *
-   * No session and no `supportsProcessMonitor`: it never builds a service, so
-   * it has nothing to state and can run when compute is disabled (where it is a
-   * no-op).
-   */
-  async adoptCommittedResourceProfile(input: {
-    threadId: string;
-  }): Promise<SandboxCallResult<null>> {
-    try {
-      await adoptCommittedWorkbenchResourceProfile({
-        env: this.env,
-        threadId: input.threadId,
-        storage: this.ctx.storage,
-        resolveRuntimeConfig: () => this.runtimeConfigFor(input.threadId),
-      });
-      return { ok: true, value: null };
-    } catch (error) {
-      log.warn("agent_sandbox.adopt_resource_profile_failed", {
-        threadId: input.threadId,
-        error: String(error),
-      });
       return { ok: false, error: encodeSandboxError(error) };
     }
   }

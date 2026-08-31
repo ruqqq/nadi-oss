@@ -17,7 +17,6 @@ function db() {
 async function clearRegistry() {
   const conn = db();
   await conn.delete(schema.threadTokenUsage);
-  await conn.delete(schema.threadRepositorySnapshots);
   await conn.delete(schema.threadIndex);
   await conn.delete(schema.agents);
   await conn.delete(schema.workspaceMembers);

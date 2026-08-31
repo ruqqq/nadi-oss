@@ -26,7 +26,7 @@ import {
   type WorkbenchRepositoryEntry,
 } from "../../src/db/repositories/workbenches";
 import { ProjectRepository } from "../../src/db/repositories/projects";
-import { ThreadRepositorySnapshotRepository } from "../../src/db/repositories/thread-repository-snapshots";
+import { ThreadRepository } from "../../src/db/repositories/threads";
 import * as posthogObservability from "../../src/observability/posthog";
 import { saveDaytonaApiKey } from "../../src/compute/settings";
 import { FakeComputeBackend } from "../../src/compute/backends/fake";
@@ -594,15 +594,13 @@ beforeAll(async () => {
     repositoryIds: ["repo-think-snapshot"],
     createdAt: promptCreatedAt,
   });
-  await new ThreadRepositorySnapshotRepository(db).replaceFromWorkbench(
+  await new ThreadRepository(db).updateWorkbench(
     "think-project-context-assigned",
-    "workspace-think-project-context",
     "env-think-context",
     promptCreatedAt + 1,
   );
-  await new ThreadRepositorySnapshotRepository(db).replaceFromWorkbench(
+  await new ThreadRepository(db).updateWorkbench(
     "think-project-context-archived",
-    "workspace-think-project-context",
     "env-think-archived",
     promptCreatedAt + 2,
   );
@@ -610,8 +608,9 @@ beforeAll(async () => {
     customInstructions: "Use the latest project instructions.",
     updatedAt: promptCreatedAt + 10,
   });
-  // Reassign the workbench's live repositories after the snapshot was taken:
-  // the snapshot must stay immutable and not pick up this change.
+  // Reassign the environment's repositories AFTER the thread was assigned to
+  // it. Configuration is LIVE, so the prompt must pick this change up — the
+  // per-thread snapshot that used to freeze it is gone.
   await assignWorkbenchRepos(db, {
     workbenchId: "env-think-context",
     workspaceId: "workspace-think-project-context",
@@ -1565,7 +1564,9 @@ describe("ThinkThreadAgent spike", () => {
     expect(result.system).toContain("Project instructions:\nUse the latest project instructions.");
   });
 
-  it("uses thread repository snapshots rather than current project assignments", async () => {
+  it("uses the environment's LIVE repository list, not the one it had when assigned", async () => {
+    // The environment was reassigned from `nadi` to `other-repo` AFTER this
+    // thread was pointed at it. Configuration is live, so the prompt follows.
     const stub = env.THINK_THREAD_AGENT.get(
       env.THINK_THREAD_AGENT.idFromName("think-project-context-assigned"),
     );
@@ -1573,12 +1574,11 @@ describe("ThinkThreadAgent spike", () => {
       instance.beforeTurnProbeForTest(),
     );
 
-    expect(result.system).toContain("- nadi\n  URL: https://github.com/acme/nadi.git");
-    expect(result.system).toContain("  default branch: main");
-    expect(result.system).toContain("  checkout path: nadi");
-    expect(result.system).toContain("  package manager: pnpm");
-    expect(result.system).not.toContain("other-repo");
-    expect(result.system).not.toContain("https://github.com/acme/other-repo.git");
+    expect(result.system).toContain("- other-repo\n  URL: https://github.com/acme/other-repo.git");
+    expect(result.system).toContain("  default branch: develop");
+    expect(result.system).toContain("  checkout path: other-repo");
+    expect(result.system).toContain("  package manager: npm");
+    expect(result.system).not.toContain("https://github.com/acme/nadi.git");
   });
 
   it("resolves archived assigned projects for Think prompts", async () => {
@@ -1597,9 +1597,9 @@ describe("ThinkThreadAgent spike", () => {
   });
 
   it("resolves the coding budget from the workbench, not a declaration", async () => {
-    // "think-project-context-assigned" has a workbench snapshot
-    // (env-think-context) assigned in beforeAll; the budget is resolved from
-    // that snapshot, not from any per-thread declaration.
+    // "think-project-context-assigned" is assigned to `env-think-context` in
+    // beforeAll; the budget is resolved from that assignment, not from any
+    // per-thread declaration.
     const stub = env.THINK_THREAD_AGENT.get(
       env.THINK_THREAD_AGENT.idFromName("think-project-context-assigned"),
     );
@@ -1613,8 +1613,7 @@ describe("ThinkThreadAgent spike", () => {
   });
 
   it("resolves the default budget for a workbench-less thread", async () => {
-    // "think-registry-model" has no workbench snapshot, so the default budget
-    // applies.
+    // "think-registry-model" has no environment, so the default budget applies.
     const stub = env.THINK_THREAD_AGENT.get(
       env.THINK_THREAD_AGENT.idFromName("think-registry-model"),
     );

@@ -527,49 +527,6 @@ export const agentSandboxes = sqliteTable("agent_sandboxes", {
   lastUsedAt: integer("last_used_at"),
 });
 
-export const threadWorkbenchSnapshots = sqliteTable("thread_workbench_snapshots", {
-  threadId: text("thread_id")
-    .primaryKey()
-    .references(() => threadIndex.id),
-  workspaceId: text("workspace_id")
-    .notNull()
-    .references(() => workspaces.id),
-  workbenchId: text("workbench_id"),
-  name: text("name").notNull(),
-  setupScript: text("setup_script").notNull().default(""),
-  // Nullable: snapshots written before workbenches carried a profile have no
-  // honest value here, and fall through to DEFAULT_COMPUTE_RESOURCE_PROFILE.
-  resourceProfile: text("resource_profile"),
-  createdAt: integer("created_at").notNull(),
-});
-
-export const threadRepositorySnapshots = sqliteTable(
-  "thread_repository_snapshots",
-  {
-    id: text("id").primaryKey(),
-    threadId: text("thread_id")
-      .notNull()
-      .references(() => threadIndex.id),
-    workspaceId: text("workspace_id")
-      .notNull()
-      .references(() => workspaces.id),
-    projectId: text("project_id").references(() => projects.id),
-    workbenchId: text("workbench_id"),
-    name: text("name").notNull(),
-    url: text("url").notNull(),
-    defaultBranch: text("default_branch").notNull(),
-    checkoutPathName: text("checkout_path_name").notNull(),
-    rootDirectory: text("root_directory").notNull().default(""),
-    setupCommand: text("setup_command").notNull().default(""),
-    packageManager: text("package_manager").notNull().default(""),
-    createdAt: integer("created_at").notNull(),
-  },
-  (table) => ({
-    byThread: index("idx_thread_repository_snapshots_thread").on(table.threadId),
-    byWorkspace: index("idx_thread_repository_snapshots_workspace").on(table.workspaceId),
-  }),
-);
-
 export const threadIndex = sqliteTable(
   "thread_index",
   {
@@ -582,9 +539,6 @@ export const threadIndex = sqliteTable(
       .references(() => agents.id),
     projectId: text("project_id"),
     workbenchId: text("workbench_id").references(() => workbenches.id),
-    // Set while a workbench switch waits for the agent to save its work; the
-    // snapshot still holds the OLD workbench until commit.
-    workbenchSwitchPendingAt: integer("workbench_switch_pending_at"),
     modelProvider: text("model_provider"),
     model: text("model"),
     modelInputModalities: text("model_input_modalities"),
@@ -1199,13 +1153,11 @@ export type Skill = typeof skills.$inferSelect;
 export type AgentSkillExclusion = typeof agentSkillExclusions.$inferSelect;
 export type AgentSkillResource = typeof agentSkillResources.$inferSelect;
 export type Project = typeof projects.$inferSelect;
-export type ThreadRepositorySnapshot = typeof threadRepositorySnapshots.$inferSelect;
 export type GithubAppInstallationRow = typeof githubAppInstallations.$inferSelect;
 export type Workbench = typeof workbenches.$inferSelect;
 export type AgentRepositoryRow = typeof agentRepositories.$inferSelect;
 export type AgentSecretNameRow = typeof agentSecretNames.$inferSelect;
 export type AgentSandboxRow = typeof agentSandboxes.$inferSelect;
-export type ThreadWorkbenchSnapshot = typeof threadWorkbenchSnapshots.$inferSelect;
 export type ThreadIndex = typeof threadIndex.$inferSelect;
 export type FeedbackThread = typeof feedbackThreads.$inferSelect;
 export type FeedbackReport = typeof feedbackReports.$inferSelect;

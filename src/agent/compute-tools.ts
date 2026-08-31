@@ -40,14 +40,11 @@ import type { WatcherCompletionInfo } from "./system-reminder";
 import type { WorkLedgerSink } from "./work-ledger-store";
 import { getGithubAppConfig } from "../github/config";
 import { applyGithubToken } from "./github-token-wiring";
-import { ThreadRepositorySnapshotRepository } from "../db/repositories/thread-repository-snapshots";
 import { ThreadRepository } from "../db/repositories/threads";
 import { WorkbenchRepository } from "../db/repositories/workbenches";
 import { ComputeEnvSecretsStore } from "../compute/env-secrets";
 import { parseEnvVarsJson } from "../compute/env-vars";
 import { createWorkspaceSecretsServices } from "../secrets";
-import { commitWorkbenchSwitchIfPending } from "./workbench-switch-commit";
-import { log } from "../log";
 import {
   probeWorkspaceCleanliness,
   type WorkspaceCleanliness,
@@ -214,8 +211,8 @@ export interface ComputeServiceHostDeps {
   /**
    * Fired once, after `ThreadComputeService` acquires a genuinely fresh
    * runtime (not a recovery restore). Wired to `createRepositoryPreparation`
-   * so a thread's workbench repos are cloned automatically; a workbench-less
-   * thread is a cheap no-op (no repository snapshots to prepare).
+   * so a thread's environment repos are cloned automatically; a
+   * environment-less thread is a cheap no-op (no repositories to prepare).
    */
   onFreshRuntimeAcquired?: () => Promise<void>;
 }
@@ -236,82 +233,39 @@ export function unionAllowlistWithSkillDomains(
 }
 
 /**
- * The thread's frozen workbench resource profile, or `null` when it has no
- * snapshot (or one predating the column). Callers pass this to
- * `resolveComputeConfigForAgent` / `computeConfigFromInputs` so config resolves
- * against the workbench the thread is actually assigned to rather than the
- * `small` default.
+ * The thread's environment resource profile, read LIVE, or `null` when the
+ * thread has no environment (or its stored profile fails validation). Callers
+ * pass this to `resolveComputeConfigForAgent` / `computeConfigFromInputs` so
+ * config resolves against the environment the thread is actually assigned to
+ * rather than the `small` default.
+ *
+ * Configuration is live: there is no per-thread snapshot any more, so editing
+ * the environment's size takes effect on the next acquire.
  */
 export async function readThreadWorkbenchResourceProfile(
   env: Env,
   threadId: string,
 ): Promise<ComputeResourceProfile | null> {
-  const snapshot = await new ThreadRepositorySnapshotRepository(
-    registryDb(env),
-  ).listWorkbenchSnapshot(threadId);
-  return snapshot?.resourceProfile != null && isComputeResourceProfile(snapshot.resourceProfile)
-    ? snapshot.resourceProfile
+  const db = registryDb(env);
+  const workbenchId = (await new ThreadRepository(db).getById(threadId))?.workbenchId ?? null;
+  if (workbenchId === null) return null;
+  const workbench = await new WorkbenchRepository(db).getById(workbenchId);
+  return workbench && isComputeResourceProfile(workbench.resourceProfile)
+    ? workbench.resourceProfile
     : null;
 }
 
 /**
- * Whether the thread has a workbench assigned — the configuration-level
+ * Whether the thread has an environment assigned — the configuration-level
  * statement that this thread does repository work (it declares repos, a setup
  * script and a sandbox size). Deliberately independent of
  * {@link readThreadWorkbenchResourceProfile}: that helper returns `null` both
- * for "no workbench" and for "workbench assigned but its stored profile
- * predates the column / fails validation", and only the former means the
- * thread has no workbench.
+ * for "no environment" and for "environment assigned but its stored profile
+ * fails validation", and only the former means the thread has no environment.
  */
 export async function hasThreadWorkbench(env: Env, threadId: string): Promise<boolean> {
-  const snapshot = await new ThreadRepositorySnapshotRepository(
-    registryDb(env),
-  ).listWorkbenchSnapshot(threadId);
-  return snapshot?.workbenchId != null;
-}
-
-/**
- * Rewrites the DO-persisted resource profile to the one the thread's CURRENT
- * workbench snapshot declares. Called by `commitWorkbenchSwitchIfPending` right
- * after a successful commit — see `adoptCommittedResourceProfile` there for why
- * the stored value must be rewritten rather than left to age.
- *
- * Reads the snapshot directly instead of going through `resolveComputeService`:
- * that helper deliberately prefers the stored profile over the workbench one,
- * which is precisely the stale value being corrected here.
- *
- * Falls back to the resolved config's profile when the thread has no snapshot
- * profile (an unassigned workbench), so the stored value always tracks whatever
- * the next acquire would otherwise resolve to.
- *
- * It writes the STORE, so like {@link resolveComputeService} it runs inside
- * `AgentSandbox` and nowhere else; the thread DO reaches it through
- * `adoptCommittedResourceProfileOnSandbox`. The parameter is narrowed to what
- * it actually reads so it is legible as "a store write plus two config reads"
- * rather than as another full host wiring.
- */
-export async function adoptCommittedWorkbenchResourceProfile(
-  deps: Pick<
-    ComputeServiceHostDeps,
-    "env" | "threadId" | "storage" | "resolveRuntimeConfig" | "now"
-  >,
-): Promise<void> {
-  const { workspaceId, agentId } = await deps.resolveRuntimeConfig();
-  const inputs = await loadComputeConfigInputs({ env: deps.env, workspaceId, agentId });
-  const workbenchResourceProfile = await readThreadWorkbenchResourceProfile(
-    deps.env,
-    deps.threadId,
-  );
-
-  const config = computeConfigFromInputs(inputs, workbenchResourceProfile);
-  if (!config.enabled) return;
-
-  const store = new ThreadComputeStore(deps.storage, config.value.limits);
-  store.migrate();
-  // No state yet → nothing stale to correct, and `markAcquiring` will seed the
-  // freshly-resolved profile itself on the next acquire.
-  if (!store.getComputeState()) return;
-  store.setResourceProfile(config.value.resourceProfile, (deps.now ?? Date.now)());
+  const thread = await new ThreadRepository(registryDb(env)).getById(threadId);
+  return thread?.workbenchId != null;
 }
 
 /**
@@ -337,7 +291,7 @@ export async function resolveComputeService(hostDeps: ComputeServiceHostDeps): P
   // fetch them exactly once regardless of how many times we resolve below.
   const inputs = await loadComputeConfigInputs({ env: deps.env, workspaceId, agentId });
   // Resolve once with NO profile to learn whether compute is even enabled for
-  // this workspace/agent, without paying for the thread's workbench snapshot
+  // this workspace/agent, without paying for the thread's environment
   // query. The enabled/disabled decision (aside from `missing_source`, which
   // itself depends on the profile) never consults the profile — see
   // `needsWorkbenchResourceProfile`. This is what keeps a compute-DISABLED
@@ -345,24 +299,23 @@ export async function resolveComputeService(hostDeps: ComputeServiceHostDeps): P
   const preliminary = computeConfigFromInputs(inputs, null);
   if (!needsWorkbenchResourceProfile(preliminary)) return null;
 
-  // `threadWorkbenchId` is the thread's assigned workbench BUNDLE
+  // `threadWorkbenchId` is the thread's assigned environment BUNDLE
   // (project/env-vars/setup-script grouping) — distinct from the
   // `environmentId` local below, which names the base OS image for the
-  // selected resource profile. Prefer the immutable per-thread snapshot
-  // (taken when the bundle was assigned) and fall back to the live
-  // `threadIndex.workbenchId` for threads that predate the snapshot. Fetched
-  // ONLY once we know compute could actually be enabled (see above), so this
-  // query is paid exactly once and never on the disabled path.
-  const envSnapshot = await new ThreadRepositorySnapshotRepository(
-    registryDb(deps.env),
-  ).listWorkbenchSnapshot(deps.threadId);
+  // selected resource profile. Read LIVE from `threadIndex.workbenchId`: the
+  // per-thread snapshot is gone, because a shared box cannot honour a
+  // per-thread config version. Fetched ONLY once we know compute could
+  // actually be enabled (see above), so this query is paid exactly once and
+  // never on the disabled path.
   const threadWorkbenchId =
-    envSnapshot?.workbenchId ??
-    (await new ThreadRepository(registryDb(deps.env)).getById(deps.threadId))?.workbenchId ??
-    null;
+    (await new ThreadRepository(registryDb(deps.env)).getById(deps.threadId))?.workbenchId ?? null;
+  // One read serves both the profile and the env-vars/allowlist below.
+  const workbenchRow = threadWorkbenchId
+    ? ((await new WorkbenchRepository(registryDb(deps.env)).getById(threadWorkbenchId)) ?? null)
+    : null;
   const workbenchResourceProfile =
-    envSnapshot?.resourceProfile != null && isComputeResourceProfile(envSnapshot.resourceProfile)
-      ? envSnapshot.resourceProfile
+    workbenchRow && isComputeResourceProfile(workbenchRow.resourceProfile)
+      ? workbenchRow.resourceProfile
       : null;
 
   const config = computeConfigFromInputs(inputs, workbenchResourceProfile);
@@ -378,10 +331,22 @@ export async function resolveComputeService(hostDeps: ComputeServiceHostDeps): P
   const store = new ThreadComputeStore(deps.storage, config.value.limits);
   store.migrate();
   const computeState = store.getComputeState();
-  // Prefer a profile persisted on state (from a running sandbox created under
-  // an earlier workbench) so the backend is built for the environment source
-  // that sandbox is actually acquired under, not just the settings default.
-  const effectiveProfile = computeState?.resourceProfile ?? config.value.resourceProfile;
+  // Prefer the profile persisted on state so the backend is built for the
+  // environment source the LIVE sandbox was actually acquired under — but ONLY
+  // while such a sandbox exists.
+  //
+  // This gate is load-bearing. `markAcquiring` writes the resolved profile into
+  // `compute_state` and `markAbsent` preserves it, so an unconditional
+  // preference means the profile frozen at the very FIRST acquire wins forever:
+  // retarget the thread to a medium environment and every later sandbox still
+  // provisions small, from small's base image. The switch handshake used to
+  // paper over that with an explicit "adopt the committed profile" write; that
+  // handshake is gone, and configuration is live, so the correct rule is that a
+  // stored profile only outranks config while there is a runtime to stay
+  // consistent with. Same rule in `ThreadComputeService.readOrAcquireRuntime`.
+  const hasRuntime = computeState?.status === "active" || computeState?.status === "recoverable";
+  const effectiveProfile =
+    (hasRuntime ? computeState?.resourceProfile : null) ?? config.value.resourceProfile;
 
   let environmentEditableEnv: Record<string, string> = {};
   let environmentSecretEnvNames: string[] = [];
@@ -391,9 +356,6 @@ export async function resolveComputeService(hostDeps: ComputeServiceHostDeps): P
   // resolution intentionally left out.
   let workbenchNetworkHosts: string[] = [];
   if (threadWorkbenchId) {
-    const workbenchRow = await new WorkbenchRepository(registryDb(deps.env)).getById(
-      threadWorkbenchId,
-    );
     if (workbenchRow) {
       environmentEditableEnv = parseEnvVarsJson(workbenchRow.sandboxEnvVarsJson);
       workbenchNetworkHosts = parseDomainList(workbenchRow.sandboxNetworkDomainAllowlist);
@@ -472,15 +434,17 @@ export async function resolveComputeService(hostDeps: ComputeServiceHostDeps): P
   let effectiveEnv = computeEnv;
   const githubConfig = getGithubAppConfig(deps.env);
   if (githubConfig) {
-    const snapshots = await new ThreadRepositorySnapshotRepository(
-      registryDb(deps.env),
-    ).listForThread(deps.threadId);
+    // LIVE repository list for the thread's environment — the token is minted
+    // for whatever it currently declares, not a frozen snapshot.
+    const repositories = threadWorkbenchId
+      ? await new WorkbenchRepository(registryDb(deps.env)).listRepositories(threadWorkbenchId)
+      : [];
     effectiveEnv = await applyGithubToken({
       db: registryDb(deps.env),
       workspaceId,
       config: githubConfig,
       existingEnv: computeEnv,
-      repoUrls: snapshots.map((s) => s.url),
+      repoUrls: repositories.map((r) => r.url),
       log: (message) => console.log(message),
     });
   }
@@ -678,29 +642,6 @@ export function toErrorResult(error: unknown): { ok: false; error: string; detai
  * `getFileContext` is resolved lazily (upload/download need the workspace id).
  */
 /**
- * The two preconditions `confirm_workbench_switch` cannot safely run without,
- * bundled so they arrive together or not at all.
- *
- * `hasBlockingWork` used to be an independent optional that defaulted to
- * `async () => false` — failing OPEN on a safety precondition. Because the
- * commit happens BEFORE `execShutdown`, a false `false` moves the snapshot to
- * the new workbench and only then has `execShutdown` throw
- * `compute_children_active`; that teardown failure is swallowed by design, so
- * the thread is left with the new snapshot, the old sandbox, and live subagents
- * still running on it — exactly the inconsistency the mechanism exists to
- * prevent.
- *
- * Making the bundle gate tool REGISTRATION (below) is stronger than making the
- * field required: a required field can still be satisfied with a stub
- * `async () => false`, whereas a caller that has not wired the preconditions
- * simply never gets the dangerous tool.
- */
-export interface WorkbenchSwitchToolDeps {
-  hasBlockingWork: () => Promise<boolean>;
-  adoptCommittedResourceProfile: () => Promise<void>;
-}
-
-/**
  * The compute surface the model-facing exec tools actually call.
  *
  * A `Pick` rather than `ThreadComputeService` itself for the same reason
@@ -734,9 +675,7 @@ export interface BuildComputeToolDefsOptions {
   supportsProcessMonitor?: boolean;
   backgroundLongRunningExec?: boolean;
   attachedRuntime?: BackendReference | undefined;
-  workbenchSwitch?: WorkbenchSwitchToolDeps | undefined;
   workSaved?: WorkSavedToolDeps | undefined;
-  now?: (() => number) | undefined;
 }
 
 export function buildComputeToolDefs(
@@ -751,9 +690,7 @@ export function buildComputeToolDefs(
     supportsProcessMonitor = false,
     attachedRuntime,
     backgroundLongRunningExec = !attachedRuntime,
-    workbenchSwitch,
     workSaved,
-    now,
   } = options;
   const netNote =
     networkDomainAllowlist && networkDomainAllowlist.length
@@ -1070,49 +1007,6 @@ export function buildComputeToolDefs(
         }
       },
     }),
-    // Registered only with its safety preconditions wired AND when this is not
-    // an attached subagent runtime — see `WorkbenchSwitchToolDeps`. Levelled up
-    // to match `confirm_work_saved`'s gate below: `createComputeTools` already
-    // omits `workbenchSwitch` from the options when `attachedRuntime` is set,
-    // but checking it again here (not only at the bundle-construction site)
-    // means the invariant holds regardless of how this function is called —
-    // a subagent reaching either tool is a data-loss bug, so the defensive
-    // check is cheap insurance against a future caller skipping that gate.
-    ...(workbenchSwitch && !attachedRuntime
-      ? {
-          confirm_workbench_switch: tool({
-            description:
-              "Confirm that all work in the current sandbox has been saved, so a user-requested workbench switch can proceed. The sandbox is destroyed immediately after this call. Only call this after committing and pushing anything worth keeping, or if there is nothing to save.",
-            inputSchema: z.object({}),
-            execute: async () => {
-              try {
-                const { env, threadId } = await getFileContext();
-                return await commitWorkbenchSwitchIfPending({
-                  threadId,
-                  now: now ?? (() => Date.now()),
-                  commitWorkbenchSwitch: (id, at) =>
-                    new ThreadRepository(registryDb(env)).commitWorkbenchSwitch(id, at),
-                  execShutdown: async () => (await getService()).execShutdown({ confirm: true }),
-                  hasBlockingWork: workbenchSwitch.hasBlockingWork,
-                  adoptCommittedResourceProfile: workbenchSwitch.adoptCommittedResourceProfile,
-                  onTeardownFailure: (error) =>
-                    log.warn("compute_tools.workbench_switch_teardown_failed", {
-                      threadId,
-                      error: String(error),
-                    }),
-                });
-              } catch (error) {
-                return toErrorResult(error);
-              }
-            },
-          }),
-        }
-      : {}),
-    // Registered only when its verification dependencies are wired AND this is
-    // not an attached subagent runtime — see `WorkSavedToolDeps`. An attached
-    // subagent shares its parent's runtime, so letting it declare the parent's
-    // sandbox discardable would destroy the parent's work; checked here (not
-    // only in `createComputeTools`) so the invariant holds regardless of caller.
     ...(workSaved && !attachedRuntime
       ? {
           confirm_work_saved: tool({
@@ -1150,18 +1044,8 @@ export interface ComputeToolDeps {
   backgroundLongRunningExec: boolean;
   /** Present when this thread is an attached subagent sharing its parent's machine. */
   attachedRuntime?: BackendReference;
-  /** Owner-side child-subagent gate; gates `confirm_workbench_switch`'s registration. */
-  hasBlockingWork?: () => Promise<boolean>;
   /** Sets/clears the "workspace verified clean" bit; backs `confirm_work_saved`. */
   setSandboxDeclaredClean?: (clean: boolean) => Promise<void>;
-  /**
-   * Rewrites the sandbox's persisted resource profile after a workbench switch
-   * commits. A callback because the write lands in the sandbox DO's store — see
-   * {@link adoptCommittedWorkbenchResourceProfile}.
-   */
-  adoptCommittedResourceProfile: () => Promise<void>;
-  /** @internal for tests only — the `work_saved` probe's clock. */
-  now?: () => number;
 }
 
 /**
@@ -1183,9 +1067,8 @@ export async function createComputeTools(
 ): Promise<ToolSet> {
   const resolved = session;
   if (!resolved) return {};
-  // Same test-only substitution `resolveComputeService` applies — repeated here
-  // because this factory reads `deps.now` itself (the `work_saved` probe's
-  // clock) rather than only through the resolved service.
+  // Same test-only substitution `resolveComputeService` applies — repeated
+  // here rather than only through the resolved service.
   //
   // BELOW the null-session return, deliberately. Applied above it, a test whose
   // session resolves to `null` would stamp `CONSUMED` from this factory alone —
@@ -1205,26 +1088,9 @@ export async function createComputeTools(
       supportsProcessMonitor,
       backgroundLongRunningExec,
       attachedRuntime,
-      // Gated on `attachedRuntime` being absent, the same way the tool this
-      // replaced (`select_sandbox_package`) was hidden from attached
-      // subagents: a subagent's `confirm_workbench_switch` call would resolve
-      // against its OWN thread row, which never has a pending switch, so it
-      // could only fail. `hasBlockingWork` alone doesn't distinguish this —
-      // the thread's tool deps set it unconditionally — and checking "is a
-      // switch actually pending for THIS thread" would cost a D1 round-trip on
-      // every turn's tool build, which this codebase's latency budget (D1-from-DO
-      // ~220ms, sequential wave count dominates) rules out. Attached-runtime is
-      // knowable synchronously, so it's the gate.
-      workbenchSwitch:
-        deps.hasBlockingWork && !attachedRuntime
-          ? {
-              hasBlockingWork: deps.hasBlockingWork,
-              adoptCommittedResourceProfile: deps.adoptCommittedResourceProfile,
-            }
-          : undefined,
-      // Gated on `!attachedRuntime` for the same reason as `workbenchSwitch`:
-      // an attached subagent shares the parent's runtime, so letting it
-      // declare the parent's sandbox discardable would destroy the parent's
+      // Gated on `!attachedRuntime`: an attached subagent shares the parent's
+      // runtime, so letting it declare the parent's sandbox discardable would
+      // destroy the parent's
       // work. `resolved.service` is already resolved for THIS runtime (the
       // subagent's own attached environment when attached, the owner's
       // otherwise), so gating registration is the only seam that matters.
@@ -1239,7 +1105,6 @@ export async function createComputeTools(
               threadId: deps.threadId,
             }
           : undefined,
-      now: deps.now,
     },
   );
   // Model-native file tools share the same lease/runtime resolution as exec and

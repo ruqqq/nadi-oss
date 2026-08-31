@@ -178,7 +178,6 @@ export function ThreadDetailsSheet({
               workbenches={workbenches}
               selectedName={thread.workbenchName ?? undefined}
               onValueChange={(next) => setPendingWorkbenchId(next)}
-              disabled={thread.workbenchSwitchPending}
             />
           ) : (
             <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-foreground text-sm">
@@ -188,12 +187,6 @@ export function ThreadDetailsSheet({
           <p className="text-sm text-muted-foreground">
             Sandbox size: <span className="font-mono">{thread.resourceProfile}</span>
           </p>
-          {thread.workbenchSwitchPending && (
-            <p className="text-sm text-muted-foreground">
-              Switching to {thread.workbenchName ?? "the new workbench"}… the agent is saving its
-              work.
-            </p>
-          )}
         </section>
 
         <Separator />

@@ -9,9 +9,6 @@ import { MAX_THREAD_PAGE, routeThreads } from "../../src/http/thread-routes";
 import { serializeThread } from "../../src/http/thread-serialize";
 import { ArchivedMessageRepository } from "../../src/db/repositories/archived-messages";
 import { ThinkThreadAgent } from "../../src/agent/think-thread-agent";
-import type { AgentSandbox } from "../../src/compute/agent-sandbox-do";
-import { ThreadComputeStore } from "../../src/compute/thread-store";
-import { saveDaytonaApiKey } from "../../src/compute/settings";
 import type { Env } from "../../src/env";
 
 // compactThread()/getCompactionStatus() go through getAgentByName (not a raw
@@ -35,7 +32,6 @@ const defaultThreadActivityFields = {
   lastSeenAt: null,
   workbenchId: null,
   workbenchName: null,
-  workbenchSwitchPending: false,
   resourceProfile: "small" as const,
   // A thread a human started carries no automaton provenance.
   automatonId: null,
@@ -90,8 +86,6 @@ async function ensureThreadNotificationSchema() {
 
 async function clearRegistry() {
   const db = drizzle(env.REGISTRY_DB, { schema });
-  await db.delete(schema.threadRepositorySnapshots);
-  await db.delete(schema.threadWorkbenchSnapshots);
   await db.delete(schema.threadIndex);
   // Referenced by workspaces(id); the "live sandbox" workbench-switch tests
   // seed a row here and it must not survive to block the workspaces delete
@@ -284,39 +278,6 @@ async function insertProject(input: {
 // now self-contained and seeded directly via assignRepositoryToEnvironment.
 async function insertRepository(_input: { id: string; workspaceId: string; createdAt: number }) {}
 
-async function insertThreadSnapshot(input: {
-  threadId: string;
-  workspaceId: string;
-  projectId: string;
-  repositoryId: string;
-  createdAt: number;
-}) {
-  const db = drizzle(env.REGISTRY_DB, { schema });
-  await db.insert(schema.threadRepositorySnapshots).values({
-    id: `${input.threadId}:${input.repositoryId}`,
-    threadId: input.threadId,
-    workspaceId: input.workspaceId,
-    projectId: input.projectId,
-    workbenchId: null,
-    name: input.repositoryId,
-    url: `https://github.com/acme/${input.repositoryId}.git`,
-    defaultBranch: "main",
-    checkoutPathName: input.repositoryId,
-    rootDirectory: "",
-    setupCommand: "",
-    packageManager: "",
-    createdAt: input.createdAt,
-  });
-}
-
-async function listThreadSnapshots(threadId: string) {
-  const db = drizzle(env.REGISTRY_DB, { schema });
-  return db
-    .select()
-    .from(schema.threadRepositorySnapshots)
-    .where(eq(schema.threadRepositorySnapshots.threadId, threadId));
-}
-
 async function patchThread(threadId: string, patch: Record<string, unknown>, token: string) {
   return SELF.fetch(`https://nadi.test/api/threads/${threadId}`, {
     method: "PATCH",
@@ -331,79 +292,6 @@ async function patchThread(threadId: string, patch: Record<string, unknown>, tok
 async function readThread(threadId: string) {
   const db = drizzle(env.REGISTRY_DB, { schema });
   return db.select().from(schema.threadIndex).where(eq(schema.threadIndex.id, threadId)).get();
-}
-
-async function readWorkbenchSnapshot(threadId: string) {
-  const db = drizzle(env.REGISTRY_DB, { schema });
-  return db
-    .select()
-    .from(schema.threadWorkbenchSnapshots)
-    .where(eq(schema.threadWorkbenchSnapshots.threadId, threadId))
-    .get();
-}
-
-/**
- * Marks the thread's `AgentSandbox` DO as having a genuinely live
- * sandbox, the same way a real `acquire()` would: a daytona-enabled
- * workspace (so `resolveComputeService` doesn't bail out early on
- * `missing_workspace_settings`) plus an `active` compute state written
- * through the real durable store. `DaytonaComputeBackend`'s constructor only
- * stores config (no network call), so this reaches `isComputeLive()` without
- * a fake/overridden backend.
- */
-/** `idFromName`: AGENT_SANDBOX is a plain DurableObject with no `onStart`. */
-function sandboxStubFor(threadId: string) {
-  return env.AGENT_SANDBOX.get(env.AGENT_SANDBOX.idFromName(threadId));
-}
-
-async function makeComputeLive(threadId: string, workspaceId: string): Promise<void> {
-  const providerConfigJson = JSON.stringify({
-    kind: "daytona",
-    apiKeySecretName: "sandbox:daytona",
-    apiUrl: null,
-    target: null,
-    profiles: {
-      small: { kind: "image", value: "node:22" },
-      medium: { kind: "image", value: "node:22" },
-    },
-  });
-  await env.REGISTRY_DB.prepare(
-    "INSERT OR IGNORE INTO workspace_sandbox_settings (workspace_id, enabled, provider, provider_config_json, image, idle_timeout_ms, max_process_runtime_ms, limits_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-  )
-    .bind(workspaceId, 1, "daytona", providerConfigJson, "node:22", 900_000, 600_000, "{}")
-    .run();
-  await saveDaytonaApiKey({
-    env: env as unknown as Env,
-    workspaceId,
-    secretName: "sandbox:daytona",
-    value: "dt_test_secret",
-  });
-
-  // The AGENT_SANDBOX DO's storage, not the thread's: the compute store lives
-  // in the sandbox Durable Object, and a row written on the thread would be a
-  // second brain that `isComputeLive()` no longer even looks at.
-  const stub = sandboxStubFor(threadId);
-  await runInDurableObject(stub, async (_instance: AgentSandbox, state) => {
-    const store = new ThreadComputeStore(state.storage);
-    store.migrate();
-    store.markActive({ provider: "daytona", version: 1, payload: { sandboxId: "sbx-live" } }, now);
-  });
-}
-
-/**
- * Same seeding as {@link makeComputeLive}, but leaves the compute state in
- * `acquiring` — a sandbox mid-provision, which on Daytona lasts seconds to a
- * minute. Written through the real store via the same `markAcquiring` call the
- * production acquire path makes.
- */
-async function makeComputeAcquiring(threadId: string, workspaceId: string): Promise<void> {
-  await makeComputeLive(threadId, workspaceId);
-  const stub = sandboxStubFor(threadId);
-  await runInDurableObject(stub, async (_instance: AgentSandbox, state) => {
-    const store = new ThreadComputeStore(state.storage);
-    store.migrate();
-    store.markAcquiring({ provider: "daytona", resourceProfile: "small", now });
-  });
 }
 
 const FAKE_HISTORY = [{ id: "fake1", role: "user", parts: [{ type: "text", text: "hi" }] }];
@@ -461,41 +349,6 @@ function makeDeleteRouteEnv(input: {
   return {
     ...env,
     THINK_THREAD_AGENT: fakeBinding("think", input.thinkActive),
-  } as unknown as Env;
-}
-
-/**
- * A THINK_THREAD_AGENT stub that reports the sandbox as live (so the PATCH
- * workbench arm takes the deferred `beginWorkbenchSwitch` path) and then
- * throws from `requestWorkbenchSwitch` — simulating the reminder injection
- * failing after the pending marker has already landed.
- */
-function makeWorkbenchSwitchInjectionFailureEnv(calls: string[]): Env {
-  const binding = {
-    idFromName(name: string) {
-      calls.push(`think:idFromName:${name}`);
-      return name;
-    },
-    get(name: string) {
-      calls.push(`think:get:${name}`);
-      return {
-        async setName(setName: string) {
-          calls.push(`think:setName:${setName}`);
-        },
-        async isComputeLive() {
-          calls.push("think:isComputeLive");
-          return true;
-        },
-        async requestWorkbenchSwitch() {
-          calls.push("think:requestWorkbenchSwitch");
-          throw new Error("injection-failed");
-        },
-      };
-    },
-  };
-  return {
-    ...env,
-    THINK_THREAD_AGENT: binding,
   } as unknown as Env;
 }
 
@@ -1160,7 +1013,6 @@ describe("thread routes", () => {
       .get();
     expect(row?.projectId).toBe("project-create");
     expect(row?.workbenchId).toBe("env-create");
-    await expect(listThreadSnapshots(body.thread.threadId)).resolves.toHaveLength(2);
   });
 
   it("an explicit workbenchId overrides the project's defaultWorkbenchId", async () => {
@@ -1319,13 +1171,6 @@ describe("thread routes", () => {
       .where(eq(schema.threadIndex.id, body.thread.threadId))
       .get();
     expect(row?.workbenchId).toBeNull();
-
-    const snapshot = await db
-      .select()
-      .from(schema.threadRepositorySnapshots)
-      .where(eq(schema.threadRepositorySnapshots.threadId, body.thread.threadId))
-      .get();
-    expect(snapshot).toBeUndefined();
   });
 
   it("returns 404 when creating a thread against an archived or cross-workspace project", async () => {
@@ -1746,7 +1591,7 @@ describe("thread routes", () => {
     expect(compact?.status).toBe(409);
   });
 
-  it("clears environment snapshots when PATCH /api/threads/:id sets workbenchId to null", async () => {
+  it("clears the environment when PATCH /api/threads/:id sets workbenchId to null", async () => {
     const seeded = await seedUserWorkspace({
       userId: "user-thread-patch-clear-project",
       token: "thread-patch-clear-project-token",
@@ -1776,21 +1621,6 @@ describe("thread routes", () => {
       workbenchId: "env-clear",
       updatedAt: now,
     });
-    await drizzle(env.REGISTRY_DB, { schema }).insert(schema.threadRepositorySnapshots).values({
-      id: "thr_clear_project:repo-clear-1",
-      threadId: "thr_clear_project",
-      workspaceId: seeded.workspaceId,
-      workbenchId: "env-clear",
-      name: "repo-clear-1",
-      url: "https://github.com/acme/repo-clear-1.git",
-      defaultBranch: "main",
-      checkoutPathName: "repo-clear-1",
-      rootDirectory: "",
-      setupCommand: "",
-      packageManager: "",
-      createdAt: now,
-    });
-
     const res = await SELF.fetch("https://nadi.test/api/threads/thr_clear_project", {
       method: "PATCH",
       headers: {
@@ -1807,10 +1637,12 @@ describe("thread routes", () => {
         repositorySnapshotCount: 0,
       },
     });
-    await expect(listThreadSnapshots("thr_clear_project")).resolves.toEqual([]);
+    await expect(readThread("thr_clear_project")).resolves.toMatchObject({
+      workbenchId: null,
+    });
   });
 
-  it("switches immediately when no sandbox is live", async () => {
+  it("retargets the environment with a plain column write", async () => {
     const seeded = await seedUserWorkspace({
       userId: "user-thread-patch-workbench-no-sandbox",
       token: "thread-patch-workbench-no-sandbox-token",
@@ -1835,198 +1667,19 @@ describe("thread routes", () => {
     const res = await patchThread(threadId, { workbenchId: "wb_new_no_sandbox" }, seeded.token);
     expect(res.status).toBe(200);
 
-    const snapshot = await readWorkbenchSnapshot(threadId);
-    expect(snapshot?.workbenchId).toBe("wb_new_no_sandbox");
-
     const thread = await readThread(threadId);
-    expect(thread?.workbenchSwitchPendingAt).toBeNull();
-  });
-
-  it("defers the snapshot and marks pending when a sandbox is live", async () => {
-    const seeded = await seedUserWorkspace({
-      userId: "user-thread-patch-workbench-live-sandbox",
-      token: "thread-patch-workbench-live-sandbox-token",
-      workspaceId: "workspace-thread-patch-workbench-live-sandbox",
-    });
-    await insertEnvironment({
-      id: "wb_old_live_sandbox",
-      workspaceId: seeded.workspaceId,
-      name: "Old Bench",
-      createdAt: now,
-    });
-    await insertEnvironment({
-      id: "wb_new_live_sandbox",
-      workspaceId: seeded.workspaceId,
-      name: "New Bench",
-      createdAt: now,
-    });
-    const threadId = "thr_patch_workbench_live_sandbox";
-    await insertThread({
-      id: threadId,
-      workspaceId: seeded.workspaceId,
-      agentId: seeded.agentId,
-      title: "Live Sandbox Switch",
-      updatedAt: now,
-      runtime: "think",
-      workbenchId: "wb_old_live_sandbox",
-    });
-    // Seed the pre-switch snapshot directly (insertThread only writes the
-    // `thread_index` row) so the "stays on the old workbench" assertion below
-    // is observing a real change, not an absent row that happens to compare
-    // unequal to "wb_new_live_sandbox".
-    await drizzle(env.REGISTRY_DB, { schema }).insert(schema.threadWorkbenchSnapshots).values({
-      threadId,
-      workspaceId: seeded.workspaceId,
-      workbenchId: "wb_old_live_sandbox",
-      name: "Old Bench",
-      setupScript: "",
-      resourceProfile: "small",
-      createdAt: now,
-    });
-
-    await makeComputeLive(threadId, seeded.workspaceId);
-
-    const res = await patchThread(threadId, { workbenchId: "wb_new_live_sandbox" }, seeded.token);
-    expect(res.status).toBe(200);
-
-    const thread = await readThread(threadId);
-    expect(thread?.workbenchId).toBe("wb_new_live_sandbox");
-    expect(thread?.workbenchSwitchPendingAt).not.toBeNull();
-
-    const snapshot = await readWorkbenchSnapshot(threadId);
-    expect(snapshot?.workbenchId).toBe("wb_old_live_sandbox");
-
-    // The save-work injection actually reached the agent — checked via the
-    // real transcript (the messages route → the DO's exportHistory()), not
-    // by peeking the injection buffer: `deliverInjection` fire-and-forgets
-    // `_kickInjectionTurn` when idle (the case here, a fresh thread with no
-    // running turn), which drains and submits the message durably before
-    // this assertion runs, so the buffer itself is expected to already be
-    // empty by now — a "still buffered" check would be racing the kick, not
-    // proving delivery.
-    const historyRes = await SELF.fetch(`https://nadi.test/api/threads/${threadId}/messages`, {
-      headers: { cookie: `better-auth.session_token=${seeded.token}` },
-    });
-    expect(historyRes.status).toBe(200);
-    const history = (await historyRes.json()) as Array<{
-      role: string;
-      parts?: Array<{ type: string; text?: string }>;
-    }>;
-    const allText = history
-      .flatMap((m) => m.parts ?? [])
-      .map((p) => p.text ?? "")
-      .join("\n");
-    expect(allText).toContain("New Bench");
-    expect(allText).toContain("confirm_workbench_switch");
+    expect(thread?.workbenchId).toBe("wb_new_no_sandbox");
   });
 
   /**
-   * Regression: `isComputeLive()` covered only `active`+runtimeRef and
-   * `recoverable`+recoveryRef, so a sandbox still `acquiring` reported NOT live
-   * and the PATCH took the IMMEDIATE path. The container then came up with the
-   * old workbench's repos and setup script while the snapshot already claimed
-   * the new one — and because no marker was set, nothing ever tore it down or
-   * re-cloned it. Permanent divergence, from a natural moment: switching just
-   * after starting work.
+   * Retargeting an environment is a plain column write: there is no
+   * save-your-work handshake and therefore no reason to ask the thread DO
+   * whether a sandbox is live. Driven through `routeThreads` with a spy
+   * THINK_THREAD_AGENT binding, on a THINK thread — the case that used to
+   * dial — so the assertion is on the thing that actually changed: whether
+   * the binding is touched at all.
    */
-  it("defers the switch while a sandbox is still acquiring", async () => {
-    const seeded = await seedUserWorkspace({
-      userId: "user-thread-patch-workbench-acquiring",
-      token: "thread-patch-workbench-acquiring-token",
-      workspaceId: "workspace-thread-patch-workbench-acquiring",
-    });
-    await insertEnvironment({
-      id: "wb_old_acquiring",
-      workspaceId: seeded.workspaceId,
-      name: "Old Bench Acquiring",
-      createdAt: now,
-    });
-    await insertEnvironment({
-      id: "wb_new_acquiring",
-      workspaceId: seeded.workspaceId,
-      name: "New Bench Acquiring",
-      createdAt: now,
-    });
-    const threadId = "thr_patch_workbench_acquiring";
-    await insertThread({
-      id: threadId,
-      workspaceId: seeded.workspaceId,
-      agentId: seeded.agentId,
-      title: "Acquiring Switch",
-      updatedAt: now,
-      runtime: "think",
-      workbenchId: "wb_old_acquiring",
-    });
-    await drizzle(env.REGISTRY_DB, { schema }).insert(schema.threadWorkbenchSnapshots).values({
-      threadId,
-      workspaceId: seeded.workspaceId,
-      workbenchId: "wb_old_acquiring",
-      name: "Old Bench Acquiring",
-      setupScript: "",
-      resourceProfile: "small",
-      createdAt: now,
-    });
-
-    await makeComputeAcquiring(threadId, seeded.workspaceId);
-
-    const res = await patchThread(threadId, { workbenchId: "wb_new_acquiring" }, seeded.token);
-    expect(res.status).toBe(200);
-
-    // Deferred: the column carries the intent, the marker is armed...
-    const thread = await readThread(threadId);
-    expect(thread?.workbenchId).toBe("wb_new_acquiring");
-    expect(thread?.workbenchSwitchPendingAt).not.toBeNull();
-
-    // ...and the snapshot has NOT moved, so the container coming up still
-    // matches the workbench it was provisioned from.
-    const snapshot = await readWorkbenchSnapshot(threadId);
-    expect(snapshot?.workbenchId).toBe("wb_old_acquiring");
-  });
-
-  it("switches immediately for legacy runtime threads without dialing a Think DO", async () => {
-    const seeded = await seedUserWorkspace({
-      userId: "user-thread-patch-workbench-legacy-runtime",
-      token: "thread-patch-workbench-legacy-runtime-token",
-      workspaceId: "workspace-thread-patch-workbench-legacy-runtime",
-    });
-    await insertEnvironment({
-      id: "wb_new_legacy",
-      workspaceId: seeded.workspaceId,
-      name: "New Bench Legacy",
-      createdAt: now,
-    });
-    const threadId = "thr_patch_workbench_legacy_runtime";
-    await insertThread({
-      id: threadId,
-      workspaceId: seeded.workspaceId,
-      agentId: seeded.agentId,
-      title: "Legacy Runtime Switch",
-      updatedAt: now,
-      runtime: "legacy",
-    });
-
-    const res = await patchThread(threadId, { workbenchId: "wb_new_legacy" }, seeded.token);
-    expect(res.status).toBe(200);
-
-    const snapshot = await readWorkbenchSnapshot(threadId);
-    expect(snapshot?.workbenchId).toBe("wb_new_legacy");
-
-    const thread = await readThread(threadId);
-    expect(thread?.workbenchSwitchPendingAt).toBeNull();
-  });
-
-  /**
-   * The test above ("switches immediately for legacy runtime threads...")
-   * cannot detect the `runtime !== "think"` guard's absence: a fresh
-   * THINK_THREAD_AGENT DO reports `isComputeLive() === false` regardless of
-   * whether the guard skipped dialing it or dialed it and got a not-live
-   * answer back — the observable business outcome (immediate switch, no
-   * pending marker) is identical either way. This test drives `routeThreads`
-   * directly with a spy THINK_THREAD_AGENT binding instead, so it can assert
-   * on the thing the guard actually controls: whether the binding was
-   * touched at all.
-   */
-  it("never dials THINK_THREAD_AGENT for a legacy thread's workbench PATCH", async () => {
+  it("never dials THINK_THREAD_AGENT for a workbench PATCH", async () => {
     const seeded = await seedUserWorkspace({
       userId: "user-thread-patch-workbench-legacy-no-dial",
       token: "thread-patch-workbench-legacy-no-dial-token",
@@ -2043,9 +1696,9 @@ describe("thread routes", () => {
       id: threadId,
       workspaceId: seeded.workspaceId,
       agentId: seeded.agentId,
-      title: "Legacy Runtime No Dial",
+      title: "Think Runtime No Dial",
       updatedAt: now,
-      runtime: "legacy",
+      runtime: "think",
     });
 
     const calls: string[] = [];
@@ -2083,85 +1736,14 @@ describe("thread routes", () => {
     );
 
     expect(res?.status).toBe(200);
-    // The load-bearing assertion: the guard means the binding is never
-    // touched for a legacy thread. Mutate away `runtime !== "think"` and
-    // this fails — `getAgentByName` calls `idFromName`/`get`/`setName`
-    // before `isComputeLive()`, so any of those landing in `calls` proves
-    // the DO was dialed.
+    // The load-bearing assertion: the PATCH never touches the binding.
+    // Re-introduce any live-compute probe and this fails — `getAgentByName`
+    // calls `idFromName`/`get`/`setName` before `isComputeLive()`, so any of
+    // those landing in `calls` proves the DO was dialed.
     expect(calls).toEqual([]);
 
-    const snapshot = await readWorkbenchSnapshot(threadId);
-    expect(snapshot?.workbenchId).toBe("wb_new_legacy_no_dial");
-  });
-
-  it("rolls back the pending marker when the switch reminder injection fails", async () => {
-    const seeded = await seedUserWorkspace({
-      userId: "user-thread-patch-workbench-injection-failure",
-      token: "thread-patch-workbench-injection-failure-token",
-      workspaceId: "workspace-thread-patch-workbench-injection-failure",
-    });
-    await insertEnvironment({
-      id: "wb_old_injection_failure",
-      workspaceId: seeded.workspaceId,
-      name: "Old Bench Injection Failure",
-      createdAt: now,
-    });
-    await insertEnvironment({
-      id: "wb_new_injection_failure",
-      workspaceId: seeded.workspaceId,
-      name: "New Bench Injection Failure",
-      createdAt: now,
-    });
-    const threadId = "thr_patch_workbench_injection_failure";
-    await insertThread({
-      id: threadId,
-      workspaceId: seeded.workspaceId,
-      agentId: seeded.agentId,
-      title: "Injection Failure Switch",
-      updatedAt: now,
-      runtime: "think",
-      workbenchId: "wb_old_injection_failure",
-    });
-    await drizzle(env.REGISTRY_DB, { schema }).insert(schema.threadWorkbenchSnapshots).values({
-      threadId,
-      workspaceId: seeded.workspaceId,
-      workbenchId: "wb_old_injection_failure",
-      name: "Old Bench Injection Failure",
-      setupScript: "",
-      resourceProfile: "small",
-      createdAt: now,
-    });
-    const before = await readThread(threadId);
-
-    const calls: string[] = [];
-    const res = await routeThreads(
-      new Request(`https://nadi.test/api/threads/${threadId}`, {
-        method: "PATCH",
-        headers: {
-          cookie: `better-auth.session_token=${seeded.token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ workbenchId: "wb_new_injection_failure" }),
-      }),
-      makeWorkbenchSwitchInjectionFailureEnv(calls),
-      makeExecutionContext(),
-    );
-
-    expect(res?.status).toBe(500);
-    expect(calls).toContain("think:requestWorkbenchSwitch");
-
-    // Left exactly as it was pre-switch: the intent column back to the OLD
-    // workbench and the pending marker cleared — not left pointing at the
-    // new workbench with the marker armed and no reminder ever delivered.
-    // (updatedAt legitimately advances on the rollback write itself.)
-    const after = await readThread(threadId);
-    expect(after?.workbenchId).toBe(before?.workbenchId);
-    expect(after?.workbenchSwitchPendingAt).toBeNull();
-
-    // The snapshot never moved (beginWorkbenchSwitch doesn't touch it), so
-    // it should still read the pre-switch workbench too.
-    const snapshot = await readWorkbenchSnapshot(threadId);
-    expect(snapshot?.workbenchId).toBe("wb_old_injection_failure");
+    const thread = await readThread(threadId);
+    expect(thread?.workbenchId).toBe("wb_new_legacy_no_dial");
   });
 
   it("returns 409 when changing the project on an archived thread", async () => {
@@ -2573,14 +2155,6 @@ describe("thread routes", () => {
       updatedAt: now,
       runtime: "think",
     });
-    await insertThreadSnapshot({
-      threadId: "thr_active_project_delete",
-      workspaceId,
-      projectId: "project-active-delete",
-      repositoryId: "repo-active-delete",
-      createdAt: now,
-    });
-
     const res = await routeThreads(
       new Request("https://x/api/threads/thr_active_project_delete", {
         method: "DELETE",
@@ -2591,7 +2165,7 @@ describe("thread routes", () => {
     );
 
     expect(res?.status).toBe(204);
-    await expect(listThreadSnapshots("thr_active_project_delete")).resolves.toEqual([]);
+    await expect(readThread("thr_active_project_delete")).resolves.toBeUndefined();
   });
 
   it("deleting an archived thread never rehydrates the evicted DO", async () => {

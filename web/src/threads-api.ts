@@ -33,12 +33,8 @@ export interface ThreadSummary {
   projectName: string | null;
   workbenchId: string | null;
   workbenchName: string | null;
-  /** True while a workbench switch is deferred: `workbenchId` is the intent,
-   * but `resourceProfile` still reflects the OLD workbench until the agent
-   * confirms and the switch commits. */
-  workbenchSwitchPending: boolean;
-  /** The sandbox size actually in effect (frozen snapshot, not the live
-   * workbench — those can diverge while `workbenchSwitchPending` is true). */
+  /** The workbench's sandbox size, read live: configuration is not
+   * snapshotted per thread, so editing it takes effect on the next turn. */
   resourceProfile: "small" | "medium";
   automatonId: string | null;
   automatonName: string | null;

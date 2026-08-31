@@ -175,7 +175,6 @@ export const automataHandlers = [
       projectName: store.projects.find((p) => p.id === automaton.projectId)?.name ?? null,
       workbenchId: null,
       workbenchName: null,
-      workbenchSwitchPending: false,
       resourceProfile: "small",
       automatonId: automaton.id,
       automatonName: automaton.name,

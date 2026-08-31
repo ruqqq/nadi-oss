@@ -43,9 +43,6 @@ const RPC_REPLIES: Record<string, unknown> = {
   // under noise the mock already knows the answer to.
   listBackgroundWork: [],
   pendingSteerKeys: [],
-  // Confirms a pending workbench switch (see `confirm_workbench_switch` in
-  // `src/agent/compute-tools.ts`); the mock always wins the commit permit.
-  confirm_workbench_switch: { committed: true },
 };
 
 function fakeCall(method: string, args: unknown[]): Promise<unknown> {

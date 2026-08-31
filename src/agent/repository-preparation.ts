@@ -1,6 +1,7 @@
 import { posix as path } from "node:path";
 import { registryDb } from "../db/client";
-import { ThreadRepositorySnapshotRepository } from "../db/repositories/thread-repository-snapshots";
+import { ThreadRepository } from "../db/repositories/threads";
+import { WorkbenchRepository } from "../db/repositories/workbenches";
 import type { Env } from "../env";
 import type { ThreadComputeService } from "../compute/thread-service";
 
@@ -43,9 +44,23 @@ export function createRepositoryPreparation(input: {
   resolveComputeService: () => Promise<{ service: RepositoryExecService } | null>;
 }): () => Promise<RepositoryPreparationResult> {
   return async () => {
-    const snapshotRepo = new ThreadRepositorySnapshotRepository(registryDb(input.env));
-    const snapshots = await snapshotRepo.listForThread(input.threadId);
-    if (snapshots.length === 0) {
+    const db = registryDb(input.env);
+    // LIVE, not snapshotted: a thread clones whatever its environment CURRENTLY
+    // declares, so editing the repository list takes effect on the next
+    // preparation. The per-thread snapshot this used to read is gone — a shared
+    // box cannot honour a per-thread config version.
+    const configId = (await new ThreadRepository(db).getById(input.threadId))?.workbenchId ?? null;
+    if (configId === null) {
+      return { summary: "No project repositories are configured for this thread." };
+    }
+    const environmentRepo = new WorkbenchRepository(db);
+    // Ordered by id — the same order the snapshot rows were built and read in.
+    const repositories = await environmentRepo.listRepositories(configId);
+    // Preserved exactly: with no repositories configured this returns BEFORE
+    // resolving compute and before the environment setup script. An environment
+    // whose only content is a setup script never ran it, and this task is not
+    // the place to change that.
+    if (repositories.length === 0) {
       return { summary: "No project repositories are configured for this thread." };
     }
 
@@ -66,13 +81,13 @@ export function createRepositoryPreparation(input: {
 
     const prepared: RepositoryPreparationPrepared[] = [];
     const skipped: RepositoryPreparationSkipped[] = [];
-    for (const snapshot of snapshots) {
-      const checkoutPath = path.join(SANDBOX_WORK_ROOT, snapshot.checkoutPathName);
-      const repositoryRoot = resolveRepositoryRoot(checkoutPath, snapshot.rootDirectory);
+    for (const repository of repositories) {
+      const checkoutPath = path.join(SANDBOX_WORK_ROOT, repository.checkoutPathName);
+      const repositoryRoot = resolveRepositoryRoot(checkoutPath, repository.rootDirectory);
       const pathProbe = await pathExists(resolved.service, checkoutPath);
       if (pathProbe.kind === "error") {
         skipped.push({
-          name: snapshot.name,
+          name: repository.name,
           reason: pathProbe.reason,
         });
         continue;
@@ -80,27 +95,27 @@ export function createRepositoryPreparation(input: {
       if (pathProbe.kind === "missing") {
         const cloneResult = await runCommand(
           resolved.service,
-          `git clone ${formatCloneUrlForShell(snapshot.url)} ${shellQuote(checkoutPath)}`,
+          `git clone ${formatCloneUrlForShell(repository.url)} ${shellQuote(checkoutPath)}`,
           undefined,
-          `clone ${snapshot.name}`,
+          `clone ${repository.name}`,
         );
         if (!cloneResult.ok) {
           skipped.push({
-            name: snapshot.name,
+            name: repository.name,
             reason: formatFailedCommandReason("clone", cloneResult),
           });
           continue;
         }
-        if (snapshot.defaultBranch.trim() !== "") {
+        if (repository.defaultBranch.trim() !== "") {
           const checkoutResult = await runCommand(
             resolved.service,
-            `git -C ${shellQuote(checkoutPath)} checkout ${shellQuote(snapshot.defaultBranch)}`,
+            `git -C ${shellQuote(checkoutPath)} checkout ${shellQuote(repository.defaultBranch)}`,
             undefined,
-            `checkout ${snapshot.name}`,
+            `checkout ${repository.name}`,
           );
           if (!checkoutResult.ok) {
             skipped.push({
-              name: snapshot.name,
+              name: repository.name,
               reason: formatFailedCommandReason("checkout", checkoutResult),
             });
             continue;
@@ -109,11 +124,11 @@ export function createRepositoryPreparation(input: {
         prepared.push(
           await prepareRepositoryCheckout({
             service: resolved.service,
-            name: snapshot.name,
+            name: repository.name,
             checkoutPath,
             repositoryRoot,
             status: "cloned",
-            setupCommand: snapshot.setupCommand,
+            setupCommand: repository.setupCommand,
           }),
         );
         continue;
@@ -122,23 +137,23 @@ export function createRepositoryPreparation(input: {
       const gitProbe = await isGitRepository(resolved.service, checkoutPath);
       if (gitProbe.kind === "error") {
         skipped.push({
-          name: snapshot.name,
+          name: repository.name,
           reason: gitProbe.reason,
         });
         continue;
       }
       if (gitProbe.kind === "not_git") {
         skipped.push({
-          name: snapshot.name,
+          name: repository.name,
           reason: "path exists but is not a git checkout",
         });
         continue;
       }
 
       const remoteUrl = await readOriginRemoteUrl(resolved.service, checkoutPath);
-      if (!remoteUrl || normalizeGitUrl(remoteUrl) !== normalizeGitUrl(snapshot.url)) {
+      if (!remoteUrl || normalizeGitUrl(remoteUrl) !== normalizeGitUrl(repository.url)) {
         skipped.push({
-          name: snapshot.name,
+          name: repository.name,
           reason: "path exists but remote does not match configured repository",
         });
         continue;
@@ -147,20 +162,16 @@ export function createRepositoryPreparation(input: {
       prepared.push(
         await prepareRepositoryCheckout({
           service: resolved.service,
-          name: snapshot.name,
+          name: repository.name,
           checkoutPath,
           repositoryRoot,
           status: "already_cloned",
-          setupCommand: snapshot.setupCommand,
+          setupCommand: repository.setupCommand,
         }),
       );
     }
 
-    const environmentSetup = await runEnvironmentSetup(
-      snapshotRepo,
-      input.threadId,
-      resolved.service,
-    );
+    const environmentSetup = await runEnvironmentSetup(environmentRepo, configId, resolved.service);
 
     return {
       summary: "Repositories are ready for coding work.",
@@ -175,15 +186,15 @@ export function createRepositoryPreparation(input: {
 // been cloned and had its own per-repo setup run — so environment-level setup
 // (e.g. cross-repo tooling) can assume all checkouts already exist. Returns
 // `null` (skipped silently) when the thread has no environment bundle or the
-// bundle has no setup script configured.
+// bundle has no setup script configured. Read LIVE, like the repository list.
 async function runEnvironmentSetup(
-  snapshotRepo: ThreadRepositorySnapshotRepository,
-  threadId: string,
+  environmentRepo: WorkbenchRepository,
+  configId: string,
   service: RepositoryExecService,
 ): Promise<string | null> {
-  const envSnapshot = await snapshotRepo.listWorkbenchSnapshot(threadId);
-  if (!envSnapshot) return null;
-  const script = envSnapshot.setupScript.trim();
+  const environment = await environmentRepo.getById(configId);
+  if (!environment) return null;
+  const script = environment.setupScript.trim();
   if (script === "") return null;
 
   const result = await runCommand(

@@ -62,7 +62,6 @@ function thread(over: Partial<ThreadSummary> & { threadId: string }): ThreadSumm
     projectName: "Project One",
     workbenchId: null,
     workbenchName: null,
-    workbenchSwitchPending: false,
     resourceProfile: "small",
     automatonId: null,
     automatonName: null,

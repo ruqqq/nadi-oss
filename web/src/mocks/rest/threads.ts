@@ -110,7 +110,6 @@ export const threadHandlers = [
       projectName: project?.name ?? null,
       workbenchId: workbench?.id ?? null,
       workbenchName: workbench?.name ?? null,
-      workbenchSwitchPending: false,
       resourceProfile: workbench?.resourceProfile ?? "small",
       automatonId: null,
       automatonName: null,
@@ -182,23 +181,11 @@ export const threadHandlers = [
     }
     if (patch.workbenchId !== undefined) {
       const nextWorkbench = store.workbenches.find((w) => w.id === patch.workbenchId);
-      // A live sandbox defers: the model has no exec/sandbox lifecycle to
-      // inspect, so a thread that already had a workbench assigned stands in
-      // for "a sandbox may be running". `resourceProfile` (the frozen
-      // snapshot) intentionally does NOT move here — the real server only
-      // re-snapshots when the switch commits, so the mock must keep showing
-      // the OLD size while `workbenchSwitchPending` is true, exactly what a
-      // pending switch looks like for real.
-      const isRealChange = patch.workbenchId !== thread.workbenchId;
-      const hadLiveSandbox = thread.workbenchId !== null;
+      // Configuration is live: the switch applies immediately and the sandbox
+      // size moves with it, exactly as the server now does it.
       thread.workbenchId = nextWorkbench?.id ?? null;
       thread.workbenchName = nextWorkbench?.name ?? null;
-      if (isRealChange && hadLiveSandbox) {
-        thread.workbenchSwitchPending = true;
-      } else {
-        thread.workbenchSwitchPending = false;
-        thread.resourceProfile = nextWorkbench?.resourceProfile ?? "small";
-      }
+      thread.resourceProfile = nextWorkbench?.resourceProfile ?? "small";
     }
     thread.updatedAt = Date.now();
     return HttpResponse.json({ thread });

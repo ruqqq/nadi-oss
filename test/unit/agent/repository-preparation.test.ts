@@ -1,20 +1,29 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ThreadRepositorySnapshot } from "../../../src/db/schema";
+import type { AgentRepositoryRow } from "../../../src/db/schema";
 
-const { registryDbMock, listForThreadMock, listWorkbenchSnapshotMock } = vi.hoisted(() => ({
-  registryDbMock: vi.fn(),
-  listForThreadMock: vi.fn(),
-  listWorkbenchSnapshotMock: vi.fn(),
-}));
+const { registryDbMock, getThreadMock, listRepositoriesMock, getWorkbenchMock } = vi.hoisted(
+  () => ({
+    registryDbMock: vi.fn(),
+    getThreadMock: vi.fn(),
+    listRepositoriesMock: vi.fn(),
+    getWorkbenchMock: vi.fn(),
+  }),
+);
 
 vi.mock("../../../src/db/client", () => ({
   registryDb: registryDbMock,
 }));
 
-vi.mock("../../../src/db/repositories/thread-repository-snapshots", () => ({
-  ThreadRepositorySnapshotRepository: class {
-    listForThread = listForThreadMock;
-    listWorkbenchSnapshot = listWorkbenchSnapshotMock;
+vi.mock("../../../src/db/repositories/threads", () => ({
+  ThreadRepository: class {
+    getById = getThreadMock;
+  },
+}));
+
+vi.mock("../../../src/db/repositories/workbenches", () => ({
+  WorkbenchRepository: class {
+    listRepositories = listRepositoriesMock;
+    getById = getWorkbenchMock;
   },
 }));
 
@@ -27,15 +36,16 @@ type ExecResult = {
   text?: string;
 };
 
-function makeSnapshot(overrides: Partial<ThreadRepositorySnapshot> = {}): ThreadRepositorySnapshot {
+function makeRepository(overrides: Partial<AgentRepositoryRow> = {}): AgentRepositoryRow {
   return {
-    id: "thread-1:repo-1",
-    threadId: "thread-1",
-    workspaceId: "workspace-1",
-    projectId: "project-1",
-    workbenchId: null,
+    id: "repo-1",
+    agentId: "env-1",
+    source: "github",
     name: "nadi",
     url: "https://github.com/acme/nadi.git",
+    githubRepoId: null,
+    sourceInstallationId: null,
+    accessStatus: "ok",
     defaultBranch: "",
     checkoutPathName: "nadi",
     rootDirectory: "/",
@@ -64,11 +74,13 @@ describe("createRepositoryPreparation", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     registryDbMock.mockReturnValue({ db: "mock" });
-    listWorkbenchSnapshotMock.mockResolvedValue(undefined);
+    // Every case runs against a thread assigned to environment `env-1`.
+    getThreadMock.mockResolvedValue({ id: "thread-1", workbenchId: "env-1" });
+    getWorkbenchMock.mockResolvedValue(undefined);
   });
 
   it("clones when the checkout path test exits non-zero for a missing path", async () => {
-    listForThreadMock.mockResolvedValue([makeSnapshot()]);
+    listRepositoriesMock.mockResolvedValue([makeRepository()]);
     const service = makeService([
       { status: "exited", processId: "mkdir", exitCode: 0 },
       { status: "exited", processId: "exists", exitCode: 1 },
@@ -115,7 +127,7 @@ describe("createRepositoryPreparation", () => {
    * thr_92e0b60c: `test -e /workspace/nadi` returned status `failed`, exitCode 1.
    */
   it("clones when a MISSING path is reported as failed/1 (the Cloudflare shape)", async () => {
-    listForThreadMock.mockResolvedValue([makeSnapshot()]);
+    listRepositoriesMock.mockResolvedValue([makeRepository()]);
     const service = makeService([
       { status: "exited", processId: "mkdir", exitCode: 0 },
       { status: "failed", processId: "exists", exitCode: 1 },
@@ -134,7 +146,7 @@ describe("createRepositoryPreparation", () => {
   });
 
   it("treats a failed/1 rev-parse as a non-git path, not a probe error", async () => {
-    listForThreadMock.mockResolvedValue([makeSnapshot()]);
+    listRepositoriesMock.mockResolvedValue([makeRepository()]);
     const service = makeService([
       { status: "exited", processId: "mkdir", exitCode: 0 },
       { status: "exited", processId: "exists", exitCode: 0 },
@@ -158,7 +170,7 @@ describe("createRepositoryPreparation", () => {
   });
 
   it("skips an existing non-git path when rev-parse exits non-zero", async () => {
-    listForThreadMock.mockResolvedValue([makeSnapshot()]);
+    listRepositoriesMock.mockResolvedValue([makeRepository()]);
     const service = makeService([
       { status: "exited", processId: "mkdir", exitCode: 0 },
       { status: "exited", processId: "exists", exitCode: 0 },
@@ -185,7 +197,7 @@ describe("createRepositoryPreparation", () => {
   });
 
   it("reports clone failure as skipped when clone exits non-zero", async () => {
-    listForThreadMock.mockResolvedValue([makeSnapshot()]);
+    listRepositoriesMock.mockResolvedValue([makeRepository()]);
     const service = makeService([
       { status: "exited", processId: "mkdir", exitCode: 0 },
       { status: "exited", processId: "exists", exitCode: 1 },
@@ -212,7 +224,7 @@ describe("createRepositoryPreparation", () => {
   });
 
   it("skips when the repository path probe fails indeterminately", async () => {
-    listForThreadMock.mockResolvedValue([makeSnapshot()]);
+    listRepositoriesMock.mockResolvedValue([makeRepository()]);
     const service = makeService([
       { status: "exited", processId: "mkdir", exitCode: 0 },
       { status: "failed", processId: "exists" },
@@ -239,8 +251,8 @@ describe("createRepositoryPreparation", () => {
   });
 
   it("reports setup failure instead of claiming setup completed on non-zero exit", async () => {
-    listForThreadMock.mockResolvedValue([
-      makeSnapshot({
+    listRepositoriesMock.mockResolvedValue([
+      makeRepository({
         setupCommand: "pnpm install",
       }),
     ]);
@@ -281,7 +293,7 @@ describe("createRepositoryPreparation", () => {
   });
 
   it("reuses an existing checkout when the authenticated origin remote matches", async () => {
-    listForThreadMock.mockResolvedValue([makeSnapshot()]);
+    listRepositoriesMock.mockResolvedValue([makeRepository()]);
     const service = makeService(
       [
         { status: "exited", processId: "mkdir", exitCode: 0 },
@@ -326,7 +338,7 @@ describe("createRepositoryPreparation", () => {
   });
 
   it("migrates legacy checkouts from the pre-/workspace root while preparing the root", async () => {
-    listForThreadMock.mockResolvedValue([makeSnapshot()]);
+    listRepositoriesMock.mockResolvedValue([makeRepository()]);
     const service = makeService([
       { status: "exited", processId: "mkdir", exitCode: 0 },
       { status: "exited", processId: "exists", exitCode: 1 },
@@ -350,27 +362,25 @@ describe("createRepositoryPreparation", () => {
   });
 
   it("runs multi-line per-repo setup as a single bash-wrapped call and the environment script once, after all repos", async () => {
-    listForThreadMock.mockResolvedValue([
-      makeSnapshot({
-        id: "thread-1:repo-1",
+    listRepositoriesMock.mockResolvedValue([
+      makeRepository({
+        id: "repo-1",
         name: "repo-a",
         checkoutPathName: "repo-a",
         setupCommand: "echo a\necho b",
       }),
-      makeSnapshot({
-        id: "thread-1:repo-2",
+      makeRepository({
+        id: "repo-2",
         name: "repo-b",
         checkoutPathName: "repo-b",
         setupCommand: "echo a\necho b",
       }),
     ]);
-    listWorkbenchSnapshotMock.mockResolvedValue({
-      threadId: "thread-1",
+    getWorkbenchMock.mockResolvedValue({
+      id: "env-1",
       workspaceId: "workspace-1",
-      workbenchId: "env-1",
       name: "env",
       setupScript: "echo env-setup",
-      createdAt: 1,
     });
     const service = makeService([
       { status: "exited", processId: "mkdir", exitCode: 0 },
@@ -411,7 +421,7 @@ describe("createRepositoryPreparation", () => {
     expect(calls).not.toContain("echo env-setup");
 
     // The environment script runs exactly once.
-    expect(listWorkbenchSnapshotMock).toHaveBeenCalledTimes(1);
+    expect(getWorkbenchMock).toHaveBeenCalledTimes(1);
 
     // It runs after both repos' clone + setup (by call index).
     const envSetupIndex = calls.length - 1;
@@ -421,7 +431,7 @@ describe("createRepositoryPreparation", () => {
   });
 
   it("skips when the git probe fails indeterminately", async () => {
-    listForThreadMock.mockResolvedValue([makeSnapshot()]);
+    listRepositoriesMock.mockResolvedValue([makeRepository()]);
     const service = makeService([
       { status: "exited", processId: "mkdir", exitCode: 0 },
       { status: "exited", processId: "exists", exitCode: 0 },

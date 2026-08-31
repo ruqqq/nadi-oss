@@ -23,7 +23,6 @@ const EXEC_TOOL_NAMES = [
   "exec_upload_file",
   "exec_download_file",
   "exec_publish_artifact",
-  "confirm_workbench_switch",
 ];
 
 // Model-native file tools ride the same sandbox tool set as exec: present only
@@ -110,14 +109,7 @@ describe("buildComputeToolDefs", () => {
     const tools = buildComputeToolDefs(
       async () => service,
       async () => ({ env: {} as never, threadId: "t", workspaceId: "w" }),
-      {
-        // `confirm_workbench_switch` is registered only with its safety
-        // preconditions wired, so the FULL surface requires them here.
-        workbenchSwitch: {
-          hasBlockingWork: async () => false,
-          adoptCommittedResourceProfile: async () => {},
-        },
-      },
+      {},
     );
     expect(Object.keys(tools).sort()).toEqual([...EXEC_TOOL_NAMES].sort());
     expect(tools).not.toHaveProperty("exec_input");

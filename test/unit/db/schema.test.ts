@@ -11,7 +11,6 @@ import {
   pushSubscriptions,
   projects,
   threadIndex,
-  threadRepositorySnapshots,
   userNotificationSettings,
   users,
   verifications,
@@ -35,7 +34,6 @@ describe("registry schema", () => {
   it("exports project scoped conversation tables", () => {
     expect(projects).toBeDefined();
     expect(agentRepositories).toBeDefined();
-    expect(threadRepositorySnapshots).toBeDefined();
     expect(threadIndex.projectId.name).toBe("project_id");
   });
 

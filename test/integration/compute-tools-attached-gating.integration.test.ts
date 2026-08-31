@@ -1,15 +1,14 @@
 /**
- * `confirm_workbench_switch` must be hidden from an attached subagent — its
- * own thread row never has a pending switch, so the call could only fail and
- * waste tokens / confuse the model. `select_sandbox_package`, the tool this
- * replaced, was gated the same way (on `attachedRuntime`).
+ * `confirm_work_saved` must be hidden from an attached subagent: it shares the
+ * parent's runtime, so letting it declare the parent's sandbox discardable
+ * would destroy the parent's work.
  *
  * Drives `createComputeTools` (not `buildComputeToolDefs` directly) over a real
  * D1-backed workspace + thread and a REAL session on the thread's
  * `AgentSandbox`, because the gate under test lives in `createComputeTools`'s
- * call to `buildComputeToolDefs` — `hasBlockingWork` is unconditionally present
- * on the tool deps (see `think-thread-agent.ts`'s `computeToolDeps()`), so a
- * test that stubs `buildComputeToolDefs` directly could never see this
+ * call to `buildComputeToolDefs` — `setSandboxDeclaredClean` is unconditionally
+ * present on the tool deps (see `think-thread-agent.ts`'s `computeToolDeps()`),
+ * so a test that stubs `buildComputeToolDefs` directly could never see this
  * regression.
  *
  * The backend is the in-memory fake, installed through the thread-keyed host
@@ -29,8 +28,6 @@ import type { BackendReference } from "../../src/compute/backend";
 import type { Env } from "../../src/env";
 import { applyRegistryTestSchema, seedRegistryThread } from "./helpers/registry";
 
-const NOW = 1_800_000_000_000;
-
 async function seedComputeEnabledWorkspace(workspaceId: string) {
   await env.REGISTRY_DB.prepare(
     `INSERT INTO workspace_sandbox_settings
@@ -49,11 +46,9 @@ function baseToolDeps(threadId: string, attachedRuntime?: BackendReference): Com
     threadId,
     supportsProcessMonitor: false,
     backgroundLongRunningExec: false,
-    now: () => NOW,
     // Set unconditionally, exactly as `computeToolDeps()` does — the gate
     // under test must NOT rely on this being absent for subagents.
-    hasBlockingWork: async () => false,
-    adoptCommittedResourceProfile: async () => {},
+    setSandboxDeclaredClean: async () => {},
     ...(attachedRuntime ? { attachedRuntime } : {}),
   };
 }
@@ -66,7 +61,6 @@ async function toolsFor(
 ) {
   setComputeHostTestOverrides(threadId, {
     buildBackend: async () => new FakeComputeBackend(),
-    now: () => NOW,
   });
   try {
     const session = await openSandboxSession(env as unknown as Env, threadId, {
@@ -81,12 +75,12 @@ async function toolsFor(
   }
 }
 
-describe("createComputeTools confirm_workbench_switch attached-runtime gating", () => {
+describe("createComputeTools confirm_work_saved attached-runtime gating", () => {
   beforeAll(async () => {
     await applyRegistryTestSchema(env.REGISTRY_DB);
   });
 
-  it("exposes confirm_workbench_switch to the owning thread", async () => {
+  it("exposes confirm_work_saved to the owning thread", async () => {
     const threadId = "thr_gating_owner";
     const { workspaceId, agentId } = await seedRegistryThread(env.REGISTRY_DB, {
       threadId,
@@ -95,10 +89,10 @@ describe("createComputeTools confirm_workbench_switch attached-runtime gating", 
     await seedComputeEnabledWorkspace(workspaceId);
 
     const tools = await toolsFor(threadId, { workspaceId, agentId });
-    expect(tools.confirm_workbench_switch).toBeDefined();
+    expect(tools.confirm_work_saved).toBeDefined();
   });
 
-  it("hides confirm_workbench_switch from an attached subagent", async () => {
+  it("hides confirm_work_saved from an attached subagent", async () => {
     const threadId = "thr_gating_subagent";
     const { workspaceId, agentId } = await seedRegistryThread(env.REGISTRY_DB, {
       threadId,
@@ -113,7 +107,7 @@ describe("createComputeTools confirm_workbench_switch attached-runtime gating", 
     };
 
     const tools = await toolsFor(threadId, { workspaceId, agentId }, attachedRuntime);
-    expect(tools.confirm_workbench_switch).toBeUndefined();
+    expect(tools.confirm_work_saved).toBeUndefined();
     // Sanity: the rest of the compute surface is unaffected by the gate.
     expect(tools.exec).toBeDefined();
   });

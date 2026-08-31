@@ -139,15 +139,25 @@ describe("the turn's sandbox session", () => {
       runtime: "think",
     });
     await seedComputeEnabledWorkspace(workspaceId);
-    // A repository snapshot, or `createRepositoryPreparation` takes its
-    // "nothing configured" exit and the whole test would pass without the
+    // An environment with a repository, or `createRepositoryPreparation` takes
+    // its "nothing configured" exit and the whole test would pass without the
     // reentrancy holder working at all.
+    const workbenchId = `wb_${threadId}`;
     await env.REGISTRY_DB.prepare(
-      `INSERT INTO thread_repository_snapshots
-        (id, thread_id, workspace_id, name, url, default_branch, checkout_path_name, created_at)
-       VALUES (?, ?, ?, 'nadi', 'https://example.test/nadi.git', 'main', 'nadi', ?)`,
+      `INSERT INTO workbenches (id, workspace_id, name, created_at, updated_at)
+       VALUES (?, ?, 'Prep bench', ?, ?)`,
     )
-      .bind(`trs_${threadId}`, threadId, workspaceId, NOW)
+      .bind(workbenchId, workspaceId, NOW, NOW)
+      .run();
+    await env.REGISTRY_DB.prepare(
+      `INSERT INTO agent_repositories
+        (id, agent_id, source, name, url, default_branch, checkout_path_name, created_at)
+       VALUES (?, ?, 'url', 'nadi', 'https://example.test/nadi.git', 'main', 'nadi', ?)`,
+    )
+      .bind(`agr_${threadId}`, workbenchId, NOW)
+      .run();
+    await env.REGISTRY_DB.prepare(`UPDATE thread_index SET workbench_id = ? WHERE id = ?`)
+      .bind(workbenchId, threadId)
       .run();
 
     const backend = new FakeComputeBackend();

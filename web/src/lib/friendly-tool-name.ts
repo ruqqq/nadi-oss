@@ -23,7 +23,6 @@ const FRIENDLY_TOOL_NAMES: Record<string, string> = {
   write_file: "Write file",
   apply_patch: "Apply patch",
   exec_shutdown: "Shut down sandbox",
-  confirm_workbench_switch: "Confirm workbench switch",
   exec_list: "List processes",
   exec_upload_file: "Upload file",
   create_skill: "Create skill",

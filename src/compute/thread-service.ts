@@ -2603,9 +2603,14 @@ export class ThreadComputeService {
     }
     if (state?.status === "active" && state.runtimeRef) return state.runtimeRef;
     const recovery = state?.status === "recoverable" ? state.recoveryRef : null;
-    // Prefer a profile persisted on existing state over the settings default;
-    // the default seeds only fresh state.
-    const resourceProfile = state?.resourceProfile ?? this.deps.config.resourceProfile;
+    // Prefer a profile persisted on existing state over the configured one only
+    // while a runtime actually exists to stay consistent with. Once it is gone
+    // the live configuration wins — see the same rule, and why it matters, in
+    // `resolveComputeService`.
+    const resourceProfile =
+      (state?.status === "active" || state?.status === "recoverable"
+        ? state.resourceProfile
+        : null) ?? this.deps.config.resourceProfile;
     const spec = this.computeSpec(resourceProfile);
     const startedAt = this.deps.now();
     if (!recovery) {

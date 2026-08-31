@@ -1,6 +1,6 @@
 import { registryDb } from "../db/client";
 import { ProjectRepository } from "../db/repositories/projects";
-import { ThreadRepositorySnapshotRepository } from "../db/repositories/thread-repository-snapshots";
+import { WorkbenchRepository } from "../db/repositories/workbenches";
 import type { Env } from "../env";
 
 export interface ProjectPromptRepositoryContext {
@@ -24,6 +24,9 @@ export interface ProjectPromptThreadContext {
   threadId: string;
   workspaceId: string;
   projectId: string | null;
+  /** The thread's environment. REQUIRED, not optional: omitting it would
+   *  silently drop every repository from the prompt. */
+  workbenchId: string | null;
 }
 
 export async function resolveProjectPromptContext(input: {
@@ -39,22 +42,25 @@ export async function resolveProjectPromptContext(input: {
     input.thread.projectId,
     input.thread.workspaceId,
   );
-  const snapshots = await new ThreadRepositorySnapshotRepository(db).listForThread(
-    input.thread.threadId,
-  );
+  // Read LIVE from the environment's repository list — the per-thread snapshot
+  // is gone. Same ordering (by id) the snapshot rows had.
+  const repositories =
+    input.thread.workbenchId === null
+      ? []
+      : await new WorkbenchRepository(db).listRepositories(input.thread.workbenchId);
 
   return {
     name: project.name,
     description: project.description,
     instructions: project.customInstructions,
-    repositories: snapshots.map((snapshot) => ({
-      name: snapshot.name,
-      url: snapshot.url,
-      defaultBranch: snapshot.defaultBranch,
-      checkoutPath: snapshot.checkoutPathName,
-      rootDirectory: snapshot.rootDirectory,
-      setupCommand: snapshot.setupCommand,
-      packageManager: snapshot.packageManager,
+    repositories: repositories.map((repository) => ({
+      name: repository.name,
+      url: repository.url,
+      defaultBranch: repository.defaultBranch,
+      checkoutPath: repository.checkoutPathName,
+      rootDirectory: repository.rootDirectory,
+      setupCommand: repository.setupCommand,
+      packageManager: repository.packageManager,
     })),
   };
 }

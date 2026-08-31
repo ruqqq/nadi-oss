@@ -18,8 +18,6 @@ async function clearRegistry() {
   await db.delete(schema.feedbackReports);
   await db.delete(schema.feedbackThreads);
   await db.delete(schema.attachments);
-  await db.delete(schema.threadRepositorySnapshots);
-  await db.delete(schema.threadWorkbenchSnapshots);
   await db.delete(schema.threadIndex);
   await db.delete(schema.agents);
   await db.delete(schema.workspaceMembers);

@@ -1,10 +1,10 @@
 import { env } from "cloudflare:test";
+import { ThreadRepository } from "../../src/db/repositories/threads";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeAll, describe, expect, it } from "vitest";
 import { resolveThreadRuntimeConfigForAgent } from "../../src/agent/thread-agent-config";
 import { WorkbenchRepository } from "../../src/db/repositories/workbenches";
 import { ProjectRepository } from "../../src/db/repositories/projects";
-import { ThreadRepositorySnapshotRepository } from "../../src/db/repositories/thread-repository-snapshots";
 import * as schema from "../../src/db/schema";
 import { applyRegistryTestSchema, seedRegistryThread } from "./helpers/registry";
 
@@ -83,9 +83,8 @@ async function seedProjectRuntimeContext() {
     createdAt: createdAt + 1,
     updatedAt: createdAt + 1,
   });
-  await new ThreadRepositorySnapshotRepository(db).replaceFromWorkbench(
+  await new ThreadRepository(db).updateWorkbench(
     "legacy-project-runtime",
-    "workspace-project-runtime",
     "env-runtime",
     createdAt,
   );

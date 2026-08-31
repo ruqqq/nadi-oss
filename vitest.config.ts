@@ -89,7 +89,6 @@ const integrationSharedIsolateFiles = [
   "test/unit/agent/list-background-work.test.ts",
   "test/unit/agent/tool-call-timing-store.test.ts",
   "test/unit/agent/work-delivery-ownership.test.ts",
-  "test/unit/agent/workbench-switch-commit-wiring.test.ts",
   "test/unit/agent/model-switch-commit.test.ts",
 ];
 

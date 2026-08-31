@@ -2769,22 +2769,15 @@ export function ChatApp({
       });
   }, []);
 
-  // Switching a LIVE thread's workbench is deferred server-side: the response
-  // carries the new intent (workbenchId/workbenchName) but keeps
-  // resourceProfile pinned to the old workbench until the agent saves its
-  // work and the switch commits (workbenchSwitchPending flips back to false).
-  // If no sandbox was live, the server applies it immediately instead.
+  // Switching a thread's workbench is a plain column write server-side:
+  // configuration is live, so the response already carries the new workbench
+  // and its sandbox size, and the next turn picks it up.
   const switchWorkbench = useCallback(async (threadId: string, workbenchId: string | null) => {
     try {
       const updated = await switchThreadWorkbench(threadId, workbenchId);
       setActiveThread((current) => (current && current.threadId === threadId ? updated : current));
       setThreads((current) => mergeThreadsExcluding(current, [updated], excludedThreadIds()));
-      toast.success(
-        updated.workbenchSwitchPending ? "Switching workbench…" : "Workbench switched",
-        updated.workbenchSwitchPending
-          ? { description: "The agent will save its work before the switch completes." }
-          : undefined,
-      );
+      toast.success("Workbench switched");
     } catch (error) {
       setThreadError(error instanceof Error ? error : new Error(String(error)));
       toast.error("Couldn't switch workbench");

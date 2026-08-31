@@ -594,12 +594,50 @@ describe("ThreadComputeService.listActiveWatchersView output tail", () => {
 });
 
 describe("ThreadComputeService acquisition profile preference", () => {
-  it("prefers a profile persisted on existing state over the settings default", async () => {
+  it("prefers the profile persisted on state while a runtime still exists", async () => {
+    // A runtime IS acquired at "medium" and then released as recoverable.
+    // Resuming it must reuse "medium" — the box it is resuming was built that
+    // way — even though the configuration now says "small".
+    const backend = new FakeComputeBackend();
+    const store = createMemoryComputeStore();
+    const now = { value: 1_000 };
+    const medium = await createService({
+      backend,
+      store,
+      now,
+      config: { ...CONFIG, resourceProfile: "medium" },
+      probeWorkspaceCleanliness: dirtyProbe(),
+    });
+    await medium.service.exec({ command: "pwd" });
+    now.value = 2_000;
+    await medium.service.runComputeTick();
+    expect(store.getComputeState()?.status).toBe("recoverable");
+    expect(store.getComputeState()?.resourceProfile).toBe("medium");
+
+    now.value = 2_500;
+    const small = await createService({
+      backend,
+      store,
+      now,
+      probeWorkspaceCleanliness: dirtyProbe(),
+    });
+    await small.service.exec({ command: "pwd" });
+
+    expect(backend.acquireCalls.at(-1)?.spec.profile).toBe("medium");
+  });
+
+  it("falls back to the configured profile once no runtime exists", async () => {
+    // The stored profile survives `markAbsent`, so preferring it
+    // unconditionally would freeze the profile of the very first acquire
+    // forever — a thread retargeted to a smaller/larger environment would keep
+    // provisioning the old size, from the old base image, with nothing to
+    // correct it now the switch handshake's explicit "adopt" write is gone.
     const { service, backend, store, now } = createService();
     store.setResourceProfile("medium", now.value);
+    store.markAbsent(now.value);
 
     await service.exec({ command: "pwd" });
-    expect(backend.acquireCalls[0]?.spec.profile).toBe("medium");
+    expect(backend.acquireCalls[0]?.spec.profile).toBe("small");
   });
 });
 

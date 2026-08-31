@@ -71,7 +71,6 @@ export function makeThread(overrides: Partial<ThreadSummary> = {}): ThreadSummar
     projectName: null,
     workbenchId: null,
     workbenchName: null,
-    workbenchSwitchPending: false,
     resourceProfile: "small",
     automatonId: null,
     automatonName: null,
@@ -1333,34 +1332,6 @@ function cloudflareBlockedStore(): MockStore {
 }
 
 /**
- * A thread mid-switch: `workbenchId`/`workbenchName` already point at the new
- * workbench (docs-site, "medium"), but `resourceProfile` stays pinned to the
- * OLD workbench's ("nadi", "small") frozen snapshot — the divergence a
- * pending switch legitimately shows. Reachable without performing a switch,
- * so the pending banner in ThreadDetailsSheet is screenshot-able directly.
- */
-function workbenchSwitchPendingStore(): MockStore {
-  const base = defaultStore();
-  return {
-    ...base,
-    workbenches: base.workbenches.map((w) =>
-      w.id === "wb_docs" ? { ...w, resourceProfile: "medium" } : w,
-    ),
-    threads: base.threads.map((t) =>
-      t.threadId === "thr_001"
-        ? {
-            ...t,
-            workbenchId: "wb_docs",
-            workbenchName: "docs-site",
-            workbenchSwitchPending: true,
-            resourceProfile: "small",
-          }
-        : t,
-    ),
-  };
-}
-
-/**
  * The rail's dismissal states, at the top of the list so all three are on one
  * screen. The rule under test is `recentDismissedAt >= updatedAt`: a stamp
  * older than the thread's last activity is spent, which is what brings a
@@ -1543,7 +1514,6 @@ export const SCENARIOS: Record<string, () => MockStore> = {
   "cloudflare-compute": cloudflareComputeStore,
   "cloudflare-managed": cloudflareManagedStore,
   "cloudflare-blocked": cloudflareBlockedStore,
-  "workbench-switch-pending": workbenchSwitchPendingStore,
   "background-work-enabled": backgroundWorkEnabledStore,
   "workbench-network-allowlist": workbenchNetworkAllowlistStore,
 };

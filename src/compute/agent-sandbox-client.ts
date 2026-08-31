@@ -111,27 +111,6 @@ function agentSandboxFor(env: Env, threadId: string) {
 }
 
 /**
- * Rewrites the sandbox's persisted resource profile to the one the thread's
- * CURRENT workbench snapshot declares, after a workbench switch commits.
- *
- * A second entry point rather than a session method because it must run when
- * there is no session and may run when compute is disabled: it reads and
- * rewrites the STORE, which lives in the sandbox DO, and it is the only other
- * thing on the thread DO's side that ever wanted a `ThreadComputeStore`.
- *
- * Best-effort, like the commit backstop that calls it: the stored profile ages
- * into correctness on the next acquire, so a failure here must not fail the
- * switch it is decorating.
- */
-export async function adoptCommittedResourceProfileOnSandbox(
-  env: Env,
-  threadId: string,
-): Promise<void> {
-  const result = await agentSandboxFor(env, threadId).adoptCommittedResourceProfile({ threadId });
-  if (!result.ok) throw decodeSandboxError(result.error);
-}
-
-/**
  * Opens ONE per-turn compute session on the thread's `AgentSandbox`.
  *
  * Deliberately shaped like `resolveComputeService`: `{ service, workspaceId,

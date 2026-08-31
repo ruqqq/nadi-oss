@@ -10,8 +10,7 @@ import {
   workbenches,
   projects,
   threadIndex,
-  threadRepositorySnapshots,
-  threadWorkbenchSnapshots,
+  agentRepositories,
   workspaceMembers,
 } from "../db/schema";
 import { MAX_TITLE_LEN, ThreadRepository } from "../db/repositories/threads";
@@ -54,43 +53,6 @@ interface ThreadDeletionStub {
 interface ThreadCompactionStub {
   compactThread(): Promise<{ compacted: boolean; reason?: string; message: string }>;
   getCompactionStatus(): Promise<{ phase: "idle" | "compacting" }>;
-}
-
-interface ThreadComputeLiveStub {
-  isComputeLive(): Promise<boolean>;
-}
-
-interface ThreadWorkbenchSwitchStub {
-  requestWorkbenchSwitch(workbenchName: string, workbenchId: string | null): Promise<void>;
-}
-
-/**
- * Resolves the same sandbox service `resolveComputeService`
- * (`compute-tools.ts`) would, and reports whether it is live. That
- * resolution needs the thread's DO's own storage, so it can only run inside
- * the agent — this is a thin RPC wrapper around `ThinkThreadAgent.isComputeLive()`.
- * A thread whose live compute predates this feature, or that never had a
- * client attach, resolves to a fresh/empty DO under this binding and reports
- * not live, which is the correct fallback (existing byte-compatible
- * `updateWorkbench` behavior).
- *
- * Legacy threads can never have a Think Durable Object, so we return false
- * immediately without dialing the binding — this avoids unnecessarily
- * instantiating and persisting a phantom DO.
- */
-async function isThreadComputeLive(
-  env: Env,
-  threadId: string,
-  runtime: "legacy" | "think",
-): Promise<boolean> {
-  if (runtime !== "think") {
-    return false;
-  }
-  const agent = (await getAgentByName(
-    env.THINK_THREAD_AGENT,
-    threadId,
-  )) as unknown as ThreadComputeLiveStub;
-  return agent.isComputeLive();
 }
 
 type ThreadModelSnapshotInput = {
@@ -448,14 +410,13 @@ export async function selectThreadSummariesForUser(
       projectName: projects.name,
       workbenchId: threadIndex.workbenchId,
       workbenchName: workbenches.name,
-      workbenchSwitchPendingAt: threadIndex.workbenchSwitchPendingAt,
-      snapshotResourceProfile: threadWorkbenchSnapshots.resourceProfile,
+      snapshotResourceProfile: workbenches.resourceProfile,
       automatonId: threadIndex.automatonId,
       automatonName: automata.name,
       outcomeDismissedAt: threadIndex.outcomeDismissedAt,
       recentDismissedAt: threadIndex.recentDismissedAt,
       automatonNotifyMode: automata.notifyMode,
-      repositorySnapshotCount: sql<number>`count(${threadRepositorySnapshots.id})`,
+      repositorySnapshotCount: sql<number>`count(${agentRepositories.id})`,
       lastContextTokens: threadIndex.lastContextTokens,
       lastContextWindow: threadIndex.lastContextWindow,
       lastCompactAfterTokens: threadIndex.lastCompactAfterTokens,
@@ -466,10 +427,9 @@ export async function selectThreadSummariesForUser(
     .leftJoin(projects, eq(projects.id, threadIndex.projectId))
     .leftJoin(workbenches, eq(workbenches.id, threadIndex.workbenchId))
     .leftJoin(automata, eq(automata.id, threadIndex.automatonId))
-    .leftJoin(threadRepositorySnapshots, eq(threadRepositorySnapshots.threadId, threadIndex.id))
-    // 1:1 on threadId (the snapshot table's primary key), so this cannot
-    // multiply rows the way a join on thread_repository_snapshots would.
-    .leftJoin(threadWorkbenchSnapshots, eq(threadWorkbenchSnapshots.threadId, threadIndex.id))
+    // The environment's LIVE repositories; this is the join that can multiply
+    // rows, which is why the aggregate + groupBy below stay.
+    .leftJoin(agentRepositories, eq(agentRepositories.agentId, threadIndex.workbenchId))
     .innerJoin(
       workspaceMembers,
       and(
@@ -502,8 +462,8 @@ export async function selectThreadSummariesForUser(
       threadIndex.id,
       projects.name,
       workbenches.name,
+      workbenches.resourceProfile,
       automata.name,
-      threadWorkbenchSnapshots.resourceProfile,
     )
     // The tie-break must be in the ORDER BY too, or the cursor's idea of "next"
     // disagrees with the order rows actually come back in.
@@ -1178,36 +1138,10 @@ async function renameThread(
     await repo.updateProject(threadId, projectId.value, updatedAt);
   }
   if (workbenchId.hasValue) {
-    const live = await isThreadComputeLive(env, threadId, thread.runtime);
-    if (!live) {
-      await repo.updateWorkbench(threadId, workbenchId.value, updatedAt);
-    } else {
-      const previousWorkbenchId = thread.workbenchId;
-      await repo.beginWorkbenchSwitch(threadId, workbenchId.value, updatedAt);
-      try {
-        // MUST be getAgentByName, not a raw idFromName stub — see the
-        // compactThread() note above; requestWorkbenchSwitch() depends on
-        // onStart() having run.
-        const agent = (await getAgentByName(
-          env.THINK_THREAD_AGENT,
-          threadId,
-        )) as unknown as ThreadWorkbenchSwitchStub;
-        await agent.requestWorkbenchSwitch(
-          workbenchId.name ?? "the new workbench",
-          workbenchId.value,
-        );
-      } catch (error) {
-        // The reminder never reached the agent: roll the marker back to the
-        // pre-switch state instead of leaving the thread stuck "switching"
-        // with no reminder in flight and a retry stacking another `begin`.
-        log.warn("thread.workbench_switch_injection_failed", {
-          threadId,
-          error: String(error),
-        });
-        await repo.abandonWorkbenchSwitch(threadId, previousWorkbenchId, Date.now());
-        return new Response("Could not start workbench switch", { status: 500 });
-      }
-    }
+    // A plain column write, live compute or not: configuration is LIVE, so the
+    // next turn's preparation reads the new environment. There is no snapshot
+    // to move and therefore no save-your-work handshake to run first.
+    await repo.updateWorkbench(threadId, workbenchId.value, updatedAt);
   }
 
   const updated = await selectThreadSummaryForMember(env, session.user.id, threadId);

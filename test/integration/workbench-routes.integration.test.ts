@@ -24,7 +24,6 @@ async function clearRegistry() {
   await db.delete(schema.agentSecretNames);
   await db.delete(schema.agentRepositories);
   await db.delete(schema.workbenches);
-  await db.delete(schema.threadRepositorySnapshots);
   await db.delete(schema.threadIndex);
   await db.delete(schema.projects);
   await db.delete(schema.agents);

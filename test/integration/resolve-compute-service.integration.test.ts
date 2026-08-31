@@ -13,11 +13,7 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { ThinkThreadAgent } from "../../src/agent/think-thread-agent";
-import {
-  adoptCommittedWorkbenchResourceProfile,
-  resolveComputeService,
-  type ComputeServiceHostDeps,
-} from "../../src/agent/compute-tools";
+import { resolveComputeService, type ComputeServiceHostDeps } from "../../src/agent/compute-tools";
 import { FakeComputeBackend } from "../../src/compute/backends/fake";
 import type {
   BackendProcessReference,
@@ -34,7 +30,7 @@ import type {
   StopMode,
   WriteFileOptions,
 } from "../../src/compute/backend";
-import { ThreadRepositorySnapshotRepository } from "../../src/db/repositories/thread-repository-snapshots";
+import { ThreadRepository } from "../../src/db/repositories/threads";
 import { ThreadComputeStore } from "../../src/compute/thread-store";
 import { ComputeError } from "../../src/compute/errors";
 import { DEFAULT_COMPUTE_ALLOWED_HOSTS } from "../../src/compute/config";
@@ -231,7 +227,7 @@ describe("resolveComputeService (real D1 + real DO storage)", () => {
     await applyRegistryTestSchema(env.REGISTRY_DB);
   });
 
-  it("takes config.resourceProfile from the thread's workbench snapshot, not the default", async () => {
+  it("takes config.resourceProfile from the thread's LIVE environment, not the default", async () => {
     const threadId = "thr_resolve_snapshot_profile";
     const { workspaceId, agentId } = await seedRegistryThread(env.REGISTRY_DB, {
       threadId,
@@ -246,11 +242,8 @@ describe("resolveComputeService (real D1 + real DO storage)", () => {
     )
       .bind(workbenchId, workspaceId, NOW, NOW)
       .run();
-    await env.REGISTRY_DB.prepare(
-      `INSERT INTO thread_workbench_snapshots (thread_id, workspace_id, workbench_id, name, setup_script, resource_profile, created_at)
-       VALUES (?, ?, ?, 'Medium bench', '', 'medium', ?)`,
-    )
-      .bind(threadId, workspaceId, workbenchId, NOW)
+    await env.REGISTRY_DB.prepare(`UPDATE thread_index SET workbench_id = ? WHERE id = ?`)
+      .bind(workbenchId, threadId)
       .run();
 
     const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
@@ -297,11 +290,8 @@ describe("resolveComputeService (real D1 + real DO storage)", () => {
     )
       .bind(workbenchId, workspaceId, NOW, NOW)
       .run();
-    await env.REGISTRY_DB.prepare(
-      `INSERT INTO thread_workbench_snapshots (thread_id, workspace_id, workbench_id, name, setup_script, resource_profile, created_at)
-       VALUES (?, ?, ?, 'Bench', '', 'small', ?)`,
-    )
-      .bind(threadId, workspaceId, workbenchId, NOW)
+    await env.REGISTRY_DB.prepare(`UPDATE thread_index SET workbench_id = ? WHERE id = ?`)
+      .bind(workbenchId, threadId)
       .run();
 
     const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
@@ -356,11 +346,8 @@ describe("resolveComputeService (real D1 + real DO storage)", () => {
     )
       .bind(workbenchId, workspaceId, NOW, NOW)
       .run();
-    await env.REGISTRY_DB.prepare(
-      `INSERT INTO thread_workbench_snapshots (thread_id, workspace_id, workbench_id, name, setup_script, resource_profile, created_at)
-       VALUES (?, ?, ?, 'Daytona bench', '', 'small', ?)`,
-    )
-      .bind(threadId, workspaceId, workbenchId, NOW)
+    await env.REGISTRY_DB.prepare(`UPDATE thread_index SET workbench_id = ? WHERE id = ?`)
+      .bind(workbenchId, threadId)
       .run();
     await env.REGISTRY_DB.prepare(
       `INSERT INTO skills (id, workspace_id, agent_id, name, description, body, enabled, network_domains, created_at, updated_at)
@@ -395,7 +382,7 @@ describe("resolveComputeService (real D1 + real DO storage)", () => {
     });
   });
 
-  it("never queries the workbench snapshot when compute is disabled for the workspace", async () => {
+  it("never queries the thread's environment when compute is disabled for the workspace", async () => {
     const threadId = "thr_resolve_disabled_no_snapshot";
     // Deliberately no `workspace_sandbox_settings` row: compute is disabled by
     // absence, the same as a workspace that never turned it on.
@@ -404,10 +391,7 @@ describe("resolveComputeService (real D1 + real DO storage)", () => {
       runtime: "think",
     });
 
-    const snapshotSpy = vi.spyOn(
-      ThreadRepositorySnapshotRepository.prototype,
-      "listWorkbenchSnapshot",
-    );
+    const threadReadSpy = vi.spyOn(ThreadRepository.prototype, "getById");
 
     const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
     await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
@@ -425,27 +409,30 @@ describe("resolveComputeService (real D1 + real DO storage)", () => {
     // test. That is exactly how this flaked in CI: the recorded call was for an
     // app-generated `thr_c6ff892e-…`, while every thread in this file is a
     // deterministic `thr_resolve_*`. The claim is "resolving a
-    // compute-disabled thread does not query ITS snapshot", and this asserts
-    // that claim rather than a global that the test cannot control.
-    expect(snapshotSpy).not.toHaveBeenCalledWith(threadId);
+    // compute-disabled thread does not query ITS environment", and this
+    // asserts that claim rather than a global that the test cannot control.
+    expect(threadReadSpy).not.toHaveBeenCalledWith(threadId);
   });
 
   /**
    * Regression for the defect that defeated the whole feature: `markAcquiring`
    * persists the resolved profile into the DO's `compute_state`, `markAbsent`
    * preserves it, and BOTH readers (`resolveComputeService` here and
-   * `readOrAcquireRuntime` inside the service) prefer that stored value over
-   * the workbench-derived config. So once a thread had ever acquired a sandbox,
-   * the profile frozen at that first acquire won forever — a small->medium
-   * switch re-snapshotted to medium and showed medium in the UI while every
-   * later sandbox still provisioned small, from small's base image.
+   * `readOrAcquireRuntime` inside the service) preferred that stored value over
+   * the config-derived one UNCONDITIONALLY. So once a thread had ever acquired
+   * a sandbox, the profile frozen at that first acquire won forever.
+   *
+   * Configuration is now LIVE, and the explicit "adopt the committed profile"
+   * write that used to correct this went with the switch handshake. So the
+   * stored profile is preferred ONLY while a runtime actually exists to be
+   * consistent with; once it is gone, the live config wins.
    *
    * This drives the real sequence over real D1 + real DO storage: acquire on a
-   * small workbench, move the snapshot to a medium workbench, run the commit's
-   * profile-adoption step, release, then acquire again — and asserts on the
-   * spec the BACKEND actually received, not on any intermediate value.
+   * small environment, retarget the thread to a medium one, release, then
+   * acquire again — and asserts on the spec the BACKEND actually received, not
+   * on any intermediate value.
    */
-  it("acquires with the new workbench's profile and image after a committed switch", async () => {
+  it("acquires with the new environment's profile and image after the thread is retargeted", async () => {
     const threadId = "thr_switch_reacquires_medium";
     const { workspaceId, agentId } = await seedRegistryThread(env.REGISTRY_DB, {
       threadId,
@@ -469,19 +456,13 @@ describe("resolveComputeService (real D1 + real DO storage)", () => {
         .run();
     }
 
-    const snapshotTo = async (workbenchId: string, name: string, profile: string) => {
-      await env.REGISTRY_DB.prepare(`DELETE FROM thread_workbench_snapshots WHERE thread_id = ?`)
-        .bind(threadId)
-        .run();
-      await env.REGISTRY_DB.prepare(
-        `INSERT INTO thread_workbench_snapshots (thread_id, workspace_id, workbench_id, name, setup_script, resource_profile, created_at)
-         VALUES (?, ?, ?, ?, '', ?, ?)`,
-      )
-        .bind(threadId, workspaceId, workbenchId, name, profile, NOW)
+    const assignTo = async (workbenchId: string) => {
+      await env.REGISTRY_DB.prepare(`UPDATE thread_index SET workbench_id = ? WHERE id = ?`)
+        .bind(workbenchId, threadId)
         .run();
     };
 
-    await snapshotTo("wb_switch_small", "Small bench", "small");
+    await assignTo("wb_switch_small");
 
     const backend = new FakeComputeBackend();
     const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
@@ -492,7 +473,7 @@ describe("resolveComputeService (real D1 + real DO storage)", () => {
         buildBackend: async () => backend,
       };
 
-      // 1. First acquire on the small workbench. This is what writes the
+      // 1. First acquire on the small environment. This is what writes the
       //    profile into `compute_state` and arms the defect.
       const first = await resolveComputeService(deps);
       expect(first).not.toBeNull();
@@ -501,16 +482,15 @@ describe("resolveComputeService (real D1 + real DO storage)", () => {
       expect(backend.acquireCalls[0]!.spec.profile).toBe("small");
       expect(backend.acquireCalls[0]!.spec.environmentId).toBe("cloudflare:small");
 
-      // 2. The user switches to the medium workbench; the commit re-snapshots.
-      await snapshotTo("wb_switch_medium", "Medium bench", "medium");
-      // 3. ...and then adopts the committed profile. Without this step the
-      //    stored "small" survives and wins on every future read.
-      await adoptCommittedWorkbenchResourceProfile(deps);
-      // 4. Teardown, exactly as `commitWorkbenchSwitchIfPending` does next.
+      // 2. The user retargets the thread to the medium environment. That is a
+      //    plain column write now — no handshake, no adopt step.
+      await assignTo("wb_switch_medium");
+      // 3. Teardown. The stored "small" survives `markAbsent`, so if the
+      //    readers preferred it unconditionally it would win forever.
       await first!.service.execShutdown({ confirm: true });
 
-      // 5. The NEXT acquire — a fresh resolve, as a later turn would do — must
-      //    provision medium, from medium's snapshot.
+      // 4. The NEXT acquire — a fresh resolve, as a later turn would do — must
+      //    provision medium, from the LIVE environment.
       const second = await resolveComputeService(deps);
       expect(second).not.toBeNull();
       expect(second!.config.resourceProfile).toBe("medium");

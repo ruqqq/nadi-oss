@@ -66,7 +66,6 @@ function makeThread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
     projectName: null,
     workbenchId: "wb_nadi",
     workbenchName: "nadi",
-    workbenchSwitchPending: false,
     resourceProfile: "small",
     automatonId: null,
     automatonName: null,
@@ -169,20 +168,19 @@ describe("ThreadDetailsSheet workbench switch", () => {
     expect(onSwitchWorkbench).not.toHaveBeenCalled();
   });
 
-  it("shows a pending banner mid-switch and disables the picker", () => {
+  it("keeps the picker enabled for an assigned workbench: switching is immediate", () => {
     render(
       <ThreadDetailsSheet
         {...baseProps}
         thread={makeThread({
           workbenchId: "wb_docs",
           workbenchName: "Docs",
-          workbenchSwitchPending: true,
         })}
         onSwitchWorkbench={vi.fn()}
       />,
     );
-    expect(screen.getByText(/switching to docs/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /workbench: docs/i })).toBeDisabled();
+    expect(screen.queryByText(/switching to docs/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /workbench: docs/i })).not.toBeDisabled();
   });
 
   it("does not offer the switch for a read-only thread", () => {

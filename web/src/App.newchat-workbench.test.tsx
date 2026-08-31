@@ -70,7 +70,6 @@ const CREATED_THREAD = {
   projectName: null,
   workbenchId: null,
   workbenchName: null,
-  workbenchSwitchPending: false,
   resourceProfile: "small",
   automatonId: null,
   automatonName: null,

@@ -32,7 +32,7 @@ export async function applyRegistryTestSchema(registryDb: typeof env.REGISTRY_DB
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_skill_resources_skill_path ON agent_skill_resources (skill_id, path)",
     "CREATE TABLE IF NOT EXISTS projects (id text PRIMARY KEY NOT NULL, workspace_id text NOT NULL, name text NOT NULL, description text DEFAULT '' NOT NULL, custom_instructions text DEFAULT '' NOT NULL, default_workbench_id text, archived_at integer, created_at integer NOT NULL, updated_at integer NOT NULL, FOREIGN KEY (workspace_id) REFERENCES workspaces(id))",
     "CREATE INDEX IF NOT EXISTS idx_projects_workspace_archived ON projects (workspace_id, archived_at)",
-    "CREATE TABLE IF NOT EXISTS thread_index (id text PRIMARY KEY NOT NULL, workspace_id text NOT NULL, agent_id text NOT NULL, project_id text, workbench_id text, workbench_switch_pending_at integer, model_provider text, model text, model_input_modalities text, show_reasoning integer, reasoning_effort text, model_supports_reasoning integer, kind text DEFAULT 'regular' NOT NULL, title text NOT NULL, title_set integer DEFAULT false NOT NULL, runtime text DEFAULT 'legacy' NOT NULL, source text NOT NULL, automaton_id text, automaton_run_id text, last_event_id text, last_message_preview text DEFAULT '' NOT NULL, activity_status text DEFAULT 'idle' NOT NULL, current_turn_started_at integer, attention_required_at integer, unread_outcome text, unread_outcome_at integer, outcome_dismissed_at integer, recent_dismissed_at integer, last_seen_at integer, archived_at integer, archive_skipped_updated_at integer, last_context_tokens integer, last_context_window integer, last_compact_after_tokens integer, search_indexed_through integer, search_repair_attempts integer, created_at integer NOT NULL, updated_at integer NOT NULL, FOREIGN KEY (workspace_id) REFERENCES workspaces(id), FOREIGN KEY (agent_id) REFERENCES agents(id))",
+    "CREATE TABLE IF NOT EXISTS thread_index (id text PRIMARY KEY NOT NULL, workspace_id text NOT NULL, agent_id text NOT NULL, project_id text, workbench_id text, model_provider text, model text, model_input_modalities text, show_reasoning integer, reasoning_effort text, model_supports_reasoning integer, kind text DEFAULT 'regular' NOT NULL, title text NOT NULL, title_set integer DEFAULT false NOT NULL, runtime text DEFAULT 'legacy' NOT NULL, source text NOT NULL, automaton_id text, automaton_run_id text, last_event_id text, last_message_preview text DEFAULT '' NOT NULL, activity_status text DEFAULT 'idle' NOT NULL, current_turn_started_at integer, attention_required_at integer, unread_outcome text, unread_outcome_at integer, outcome_dismissed_at integer, recent_dismissed_at integer, last_seen_at integer, archived_at integer, archive_skipped_updated_at integer, last_context_tokens integer, last_context_window integer, last_compact_after_tokens integer, search_indexed_through integer, search_repair_attempts integer, created_at integer NOT NULL, updated_at integer NOT NULL, FOREIGN KEY (workspace_id) REFERENCES workspaces(id), FOREIGN KEY (agent_id) REFERENCES agents(id))",
     "CREATE INDEX IF NOT EXISTS idx_thread_index_workspace_project_updated ON thread_index (workspace_id, project_id, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_thread_index_workspace_attention ON thread_index (workspace_id, attention_required_at)",
     "CREATE INDEX IF NOT EXISTS idx_thread_index_workspace_unread ON thread_index (workspace_id, unread_outcome_at)",
@@ -44,9 +44,6 @@ export async function applyRegistryTestSchema(registryDb: typeof env.REGISTRY_DB
     "CREATE TRIGGER IF NOT EXISTS thread_search_messages_ai AFTER INSERT ON thread_search_messages BEGIN INSERT INTO thread_search_fts(rowid, content) VALUES (new.id, new.content); END",
     "CREATE TRIGGER IF NOT EXISTS thread_search_messages_ad AFTER DELETE ON thread_search_messages BEGIN INSERT INTO thread_search_fts(thread_search_fts, rowid, content) VALUES ('delete', old.id, old.content); END",
     "CREATE TRIGGER IF NOT EXISTS thread_search_messages_au AFTER UPDATE OF content ON thread_search_messages BEGIN INSERT INTO thread_search_fts(thread_search_fts, rowid, content) VALUES ('delete', old.id, old.content); INSERT INTO thread_search_fts(rowid, content) VALUES (new.id, new.content); END",
-    "CREATE TABLE IF NOT EXISTS thread_repository_snapshots (id text PRIMARY KEY NOT NULL, thread_id text NOT NULL, workspace_id text NOT NULL, project_id text, workbench_id text, name text NOT NULL, url text NOT NULL, default_branch text NOT NULL, checkout_path_name text NOT NULL, root_directory text DEFAULT '' NOT NULL, setup_command text DEFAULT '' NOT NULL, package_manager text DEFAULT '' NOT NULL, created_at integer NOT NULL, FOREIGN KEY (thread_id) REFERENCES thread_index(id), FOREIGN KEY (workspace_id) REFERENCES workspaces(id), FOREIGN KEY (project_id) REFERENCES projects(id))",
-    "CREATE INDEX IF NOT EXISTS idx_thread_repository_snapshots_thread ON thread_repository_snapshots (thread_id)",
-    "CREATE INDEX IF NOT EXISTS idx_thread_repository_snapshots_workspace ON thread_repository_snapshots (workspace_id)",
     "CREATE TABLE IF NOT EXISTS github_app_installations (id text PRIMARY KEY NOT NULL, workspace_id text NOT NULL, installation_id integer NOT NULL, account_login text NOT NULL, account_type text NOT NULL, repository_selection text NOT NULL, connected_by_user_id text NOT NULL, status text DEFAULT 'active' NOT NULL, created_at integer NOT NULL, updated_at integer NOT NULL, FOREIGN KEY (workspace_id) REFERENCES workspaces(id))",
     "CREATE INDEX IF NOT EXISTS idx_github_app_installations_workspace ON github_app_installations (workspace_id)",
     "CREATE UNIQUE INDEX IF NOT EXISTS uidx_github_app_installations_ws_installation ON github_app_installations (workspace_id, installation_id)",
@@ -56,7 +53,6 @@ export async function applyRegistryTestSchema(registryDb: typeof env.REGISTRY_DB
     "CREATE TABLE IF NOT EXISTS agent_repositories (id text PRIMARY KEY NOT NULL, agent_id text NOT NULL, source text NOT NULL, name text NOT NULL, url text NOT NULL, github_repo_id integer, source_installation_id text, access_status text DEFAULT 'ok' NOT NULL, checkout_path_name text NOT NULL, default_branch text DEFAULT 'main' NOT NULL, root_directory text DEFAULT '' NOT NULL, setup_command text DEFAULT '' NOT NULL, package_manager text DEFAULT '' NOT NULL, created_at integer NOT NULL, FOREIGN KEY (agent_id) REFERENCES workbenches(id), FOREIGN KEY (source_installation_id) REFERENCES github_app_installations(id))",
     "CREATE INDEX IF NOT EXISTS idx_agent_repositories_agent ON agent_repositories (agent_id)",
     "CREATE TABLE IF NOT EXISTS agent_sandboxes (agent_id text PRIMARY KEY NOT NULL, provider text NOT NULL, sprite_name text, status text NOT NULL, generation text, created_at integer NOT NULL, last_used_at integer, FOREIGN KEY (agent_id) REFERENCES agents(id))",
-    "CREATE TABLE IF NOT EXISTS thread_workbench_snapshots (thread_id text PRIMARY KEY NOT NULL, workspace_id text NOT NULL, workbench_id text, name text NOT NULL, setup_script text DEFAULT '' NOT NULL, resource_profile text, created_at integer NOT NULL, FOREIGN KEY (thread_id) REFERENCES thread_index(id), FOREIGN KEY (workspace_id) REFERENCES workspaces(id))",
     "CREATE TABLE IF NOT EXISTS archived_message (thread_id text NOT NULL, seq integer NOT NULL, payload text NOT NULL, PRIMARY KEY(thread_id, seq))",
     "CREATE TABLE IF NOT EXISTS archived_compaction (thread_id text NOT NULL, seq integer NOT NULL, compaction_id text NOT NULL, from_message_id text NOT NULL, to_message_id text NOT NULL, summary text NOT NULL, PRIMARY KEY(thread_id, seq))",
     "CREATE TABLE IF NOT EXISTS mcp_servers (id text PRIMARY KEY NOT NULL, workspace_id text NOT NULL, name text NOT NULL, url text NOT NULL, enabled integer DEFAULT true NOT NULL, created_at integer NOT NULL, FOREIGN KEY (workspace_id) REFERENCES workspaces(id))",
@@ -368,6 +364,7 @@ export async function seedRegistryThread(
     provider?: string;
     model?: string;
     projectId?: string | null;
+    workbenchId?: string | null;
     createdAt?: number;
     updatedAt?: number;
     archivedAt?: number | null;
@@ -392,13 +389,14 @@ export async function seedRegistryThread(
     .run();
   await registryDb
     .prepare(
-      "INSERT OR IGNORE INTO thread_index (id, workspace_id, agent_id, project_id, title, title_set, runtime, source, automaton_id, automaton_run_id, last_event_id, last_message_preview, archived_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT OR IGNORE INTO thread_index (id, workspace_id, agent_id, project_id, workbench_id, title, title_set, runtime, source, automaton_id, automaton_run_id, last_event_id, last_message_preview, archived_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(
       threadId,
       workspaceId,
       agentId,
       input?.projectId ?? null,
+      input?.workbenchId ?? null,
       input?.title ?? "Test Thread",
       input?.titleSet ? 1 : 0,
       input?.runtime ?? "think",

@@ -39,13 +39,8 @@ export interface ThreadSummary {
   projectName: string | null;
   workbenchId: string | null;
   workbenchName: string | null;
-  /** True while a workbench switch is deferred: `workbenchId` is the intent,
-   * but the sandbox (and `resourceProfile` below) still reflects the OLD
-   * workbench until the agent confirms and the switch commits. */
-  workbenchSwitchPending: boolean;
-  /** The sandbox size actually in effect, read from the frozen
-   * `thread_workbench_snapshots` row — NOT the live workbench, which during a
-   * pending switch already names the NEW workbench. */
+  /** The environment's sandbox size, read LIVE: configuration is not
+   * snapshotted per thread, so editing it takes effect on the next acquire. */
   resourceProfile: ComputeResourceProfile;
   automatonId: string | null;
   automatonName: string | null;
@@ -90,9 +85,8 @@ export function serializeThread(input: {
   projectName?: string | null;
   workbenchId?: string | null;
   workbenchName?: string | null;
-  workbenchSwitchPendingAt?: number | null;
-  /** Raw `thread_workbench_snapshots.resource_profile` — nullable text,
-   * validated and defaulted below. Never the live workbench's profile. */
+  /** Raw `workbenches.resource_profile` — nullable text (NULL when the thread
+   * has no environment), validated and defaulted below. */
   snapshotResourceProfile?: string | null;
   automatonId?: string | null;
   automatonName?: string | null;
@@ -133,7 +127,6 @@ export function serializeThread(input: {
     projectName: input.projectName ?? null,
     workbenchId: input.workbenchId ?? null,
     workbenchName: input.workbenchName ?? null,
-    workbenchSwitchPending: input.workbenchSwitchPendingAt != null,
     resourceProfile:
       input.snapshotResourceProfile != null &&
       isComputeResourceProfile(input.snapshotResourceProfile)

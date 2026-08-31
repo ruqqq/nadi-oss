@@ -13,7 +13,6 @@ function cookie(token: string) {
 
 async function clearRegistry() {
   const db = drizzle(env.REGISTRY_DB, { schema });
-  await db.delete(schema.threadRepositorySnapshots);
   await db.delete(schema.threadIndex);
   await db.delete(schema.workbenches);
   await db.delete(schema.projects);

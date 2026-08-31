@@ -18,8 +18,6 @@ const registryTables = [
   "feedback_threads",
   "attachments",
   "artifacts",
-  "thread_repository_snapshots",
-  "thread_workbench_snapshots",
   "thread_token_usage",
   "agent_repositories",
   "agent_secret_names",

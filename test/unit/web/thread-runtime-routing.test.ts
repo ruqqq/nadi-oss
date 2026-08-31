@@ -28,7 +28,6 @@ function thread(runtime: ThreadSummary["runtime"], threadId = "thr/a b"): Thread
     projectName: null,
     workbenchId: null,
     workbenchName: null,
-    workbenchSwitchPending: false,
     resourceProfile: "small",
     automatonId: null,
     automatonName: null,

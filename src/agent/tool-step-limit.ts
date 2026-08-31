@@ -18,8 +18,8 @@ export const MAX_TOOL_STEPS = 50;
 export const CODING_MAX_TOOL_STEPS = 500;
 
 /**
- * Pick the turn's step budget from whether the thread has a workbench. A
- * workbench declares repos, a setup script and a sandbox size — it is the
+ * Pick the turn's step budget from whether the thread has an environment. An
+ * environment declares repos, a setup script and a sandbox size — it is the
  * configuration-level statement that this thread does repository work. Keyed
  * here rather than on a model declaration so the budget is deterministic and
  * visible, and carries no hidden side effect on a tool documented as being

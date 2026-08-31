@@ -154,7 +154,6 @@ import {
   type ComputeToolDeps,
 } from "./compute-tools";
 import {
-  adoptCommittedResourceProfileOnSandbox,
   openSandboxSession,
   nearSideSandboxSession,
   type SandboxSessionClient,
@@ -200,7 +199,6 @@ import {
 import type { SandboxCallResult } from "../compute/agent-sandbox-do";
 import type { SandboxSweepResolution, SandboxThreadHost } from "../compute/sandbox-thread-host";
 import { buildThreadStartClockReminder, isFirstTurn } from "./thread-start-clock";
-import { buildWorkbenchSwitchMessage } from "./workbench-switch-message";
 import { InjectionBuffer, type InjectionKind } from "./injection-buffer";
 import { assembleStepMessages, routeInjection } from "./injection-router";
 import { buildSteeredUserMessage, steeredMessageText } from "./steering-message";
@@ -228,10 +226,6 @@ import {
 } from "./model-switch";
 import { attachmentsBucket } from "../storage/bucket-binding";
 import { log } from "../log";
-import {
-  commitWorkbenchSwitchIfPending,
-  type WorkbenchSwitchCommitDeps,
-} from "./workbench-switch-commit";
 import { MIN_STEP_WATCH_AGE_MS } from "../compute/thread-service";
 import type { BackendReference, ComputeSpec } from "../compute/backend";
 import { sha256Hex } from "../compute/files/hash";
@@ -889,7 +883,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
       // depends on the other's data — only on workspaceId/agentId. Serially they
       // doubled the cold-wake skills cost. `hasEnabledScriptSkill` is a read, so
       // running it even when compute is disabled is harmless (result discarded).
-      // The thread's frozen workbench profile must be threaded through here the
+      // The thread's environment profile must be threaded through here the
       // same way `resolveComputeService` does it. Resolving against the default
       // `small` on a workspace whose Daytona config sets only a `medium` source
       // yields `missing_source` -> `enabled === false`, which disabled the
@@ -2008,20 +2002,6 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
       if (!this.injectionBuffer().isEmpty()) await this._kickInjectionTurn();
     } catch (error) {
       log.warn("think_thread.injection_flush_failed", {
-        threadId: this.name,
-        error: String(error),
-      });
-    }
-    // Turn-end backstop for a pending workbench switch: if the agent's turn
-    // ended without it calling `confirm_workbench_switch` (ignored the
-    // reminder, or the switch became unblocked only after the turn started),
-    // retry the commit here so the switch does not wait on another user
-    // message. A no-op when nothing is pending or another caller already won
-    // the permit — see `commitWorkbenchSwitchIfPending`.
-    try {
-      await commitWorkbenchSwitchIfPending(this.workbenchSwitchCommitDeps());
-    } catch (error) {
-      log.warn("think_thread.workbench_switch_commit_failed", {
         threadId: this.name,
         error: String(error),
       });
@@ -4713,9 +4693,8 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
 
   /**
    * Is a CHILD SUBAGENT holding this machine? The idle-eviction /
-   * `exec_shutdown` gate, and the same answer `confirm_workbench_switch` asks
-   * for — ONE implementation, reached both in-process (the tool deps, the
-   * workbench-switch backstop) and over RPC (`sandboxHasBlockingWork`).
+   * `exec_shutdown` gate — ONE implementation, reached both in-process (the
+   * tool deps) and over RPC (`sandboxHasBlockingWork`).
    *
    * Lives on the thread DO because the answer is derived from this thread's
    * subagent runs (and their legacy backfill), which the sandbox DO cannot see.
@@ -4865,47 +4844,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
       // surface and the service agree.
       backgroundLongRunningExec: processMonitorEnabled && !attachedRuntime,
       ...(attachedRuntime ? { attachedRuntime } : {}),
-      // Defer idle eviction of the shared machine while any subagent is live.
-      // DERIVED from the ledger (an open `kind: "subagent"` row IS the lease),
-      // so a reaped run releases the hold with nothing to forget. Same body as
-      // `sandboxHasBlockingWork`, which is the RPC face of this — see there for
-      // why it is scoped to SUBAGENT rows and why the backfill is awaited in the
-      // reader itself.
-      hasBlockingWork: () => this.hasBlockingWorkForSandbox(),
       setSandboxDeclaredClean: (clean) => this.setSandboxDeclaredClean(clean),
-      adoptCommittedResourceProfile: () =>
-        adoptCommittedResourceProfileOnSandbox(this.env, this.name),
-    };
-  }
-
-  /**
-   * Deps for the turn-end workbench-switch commit backstop (see
-   * `onChatResponse`). Reuses {@link hasBlockingWorkForSandbox} — the same
-   * child-subagent gate `execShutdown` itself consults — so this never invents
-   * a second way to ask "is it safe to tear this sandbox down".
-   */
-  private workbenchSwitchCommitDeps(): WorkbenchSwitchCommitDeps {
-    return {
-      threadId: this.name,
-      now: () => Date.now(),
-      commitWorkbenchSwitch: (threadId, at) =>
-        new ThreadRepository(registryDb(this.env)).commitWorkbenchSwitch(threadId, at),
-      execShutdown: async () => {
-        const resolved = await this.openSandbox();
-        if (!resolved) return { ok: true, terminated: false, alreadyGone: true };
-        return resolved.service.execShutdown({ confirm: true });
-      },
-      hasBlockingWork: () => this.hasBlockingWorkForSandbox(),
-      // The store write lands in the sandbox DO — the thread has no store to
-      // rewrite. This was the SECOND independent `ThreadComputeStore`
-      // construction the thread used to make.
-      adoptCommittedResourceProfile: () =>
-        adoptCommittedResourceProfileOnSandbox(this.env, this.name),
-      onTeardownFailure: (error) =>
-        log.warn("think_thread.workbench_switch_teardown_failed", {
-          threadId: this.name,
-          error: String(error),
-        }),
     };
   }
 
@@ -6577,26 +6516,6 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
     // Widened deliberately: a sandbox still `acquiring` must defer the switch,
     // or it comes up cloned from the OLD workbench with no marker to fix it.
     return (await resolved?.service.isComputeLiveOrAcquiring()) ?? false;
-  }
-
-  /**
-   * Asks the agent to save its work before a live sandbox is torn down for a
-   * workbench switch. Delivered through the injection buffer, not appended
-   * directly: `deliverInjection` routes it into the running turn's `beforeStep`
-   * drain when a turn is active, or kicks a fresh turn when idle — no branching
-   * needed here. The commit side (the `confirm_workbench_switch` tool and the
-   * turn-end backstop) lands in a later task.
-   */
-  async requestWorkbenchSwitch(workbenchName: string, workbenchId?: string | null): Promise<void> {
-    this.deliverInjection({
-      // Keyed on the TARGET workbench, not just the thread: a per-thread
-      // constant made a second switch while one was pending a silent no-op in
-      // `InjectionBuffer.enqueue`, so the agent was told to save its work for
-      // workbench A while `threadIndex.workbenchId` already said B.
-      dedupeKey: `workbench-switch:${this.name}:${workbenchId ?? "none"}`,
-      kind: "workbench-switch",
-      message: buildWorkbenchSwitchMessage(workbenchName),
-    });
   }
 
   async steer(text: unknown, clientMessageId: unknown): Promise<string[]> {

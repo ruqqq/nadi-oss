@@ -64,6 +64,7 @@ export async function resolveThreadRuntimeConfigForAgent(
       workspaceId: threadIndex.workspaceId,
       agentId: threadIndex.agentId,
       projectId: threadIndex.projectId,
+      workbenchId: threadIndex.workbenchId,
       titleSet: threadIndex.titleSet,
       archivedAt: threadIndex.archivedAt,
       source: threadIndex.source,
@@ -112,6 +113,7 @@ export async function resolveThreadRuntimeConfigForAgent(
       threadId,
       workspaceId: row.workspaceId,
       projectId: row.projectId,
+      workbenchId: row.workbenchId,
     },
   });
   const modelInputModalities = useThreadSnapshot
