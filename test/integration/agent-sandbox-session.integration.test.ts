@@ -336,9 +336,9 @@ describe("AgentSandbox.session", () => {
     it("DERIVES backgroundLongRunningExec from the same flag", async () => {
       // Behaviour, not the flag's value: `backgroundLongRunningExec: false`
       // routes `exec` to the blocking `runCommand` path
-      // (`thread-service.ts:643`), `true` to `startProcess`. The default
-      // `resolveComputeService` would apply is `!attachedRuntime` = true, so
-      // the `false` case is the one that would silently flip.
+      // (`thread-service.ts:643`), `true` to `startProcess`. `false` is the
+      // case that would silently flip if the derivation in `resolveService`
+      // were dropped for the `!attachedRuntime` rule it replaced.
       const threadId = "thr_sess_bglre_off";
       await seedComputeEnabledThread(threadId);
       const provider = new FakeComputeBackend();
@@ -384,9 +384,10 @@ describe("AgentSandbox.session", () => {
 
       const db = drizzle(env.REGISTRY_DB, { schema });
       await db.select().from(schema.threadIndex).all();
-      await stub("thr_sess_lifetime_other").getComputeStateView({
+      await stub("thr_sess_lifetime_other").session({
         threadId: "thr_sess_lifetime_other",
         supportsProcessMonitor: true,
+        runtimeConfig: RUNTIME_CONFIG,
       });
 
       expect((await session.execRun({ command: "echo after" })).ok).toBe(true);
@@ -441,9 +442,11 @@ describe("AgentSandbox.session", () => {
       const holder = stub("thr_sess_lifetime_holder");
 
       await runInDurableObject(holder, async (instance) => {
-        (instance as unknown as { __pending?: unknown }).__pending = stub(
+        (instance as unknown as { __pending?: unknown }).__pending = stub(threadId).session({
           threadId,
-        ).getComputeStateView({ threadId, supportsProcessMonitor: true });
+          supportsProcessMonitor: true,
+          runtimeConfig: RUNTIME_CONFIG,
+        });
       });
 
       const verdict = await runInDurableObject(holder, async (instance) => {

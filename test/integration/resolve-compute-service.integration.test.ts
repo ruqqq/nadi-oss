@@ -63,6 +63,10 @@ function baseDeps(
     cancelEviction: async () => {},
     deliverSystemReminder: async () => {},
     supportsProcessMonitor: false,
+    // Required, no default — see `ComputeServiceHostDeps.backgroundLongRunningExec`.
+    // Matches the production derivation (`supportsProcessMonitor && !attachedRuntime`)
+    // for the `supportsProcessMonitor: false` above.
+    backgroundLongRunningExec: false,
     buildBackend: async () => new FakeComputeBackend(),
     now: () => NOW,
   };

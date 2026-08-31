@@ -76,6 +76,23 @@ function stub(threadId: string) {
   return env.AGENT_SANDBOX.get(env.AGENT_SANDBOX.idFromName(threadId));
 }
 
+/**
+ * The caller's identity, which `session()` requires rather than deriving from
+ * `threadId` — see `AgentSandbox.session`.
+ */
+const RUNTIME_CONFIG = { workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+
+async function openSession(threadId: string, supportsProcessMonitor = true) {
+  const opened = await stub(threadId).session({
+    threadId,
+    supportsProcessMonitor,
+    runtimeConfig: RUNTIME_CONFIG,
+  });
+  if (!opened.ok) throw new Error(`session failed: ${opened.error.code}`);
+  if (!opened.value) throw new Error("expected compute to be enabled");
+  return opened.value;
+}
+
 describe("AgentSandbox durable object", () => {
   beforeAll(async () => {
     await applyRegistryTestSchema(env.REGISTRY_DB);
@@ -85,11 +102,8 @@ describe("AgentSandbox durable object", () => {
     const threadId = "thr_sbx_run";
     await seedComputeEnabledThread(threadId);
 
-    const result = await stub(threadId).runCommand({
-      threadId,
-      command: "echo hello",
-      supportsProcessMonitor: true,
-    });
+    const { session } = await openSession(threadId);
+    const result = await session.execRun({ command: "echo hello" });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.exitCode).toBe(0);
@@ -99,48 +113,6 @@ describe("AgentSandbox durable object", () => {
       const rows = [...state.storage.sql.exec("SELECT id, status FROM compute_state").raw()];
       expect(rows.length).toBe(1);
     });
-  });
-
-  it("reports compute state through the RPC surface", async () => {
-    const threadId = "thr_sbx_state";
-    await seedComputeEnabledThread(threadId);
-
-    await stub(threadId).runCommand({
-      threadId,
-      command: "echo hi",
-      supportsProcessMonitor: true,
-    });
-    const view = await stub(threadId).getComputeStateView({
-      threadId,
-      supportsProcessMonitor: true,
-    });
-    expect(view.ok).toBe(true);
-    if (!view.ok) return;
-    expect(view.value?.status).toBe("active");
-  });
-
-  it("returns null state before anything has run", async () => {
-    const threadId = "thr_sbx_empty";
-    await seedComputeEnabledThread(threadId);
-
-    const view = await stub(threadId).getComputeStateView({
-      threadId,
-      supportsProcessMonitor: true,
-    });
-    expect(view.ok).toBe(true);
-    if (!view.ok) return;
-    expect(view.value).toBeNull();
-  });
-
-  it("ENCODES an error instead of throwing across RPC", async () => {
-    const result = await stub("thr_missing").runCommand({
-      threadId: "thr_missing",
-      command: "echo hello",
-      supportsProcessMonitor: true,
-    });
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(typeof result.error.code).toBe("string");
   });
 
   /**
@@ -158,8 +130,9 @@ describe("AgentSandbox durable object", () => {
    * two outcomes cannot both be produced by a hardcoded value.
    *
    * Reached through `runInDurableObject` on the DO's own private
-   * `resolveService` — a PRODUCTION method (`runCommand` uses it), not a
-   * test-only RPC — which is this repo's existing way into DO internals.
+   * `resolveService` — a PRODUCTION method (`session()` and the alarm both use
+   * it), not a test-only RPC — which is this repo's existing way into DO
+   * internals.
    */
   describe("supportsProcessMonitor reaches the resolved service", () => {
     async function watchError(threadId: string, supportsProcessMonitor: boolean) {
@@ -199,10 +172,12 @@ describe("AgentSandbox durable object", () => {
   /**
    * `backgroundLongRunningExec` is DERIVED in `resolveService`
    * (`supportsProcessMonitor && !attachedRuntime`), mirroring
-   * `think-thread-agent.ts`'s `sandboxHostDeps()`. It must not be left to
-   * `resolveComputeService`'s default, which is `!deps.attachedRuntime` ALONE
-   * (`compute-tools.ts:469`) — that would let a runtime which cannot deliver a
-   * completion reminder background a long-running exec anyway.
+   * `think-thread-agent.ts`'s `sandboxHostDeps()`. `resolveComputeService` now
+   * REQUIRES the field (it used to default to `!deps.attachedRuntime` ALONE,
+   * which would let a runtime that cannot deliver a completion reminder
+   * background a long-running exec anyway), so an omission is a compile error —
+   * but a WRONG stated value is still silent, which is what these two cases
+   * pin.
    *
    * Like `supportsProcessMonitor` above, getting it wrong is SILENT: the exec
    * simply takes a different shape. So the assertion is the BACKEND CALL LOG,

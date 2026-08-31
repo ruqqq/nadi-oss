@@ -30,10 +30,6 @@ export interface SandboxCallError {
     | { kind: "partial"; affectedPaths: string[] };
 }
 
-export function sandboxFailure(code: string, message: string): SandboxCallResult<never> {
-  return { ok: false, error: { code, message } };
-}
-
 export function encodeSandboxError(error: unknown): SandboxCallError {
   if (error instanceof ComputeStaleFileError) {
     return {

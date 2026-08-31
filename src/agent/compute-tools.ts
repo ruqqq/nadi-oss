@@ -163,8 +163,19 @@ export interface ComputeServiceHostDeps {
    * the process finished. `true` on the Think runtime.
    */
   supportsProcessMonitor: boolean;
-  /** Whether exec calls may background commands after the foreground window. */
-  backgroundLongRunningExec?: boolean;
+  /**
+   * Whether exec calls may background commands after the foreground window.
+   *
+   * REQUIRED, and deliberately not defaulted. It used to default to
+   * `!attachedRuntime`, which is NOT the value any caller wants: the real rule
+   * is `supportsProcessMonitor && !attachedRuntime`, because a runtime that
+   * cannot deliver a completion reminder must not background a command whose
+   * finish nobody can report. The permissive default silently turned background
+   * exec back ON for a caller that simply forgot the field, and typecheck said
+   * nothing — it was found by hand. Making it required turns that omission into
+   * a compile error.
+   */
+  backgroundLongRunningExec: boolean;
   /**
    * When set, the resolved service ATTACHES to this backend environment (a
    * subagent sharing its parent's machine) instead of provisioning its own.
@@ -177,8 +188,6 @@ export interface ComputeServiceHostDeps {
   hasBlockingWork?: () => Promise<boolean>;
   /** Clears the "workspace verified clean" bit. Optional — see thread-service.ts. */
   markSandboxDirty?: () => Promise<void>;
-  /** Sets/clears the "workspace verified clean" bit; backs `confirm_work_saved`. */
-  setSandboxDeclaredClean?: (clean: boolean) => Promise<void>;
   /** Read side of the "workspace verified clean" bit; drives idle-release disposition. */
   isSandboxDeclaredClean?: () => Promise<boolean>;
   /** Git-based cleanliness probe; drives idle-release disposition when the bit isn't set. */
@@ -494,7 +503,6 @@ export async function resolveComputeService(hostDeps: ComputeServiceHostDeps): P
     threadId: deps.threadId,
     now,
   });
-  const backgroundLongRunningExec = deps.backgroundLongRunningExec ?? !deps.attachedRuntime;
   const service = new ThreadComputeService({
     backend,
     store,
@@ -511,7 +519,7 @@ export async function resolveComputeService(hostDeps: ComputeServiceHostDeps): P
     now,
     deliverSystemReminder: deps.deliverSystemReminder,
     supportsProcessMonitor: deps.supportsProcessMonitor,
-    backgroundLongRunningExec,
+    backgroundLongRunningExec: deps.backgroundLongRunningExec,
     ...(deps.attachedRuntime ? { attachedRuntime: deps.attachedRuntime } : {}),
     ...(quota ? { quota } : {}),
     ...(deps.hasBlockingWork ? { hasBlockingWork: deps.hasBlockingWork } : {}),
@@ -1173,13 +1181,20 @@ export async function createComputeTools(
   session: SandboxSessionResolution | null,
   toolDeps: ComputeToolDeps,
 ): Promise<ToolSet> {
+  const resolved = session;
+  if (!resolved) return {};
   // Same test-only substitution `resolveComputeService` applies — repeated here
   // because this factory reads `deps.now` itself (the `work_saved` probe's
   // clock) rather than only through the resolved service.
+  //
+  // BELOW the null-session return, deliberately. Applied above it, a test whose
+  // session resolves to `null` would stamp `CONSUMED` from this factory alone —
+  // and the guard exists to make a BYPASSED registry fail loudly, so deleting
+  // `resolveComputeService`'s own `applyComputeHostTestOverrides` call would
+  // then still leave every such test green. A call that returns an empty tool
+  // set consumed nothing; it must not say it did.
   const deps = applyComputeHostTestOverrides(toolDeps);
   const { supportsProcessMonitor, backgroundLongRunningExec, attachedRuntime } = deps;
-  const resolved = session;
-  if (!resolved) return {};
   const execTools = buildComputeToolDefs(
     async () => resolved.service,
     async () => ({ env: deps.env, threadId: deps.threadId, workspaceId: resolved.workspaceId }),

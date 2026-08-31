@@ -14,7 +14,9 @@ const WORK_LEDGER_SCHEMA_VERSION = 5;
  * so the sink the sandbox is handed is an RPC back-call. A synchronous sink
  * cannot cross that boundary, and a sink the sandbox simply does not get is
  * worse than either — every register/terminalize/markDelivered would silently
- * no-op. Use {@link localWorkLedgerSink} for the in-process store.
+ * no-op. In production the sink is ALWAYS that back-call — no in-process store
+ * is ever handed to compute any more; {@link localWorkLedgerSink} survives only
+ * for tests that construct the service directly.
  *
  * Mostly writes — liveness, terminal, delivery — plus one
  * read (`isDelivered`), needed so a terminal writer can ask whether someone
@@ -529,13 +531,6 @@ export class WorkLedgerStore implements SyncWorkLedgerSink {
  * something — the sink contract itself is now async and cannot guard it — and
  * so a test double can be adapted the same way the real store is.
  */
-/**
- * The in-process {@link WorkLedgerSink} over a {@link SyncWorkLedgerSink}: the
- * same six operations, awaited. The store itself stays synchronous — the agent reads
- * and writes it directly on dozens of paths — so the async contract lives only
- * where the compute layer touches it, next to the RPC back-call that shares the
- * contract (`createSandboxThreadHostDeps`).
- */
 export interface SyncWorkLedgerSink {
   register(row: WorkRow): void;
   stampAlive(id: string, at: number): void;
@@ -545,6 +540,18 @@ export interface SyncWorkLedgerSink {
   deleteRow(id: string): void;
 }
 
+/**
+ * The in-process {@link WorkLedgerSink} over a {@link SyncWorkLedgerSink}: the
+ * same six operations, awaited. The store itself stays synchronous — the agent
+ * reads and writes it directly on dozens of paths — so the async contract lives
+ * only where the compute layer touches it, next to the RPC back-call that shares
+ * the contract (`createSandboxThreadHostDeps`).
+ *
+ * TEST-ONLY today. No production caller remains: the compute service runs in
+ * `AgentSandbox` and is always handed the RPC back-call sink, so there is no
+ * in-process store for it to wrap. Kept because unit tests that construct a
+ * `ThreadComputeService` directly need a real ledger behind the async contract.
+ */
 export function localWorkLedgerSink(store: SyncWorkLedgerSink): WorkLedgerSink {
   return {
     register: async (row) => store.register(row),
