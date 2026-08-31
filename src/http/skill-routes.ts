@@ -2,7 +2,7 @@ import type { Env } from "../env";
 import { validateRequestSession } from "../auth/session";
 import { registryDb } from "../db/client";
 import { AgentSkillDuplicateError, AgentSkillRepository } from "../db/repositories/agent-skills";
-import type { AgentSkill } from "../db/schema";
+import type { Skill } from "../db/schema";
 import { resolveAgentScope } from "./agent-scope";
 
 export async function routeSkills(req: Request, env: Env): Promise<Response | null> {
@@ -37,7 +37,7 @@ export async function routeSkills(req: Request, env: Env): Promise<Response | nu
   return null;
 }
 
-function serialize(s: AgentSkill) {
+function serialize(s: Skill) {
   return {
     id: s.id,
     name: s.name,

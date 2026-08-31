@@ -1,7 +1,8 @@
-import { and, asc, desc, eq, isNotNull, isNull } from "drizzle-orm";
+import { and, asc, desc, eq, isNotNull, isNull, notExists, or, type SQL } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import type * as schema from "../schema";
-import { agentSkillResources, agentSkills, type AgentSkill } from "../schema";
+import { agentSkillExclusions, agentSkillResources, skills, type Skill } from "../schema";
+import { alias } from "drizzle-orm/sqlite-core";
 import { assertValidSkillScriptPath } from "../../agent/skills/script-path";
 
 const MAX_SKILL_NAME_LENGTH = 80;
@@ -9,7 +10,7 @@ const VALID_SKILL_NAME = /^[a-z0-9_-]+$/;
 
 export interface CreateAgentSkillInput {
   workspaceId: string;
-  agentId: string;
+  agentId: string | null;
   name: string;
   description: string;
   body: string;
@@ -44,7 +45,7 @@ export function normalizeSkillName(name: string): string {
 export class AgentSkillRepository {
   constructor(private readonly db: DrizzleD1Database<typeof schema>) {}
 
-  async create(input: CreateAgentSkillInput): Promise<AgentSkill> {
+  async create(input: CreateAgentSkillInput): Promise<Skill> {
     const name = normalizeSkillName(input.name);
     await this.assertActiveNameAvailable({
       workspaceId: input.workspaceId,
@@ -66,7 +67,7 @@ export class AgentSkillRepository {
       archivedAt: null,
     };
     try {
-      await this.db.insert(agentSkills).values(row);
+      await this.db.insert(skills).values(row);
     } catch (error) {
       if (isUniqueConstraintError(error)) throw new AgentSkillDuplicateError(name);
       throw error;
@@ -75,53 +76,53 @@ export class AgentSkillRepository {
   }
 
   async listActive(
-    input: { workspaceId: string; agentId: string },
+    input: { workspaceId: string; agentId: string | null },
     opts?: { includeDisabled?: boolean },
-  ): Promise<AgentSkill[]> {
+  ): Promise<Skill[]> {
     const conditions = [
-      eq(agentSkills.workspaceId, input.workspaceId),
-      eq(agentSkills.agentId, input.agentId),
-      isNull(agentSkills.archivedAt),
+      eq(skills.workspaceId, input.workspaceId),
+      scopeAgent(input.agentId),
+      isNull(skills.archivedAt),
     ];
-    if (!opts?.includeDisabled) conditions.push(eq(agentSkills.enabled, true));
+    if (!opts?.includeDisabled) conditions.push(eq(skills.enabled, true));
     return this.db
       .select()
-      .from(agentSkills)
+      .from(skills)
       .where(and(...conditions))
-      .orderBy(asc(agentSkills.name))
+      .orderBy(asc(skills.name))
       .all();
   }
 
-  async listArchived(input: { workspaceId: string; agentId: string }): Promise<AgentSkill[]> {
+  async listArchived(input: { workspaceId: string; agentId: string | null }): Promise<Skill[]> {
     return this.db
       .select()
-      .from(agentSkills)
+      .from(skills)
       .where(
         and(
-          eq(agentSkills.workspaceId, input.workspaceId),
-          eq(agentSkills.agentId, input.agentId),
-          isNotNull(agentSkills.archivedAt),
+          eq(skills.workspaceId, input.workspaceId),
+          scopeAgent(input.agentId),
+          isNotNull(skills.archivedAt),
         ),
       )
-      .orderBy(desc(agentSkills.archivedAt))
+      .orderBy(desc(skills.archivedAt))
       .all();
   }
 
   async setEnabled(input: {
     workspaceId: string;
-    agentId: string;
+    agentId: string | null;
     id: string;
     enabled: boolean;
-  }): Promise<AgentSkill | undefined> {
+  }): Promise<Skill | undefined> {
     await this.db
-      .update(agentSkills)
+      .update(skills)
       .set({ enabled: input.enabled, updatedAt: Date.now() })
       .where(
         and(
-          eq(agentSkills.id, input.id),
-          eq(agentSkills.workspaceId, input.workspaceId),
-          eq(agentSkills.agentId, input.agentId),
-          isNull(agentSkills.archivedAt),
+          eq(skills.id, input.id),
+          eq(skills.workspaceId, input.workspaceId),
+          scopeAgent(input.agentId),
+          isNull(skills.archivedAt),
         ),
       );
     return this.getOwnedById(input);
@@ -129,18 +130,18 @@ export class AgentSkillRepository {
 
   async archiveById(input: {
     workspaceId: string;
-    agentId: string;
+    agentId: string | null;
     id: string;
-  }): Promise<AgentSkill | undefined> {
+  }): Promise<Skill | undefined> {
     await this.db
-      .update(agentSkills)
+      .update(skills)
       .set({ archivedAt: Date.now(), updatedAt: Date.now() })
       .where(
         and(
-          eq(agentSkills.id, input.id),
-          eq(agentSkills.workspaceId, input.workspaceId),
-          eq(agentSkills.agentId, input.agentId),
-          isNull(agentSkills.archivedAt),
+          eq(skills.id, input.id),
+          eq(skills.workspaceId, input.workspaceId),
+          scopeAgent(input.agentId),
+          isNull(skills.archivedAt),
         ),
       );
     return this.getOwnedById(input);
@@ -148,16 +149,16 @@ export class AgentSkillRepository {
 
   async restore(input: {
     workspaceId: string;
-    agentId: string;
+    agentId: string | null;
     id: string;
-  }): Promise<AgentSkill | undefined> {
+  }): Promise<Skill | undefined> {
     const current = await this.getOwnedById(input);
     if (!current) return undefined;
     try {
       await this.db
-        .update(agentSkills)
+        .update(skills)
         .set({ archivedAt: null, updatedAt: Date.now() })
-        .where(eq(agentSkills.id, current.id));
+        .where(eq(skills.id, current.id));
     } catch (error) {
       if (isUniqueConstraintError(error)) throw new AgentSkillDuplicateError(current.name);
       throw error;
@@ -167,17 +168,17 @@ export class AgentSkillRepository {
 
   private async getOwnedById(input: {
     workspaceId: string;
-    agentId: string;
+    agentId: string | null;
     id: string;
-  }): Promise<AgentSkill | undefined> {
+  }): Promise<Skill | undefined> {
     return this.db
       .select()
-      .from(agentSkills)
+      .from(skills)
       .where(
         and(
-          eq(agentSkills.id, input.id),
-          eq(agentSkills.workspaceId, input.workspaceId),
-          eq(agentSkills.agentId, input.agentId),
+          eq(skills.id, input.id),
+          eq(skills.workspaceId, input.workspaceId),
+          scopeAgent(input.agentId),
         ),
       )
       .get();
@@ -185,19 +186,19 @@ export class AgentSkillRepository {
 
   async getActiveByName(input: {
     workspaceId: string;
-    agentId: string;
+    agentId: string | null;
     name: string;
-  }): Promise<AgentSkill | undefined> {
+  }): Promise<Skill | undefined> {
     const name = normalizeSkillName(input.name);
     return this.db
       .select()
-      .from(agentSkills)
+      .from(skills)
       .where(
         and(
-          eq(agentSkills.workspaceId, input.workspaceId),
-          eq(agentSkills.agentId, input.agentId),
-          eq(agentSkills.name, name),
-          isNull(agentSkills.archivedAt),
+          eq(skills.workspaceId, input.workspaceId),
+          scopeAgent(input.agentId),
+          eq(skills.name, name),
+          isNull(skills.archivedAt),
         ),
       )
       .get();
@@ -205,12 +206,12 @@ export class AgentSkillRepository {
 
   async edit(input: {
     workspaceId: string;
-    agentId: string;
+    agentId: string | null;
     name: string;
     newName?: string;
     description?: string;
     body?: string;
-  }): Promise<AgentSkill | undefined> {
+  }): Promise<Skill | undefined> {
     const name = normalizeSkillName(input.name);
     const current = await this.getActiveByName({ ...input, name });
     if (!current) return undefined;
@@ -231,27 +232,31 @@ export class AgentSkillRepository {
       updatedAt: Date.now(),
     };
     try {
-      await this.db.update(agentSkills).set(patch).where(eq(agentSkills.id, current.id));
+      await this.db.update(skills).set(patch).where(eq(skills.id, current.id));
     } catch (error) {
       if (isUniqueConstraintError(error)) throw new AgentSkillDuplicateError(newName ?? name);
       throw error;
     }
-    return this.db.select().from(agentSkills).where(eq(agentSkills.id, current.id)).get();
+    return this.db.select().from(skills).where(eq(skills.id, current.id)).get();
   }
 
-  async archive(input: { workspaceId: string; agentId: string; name: string }): Promise<boolean> {
+  async archive(input: {
+    workspaceId: string;
+    agentId: string | null;
+    name: string;
+  }): Promise<boolean> {
     const current = await this.getActiveByName(input);
     if (!current) return false;
     await this.db
-      .update(agentSkills)
+      .update(skills)
       .set({ archivedAt: Date.now(), updatedAt: Date.now() })
-      .where(eq(agentSkills.id, current.id));
+      .where(eq(skills.id, current.id));
     return true;
   }
 
   private async assertActiveNameAvailable(input: {
     workspaceId: string;
-    agentId: string;
+    agentId: string | null;
     name: string;
   }) {
     const existing = await this.getActiveByName(input);
@@ -260,7 +265,7 @@ export class AgentSkillRepository {
 
   async setScript(input: {
     workspaceId: string;
-    agentId: string;
+    agentId: string | null;
     name: string;
     path: string;
     source: string;
@@ -288,12 +293,12 @@ export class AgentSkillRepository {
       createdAt: now,
       updatedAt: now,
     });
-    await this.db.update(agentSkills).set({ updatedAt: now }).where(eq(agentSkills.id, skill.id));
+    await this.db.update(skills).set({ updatedAt: now }).where(eq(skills.id, skill.id));
   }
 
   async setNetworkDomains(input: {
     workspaceId: string;
-    agentId: string;
+    agentId: string | null;
     name: string;
     domains: string[];
   }): Promise<void> {
@@ -301,12 +306,12 @@ export class AgentSkillRepository {
     if (!skill) throw new Error(`skill not found: ${normalizeSkillName(input.name)}`);
     const deduped = [...new Set(input.domains.map((d) => d.trim()).filter(Boolean))];
     await this.db
-      .update(agentSkills)
+      .update(skills)
       .set({
         networkDomains: deduped.length ? JSON.stringify(deduped) : null,
         updatedAt: Date.now(),
       })
-      .where(eq(agentSkills.id, skill.id));
+      .where(eq(skills.id, skill.id));
   }
 
   async listResourceDescriptors(skillId: string): Promise<
@@ -357,11 +362,95 @@ export class AgentSkillRepository {
     };
   }
 
+  /**
+   * The skills an agent actually runs with, resolved at turn time:
+   *
+   *   1. library skills (`agent_id IS NULL`, unarchived, enabled) MINUS this
+   *      agent's exclusions,
+   *   2. plus this agent's own skills,
+   *   3. and on a name clash the agent's own WINS — the library one is not
+   *      loaded at all (specific beats general; no error, no ambiguity).
+   *
+   * One round-trip: this runs on the thread DO's cold-wake path, where each D1
+   * query costs ~220ms. The shadowing rule is a NOT EXISTS rather than a
+   * post-filter in JS so `hasEnabledScriptSkill` can reuse the same predicate
+   * and stay a single query too.
+   *
+   * A shadowing agent skill hides the library one whether or not it is itself
+   * enabled: an agent that has defined its own `deploy` has taken ownership of
+   * that name, and a disabled one means "off for this agent", not "fall back to
+   * the library's".
+   */
+  async listEffective(scope: { workspaceId: string; agentId: string }): Promise<Skill[]> {
+    const rows = await this.db
+      .select()
+      .from(skills)
+      .leftJoin(exclusion, exclusionJoin(scope.agentId))
+      .where(and(effectiveCondition(this.db, scope), eq(skills.enabled, true)))
+      .orderBy(asc(skills.name))
+      .all();
+    return rows.map((row) => row.skills);
+  }
+
+  /** The one skill this agent resolves `name` to, own-before-library. */
+  async getEffectiveByName(input: {
+    workspaceId: string;
+    agentId: string;
+    name: string;
+  }): Promise<Skill | undefined> {
+    const name = normalizeSkillName(input.name);
+    const rows = await this.db
+      .select()
+      .from(skills)
+      .leftJoin(exclusion, exclusionJoin(input.agentId))
+      .where(and(effectiveCondition(this.db, input), eq(skills.name, name)))
+      .all();
+    // Shadowing already drops the library row when the agent owns the name;
+    // preferring the agent-owned row here keeps that true even if it did not.
+    return (rows.find((row) => row.skills.agentId !== null) ?? rows[0])?.skills;
+  }
+
+  /** Opt this agent OUT of one workspace-library skill. */
+  async excludeLibrarySkill(input: { agentId: string; skillId: string }): Promise<void> {
+    await this.db
+      .insert(agentSkillExclusions)
+      .values({ agentId: input.agentId, skillId: input.skillId, createdAt: Date.now() })
+      .onConflictDoNothing();
+  }
+
+  /** Undo an exclusion, putting the library skill back on this agent. */
+  async includeLibrarySkill(input: { agentId: string; skillId: string }): Promise<void> {
+    await this.db
+      .delete(agentSkillExclusions)
+      .where(
+        and(
+          eq(agentSkillExclusions.agentId, input.agentId),
+          eq(agentSkillExclusions.skillId, input.skillId),
+        ),
+      );
+  }
+
+  async listExcludedSkillIds(agentId: string): Promise<string[]> {
+    const rows = await this.db
+      .select({ skillId: agentSkillExclusions.skillId })
+      .from(agentSkillExclusions)
+      .where(eq(agentSkillExclusions.agentId, agentId))
+      .all();
+    return rows.map((row) => row.skillId);
+  }
+
+  /**
+   * Egress hosts the sandbox allowlist must open for this agent.
+   *
+   * Resolved over the EFFECTIVE set, not the agent's own rows: a library
+   * skill's hosts must open for agents that actually have it, and must stay
+   * shut for an agent that excluded it — otherwise the opt-out is cosmetic.
+   */
   async listEnabledSkillDomains(scope: {
     workspaceId: string;
     agentId: string;
   }): Promise<string[]> {
-    const rows = await this.listActive(scope); // enabled + non-archived by default
+    const rows = await this.listEffective(scope); // enabled + non-archived + exclusions applied
     const domains = new Set<string>();
     for (const row of rows) {
       if (!row.networkDomains) continue;
@@ -382,19 +471,20 @@ export class AgentSkillRepository {
    * costs ~220ms. It used to call `listActive()` — re-running the exact SELECT
    * the skill source already issues — and then fan out a second query over the
    * returned ids: three sequential waves to answer one boolean. The join below
-   * keeps the same filters (scope, not archived, enabled, kind=script).
+   * keeps the same filters (EFFECTIVE scope, not archived, enabled,
+   * kind=script) — effective, so an excluded or shadowed library script does
+   * not open the gate for an agent that cannot run it.
    */
   async hasEnabledScriptSkill(scope: { workspaceId: string; agentId: string }): Promise<boolean> {
     const rows = await this.db
       .select({ skillId: agentSkillResources.skillId })
       .from(agentSkillResources)
-      .innerJoin(agentSkills, eq(agentSkillResources.skillId, agentSkills.id))
+      .innerJoin(skills, eq(agentSkillResources.skillId, skills.id))
+      .leftJoin(exclusion, exclusionJoin(scope.agentId))
       .where(
         and(
-          eq(agentSkills.workspaceId, scope.workspaceId),
-          eq(agentSkills.agentId, scope.agentId),
-          isNull(agentSkills.archivedAt),
-          eq(agentSkills.enabled, true),
+          effectiveCondition(this.db, scope),
+          eq(skills.enabled, true),
           eq(agentSkillResources.kind, "script"),
         ),
       )
@@ -402,6 +492,52 @@ export class AgentSkillRepository {
       .all();
     return rows.length > 0;
   }
+}
+
+/** `agent_id = ?` for an agent scope, `agent_id IS NULL` for the library. */
+function scopeAgent(agentId: string | null): SQL {
+  return agentId === null ? isNull(skills.agentId) : eq(skills.agentId, agentId);
+}
+
+/** This agent's exclusion row for the skill under consideration, or none. */
+const exclusion = alias(agentSkillExclusions, "agent_skill_exclusion");
+/** The agent's own skill that would shadow the library row by name. */
+const shadowing = alias(skills, "shadowing_skill");
+
+function exclusionJoin(agentId: string) {
+  return and(eq(exclusion.skillId, skills.id), eq(exclusion.agentId, agentId)) as SQL;
+}
+
+function effectiveCondition(
+  db: DrizzleD1Database<typeof schema>,
+  scope: { workspaceId: string; agentId: string },
+): SQL {
+  return and(
+    eq(skills.workspaceId, scope.workspaceId),
+    isNull(skills.archivedAt),
+    or(
+      // The agent's own.
+      eq(skills.agentId, scope.agentId),
+      // A library skill it has neither excluded nor shadowed.
+      and(
+        isNull(skills.agentId),
+        isNull(exclusion.agentId),
+        notExists(
+          db
+            .select({ shadowed: shadowing.id })
+            .from(shadowing)
+            .where(
+              and(
+                eq(shadowing.workspaceId, skills.workspaceId),
+                eq(shadowing.agentId, scope.agentId),
+                eq(shadowing.name, skills.name),
+                isNull(shadowing.archivedAt),
+              ),
+            ),
+        ),
+      ),
+    ),
+  ) as SQL;
 }
 
 function isUniqueConstraintError(error: unknown): boolean {

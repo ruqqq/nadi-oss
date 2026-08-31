@@ -27,7 +27,7 @@ export function createD1SkillSource(input: {
   async function fetchList(): Promise<SkillDescriptor[]> {
     try {
       const { scope, repo } = await resolveRepo();
-      const rows = await repo.listActive(scope);
+      const rows = await repo.listEffective(scope);
       return rows.map((row) => ({
         name: row.name,
         description: row.description,
@@ -67,7 +67,7 @@ export function createD1SkillSource(input: {
     async load(name: string): Promise<SkillContent | null> {
       try {
         const { scope, repo } = await resolveRepo();
-        const row = await repo.getActiveByName({ ...scope, name });
+        const row = await repo.getEffectiveByName({ ...scope, name });
         // Enforce the runtime invariant at the source boundary: a skill is
         // available to the model only when enabled AND not archived.
         // (getActiveByName is intentionally not enabled-filtered — chat CRUD
@@ -99,7 +99,7 @@ export function createD1SkillSource(input: {
     async readResource(name: string, path: string): Promise<SkillResource | null> {
       try {
         const { scope, repo } = await resolveRepo();
-        const row = await repo.getActiveByName({ ...scope, name });
+        const row = await repo.getEffectiveByName({ ...scope, name });
         // Same enabled+active gate as load(): disabled/archived skills are invisible.
         if (!row || !row.enabled) return null;
         const res = await repo.getResource(row.id, path);

@@ -15,7 +15,7 @@ describe("createD1SkillSource resources", () => {
   beforeEach(async () => {
     const db = drizzle(env.REGISTRY_DB, { schema });
     await db.delete(schema.agentSkillResources);
-    await db.delete(schema.agentSkills);
+    await db.delete(schema.skills);
     await db.delete(schema.threadIndex);
     await seedRegistryThread(env.REGISTRY_DB, { ...scope, threadId: "thread-a" });
     const repo = new AgentSkillRepository(db);

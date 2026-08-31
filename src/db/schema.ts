@@ -282,16 +282,22 @@ export const agentMemories = sqliteTable(
   }),
 );
 
-export const agentSkills = sqliteTable(
-  "agent_skills",
+/**
+ * Skills live at two scopes, distinguished by `agent_id`:
+ *   - NULL      -> the workspace library: live on every agent by default,
+ *                  each of which may opt out via `agent_skill_exclusions`.
+ *   - non-NULL  -> private to that agent, and it SHADOWS a library skill of
+ *                  the same name.
+ */
+export const skills = sqliteTable(
+  "skills",
   {
     id: text("id").primaryKey(),
     workspaceId: text("workspace_id")
       .notNull()
       .references(() => workspaces.id),
-    agentId: text("agent_id")
-      .notNull()
-      .references(() => agents.id),
+    // Nullable: NULL means the workspace library, not "missing".
+    agentId: text("agent_id").references(() => agents.id),
     name: text("name").notNull(),
     description: text("description").notNull(),
     body: text("body").notNull(),
@@ -302,11 +308,39 @@ export const agentSkills = sqliteTable(
     archivedAt: integer("archived_at"),
   },
   (table) => ({
-    byAgent: index("idx_agent_skills_agent").on(table.workspaceId, table.agentId, table.archivedAt),
-    byName: index("idx_agent_skills_name").on(table.workspaceId, table.agentId, table.name),
-    activeNameUnique: uniqueIndex("idx_agent_skills_active_name_unique")
+    byAgent: index("idx_skills_agent").on(table.workspaceId, table.agentId, table.archivedAt),
+    byName: index("idx_skills_name").on(table.workspaceId, table.agentId, table.name),
+    // TWO partial indexes, not one. SQLite treats NULLs as DISTINCT in a unique
+    // index, so a single (workspace_id, agent_id, name) index would silently
+    // permit two library skills both named `deploy` — no error, and resolution
+    // would then pick one arbitrarily.
+    libraryNameUnique: uniqueIndex("idx_skills_library_name_unique")
+      .on(table.workspaceId, table.name)
+      .where(sql`${table.agentId} IS NULL AND ${table.archivedAt} IS NULL`),
+    agentNameUnique: uniqueIndex("idx_skills_agent_name_unique")
       .on(table.workspaceId, table.agentId, table.name)
-      .where(sql`${table.archivedAt} IS NULL`),
+      .where(sql`${table.agentId} IS NOT NULL AND ${table.archivedAt} IS NULL`),
+  }),
+);
+
+/**
+ * An agent's opt-OUT of one workspace-library skill. Exclusions rather than
+ * enablements because the default is on: a skill added to the library reaches
+ * every agent with no rows written anywhere.
+ */
+export const agentSkillExclusions = sqliteTable(
+  "agent_skill_exclusions",
+  {
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agents.id),
+    skillId: text("skill_id")
+      .notNull()
+      .references(() => skills.id, { onDelete: "cascade" }),
+    createdAt: integer("created_at").notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.agentId, table.skillId] }),
   }),
 );
 
@@ -316,7 +350,7 @@ export const agentSkillResources = sqliteTable(
     id: text("id").primaryKey(),
     skillId: text("skill_id")
       .notNull()
-      .references(() => agentSkills.id, { onDelete: "cascade" }),
+      .references(() => skills.id, { onDelete: "cascade" }),
     path: text("path").notNull(),
     kind: text("kind", { enum: ["script", "reference", "asset", "file"] }).notNull(),
     encoding: text("encoding", { enum: ["text", "base64"] }).notNull(),
@@ -1161,7 +1195,8 @@ export type WorkspaceMember = typeof workspaceMembers.$inferSelect;
 export type AgentConfig = typeof agents.$inferSelect;
 export type WorkspaceSandboxSettingsRow = typeof workspaceSandboxSettings.$inferSelect;
 export type AgentMemory = typeof agentMemories.$inferSelect;
-export type AgentSkill = typeof agentSkills.$inferSelect;
+export type Skill = typeof skills.$inferSelect;
+export type AgentSkillExclusion = typeof agentSkillExclusions.$inferSelect;
 export type AgentSkillResource = typeof agentSkillResources.$inferSelect;
 export type Project = typeof projects.$inferSelect;
 export type ThreadRepositorySnapshot = typeof threadRepositorySnapshots.$inferSelect;

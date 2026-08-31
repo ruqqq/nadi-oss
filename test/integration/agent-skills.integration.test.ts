@@ -8,7 +8,7 @@ import * as schema from "../../src/db/schema";
 import { applyRegistryTestSchema, seedRegistryThread } from "./helpers/registry";
 
 async function clearSkills() {
-  await drizzle(env.REGISTRY_DB, { schema }).delete(schema.agentSkills);
+  await drizzle(env.REGISTRY_DB, { schema }).delete(schema.skills);
 }
 
 describe("AgentSkillRepository", () => {

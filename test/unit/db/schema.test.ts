@@ -4,7 +4,8 @@ import {
   agents,
   agentMemories,
   agentRepositories,
-  agentSkills,
+  agentSkillExclusions,
+  skills,
   automata,
   automatonRuns,
   pushSubscriptions,
@@ -25,7 +26,7 @@ describe("registry schema", () => {
     expect(workspaceMembers).toBeDefined();
     expect(agents).toBeDefined();
     expect(agentMemories).toBeDefined();
-    expect(agentSkills).toBeDefined();
+    expect(skills).toBeDefined();
     expect(threadIndex).toBeDefined();
     expect(automata).toBeDefined();
     expect(automatonRuns).toBeDefined();
@@ -113,8 +114,8 @@ describe("registry schema", () => {
     expect(columns).not.toContain("routine_id");
   });
 
-  it("defines agent-scoped skills indexes", () => {
-    const config = getTableConfig(agentSkills);
+  it("defines two-scope skills indexes", () => {
+    const config = getTableConfig(skills);
 
     expect(config.columns.map((column) => column.name)).toEqual([
       "id",
@@ -129,10 +130,51 @@ describe("registry schema", () => {
       "updated_at",
       "archived_at",
     ]);
-    expect(config.indexes.map((index) => index.config.name).sort()).toEqual([
-      "idx_agent_skills_active_name_unique",
-      "idx_agent_skills_agent",
-      "idx_agent_skills_name",
+    expect(config.indexes.map((index) => index.config.name).sort()).toEqual(
+      [
+        "idx_skills_agent_name_unique",
+        "idx_skills_agent",
+        "idx_skills_library_name_unique",
+        "idx_skills_name",
+      ].sort(),
+    );
+
+    // agent_id is nullable: NULL is the workspace library, not a missing value.
+    const agentId = config.columns.find((column) => column.name === "agent_id");
+    expect(agentId?.notNull).toBe(false);
+
+    // The trap: SQLite treats NULLs as DISTINCT in a unique index, so ONE
+    // (workspace_id, agent_id, name) index would silently allow two library
+    // skills named the same. Both halves must exist, both must be unique, and
+    // both must be partial.
+    const byName = new Map(config.indexes.map((index) => [index.config.name, index.config]));
+    const library = byName.get("idx_skills_library_name_unique");
+    expect(library?.unique).toBe(true);
+    expect(library?.columns.map((column) => (column as { name: string }).name)).toEqual([
+      "workspace_id",
+      "name",
+    ]);
+    expect(library?.where).toBeDefined();
+    const agentScoped = byName.get("idx_skills_agent_name_unique");
+    expect(agentScoped?.unique).toBe(true);
+    expect(agentScoped?.columns.map((column) => (column as { name: string }).name)).toEqual([
+      "workspace_id",
+      "agent_id",
+      "name",
+    ]);
+    expect(agentScoped?.where).toBeDefined();
+  });
+
+  it("keys a library opt-out by the (agent, skill) pair", () => {
+    const config = getTableConfig(agentSkillExclusions);
+    expect(config.columns.map((column) => column.name)).toEqual([
+      "agent_id",
+      "skill_id",
+      "created_at",
+    ]);
+    expect(config.primaryKeys[0]?.columns.map((column) => column.name)).toEqual([
+      "agent_id",
+      "skill_id",
     ]);
   });
 });

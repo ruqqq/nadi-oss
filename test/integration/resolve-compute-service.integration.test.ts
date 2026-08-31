@@ -363,7 +363,7 @@ describe("resolveComputeService (real D1 + real DO storage)", () => {
       .bind(threadId, workspaceId, workbenchId, NOW)
       .run();
     await env.REGISTRY_DB.prepare(
-      `INSERT INTO agent_skills (id, workspace_id, agent_id, name, description, body, enabled, network_domains, created_at, updated_at)
+      `INSERT INTO skills (id, workspace_id, agent_id, name, description, body, enabled, network_domains, created_at, updated_at)
        VALUES ('skill_daytona_allowlist', ?, ?, 'Network skill', '', '', 1, '["api.skill.test"]', ?, ?)`,
     )
       .bind(workspaceId, agentId, NOW, NOW)

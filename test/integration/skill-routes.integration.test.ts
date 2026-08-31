@@ -56,7 +56,7 @@ describe("skill routes", () => {
   });
   beforeEach(async () => {
     const db = drizzle(env.REGISTRY_DB, { schema });
-    await db.delete(schema.agentSkills);
+    await db.delete(schema.skills);
     await db.delete(schema.workspaceMembers);
     await db.delete(schema.agents);
     await db.delete(schema.workspaces);

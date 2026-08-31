@@ -19,11 +19,16 @@ export async function applyRegistryTestSchema(registryDb: typeof env.REGISTRY_DB
     "CREATE INDEX IF NOT EXISTS idx_agent_memories_agent ON agent_memories (workspace_id, agent_id, archived_at, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_agent_memories_source_thread ON agent_memories (source_thread_id)",
     "CREATE TABLE IF NOT EXISTS workspace_privacy_settings (workspace_id text PRIMARY KEY NOT NULL, telemetry_enabled integer DEFAULT false NOT NULL, created_at integer NOT NULL, updated_at integer NOT NULL, FOREIGN KEY (workspace_id) REFERENCES workspaces(id))",
-    "CREATE TABLE IF NOT EXISTS agent_skills (id text PRIMARY KEY NOT NULL, workspace_id text NOT NULL, agent_id text NOT NULL, name text NOT NULL, description text NOT NULL, body text NOT NULL, created_at integer NOT NULL, updated_at integer NOT NULL, archived_at integer, FOREIGN KEY (workspace_id) REFERENCES workspaces(id), FOREIGN KEY (agent_id) REFERENCES agents(id))",
-    "CREATE INDEX IF NOT EXISTS idx_agent_skills_agent ON agent_skills (workspace_id, agent_id, archived_at)",
-    "CREATE INDEX IF NOT EXISTS idx_agent_skills_name ON agent_skills (workspace_id, agent_id, name)",
-    "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_skills_active_name_unique ON agent_skills (workspace_id, agent_id, name) WHERE archived_at IS NULL",
-    "CREATE TABLE IF NOT EXISTS agent_skill_resources (id text PRIMARY KEY NOT NULL, skill_id text NOT NULL, path text NOT NULL, kind text NOT NULL, encoding text NOT NULL, mime_type text, content text NOT NULL, created_at integer NOT NULL, updated_at integer NOT NULL, FOREIGN KEY (skill_id) REFERENCES agent_skills(id) ON DELETE CASCADE)",
+    "CREATE TABLE IF NOT EXISTS skills (id text PRIMARY KEY NOT NULL, workspace_id text NOT NULL, agent_id text, name text NOT NULL, description text NOT NULL, body text NOT NULL, network_domains text, enabled integer DEFAULT true NOT NULL, created_at integer NOT NULL, updated_at integer NOT NULL, archived_at integer, FOREIGN KEY (workspace_id) REFERENCES workspaces(id), FOREIGN KEY (agent_id) REFERENCES agents(id))",
+    "CREATE INDEX IF NOT EXISTS idx_skills_agent ON skills (workspace_id, agent_id, archived_at)",
+    "CREATE INDEX IF NOT EXISTS idx_skills_name ON skills (workspace_id, agent_id, name)",
+    // TWO partial indexes: SQLite treats NULLs as DISTINCT, so one
+    // (workspace_id, agent_id, name) index would silently permit two library
+    // skills with the same name.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_skills_library_name_unique ON skills (workspace_id, name) WHERE agent_id IS NULL AND archived_at IS NULL",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_skills_agent_name_unique ON skills (workspace_id, agent_id, name) WHERE agent_id IS NOT NULL AND archived_at IS NULL",
+    "CREATE TABLE IF NOT EXISTS agent_skill_exclusions (agent_id text NOT NULL, skill_id text NOT NULL, created_at integer NOT NULL, PRIMARY KEY (agent_id, skill_id), FOREIGN KEY (agent_id) REFERENCES agents(id), FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE)",
+    "CREATE TABLE IF NOT EXISTS agent_skill_resources (id text PRIMARY KEY NOT NULL, skill_id text NOT NULL, path text NOT NULL, kind text NOT NULL, encoding text NOT NULL, mime_type text, content text NOT NULL, created_at integer NOT NULL, updated_at integer NOT NULL, FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_skill_resources_skill_path ON agent_skill_resources (skill_id, path)",
     "CREATE TABLE IF NOT EXISTS projects (id text PRIMARY KEY NOT NULL, workspace_id text NOT NULL, name text NOT NULL, description text DEFAULT '' NOT NULL, custom_instructions text DEFAULT '' NOT NULL, default_workbench_id text, archived_at integer, created_at integer NOT NULL, updated_at integer NOT NULL, FOREIGN KEY (workspace_id) REFERENCES workspaces(id))",
     "CREATE INDEX IF NOT EXISTS idx_projects_workspace_archived ON projects (workspace_id, archived_at)",
@@ -248,17 +253,9 @@ export async function applyRegistryTestSchema(registryDb: typeof env.REGISTRY_DB
       .run();
   }
 
-  const agentSkillColumns = await registryDb
-    .prepare("PRAGMA table_info(agent_skills)")
-    .all<{ name: string }>();
-  if (!agentSkillColumns.results.some((column) => column.name === "enabled")) {
-    await registryDb
-      .prepare("ALTER TABLE agent_skills ADD COLUMN enabled integer DEFAULT 1 NOT NULL")
-      .run();
-  }
-  if (!agentSkillColumns.results.some((column) => column.name === "network_domains")) {
-    await registryDb.prepare("ALTER TABLE agent_skills ADD COLUMN network_domains text").run();
-  }
+  // `skills` needs no column self-heal: it is created here in full, and no
+  // pre-existing test database can carry an older shape of a table with this
+  // name (it replaced `agent_skills` wholesale).
 
   const threadColumns = await registryDb
     .prepare("PRAGMA table_info(thread_index)")
