@@ -3,11 +3,11 @@ import type { BatchItem } from "drizzle-orm/batch";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import type * as schema from "../schema";
 import {
-  workbenchRepositories,
-  workbenchSecretNames,
+  agentRepositories,
+  agentSecretNames,
   workbenches,
   type Workbench,
-  type WorkbenchRepositoryRow,
+  type AgentRepositoryRow,
 } from "../schema";
 import type { ProjectStatus } from "./projects";
 
@@ -111,16 +111,14 @@ export class WorkbenchRepository {
     createdAt: number,
   ): Promise<void> {
     await this.assertActiveWorkbenchInWorkspace(workbenchId, workspaceId);
-    const del = this.db
-      .delete(workbenchRepositories)
-      .where(eq(workbenchRepositories.workbenchId, workbenchId));
+    const del = this.db.delete(agentRepositories).where(eq(agentRepositories.agentId, workbenchId));
     const statements: [BatchItem<"sqlite">, ...BatchItem<"sqlite">[]] = [del];
     if (entries.length > 0) {
       statements.push(
-        this.db.insert(workbenchRepositories).values(
+        this.db.insert(agentRepositories).values(
           entries.map((entry) => ({
             id: `wbr_${crypto.randomUUID()}`,
-            workbenchId,
+            agentId: workbenchId,
             source: entry.source,
             name: entry.name,
             url: entry.url,
@@ -139,42 +137,40 @@ export class WorkbenchRepository {
     await this.db.batch(statements);
   }
 
-  async listRepositories(workbenchId: string): Promise<WorkbenchRepositoryRow[]> {
+  async listRepositories(workbenchId: string): Promise<AgentRepositoryRow[]> {
     return this.db
       .select()
-      .from(workbenchRepositories)
-      .where(eq(workbenchRepositories.workbenchId, workbenchId))
-      .orderBy(asc(workbenchRepositories.id))
+      .from(agentRepositories)
+      .where(eq(agentRepositories.agentId, workbenchId))
+      .orderBy(asc(agentRepositories.id))
       .all();
   }
 
   /** Strongly-consistent secret names for a workbench, sorted by name. */
   async listSecretNames(workbenchId: string): Promise<string[]> {
     const rows = await this.db
-      .select({ name: workbenchSecretNames.name })
-      .from(workbenchSecretNames)
-      .where(eq(workbenchSecretNames.workbenchId, workbenchId))
-      .orderBy(asc(workbenchSecretNames.name))
+      .select({ name: agentSecretNames.name })
+      .from(agentSecretNames)
+      .where(eq(agentSecretNames.agentId, workbenchId))
+      .orderBy(asc(agentSecretNames.name))
       .all();
     return rows.map((row) => row.name);
   }
 
   async putSecretName(workbenchId: string, name: string, updatedAt: number): Promise<void> {
     await this.db
-      .insert(workbenchSecretNames)
-      .values({ workbenchId, name, updatedAt })
+      .insert(agentSecretNames)
+      .values({ agentId: workbenchId, name, updatedAt })
       .onConflictDoUpdate({
-        target: [workbenchSecretNames.workbenchId, workbenchSecretNames.name],
+        target: [agentSecretNames.agentId, agentSecretNames.name],
         set: { updatedAt },
       });
   }
 
   async deleteSecretName(workbenchId: string, name: string): Promise<void> {
     await this.db
-      .delete(workbenchSecretNames)
-      .where(
-        and(eq(workbenchSecretNames.workbenchId, workbenchId), eq(workbenchSecretNames.name, name)),
-      );
+      .delete(agentSecretNames)
+      .where(and(eq(agentSecretNames.agentId, workbenchId), eq(agentSecretNames.name, name)));
   }
 
   /**
@@ -197,8 +193,8 @@ export class WorkbenchRepository {
     }
     await this.db.batch([
       this.db
-        .insert(workbenchSecretNames)
-        .values(entries.map((entry) => ({ workbenchId, ...entry })))
+        .insert(agentSecretNames)
+        .values(entries.map((entry) => ({ agentId: workbenchId, ...entry })))
         .onConflictDoNothing(),
       markBackfilled,
     ]);

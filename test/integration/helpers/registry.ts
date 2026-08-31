@@ -14,7 +14,7 @@ export async function applyRegistryTestSchema(registryDb: typeof env.REGISTRY_DB
     "CREATE TABLE IF NOT EXISTS waiting_list (email text PRIMARY KEY NOT NULL, attempts integer DEFAULT 1 NOT NULL, created_at integer NOT NULL, updated_at integer NOT NULL)",
     "CREATE TABLE IF NOT EXISTS workspaces (id text PRIMARY KEY NOT NULL, name text NOT NULL, flags_json text DEFAULT '{}' NOT NULL, created_at integer NOT NULL)",
     "CREATE TABLE IF NOT EXISTS workspace_members (workspace_id text NOT NULL, user_id text NOT NULL, role text NOT NULL, created_at integer NOT NULL, PRIMARY KEY(workspace_id, user_id), FOREIGN KEY (workspace_id) REFERENCES workspaces(id), FOREIGN KEY (user_id) REFERENCES users(id))",
-    "CREATE TABLE IF NOT EXISTS agents (id text PRIMARY KEY NOT NULL, workspace_id text NOT NULL, name text NOT NULL, system_prompt text NOT NULL, provider text NOT NULL, model text NOT NULL, model_input_modalities text DEFAULT '[\"text\"]' NOT NULL, show_reasoning integer DEFAULT true NOT NULL, reasoning_effort text DEFAULT 'medium' NOT NULL, model_supports_reasoning integer, sandbox_enabled integer, sandbox_image text, sandbox_resource_profile text, sandbox_idle_timeout_ms integer, sandbox_max_process_runtime_ms integer, sandbox_network_domain_allowlist text, created_at integer NOT NULL, FOREIGN KEY (workspace_id) REFERENCES workspaces(id))",
+    "CREATE TABLE IF NOT EXISTS agents (id text PRIMARY KEY NOT NULL, workspace_id text NOT NULL, name text NOT NULL, description text DEFAULT '' NOT NULL, system_prompt text NOT NULL, provider text NOT NULL, model text NOT NULL, model_input_modalities text DEFAULT '[\"text\"]' NOT NULL, show_reasoning integer DEFAULT true NOT NULL, reasoning_effort text DEFAULT 'medium' NOT NULL, model_supports_reasoning integer, enabled integer DEFAULT true NOT NULL, archived_at integer, sandbox_enabled integer, sandbox_idle_timeout_ms integer, sandbox_max_process_runtime_ms integer, sandbox_network_domain_allowlist text, sandbox_env_vars_json text, setup_script text DEFAULT '' NOT NULL, resource_profile text DEFAULT 'small' NOT NULL, created_at integer NOT NULL, FOREIGN KEY (workspace_id) REFERENCES workspaces(id))",
     "CREATE TABLE IF NOT EXISTS agent_memories (id text PRIMARY KEY NOT NULL, workspace_id text NOT NULL, agent_id text NOT NULL, content text NOT NULL, title text, kind text DEFAULT 'fact' NOT NULL, source_thread_id text, created_at integer NOT NULL, updated_at integer NOT NULL, archived_at integer, FOREIGN KEY (workspace_id) REFERENCES workspaces(id), FOREIGN KEY (agent_id) REFERENCES agents(id))",
     "CREATE INDEX IF NOT EXISTS idx_agent_memories_agent ON agent_memories (workspace_id, agent_id, archived_at, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_agent_memories_source_thread ON agent_memories (source_thread_id)",
@@ -47,9 +47,10 @@ export async function applyRegistryTestSchema(registryDb: typeof env.REGISTRY_DB
     "CREATE UNIQUE INDEX IF NOT EXISTS uidx_github_app_installations_ws_installation ON github_app_installations (workspace_id, installation_id)",
     "CREATE TABLE IF NOT EXISTS workbenches (id text PRIMARY KEY NOT NULL, workspace_id text NOT NULL, name text NOT NULL, description text DEFAULT '' NOT NULL, setup_script text DEFAULT '' NOT NULL, resource_profile text DEFAULT 'small' NOT NULL, sandbox_env_vars_json text DEFAULT '{}' NOT NULL, sandbox_network_domain_allowlist text DEFAULT '' NOT NULL, secret_names_backfilled integer DEFAULT false NOT NULL, archived_at integer, created_at integer NOT NULL, updated_at integer NOT NULL, FOREIGN KEY (workspace_id) REFERENCES workspaces(id))",
     "CREATE INDEX IF NOT EXISTS idx_workbenches_workspace_archived ON workbenches (workspace_id, archived_at)",
-    "CREATE TABLE IF NOT EXISTS workbench_secret_names (workbench_id text NOT NULL, name text NOT NULL, updated_at integer NOT NULL, PRIMARY KEY (workbench_id, name), FOREIGN KEY (workbench_id) REFERENCES workbenches(id))",
-    "CREATE TABLE IF NOT EXISTS workbench_repositories (id text PRIMARY KEY NOT NULL, workbench_id text NOT NULL, source text NOT NULL, name text NOT NULL, url text NOT NULL, github_repo_id integer, source_installation_id text, access_status text DEFAULT 'ok' NOT NULL, checkout_path_name text NOT NULL, default_branch text DEFAULT 'main' NOT NULL, root_directory text DEFAULT '' NOT NULL, setup_command text DEFAULT '' NOT NULL, package_manager text DEFAULT '' NOT NULL, created_at integer NOT NULL, FOREIGN KEY (workbench_id) REFERENCES workbenches(id), FOREIGN KEY (source_installation_id) REFERENCES github_app_installations(id))",
-    "CREATE INDEX IF NOT EXISTS idx_workbench_repositories_workbench ON workbench_repositories (workbench_id)",
+    "CREATE TABLE IF NOT EXISTS agent_secret_names (agent_id text NOT NULL, name text NOT NULL, updated_at integer NOT NULL, PRIMARY KEY (agent_id, name), FOREIGN KEY (agent_id) REFERENCES workbenches(id))",
+    "CREATE TABLE IF NOT EXISTS agent_repositories (id text PRIMARY KEY NOT NULL, agent_id text NOT NULL, source text NOT NULL, name text NOT NULL, url text NOT NULL, github_repo_id integer, source_installation_id text, access_status text DEFAULT 'ok' NOT NULL, checkout_path_name text NOT NULL, default_branch text DEFAULT 'main' NOT NULL, root_directory text DEFAULT '' NOT NULL, setup_command text DEFAULT '' NOT NULL, package_manager text DEFAULT '' NOT NULL, created_at integer NOT NULL, FOREIGN KEY (agent_id) REFERENCES workbenches(id), FOREIGN KEY (source_installation_id) REFERENCES github_app_installations(id))",
+    "CREATE INDEX IF NOT EXISTS idx_agent_repositories_agent ON agent_repositories (agent_id)",
+    "CREATE TABLE IF NOT EXISTS agent_sandboxes (agent_id text PRIMARY KEY NOT NULL, provider text NOT NULL, sprite_name text, status text NOT NULL, generation text, created_at integer NOT NULL, last_used_at integer, FOREIGN KEY (agent_id) REFERENCES agents(id))",
     "CREATE TABLE IF NOT EXISTS thread_workbench_snapshots (thread_id text PRIMARY KEY NOT NULL, workspace_id text NOT NULL, workbench_id text, name text NOT NULL, setup_script text DEFAULT '' NOT NULL, resource_profile text, created_at integer NOT NULL, FOREIGN KEY (thread_id) REFERENCES thread_index(id), FOREIGN KEY (workspace_id) REFERENCES workspaces(id))",
     "CREATE TABLE IF NOT EXISTS archived_message (thread_id text NOT NULL, seq integer NOT NULL, payload text NOT NULL, PRIMARY KEY(thread_id, seq))",
     "CREATE TABLE IF NOT EXISTS archived_compaction (thread_id text NOT NULL, seq integer NOT NULL, compaction_id text NOT NULL, from_message_id text NOT NULL, to_message_id text NOT NULL, summary text NOT NULL, PRIMARY KEY(thread_id, seq))",
@@ -203,18 +204,9 @@ export async function applyRegistryTestSchema(registryDb: typeof env.REGISTRY_DB
       )
       .run();
   }
-  if (!agentColumns.results.some((column) => column.name === "sandbox_resource_profile")) {
-    await registryDb.prepare("ALTER TABLE agents ADD COLUMN sandbox_resource_profile text").run();
-  }
   const agentColumnNames = new Set(agentColumns.results.map((column) => column.name));
   if (!agentColumnNames.has("sandbox_enabled")) {
     await registryDb.prepare("ALTER TABLE agents ADD COLUMN sandbox_enabled integer").run();
-  }
-  if (!agentColumnNames.has("sandbox_image")) {
-    await registryDb.prepare("ALTER TABLE agents ADD COLUMN sandbox_image text").run();
-  }
-  if (!agentColumnNames.has("sandbox_snapshot")) {
-    await registryDb.prepare("ALTER TABLE agents ADD COLUMN sandbox_snapshot text").run();
   }
   if (!agentColumnNames.has("sandbox_idle_timeout_ms")) {
     await registryDb.prepare("ALTER TABLE agents ADD COLUMN sandbox_idle_timeout_ms integer").run();
@@ -231,6 +223,29 @@ export async function applyRegistryTestSchema(registryDb: typeof env.REGISTRY_DB
   }
   if (!agentColumnNames.has("sandbox_env_vars_json")) {
     await registryDb.prepare("ALTER TABLE agents ADD COLUMN sandbox_env_vars_json text").run();
+  }
+  if (!agentColumnNames.has("description")) {
+    await registryDb
+      .prepare("ALTER TABLE agents ADD COLUMN description text DEFAULT '' NOT NULL")
+      .run();
+  }
+  if (!agentColumnNames.has("enabled")) {
+    await registryDb
+      .prepare("ALTER TABLE agents ADD COLUMN enabled integer DEFAULT true NOT NULL")
+      .run();
+  }
+  if (!agentColumnNames.has("archived_at")) {
+    await registryDb.prepare("ALTER TABLE agents ADD COLUMN archived_at integer").run();
+  }
+  if (!agentColumnNames.has("setup_script")) {
+    await registryDb
+      .prepare("ALTER TABLE agents ADD COLUMN setup_script text DEFAULT '' NOT NULL")
+      .run();
+  }
+  if (!agentColumnNames.has("resource_profile")) {
+    await registryDb
+      .prepare("ALTER TABLE agents ADD COLUMN resource_profile text DEFAULT 'small' NOT NULL")
+      .run();
   }
 
   const agentSkillColumns = await registryDb

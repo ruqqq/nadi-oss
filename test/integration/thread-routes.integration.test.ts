@@ -97,7 +97,7 @@ async function clearRegistry() {
   // seed a row here and it must not survive to block the workspaces delete
   // below (FK constraint) on the next test's cleanup.
   await db.delete(schema.workspaceSandboxSettings);
-  await db.delete(schema.workbenchRepositories);
+  await db.delete(schema.agentRepositories);
   await db.delete(schema.projects);
   await db.delete(schema.workbenches);
   await db.delete(schema.agents);
@@ -235,9 +235,9 @@ async function assignRepositoryToEnvironment(input: {
   createdAt: number;
 }) {
   const db = drizzle(env.REGISTRY_DB, { schema });
-  await db.insert(schema.workbenchRepositories).values({
+  await db.insert(schema.agentRepositories).values({
     id: input.repositoryId,
-    workbenchId: input.workbenchId,
+    agentId: input.workbenchId,
     source: "url",
     name: input.repositoryId,
     url: `https://github.com/acme/${input.repositoryId}.git`,

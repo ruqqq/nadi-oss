@@ -273,9 +273,9 @@ async function assignRepositoriesToEnvironment(
   for (const repositoryId of input.repositoryIds) {
     const config = seededRepoConfigs.get(repositoryId);
     if (!config) throw new Error(`unknown seeded repo config: ${repositoryId}`);
-    await db.insert(schema.workbenchRepositories).values({
+    await db.insert(schema.agentRepositories).values({
       id: repositoryId,
-      workbenchId: input.workbenchId,
+      agentId: input.workbenchId,
       source: "url",
       name: config.name,
       url: config.url,
@@ -298,7 +298,7 @@ describe("ThreadRepository", () => {
     await drizzle(env.REGISTRY_DB, { schema }).delete(schema.threadRepositorySnapshots);
     await drizzle(env.REGISTRY_DB, { schema }).delete(schema.threadWorkbenchSnapshots);
     await drizzle(env.REGISTRY_DB, { schema }).delete(schema.threadIndex);
-    await drizzle(env.REGISTRY_DB, { schema }).delete(schema.workbenchRepositories);
+    await drizzle(env.REGISTRY_DB, { schema }).delete(schema.agentRepositories);
     await drizzle(env.REGISTRY_DB, { schema }).delete(schema.workbenches);
     await drizzle(env.REGISTRY_DB, { schema }).delete(schema.projects);
     await drizzle(env.REGISTRY_DB, { schema }).delete(schema.agents);
@@ -308,7 +308,7 @@ describe("ThreadRepository", () => {
     await drizzle(env.REGISTRY_DB, { schema }).delete(schema.threadRepositorySnapshots);
     await drizzle(env.REGISTRY_DB, { schema }).delete(schema.threadWorkbenchSnapshots);
     await drizzle(env.REGISTRY_DB, { schema }).delete(schema.threadIndex);
-    await drizzle(env.REGISTRY_DB, { schema }).delete(schema.workbenchRepositories);
+    await drizzle(env.REGISTRY_DB, { schema }).delete(schema.agentRepositories);
     await drizzle(env.REGISTRY_DB, { schema }).delete(schema.workbenches);
     await drizzle(env.REGISTRY_DB, { schema }).delete(schema.projects);
     await drizzle(env.REGISTRY_DB, { schema }).delete(schema.agents);
@@ -401,7 +401,7 @@ describe("ThreadRepository", () => {
 
     // Mutating the workbench's live repository must NOT change an existing snapshot.
     await db
-      .update(schema.workbenchRepositories)
+      .update(schema.agentRepositories)
       .set({
         name: "Repo A Updated",
         url: "git@github.com:acme/repo-a.git",
@@ -411,7 +411,7 @@ describe("ThreadRepository", () => {
         setupCommand: "pnpm install --frozen-lockfile",
         packageManager: "npm",
       })
-      .where(eq(schema.workbenchRepositories.id, "repo-a"));
+      .where(eq(schema.agentRepositories.id, "repo-a"));
 
     await expect(snapshots.listForThread("thr_snapshot")).resolves.toEqual([
       expect.objectContaining({

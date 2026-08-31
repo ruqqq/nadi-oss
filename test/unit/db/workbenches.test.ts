@@ -20,11 +20,20 @@ const workbenches = {
   },
 };
 
-const workbenchRepositories = {
-  __table: "workbench_repositories",
+const agentRepositories = {
+  __table: "agent_repositories",
   id: "id",
-  workbenchId: "workbench_id",
+  agentId: "agent_id",
   createdAt: "created_at",
+};
+
+// Imported by workbenches.ts but not exercised by any test in this file —
+// stubbed so the mocked schema module shape matches the real one.
+const agentSecretNames = {
+  __table: "agent_secret_names",
+  agentId: "agent_id",
+  name: "name",
+  updatedAt: "updated_at",
 };
 
 vi.mock("drizzle-orm", () => ({
@@ -41,7 +50,8 @@ vi.mock("drizzle-orm", () => ({
 
 vi.mock("../../../src/db/schema", () => ({
   workbenches,
-  workbenchRepositories,
+  agentRepositories,
+  agentSecretNames,
 }));
 
 interface WorkbenchRow {
@@ -56,9 +66,9 @@ interface WorkbenchRow {
   updated_at: number;
 }
 
-interface WorkbenchRepositoryRow {
+interface AgentRepositoryRow {
   id: string;
-  workbench_id: string;
+  agent_id: string;
   source: string;
   name: string;
   url: string;
@@ -72,13 +82,13 @@ interface WorkbenchRepositoryRow {
   created_at: number;
 }
 
-type Row = WorkbenchRow | WorkbenchRepositoryRow;
+type Row = WorkbenchRow | AgentRepositoryRow;
 type Condition = (row: Record<string, any>) => boolean;
 type SortSpec = { column: string; dir: string };
 
 class WorkbenchRepositoryTestDb {
   workbenches = new Map<string, WorkbenchRow>();
-  workbenchRepositories = new Map<string, WorkbenchRepositoryRow>();
+  agentRepositories = new Map<string, AgentRepositoryRow>();
 
   select(projection?: Record<string, any>) {
     const self = this;
@@ -126,8 +136,8 @@ class WorkbenchRepositoryTestDb {
   private denormalizeRow(table: { __table: string }, row: Row): any {
     if (table.__table === "workbenches") {
       return denormalizeWorkbenchRow(row as WorkbenchRow);
-    } else if (table.__table === "workbench_repositories") {
-      return denormalizeWorkbenchRepositoryRow(row as WorkbenchRepositoryRow);
+    } else if (table.__table === "agent_repositories") {
+      return denormalizeAgentRepositoryRow(row as AgentRepositoryRow);
     }
     return row;
   }
@@ -150,9 +160,9 @@ class WorkbenchRepositoryTestDb {
             if (table.__table === "workbenches") {
               const wbRow = normalizeWorkbenchRow(r);
               self.workbenches.set(wbRow.id, wbRow);
-            } else if (table.__table === "workbench_repositories") {
-              const wbrRow = normalizeWorkbenchRepositoryRow(r);
-              self.workbenchRepositories.set(wbrRow.id, wbrRow);
+            } else if (table.__table === "agent_repositories") {
+              const wbrRow = normalizeAgentRepositoryRow(r);
+              self.agentRepositories.set(wbrRow.id, wbrRow);
             }
           }
           resolve();
@@ -199,10 +209,10 @@ class WorkbenchRepositoryTestDb {
     return {
       where: (condition: Condition) => {
         const promise = new Promise<void>((resolve) => {
-          if (table.__table === "workbench_repositories") {
-            for (const [key, row] of self.workbenchRepositories.entries()) {
+          if (table.__table === "agent_repositories") {
+            for (const [key, row] of self.agentRepositories.entries()) {
               if (condition(row)) {
-                self.workbenchRepositories.delete(key);
+                self.agentRepositories.delete(key);
               }
             }
           }
@@ -223,8 +233,8 @@ class WorkbenchRepositoryTestDb {
     let rows: Row[] = [];
     if (table.__table === "workbenches") {
       rows = [...this.workbenches.values()] as Row[];
-    } else if (table.__table === "workbench_repositories") {
-      rows = [...this.workbenchRepositories.values()] as Row[];
+    } else if (table.__table === "agent_repositories") {
+      rows = [...this.agentRepositories.values()] as Row[];
     }
     return condition ? rows.filter((row) => condition(row)) : rows;
   }
@@ -284,10 +294,10 @@ function denormalizeWorkbenchRow(row: WorkbenchRow): any {
   };
 }
 
-function normalizeWorkbenchRepositoryRow(row: any): WorkbenchRepositoryRow {
+function normalizeAgentRepositoryRow(row: any): AgentRepositoryRow {
   return {
     id: row.id,
-    workbench_id: row.workbenchId ?? row.workbench_id,
+    agent_id: row.agentId ?? row.agent_id,
     source: row.source,
     name: row.name,
     url: row.url,
@@ -302,10 +312,10 @@ function normalizeWorkbenchRepositoryRow(row: any): WorkbenchRepositoryRow {
   };
 }
 
-function denormalizeWorkbenchRepositoryRow(row: WorkbenchRepositoryRow): any {
+function denormalizeAgentRepositoryRow(row: AgentRepositoryRow): any {
   return {
     id: row.id,
-    workbenchId: row.workbench_id,
+    agentId: row.agent_id,
     source: row.source,
     name: row.name,
     url: row.url,
@@ -434,7 +444,7 @@ describe("WorkbenchRepository", () => {
     expect(rows).toHaveLength(2);
     for (const row of rows) {
       expect(row.id).toBeTruthy();
-      expect(row.workbenchId).toBe(wb.id);
+      expect(row.agentId).toBe(wb.id);
     }
     const byName = new Map(rows.map((r) => [r.name, r]));
     expect(byName.get("repo-a")).toMatchObject({

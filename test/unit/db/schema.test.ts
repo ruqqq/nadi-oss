@@ -3,6 +3,7 @@ import { getTableConfig } from "drizzle-orm/sqlite-core";
 import {
   agents,
   agentMemories,
+  agentRepositories,
   agentSkills,
   automata,
   automatonRuns,
@@ -13,7 +14,6 @@ import {
   userNotificationSettings,
   users,
   verifications,
-  workbenchRepositories,
   workspaceMembers,
   workspaces,
 } from "../../../src/db/schema";
@@ -33,7 +33,7 @@ describe("registry schema", () => {
 
   it("exports project scoped conversation tables", () => {
     expect(projects).toBeDefined();
-    expect(workbenchRepositories).toBeDefined();
+    expect(agentRepositories).toBeDefined();
     expect(threadRepositorySnapshots).toBeDefined();
     expect(threadIndex.projectId.name).toBe("project_id");
   });

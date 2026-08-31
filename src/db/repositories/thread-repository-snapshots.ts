@@ -2,9 +2,9 @@ import { and, asc, eq, inArray } from "drizzle-orm";
 import type { D1Transaction, DrizzleD1Database } from "drizzle-orm/d1";
 import type * as schema from "../schema";
 import {
+  agentRepositories,
   threadRepositorySnapshots,
   threadWorkbenchSnapshots,
-  workbenchRepositories,
   workbenches,
   type ThreadRepositorySnapshot,
   type ThreadWorkbenchSnapshot,
@@ -56,18 +56,18 @@ export class ThreadRepositorySnapshotRepository {
 
     const assignedRepositories = await this.db
       .select({
-        id: workbenchRepositories.id,
-        name: workbenchRepositories.name,
-        url: workbenchRepositories.url,
-        defaultBranch: workbenchRepositories.defaultBranch,
-        checkoutPathName: workbenchRepositories.checkoutPathName,
-        rootDirectory: workbenchRepositories.rootDirectory,
-        setupCommand: workbenchRepositories.setupCommand,
-        packageManager: workbenchRepositories.packageManager,
+        id: agentRepositories.id,
+        name: agentRepositories.name,
+        url: agentRepositories.url,
+        defaultBranch: agentRepositories.defaultBranch,
+        checkoutPathName: agentRepositories.checkoutPathName,
+        rootDirectory: agentRepositories.rootDirectory,
+        setupCommand: agentRepositories.setupCommand,
+        packageManager: agentRepositories.packageManager,
       })
-      .from(workbenchRepositories)
-      .where(eq(workbenchRepositories.workbenchId, workbenchId))
-      .orderBy(asc(workbenchRepositories.id))
+      .from(agentRepositories)
+      .where(eq(agentRepositories.agentId, workbenchId))
+      .orderBy(asc(agentRepositories.id))
       .all();
 
     return assignedRepositories.map((repository) => ({

@@ -12,7 +12,7 @@ import {
 } from "../compute/env-vars";
 import { ComputeEnvSecretsStore } from "../compute/env-secrets";
 import { createWorkspaceSecretsServices } from "../secrets";
-import type { Workbench, WorkbenchRepositoryRow } from "../db/schema";
+import type { AgentRepositoryRow, Workbench } from "../db/schema";
 import { resolveAgentScope } from "./agent-scope";
 import {
   COMPUTE_RESOURCE_PROFILE_IDS,
@@ -30,7 +30,7 @@ type WorkbenchBody = {
 };
 
 type WorkbenchSummary = Workbench & {
-  repositories: WorkbenchRepositoryRow[];
+  repositories: AgentRepositoryRow[];
   envVars: Record<string, string>;
   secretEnvNames: string[];
   /** Additional host-allowlist domains, additive on top of the workspace list. */

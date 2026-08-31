@@ -136,6 +136,7 @@ export const agents = sqliteTable(
       .notNull()
       .references(() => workspaces.id),
     name: text("name").notNull(),
+    description: text("description").notNull().default(""),
     systemPrompt: text("system_prompt").notNull(),
     provider: text("provider").notNull(),
     model: text("model").notNull(),
@@ -148,17 +149,23 @@ export const agents = sqliteTable(
     /** Whether the default model can reason. Nullable because NULL means
      *  UNKNOWN — a default of 0 would assert every existing model cannot think. */
     modelSupportsReasoning: integer("model_supports_reasoning", { mode: "boolean" }),
+    /** Kept, hibernating: `enabled = 0` refuses new turns but the sandbox and
+     *  its disk survive. Distinct from archivedAt, which is permanent. */
+    enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+    archivedAt: integer("archived_at"),
     sandboxEnabled: integer("sandbox_enabled", { mode: "boolean" }),
-    sandboxImage: text("sandbox_image"),
-    sandboxSnapshot: text("sandbox_snapshot"),
-    // DEAD: superseded by workbenches.resourceProfile. No reader or writer
-    // remains. Kept so drizzle stays in sync with the deployed DB; dropped in
-    // the follow-up cleanup ticket alongside the legacy snapshot columns.
-    sandboxResourceProfile: text("sandbox_resource_profile"),
     sandboxIdleTimeoutMs: integer("sandbox_idle_timeout_ms"),
     sandboxMaxProcessRuntimeMs: integer("sandbox_max_process_runtime_ms"),
+    // Absorbed from workbenches (formerly per-workbench, now per-agent). Left
+    // NULLABLE with no DB-level default because they already existed on this
+    // table pre-merge in that shape; giving them workbenches' NOT NULL+default
+    // shape would require a column-constraint change, which SQLite can only do
+    // via a table rebuild — forbidden by the migration constraint. Application
+    // code treats NULL the same way workbenches treated "" / "{}".
     sandboxNetworkDomainAllowlist: text("sandbox_network_domain_allowlist"),
     sandboxEnvVarsJson: text("sandbox_env_vars_json"),
+    setupScript: text("setup_script").notNull().default(""),
+    resourceProfile: text("resource_profile").notNull().default("small"),
     createdAt: integer("created_at").notNull(),
   },
   (table) => ({
@@ -210,6 +217,13 @@ export const workspaceSandboxSettings = sqliteTable("workspace_sandbox_settings"
  * The DO's `compute_state` stays authoritative; this is a claim about reality
  * that is deliberately built to tolerate being stale — `expires_at` bounds how
  * long a leaked row can consume a slot.
+ *
+ * NOT dropped by the agent/workbench merge (Task 1): the merge plan calls for
+ * this to be replaced by `agent_sandboxes`, whose unit of admission is a live
+ * AGENT rather than a thread-with-a-container. That rewire touches
+ * `container-ledger.ts`, `container-quota.ts`, `compute-tools.ts`, and the
+ * TTL/reclaim/idle-release machinery threaded through `thread-service.ts` —
+ * scoped out of Task 1 as larger than a schema change; see the Task 1 report.
  */
 export const activeContainers = sqliteTable(
   "active_containers",
@@ -382,7 +396,7 @@ export const workbenches = sqliteTable(
     // has network restriction enabled (the workspace toggle is the master
     // switch). Empty = no additions.
     sandboxNetworkDomainAllowlist: text("sandbox_network_domain_allowlist").notNull().default(""),
-    // Secret NAMES live in `workbench_secret_names` (strongly-consistent D1),
+    // Secret NAMES live in `agent_secret_names` (strongly-consistent D1),
     // not KV — a just-added secret must show in the UI immediately, and KV
     // `list` is eventually consistent (up to ~60s). This flag records whether
     // that D1 index has been seeded from the pre-existing KV secrets yet; until
@@ -403,30 +417,40 @@ export const workbenches = sqliteTable(
 );
 
 /**
- * Strongly-consistent index of a workbench's secret NAMES (values stay
+ * Strongly-consistent index of an agent's secret NAMES (values stay
  * encrypted in KV). D1 is the source of truth the UI reads, so a freshly added
  * secret appears at once and a deleted one disappears at once — neither waits on
- * KV `list` propagation. One row per (workbench, name).
+ * KV `list` propagation. One row per (agent, name).
+ *
+ * Renamed from `workbench_secret_names` (Task 1 of the workbench merge). The
+ * FK still targets `workbenches.id` — the stored values are not yet agent ids;
+ * that repointing happens in the data-migration task. This is a schema rename
+ * only.
  */
-export const workbenchSecretNames = sqliteTable(
-  "workbench_secret_names",
+export const agentSecretNames = sqliteTable(
+  "agent_secret_names",
   {
-    workbenchId: text("workbench_id")
+    agentId: text("agent_id")
       .notNull()
       .references(() => workbenches.id),
     name: text("name").notNull(),
     updatedAt: integer("updated_at").notNull(),
   },
   (table) => ({
-    pk: primaryKey({ columns: [table.workbenchId, table.name] }),
+    pk: primaryKey({ columns: [table.agentId, table.name] }),
   }),
 );
 
-export const workbenchRepositories = sqliteTable(
-  "workbench_repositories",
+/**
+ * Renamed from `workbench_repositories` (Task 1 of the workbench merge). The
+ * FK still targets `workbenches.id` for the same reason as
+ * {@link agentSecretNames} — schema rename only, data migration is separate.
+ */
+export const agentRepositories = sqliteTable(
+  "agent_repositories",
   {
     id: text("id").primaryKey(),
-    workbenchId: text("workbench_id")
+    agentId: text("agent_id")
       .notNull()
       .references(() => workbenches.id),
     source: text("source", { enum: ["github", "url"] }).notNull(),
@@ -445,9 +469,29 @@ export const workbenchRepositories = sqliteTable(
     createdAt: integer("created_at").notNull(),
   },
   (table) => ({
-    byWorkbench: index("idx_workbench_repositories_workbench").on(table.workbenchId),
+    byAgent: index("idx_agent_repositories_agent").on(table.agentId),
   }),
 );
+
+/**
+ * One row per agent's sandbox. Replaces the concurrency accounting that
+ * `active_containers` used to do (see the note on {@link activeContainers}) —
+ * the new admission unit is a live AGENT, not a thread-with-a-container.
+ * `activeContainers` and its readers (`container-ledger.ts`,
+ * `container-quota.ts`, `compute-tools.ts`) are NOT rewired in this task; see
+ * the Task 1 report for why that rewire was scoped out.
+ */
+export const agentSandboxes = sqliteTable("agent_sandboxes", {
+  agentId: text("agent_id")
+    .primaryKey()
+    .references(() => agents.id),
+  provider: text("provider").notNull(),
+  spriteName: text("sprite_name"),
+  status: text("status").notNull(),
+  generation: text("generation"),
+  createdAt: integer("created_at").notNull(),
+  lastUsedAt: integer("last_used_at"),
+});
 
 export const threadWorkbenchSnapshots = sqliteTable("thread_workbench_snapshots", {
   threadId: text("thread_id")
@@ -1123,8 +1167,9 @@ export type Project = typeof projects.$inferSelect;
 export type ThreadRepositorySnapshot = typeof threadRepositorySnapshots.$inferSelect;
 export type GithubAppInstallationRow = typeof githubAppInstallations.$inferSelect;
 export type Workbench = typeof workbenches.$inferSelect;
-export type WorkbenchRepositoryRow = typeof workbenchRepositories.$inferSelect;
-export type WorkbenchSecretNameRow = typeof workbenchSecretNames.$inferSelect;
+export type AgentRepositoryRow = typeof agentRepositories.$inferSelect;
+export type AgentSecretNameRow = typeof agentSecretNames.$inferSelect;
+export type AgentSandboxRow = typeof agentSandboxes.$inferSelect;
 export type ThreadWorkbenchSnapshot = typeof threadWorkbenchSnapshots.$inferSelect;
 export type ThreadIndex = typeof threadIndex.$inferSelect;
 export type FeedbackThread = typeof feedbackThreads.$inferSelect;

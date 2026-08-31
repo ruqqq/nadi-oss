@@ -21,8 +21,8 @@ async function clearSecretsKv() {
 
 async function clearRegistry() {
   const db = drizzle(env.REGISTRY_DB, { schema });
-  await db.delete(schema.workbenchSecretNames);
-  await db.delete(schema.workbenchRepositories);
+  await db.delete(schema.agentSecretNames);
+  await db.delete(schema.agentRepositories);
   await db.delete(schema.workbenches);
   await db.delete(schema.threadRepositorySnapshots);
   await db.delete(schema.threadIndex);
@@ -318,8 +318,8 @@ describe("workbench routes", () => {
 
       const db = drizzle(env.REGISTRY_DB, { schema });
       const names = await db
-        .select({ name: schema.workbenchSecretNames.name })
-        .from(schema.workbenchSecretNames)
+        .select({ name: schema.agentSecretNames.name })
+        .from(schema.agentSecretNames)
         .all();
       expect(names.map((n) => n.name)).toEqual(["LEGACY_KEY"]);
       const wb = await db.select().from(schema.workbenches).get();

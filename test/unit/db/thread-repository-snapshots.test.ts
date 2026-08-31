@@ -25,10 +25,10 @@ const workbenches = {
   resourceProfile: col("resourceProfile"),
 };
 
-const workbenchRepositories = {
-  __table: "workbench_repositories",
+const agentRepositories = {
+  __table: "agent_repositories",
   id: col("id"),
-  workbenchId: col("workbenchId"),
+  agentId: col("agentId"),
   name: col("name"),
   url: col("url"),
   defaultBranch: col("defaultBranch"),
@@ -96,7 +96,7 @@ vi.mock("drizzle-orm", () => ({
 
 vi.mock("../../../src/db/schema", () => ({
   workbenches,
-  workbenchRepositories,
+  agentRepositories,
   threadRepositorySnapshots,
   threadWorkbenchSnapshots,
 }));
@@ -104,7 +104,7 @@ vi.mock("../../../src/db/schema", () => ({
 class FakeDb {
   tables: Record<string, Row[]> = {
     workbenches: [],
-    workbench_repositories: [],
+    agent_repositories: [],
     thread_repository_snapshots: [],
     thread_workbench_snapshots: [],
   };
@@ -203,12 +203,12 @@ describe("ThreadRepositorySnapshotRepository", () => {
       setupScript: "pnpm install",
     });
 
-    // Two join rows with DISTINCT config, self-contained on workbench_repositories
+    // Two join rows with DISTINCT config, self-contained on agent_repositories
     // (no join to workspace_repositories, which no longer exists).
-    db.tables.workbench_repositories!.push(
+    db.tables.agent_repositories!.push(
       {
         id: "repo-a",
-        workbenchId: "wb-1",
+        agentId: "wb-1",
         name: "Repo A",
         url: "https://example.com/a.git",
         defaultBranch: "main",
@@ -219,7 +219,7 @@ describe("ThreadRepositorySnapshotRepository", () => {
       },
       {
         id: "repo-b",
-        workbenchId: "wb-1",
+        agentId: "wb-1",
         name: "Repo B",
         url: "https://example.com/b.git",
         defaultBranch: "develop",
@@ -231,7 +231,7 @@ describe("ThreadRepositorySnapshotRepository", () => {
     );
   });
 
-  it("buildFromWorkbench reads each repo's own config directly off workbench_repositories", async () => {
+  it("buildFromWorkbench reads each repo's own config directly off agent_repositories", async () => {
     const repo = new ThreadRepositorySnapshotRepository(db as never);
 
     const snapshots = await repo.buildFromWorkbench("thr_1", "workspace-1", "wb-1", now);
