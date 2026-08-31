@@ -175,6 +175,33 @@ describe("bootstrap route", () => {
     ]);
   });
 
+  it("shapes bootstrap's agents like GET /api/agents' AgentSummary, not a bare agents row", async () => {
+    const { token } = await seedOwner();
+
+    const res = await SELF.fetch("https://nadi.test/api/bootstrap", { headers: cookie(token) });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { agents: Array<Record<string, unknown>> };
+
+    expect(body.agents).toHaveLength(1);
+    const agent = body.agents[0]!;
+    // AgentSummary fields (see web/src/agents-api.ts and buildSummary in
+    // src/http/agent-routes.ts) — present because bootstrap serializes
+    // through the same buildSummary GET /api/agents uses, not a hand-rolled
+    // second mapping that could drift from it.
+    expect(agent).toHaveProperty("repositories");
+    expect(agent).toHaveProperty("envVars");
+    expect(agent).toHaveProperty("secretEnvNames");
+    expect(agent).toHaveProperty("networkDomainAllowlist");
+    expect(Array.isArray(agent.repositories)).toBe(true);
+    expect(typeof agent.envVars).toBe("object");
+    expect(Array.isArray(agent.secretEnvNames)).toBe(true);
+    // `networkDomainAllowlist` is buildSummary's derived field (NULL on
+    // `agents` folded to ""), not the raw `sandboxNetworkDomainAllowlist`
+    // column name — the exact mismatch that would leave an `AgentPicker`
+    // reading `undefined` for every agent's allowlist.
+    expect(agent.networkDomainAllowlist).toBe("");
+  });
+
   it("caps the bootstrap thread list at DEFAULT_THREAD_PAGE and returns a cursor for the rest", async () => {
     // Phase-2 cap, shipped together with: BOOTSTRAP_CACHE_VERSION bumped to 2
     // (so a pre-cap cache is never rehydrated as if it were this shape) and

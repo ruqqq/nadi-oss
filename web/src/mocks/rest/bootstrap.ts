@@ -41,6 +41,9 @@ export const bootstrapHandlers = [
       threadsNextCursor:
         active.length > BOOTSTRAP_PAGE_SIZE ? encodeCursor(BOOTSTRAP_PAGE_SIZE) : null,
       projects: store.projects.filter((p) => p.archivedAt === null),
+      // Same AgentSummary shape GET /api/agents returns (see mocks/rest/agents.ts)
+      // — bootstrap is a first-paint alias for the same list, not a lighter one.
+      agents: store.agents.filter((a) => a.archivedAt === null),
       features: {
         voiceInput: false,
         workersAi: false,

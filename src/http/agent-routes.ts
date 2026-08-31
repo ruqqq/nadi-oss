@@ -29,7 +29,7 @@ type AgentBody = {
   networkDomainAllowlist?: unknown;
 };
 
-type AgentSummary = AgentConfig & {
+export type AgentSummary = AgentConfig & {
   repositories: AgentRepositoryRow[];
   envVars: Record<string, string>;
   secretEnvNames: string[];
@@ -350,7 +350,7 @@ async function deleteSecret(
   return Response.json({ agent: summary });
 }
 
-async function buildSummary(
+export async function buildSummary(
   env: Env,
   repo: AgentRepository,
   _workspaceId: string,
