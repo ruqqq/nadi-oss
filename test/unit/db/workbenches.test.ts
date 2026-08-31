@@ -2,8 +2,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const now = 1_800_000_000_000;
 
-const workbenches = {
-  __table: "workbenches",
+// `workbenches` is gone: this repository reads and writes `agents` now, so the
+// mocked schema module has to offer the table it actually queries.
+const agents = {
+  __table: "agents",
   id: "id",
   workspaceId: "workspace_id",
   archivedAt: "archived_at",
@@ -12,9 +14,13 @@ const workbenches = {
     id: string;
     workspaceId: string;
     name: string;
+    systemPrompt: string;
+    provider: string;
+    model: string;
     description?: string;
     setupScript?: string;
     sandboxEnvVarsJson?: string;
+    secretNamesBackfilled?: boolean;
     createdAt: number;
     updatedAt: number;
   },
@@ -49,7 +55,7 @@ vi.mock("drizzle-orm", () => ({
 }));
 
 vi.mock("../../../src/db/schema", () => ({
-  workbenches,
+  agents,
   agentRepositories,
   agentSecretNames,
 }));
@@ -134,7 +140,7 @@ class WorkbenchRepositoryTestDb {
   }
 
   private denormalizeRow(table: { __table: string }, row: Row): any {
-    if (table.__table === "workbenches") {
+    if (table.__table === "agents") {
       return denormalizeWorkbenchRow(row as WorkbenchRow);
     } else if (table.__table === "agent_repositories") {
       return denormalizeAgentRepositoryRow(row as AgentRepositoryRow);
@@ -157,7 +163,7 @@ class WorkbenchRepositoryTestDb {
         const promise = new Promise<void>((resolve) => {
           const rows = Array.isArray(row) ? row : [row];
           for (const r of rows) {
-            if (table.__table === "workbenches") {
+            if (table.__table === "agents") {
               const wbRow = normalizeWorkbenchRow(r);
               self.workbenches.set(wbRow.id, wbRow);
             } else if (table.__table === "agent_repositories") {
@@ -178,7 +184,7 @@ class WorkbenchRepositoryTestDb {
       set: (patch: any) => ({
         where: (condition: Condition) => {
           const promise = new Promise<void>((resolve) => {
-            if (table.__table === "workbenches") {
+            if (table.__table === "agents") {
               for (const [id, row] of self.workbenches.entries()) {
                 if (condition(row)) {
                   const normalizedPatch: any = {};
@@ -231,7 +237,7 @@ class WorkbenchRepositoryTestDb {
 
   private read(table: { __table: string }, condition?: Condition) {
     let rows: Row[] = [];
-    if (table.__table === "workbenches") {
+    if (table.__table === "agents") {
       rows = [...this.workbenches.values()] as Row[];
     } else if (table.__table === "agent_repositories") {
       rows = [...this.agentRepositories.values()] as Row[];
@@ -253,11 +259,14 @@ class WorkbenchRepositoryTestDb {
   }
 }
 
-function newWorkbenchRow(workspaceId: string): typeof workbenches.$inferInsert {
+function newWorkbenchRow(workspaceId: string): typeof agents.$inferInsert {
   return {
     id: `wb_${Math.random().toString(36).substr(2, 9)}`,
     workspaceId,
     name: "Test Workbench",
+    systemPrompt: "You are Nadi.",
+    provider: "mock",
+    model: "mock",
     description: "",
     setupScript: "",
     sandboxEnvVarsJson: "{}",

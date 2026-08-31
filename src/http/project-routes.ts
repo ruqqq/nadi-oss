@@ -3,6 +3,7 @@ import { validateRequestSession, type ValidatedSession } from "../auth/session";
 import { registryDb } from "../db/client";
 import { WorkbenchRepository } from "../db/repositories/workbenches";
 import { ProjectRepository, type ProjectStatus } from "../db/repositories/projects";
+import type { Project } from "../db/schema";
 import { WorkspaceRepository } from "../db/repositories/workspaces";
 import { resolveAgentScope } from "./agent-scope";
 
@@ -12,6 +13,20 @@ type ProjectBody = {
   customInstructions?: unknown;
   defaultWorkbenchId?: unknown;
 };
+
+/**
+ * A project's default is an AGENT now — the column is `default_agent_id`. The
+ * wire field keeps its old name here because renaming it is a wire-contract
+ * change, and a wire contract is changed together with `web/src/mocks/`, in the
+ * task that owns the route surface. Serializing through one function rather
+ * than returning the row keeps that rename to a single place.
+ */
+function serializeProject(row: Project): Omit<Project, "defaultAgentId"> & {
+  defaultWorkbenchId: string | null;
+} {
+  const { defaultAgentId, ...rest } = row;
+  return { ...rest, defaultWorkbenchId: defaultAgentId };
+}
 
 export async function routeProjects(req: Request, env: Env): Promise<Response | null> {
   const url = new URL(req.url);
@@ -56,7 +71,7 @@ async function listProjects(req: Request, env: Env, url: URL): Promise<Response>
     workspaceId,
     status.value,
   );
-  return Response.json({ projects });
+  return Response.json({ projects: projects.map(serializeProject) });
 }
 
 async function createProject(req: Request, env: Env): Promise<Response> {
@@ -85,7 +100,7 @@ async function createProject(req: Request, env: Env): Promise<Response> {
     updatedAt: createdAt,
   });
 
-  return Response.json({ project }, { status: 201 });
+  return Response.json({ project: serializeProject(project) }, { status: 201 });
 }
 
 async function getProject(req: Request, env: Env, projectId: string): Promise<Response> {
@@ -106,7 +121,7 @@ async function getProject(req: Request, env: Env, projectId: string): Promise<Re
     return new Response("Not found", { status: 404 });
   }
 
-  return Response.json({ project });
+  return Response.json({ project: serializeProject(project) });
 }
 
 async function updateProject(req: Request, env: Env, projectId: string): Promise<Response> {
@@ -132,7 +147,7 @@ async function updateProject(req: Request, env: Env, projectId: string): Promise
     name?: string;
     description?: string;
     customInstructions?: string;
-    defaultWorkbenchId?: string | null;
+    defaultAgentId?: string | null;
     updatedAt?: number;
   } = {};
 
@@ -161,7 +176,9 @@ async function updateProject(req: Request, env: Env, projectId: string): Promise
       body.defaultWorkbenchId,
     );
     if (!defaultWorkbenchId.ok) return defaultWorkbenchId.response;
-    patch.defaultWorkbenchId = defaultWorkbenchId.value;
+    // Wire name unchanged, column changed: a project now defaults to an AGENT.
+    // The rename of the wire field belongs with the rest of the route surface.
+    patch.defaultAgentId = defaultWorkbenchId.value;
   }
 
   if (Object.keys(patch).length === 0) {
@@ -173,7 +190,7 @@ async function updateProject(req: Request, env: Env, projectId: string): Promise
 
   const updated = await repo.getById(projectId);
   if (!updated) return new Response("Not found", { status: 404 });
-  return Response.json({ project: updated });
+  return Response.json({ project: serializeProject(updated) });
 }
 
 async function archiveProject(req: Request, env: Env, projectId: string): Promise<Response> {
@@ -197,7 +214,7 @@ async function archiveProject(req: Request, env: Env, projectId: string): Promis
   await repo.archive(projectId, Date.now());
   const archived = await repo.getById(projectId);
   if (!archived) return new Response("Not found", { status: 404 });
-  return Response.json({ project: archived });
+  return Response.json({ project: serializeProject(archived) });
 }
 
 async function resolveWorkspaceId(env: Env, session: ValidatedSession): Promise<string | null> {

@@ -194,8 +194,6 @@ export function resolveEffectiveComputeConfig(input: {
           ...(input.agentSecretEnvNames ?? []),
         ]),
       ].sort(),
-      environmentEditableEnv: {},
-      environmentSecretEnvNames: [],
     },
   };
 }

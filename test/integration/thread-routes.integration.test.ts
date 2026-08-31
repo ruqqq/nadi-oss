@@ -30,8 +30,10 @@ const defaultThreadActivityFields = {
   unreadOutcome: null,
   unreadOutcomeAt: null,
   lastSeenAt: null,
-  workbenchId: null,
-  workbenchName: null,
+  // The wire keeps the old names, but the value is the thread's AGENT — the
+  // agent IS the environment, and it is never null. Filled in per-thread at the
+  // call site, since it varies with the seeded workspace.
+  workbenchName: "Default",
   resourceProfile: "small" as const,
   // A thread a human started carries no automaton provenance.
   automatonId: null,
@@ -93,7 +95,6 @@ async function clearRegistry() {
   await db.delete(schema.workspaceSandboxSettings);
   await db.delete(schema.agentRepositories);
   await db.delete(schema.projects);
-  await db.delete(schema.workbenches);
   await db.delete(schema.agents);
   await db.delete(schema.workspaceMembers);
   await db.delete(schema.workspaces);
@@ -181,9 +182,10 @@ async function insertThread(input: {
   await db.insert(schema.threadIndex).values({
     id: input.id,
     workspaceId: input.workspaceId,
-    agentId: input.agentId,
+    // The agent IS the environment: a seed that names a `workbenchId` is
+    // naming the agent the thread runs as.
+    agentId: input.workbenchId ?? input.agentId,
     projectId: input.projectId ?? null,
-    workbenchId: input.workbenchId ?? null,
     modelProvider: input.modelProvider ?? "mock",
     model: input.model ?? "mock",
     modelInputModalities: JSON.stringify(input.modelInputModalities ?? ["text"]),
@@ -210,10 +212,15 @@ async function insertEnvironment(input: {
   archivedAt?: number | null;
 }) {
   const db = drizzle(env.REGISTRY_DB, { schema });
-  await db.insert(schema.workbenches).values({
+  await db.insert(schema.agents).values({
     id: input.id,
     workspaceId: input.workspaceId,
     name: input.name,
+    // An environment IS an agent now, so seeding one means seeding the columns
+    // `agents` requires.
+    systemPrompt: "You are Nadi.",
+    provider: "mock",
+    model: "mock",
     description: "",
     setupScript: input.setupScript ?? "",
     sandboxEnvVarsJson: "{}",
@@ -267,7 +274,7 @@ async function insertProject(input: {
     name: input.name,
     description: "",
     customInstructions: "",
-    defaultWorkbenchId: input.defaultWorkbenchId ?? null,
+    defaultAgentId: input.defaultWorkbenchId ?? null,
     archivedAt: input.archivedAt ?? null,
     createdAt: input.createdAt,
     updatedAt: input.createdAt,
@@ -513,6 +520,7 @@ describe("thread routes", () => {
           modelSupportsReasoning: null,
           runtime: "legacy",
           ...defaultThreadActivityFields,
+          workbenchId: seeded.agentId,
           title: "New",
           source: "manual",
           lastMessagePreview: "newer preview",
@@ -539,6 +547,7 @@ describe("thread routes", () => {
           modelSupportsReasoning: null,
           runtime: "legacy",
           ...defaultThreadActivityFields,
+          workbenchId: seeded.agentId,
           title: "Old",
           source: "manual",
           lastMessagePreview: "older preview",
@@ -1012,7 +1021,7 @@ describe("thread routes", () => {
       .where(eq(schema.threadIndex.id, body.thread.threadId))
       .get();
     expect(row?.projectId).toBe("project-create");
-    expect(row?.workbenchId).toBe("env-create");
+    expect(row?.agentId).toBe("env-create");
   });
 
   it("an explicit workbenchId overrides the project's defaultWorkbenchId", async () => {
@@ -1059,7 +1068,7 @@ describe("thread routes", () => {
       .from(schema.threadIndex)
       .where(eq(schema.threadIndex.id, body.thread.threadId))
       .get();
-    expect(row?.workbenchId).toBe("env-explicit-b");
+    expect(row?.agentId).toBe("env-explicit-b");
   });
 
   it("seeds the project's defaultWorkbenchId when workbenchId is omitted", async () => {
@@ -1100,10 +1109,10 @@ describe("thread routes", () => {
       .from(schema.threadIndex)
       .where(eq(schema.threadIndex.id, body.thread.threadId))
       .get();
-    expect(row?.workbenchId).toBe("env-default-a");
+    expect(row?.agentId).toBe("env-default-a");
   });
 
-  it("leaves workbenchId null when neither an explicit id nor a project default is given", async () => {
+  it("falls back to the workspace's agent when neither an explicit id nor a project default is given", async () => {
     const seeded = await seedUserWorkspace({
       userId: "user-thread-create-env-none",
       token: "thread-create-env-none-token",
@@ -1128,10 +1137,10 @@ describe("thread routes", () => {
       .from(schema.threadIndex)
       .where(eq(schema.threadIndex.id, body.thread.threadId))
       .get();
-    expect(row?.workbenchId).toBeNull();
+    expect(row?.agentId).toBe(seeded.agentId);
   });
 
-  it("falls back to null (not the archived env) when the project's defaultWorkbenchId is archived", async () => {
+  it("falls back to the workspace's agent (not the archived one) when the project default is archived", async () => {
     const seeded = await seedUserWorkspace({
       userId: "user-thread-create-env-default-archived",
       token: "thread-create-env-default-archived-token",
@@ -1170,7 +1179,7 @@ describe("thread routes", () => {
       .from(schema.threadIndex)
       .where(eq(schema.threadIndex.id, body.thread.threadId))
       .get();
-    expect(row?.workbenchId).toBeNull();
+    expect(row?.agentId).toBe(seeded.agentId);
   });
 
   it("returns 404 when creating a thread against an archived or cross-workspace project", async () => {
@@ -1591,7 +1600,11 @@ describe("thread routes", () => {
     expect(compact?.status).toBe(409);
   });
 
-  it("clears the environment when PATCH /api/threads/:id sets workbenchId to null", async () => {
+  // There is no "clear the environment" any more: a thread's agent IS its
+  // environment and `agent_id` is NOT NULL. An explicit null is REFUSED rather
+  // than quietly substituting a default, because substituting one would move
+  // the thread onto a different agent's repositories and secrets.
+  it("REFUSES a PATCH that sets workbenchId to null", async () => {
     const seeded = await seedUserWorkspace({
       userId: "user-thread-patch-clear-project",
       token: "thread-patch-clear-project-token",
@@ -1630,15 +1643,11 @@ describe("thread routes", () => {
       body: JSON.stringify({ workbenchId: null }),
     });
 
-    expect(res.status).toBe(200);
-    await expect(res.json()).resolves.toMatchObject({
-      thread: {
-        threadId: "thr_clear_project",
-        repositorySnapshotCount: 0,
-      },
-    });
+    expect(res.status).toBe(400);
+    // Refused means UNCHANGED: the thread keeps the agent, and the repository
+    // it was already cloning.
     await expect(readThread("thr_clear_project")).resolves.toMatchObject({
-      workbenchId: null,
+      agentId: "env-clear",
     });
   });
 
@@ -1668,7 +1677,7 @@ describe("thread routes", () => {
     expect(res.status).toBe(200);
 
     const thread = await readThread(threadId);
-    expect(thread?.workbenchId).toBe("wb_new_no_sandbox");
+    expect(thread?.agentId).toBe("wb_new_no_sandbox");
   });
 
   /**
@@ -1743,7 +1752,7 @@ describe("thread routes", () => {
     expect(calls).toEqual([]);
 
     const thread = await readThread(threadId);
-    expect(thread?.workbenchId).toBe("wb_new_legacy_no_dial");
+    expect(thread?.agentId).toBe("wb_new_legacy_no_dial");
   });
 
   it("returns 409 when changing the project on an archived thread", async () => {

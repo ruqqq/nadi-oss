@@ -7,7 +7,6 @@ import { parseReasoningEffort, type ReasoningEffort } from "../agent/reasoning-o
 import {
   agents,
   automata,
-  workbenches,
   projects,
   threadIndex,
   agentRepositories,
@@ -408,9 +407,8 @@ export async function selectThreadSummariesForUser(
       archivedAt: threadIndex.archivedAt,
       projectId: threadIndex.projectId,
       projectName: projects.name,
-      workbenchId: threadIndex.workbenchId,
-      workbenchName: workbenches.name,
-      snapshotResourceProfile: workbenches.resourceProfile,
+      workbenchName: agents.name,
+      snapshotResourceProfile: agents.resourceProfile,
       automatonId: threadIndex.automatonId,
       automatonName: automata.name,
       outcomeDismissedAt: threadIndex.outcomeDismissedAt,
@@ -425,11 +423,12 @@ export async function selectThreadSummariesForUser(
     })
     .from(threadIndex)
     .leftJoin(projects, eq(projects.id, threadIndex.projectId))
-    .leftJoin(workbenches, eq(workbenches.id, threadIndex.workbenchId))
+    .leftJoin(agents, eq(agents.id, threadIndex.agentId))
     .leftJoin(automata, eq(automata.id, threadIndex.automatonId))
-    // The environment's LIVE repositories; this is the join that can multiply
-    // rows, which is why the aggregate + groupBy below stay.
-    .leftJoin(agentRepositories, eq(agentRepositories.agentId, threadIndex.workbenchId))
+    // The AGENT's live repositories; this is the join that can multiply rows,
+    // which is why the aggregate + groupBy below stay. Keyed on `agentId` — the
+    // column's values moved onto agent ids in the same commit as this key.
+    .leftJoin(agentRepositories, eq(agentRepositories.agentId, threadIndex.agentId))
     .innerJoin(
       workspaceMembers,
       and(
@@ -458,13 +457,7 @@ export async function selectThreadSummariesForUser(
         ),
       ),
     )
-    .groupBy(
-      threadIndex.id,
-      projects.name,
-      workbenches.name,
-      workbenches.resourceProfile,
-      automata.name,
-    )
+    .groupBy(threadIndex.id, projects.name, agents.name, agents.resourceProfile, automata.name)
     // The tie-break must be in the ORDER BY too, or the cursor's idea of "next"
     // disagrees with the order rows actually come back in.
     .orderBy(desc(sortColumn), desc(threadIndex.id));
@@ -1031,6 +1024,7 @@ async function createThread(req: Request, env: Env, ctx: ExecutionContext): Prom
     target.workspaceId,
     projectId.value,
     (body.body ?? {}) as ThreadModelSnapshotInput,
+    target.agentId,
   );
   if (!workbenchId.ok) return workbenchId.response;
 
@@ -1159,21 +1153,27 @@ async function renameThread(
 
 async function selectThreadTarget(env: Env, session: ValidatedSession) {
   const db = registryDb(env);
-  return db
-    .select({
-      workspaceId: workspaceMembers.workspaceId,
-      agentId: agents.id,
-      provider: agents.provider,
-      model: agents.model,
-      modelInputModalities: agents.modelInputModalities,
-      reasoningEffort: agents.reasoningEffort,
-      modelSupportsReasoning: agents.modelSupportsReasoning,
-    })
-    .from(workspaceMembers)
-    .innerJoin(agents, eq(agents.workspaceId, workspaceMembers.workspaceId))
-    .where(eq(workspaceMembers.userId, session.user.id))
-    .orderBy(asc(workspaceMembers.createdAt), asc(agents.createdAt))
-    .get();
+  return (
+    db
+      .select({
+        workspaceId: workspaceMembers.workspaceId,
+        agentId: agents.id,
+        provider: agents.provider,
+        model: agents.model,
+        modelInputModalities: agents.modelInputModalities,
+        reasoningEffort: agents.reasoningEffort,
+        modelSupportsReasoning: agents.modelSupportsReasoning,
+      })
+      .from(workspaceMembers)
+      .innerJoin(agents, eq(agents.workspaceId, workspaceMembers.workspaceId))
+      .where(eq(workspaceMembers.userId, session.user.id))
+      // The id tie-break is load-bearing now that a workspace really does have
+      // more than one agent: without it two agents created in the same
+      // millisecond make "the workspace's agent" a coin flip, and that agent
+      // decides which repositories a new thread clones.
+      .orderBy(asc(workspaceMembers.createdAt), asc(agents.createdAt), asc(agents.id))
+      .get()
+  );
 }
 
 const THREAD_MODEL_SNAPSHOT_MESSAGES: Record<ThreadModelSnapshotError, string> = {
@@ -1379,37 +1379,40 @@ async function resolveThreadProjectPatch(
 }
 
 /**
- * Resolves the `workbenchId` a newly created thread should snapshot from.
- * An explicit `workbenchId` on the request wins; otherwise it defaults to
- * the project's `defaultWorkbenchId` (null when there is no project or the
- * project has none set).
+ * Resolves the AGENT a newly created thread runs as. An explicit `workbenchId`
+ * on the request wins; otherwise the project's default agent; otherwise the
+ * workspace's own agent, which the caller has already resolved.
+ *
+ * Returns a string, never null. A thread always has an agent — it is what its
+ * prompt, model, memories, repositories, secrets and env vars all come from,
+ * and `thread_index.agent_id` is a NOT NULL FK. `fallbackAgentId` is REQUIRED
+ * for the same reason: an optional one would let a caller create a thread with
+ * no agent, which reads as a thread that silently clones nothing.
  */
 async function resolveThreadWorkbenchId(
   db: ReturnType<typeof registryDb>,
   workspaceId: string,
   projectId: string | null,
   input: ThreadModelSnapshotInput,
-): Promise<{ ok: true; value: string | null } | { ok: false; response: Response }> {
+  fallbackAgentId: string,
+): Promise<{ ok: true; value: string } | { ok: false; response: Response }> {
   const explicit = await resolveThreadWorkbenchPatch(db, workspaceId, input.workbenchId);
   if (!explicit.ok) return explicit;
   if (explicit.hasValue) return { ok: true, value: explicit.value };
 
-  if (projectId === null) return { ok: true, value: null };
+  if (projectId === null) return { ok: true, value: fallbackAgentId };
   const project = await new ProjectRepository(db).getById(projectId);
-  const defaultWorkbenchId = project?.defaultWorkbenchId ?? null;
-  if (defaultWorkbenchId === null) return { ok: true, value: null };
+  const defaultAgentId = project?.defaultAgentId ?? null;
+  if (defaultAgentId === null) return { ok: true, value: fallbackAgentId };
 
-  // A stale project default (e.g. the workbench was archived after being
-  // set as default) must not snapshot from it or 400 the thread create over
-  // a default the caller never explicitly requested — fall back to null.
+  // A stale project default (e.g. the agent was archived after being set as
+  // default) must not be adopted, nor 400 the thread create over a default the
+  // caller never explicitly requested — fall back to the workspace's agent.
   try {
-    await new WorkbenchRepository(db).assertActiveWorkbenchInWorkspace(
-      defaultWorkbenchId,
-      workspaceId,
-    );
-    return { ok: true, value: defaultWorkbenchId };
+    await new WorkbenchRepository(db).assertActiveWorkbenchInWorkspace(defaultAgentId, workspaceId);
+    return { ok: true, value: defaultAgentId };
   } catch {
-    return { ok: true, value: null };
+    return { ok: true, value: fallbackAgentId };
   }
 }
 
@@ -1419,23 +1422,26 @@ async function resolveThreadWorkbenchPatch(
   value: unknown,
 ): Promise<
   | { ok: true; hasValue: false }
-  | { ok: true; hasValue: true; value: string | null; name: string | null }
+  | { ok: true; hasValue: true; value: string; name: string | null }
   | { ok: false; response: Response }
 > {
   if (value === undefined) return { ok: true, hasValue: false };
-  if (value !== null && typeof value !== "string") {
+  // `null` used to mean "no environment". There is no such state now: an agent
+  // is not optional. Refusing it is deliberate — silently substituting a
+  // default would move a thread onto a different agent's repositories and
+  // secrets without anyone asking.
+  if (typeof value !== "string") {
     return {
       ok: false,
-      response: new Response("workbenchId must be a string or null", { status: 400 }),
+      response: new Response("workbenchId must be a string", { status: 400 }),
     };
   }
-  if (value === null) return { ok: true, hasValue: true, value: null, name: null };
 
   const clean = value.trim();
   if (!clean) {
     return {
       ok: false,
-      response: new Response("workbenchId must be a string or null", { status: 400 }),
+      response: new Response("workbenchId must be a string", { status: 400 }),
     };
   }
 

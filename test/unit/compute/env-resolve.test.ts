@@ -13,31 +13,30 @@ describe("mergeSecretValuesIntoEnv", () => {
   it("layers editable, then workspace secrets, then agent secrets (agent wins)", () => {
     const result = mergeSecretValuesIntoEnv({
       workspaceEditable: { NODE_ENV: "prod", SHARED: "editable" },
-      environmentEditable: {},
       agentEditable: {},
       workspaceSecrets: { GH_TOKEN: "ws", SHARED: "wsSecret" },
-      environmentSecrets: {},
       agentSecrets: { GH_TOKEN: "agent" },
     });
     expect(result).toEqual({ NODE_ENV: "prod", SHARED: "wsSecret", GH_TOKEN: "agent" });
   });
 
-  it("layers environment between workspace and agent, secrets over editable", () => {
+  // The `environment` (workbench) layer that used to sit between workspace and
+  // agent is gone: the workbench IS the agent now, so it was the same values in
+  // two slots. What remains is four layers, and the ordering rules that mattered
+  // — secrets over editable, agent over workspace — are unchanged.
+  it("layers agent over workspace, and secrets over editable", () => {
     const merged = mergeSecretValuesIntoEnv({
       workspaceEditable: { A: "ws-e", W: "ws-e", P: "ws-e" },
-      environmentEditable: { A: "env-e", E: "env-e", P: "env-e", Q: "env-e" },
-      agentEditable: { A: "ag-e", Q: "ag-e" },
+      agentEditable: { A: "ag-e", P: "ag-e", Q: "ag-e" },
       workspaceSecrets: { A: "ws-s", S: "ws-s" },
-      environmentSecrets: { A: "env-s" },
-      agentSecrets: {},
+      agentSecrets: { A: "ag-s" },
     });
-    expect(merged.A).toBe("env-s"); // env secret beats ws secret & all editable
+    expect(merged.A).toBe("ag-s"); // agent secret beats ws secret and all editable
     expect(merged.W).toBe("ws-e");
-    expect(merged.E).toBe("env-e");
     expect(merged.S).toBe("ws-s");
     // Editable-tier ordering, isolated from any secret layer:
-    expect(merged.P).toBe("env-e"); // env editable beats ws editable (no secret for P)
-    expect(merged.Q).toBe("ag-e"); // agent editable beats env editable (no secret for Q)
+    expect(merged.P).toBe("ag-e"); // agent editable beats ws editable (no secret for P)
+    expect(merged.Q).toBe("ag-e");
   });
 });
 
@@ -166,7 +165,7 @@ describe("resolveComputeEnvVars (config -> env-resolve wiring)", () => {
     } as unknown as Env;
   }
 
-  it("agent editable beats environment editable; environment editable beats workspace editable", async () => {
+  it("agent editable beats workspace editable through the pre-collapsed editableEnv", async () => {
     // Build the config the same way src/compute/config.ts does: `editableEnv`
     // is workspace+agent pre-collapsed, `agentEditableEnv` is agent-only.
     const result = resolveEffectiveComputeConfig({
@@ -193,41 +192,34 @@ describe("resolveComputeEnvVars (config -> env-resolve wiring)", () => {
         },
         networkRestrictionEnabled: false,
         networkDomainAllowlist: "",
-        // WORKSPACE key present in workspace+environment: environment must win.
-        envVars: { WORKSPACE_AND_ENV: "workspace-value" },
+        // Present in workspace only, and in workspace+agent: the agent must win
+        // the shared one and the workspace-only one must survive.
+        envVars: { WORKSPACE_ONLY: "workspace-value", AGENT_AND_ENV: "workspace-value" },
       },
       agent: {
         enabled: true,
         idleTimeoutMs: null,
         maxProcessRuntimeMs: null,
         networkDomainAllowlist: null,
-        // AGENT key present in agent+environment: agent must win.
         envVars: { AGENT_AND_ENV: "agent-value" },
       },
       daytonaCredentialPresent: true,
       daytonaProfiles: { small: null, medium: null },
     });
     if (!result.enabled) throw new Error("expected enabled config");
-    const config: EffectiveComputeConfig = {
-      ...result.value,
-      environmentEditableEnv: {
-        WORKSPACE_AND_ENV: "environment-value",
-        AGENT_AND_ENV: "environment-value",
-      },
-    };
+    const config: EffectiveComputeConfig = { ...result.value };
 
     const resolved = await resolveComputeEnvVars({
       env: fakeEnv(),
       workspaceId: "ws1",
       agentId: "agent1",
-      environmentId: null,
       config,
     });
 
-    // Environment beats workspace when there's no agent override for the key.
-    expect(resolved.WORKSPACE_AND_ENV).toBe("environment-value");
-    // Agent beats environment even though environment sits "above" the
-    // pre-collapsed workspace+agent `editableEnv` slot.
+    // A workspace-only var survives the merge untouched.
+    expect(resolved.WORKSPACE_ONLY).toBe("workspace-value");
+    // The agent wins a shared name, both through the pre-collapsed
+    // `editableEnv` and through its own re-applied slot.
     expect(resolved.AGENT_AND_ENV).toBe("agent-value");
   });
 });

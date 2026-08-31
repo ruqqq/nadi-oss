@@ -12,7 +12,7 @@ import {
 } from "../compute/env-vars";
 import { ComputeEnvSecretsStore } from "../compute/env-secrets";
 import { createWorkspaceSecretsServices } from "../secrets";
-import type { AgentRepositoryRow, Workbench } from "../db/schema";
+import type { AgentConfig, AgentRepositoryRow } from "../db/schema";
 import { resolveAgentScope } from "./agent-scope";
 import {
   COMPUTE_RESOURCE_PROFILE_IDS,
@@ -29,7 +29,7 @@ type WorkbenchBody = {
   networkDomainAllowlist?: unknown;
 };
 
-type WorkbenchSummary = Workbench & {
+type WorkbenchSummary = AgentConfig & {
   repositories: AgentRepositoryRow[];
   envVars: Record<string, string>;
   secretEnvNames: string[];
@@ -119,12 +119,28 @@ async function createWorkbench(req: Request, env: Env): Promise<Response> {
 
   const db = registryDb(env);
   const repo = new WorkbenchRepository(db);
+  // What this route creates is an AGENT, and `system_prompt`, `provider` and
+  // `model` are NOT NULL with no default — there is nothing sensible to invent
+  // for them here. The workspace's existing agent supplies them, which is the
+  // same rule the workbench migration used when it turned each workbench into
+  // an agent. A workspace with no agent at all cannot have one made from this
+  // surface; that is the agent-creation UI's job.
+  const template = (await repo.listForWorkspace(workspaceId, "all")).sort(
+    (left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id),
+  )[0];
+  if (!template) return new Response("Workspace agent not found", { status: 404 });
   try {
     const createdAt = Date.now();
     const { resourceProfile, networkDomainAllowlist, ...rest } = parsed.value;
     const workbench = await repo.create({
       id: `env_${crypto.randomUUID()}`,
       workspaceId,
+      systemPrompt: template.systemPrompt,
+      provider: template.provider,
+      model: template.model,
+      modelInputModalities: template.modelInputModalities,
+      reasoningEffort: template.reasoningEffort,
+      modelSupportsReasoning: template.modelSupportsReasoning,
       ...rest,
       ...(resourceProfile !== undefined ? { resourceProfile } : {}),
       ...(networkDomainAllowlist !== undefined
@@ -298,7 +314,7 @@ async function setSecret(
   }
 
   const secretStore = new ComputeEnvSecretsStore(createWorkspaceSecretsServices(env));
-  await secretStore.setEnvironment(workbench.workspaceId, workbenchId, validName, body.value);
+  await secretStore.setAgent(workbench.workspaceId, workbenchId, validName, body.value);
   // Backfill legacy names before adding this one, so the D1 index is complete
   // and the returned summary lists every secret, not just the new one.
   await ensureWorkbenchSecretNamesBackfilled(env, repo, workbench);
@@ -328,7 +344,7 @@ async function deleteSecret(
   if (!membership) return new Response("Not found", { status: 404 });
 
   const secretStore = new ComputeEnvSecretsStore(createWorkspaceSecretsServices(env));
-  await secretStore.deleteEnvironment(workbench.workspaceId, workbenchId, name);
+  await secretStore.deleteAgent(workbench.workspaceId, workbenchId, name);
   // Backfill from the KV list BEFORE removing this name: that list still
   // includes the just-deleted key while KV propagates, so seeding first then
   // deleting lets the D1 removal win — otherwise the stale list would re-add it.
@@ -345,7 +361,7 @@ async function buildSummary(
   env: Env,
   repo: WorkbenchRepository,
   _workspaceId: string,
-  row: Workbench,
+  row: AgentConfig,
 ): Promise<WorkbenchSummary> {
   const [repositories, secretEnvNames] = await Promise.all([
     repo.listRepositories(row.id),
@@ -356,7 +372,8 @@ async function buildSummary(
     repositories,
     envVars: parseEnvVarsJson(row.sandboxEnvVarsJson),
     secretEnvNames,
-    networkDomainAllowlist: row.sandboxNetworkDomainAllowlist,
+    // NULL on `agents` means what "" meant on `workbenches`: no additions.
+    networkDomainAllowlist: row.sandboxNetworkDomainAllowlist ?? "",
   };
 }
 
@@ -370,7 +387,7 @@ async function buildSummary(
 async function loadWorkbenchSecretNames(
   env: Env,
   repo: WorkbenchRepository,
-  workbench: Workbench,
+  workbench: AgentConfig,
 ): Promise<string[]> {
   await ensureWorkbenchSecretNamesBackfilled(env, repo, workbench);
   return repo.listSecretNames(workbench.id);
@@ -379,11 +396,11 @@ async function loadWorkbenchSecretNames(
 async function ensureWorkbenchSecretNamesBackfilled(
   env: Env,
   repo: WorkbenchRepository,
-  workbench: Workbench,
+  workbench: AgentConfig,
 ): Promise<void> {
   if (workbench.secretNamesBackfilled) return;
   const secretStore = new ComputeEnvSecretsStore(createWorkspaceSecretsServices(env));
-  const kvNames = await secretStore.listEnvironmentNames(workbench.workspaceId, workbench.id);
+  const kvNames = await secretStore.listAgentNames(workbench.workspaceId, workbench.id);
   await repo.backfillSecretNames(
     workbench.id,
     kvNames.map((entry) => ({ name: entry.name, updatedAt: parseKvTimestamp(entry.updatedAt) })),

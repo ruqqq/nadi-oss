@@ -166,7 +166,27 @@ export const agents = sqliteTable(
     sandboxEnvVarsJson: text("sandbox_env_vars_json"),
     setupScript: text("setup_script").notNull().default(""),
     resourceProfile: text("resource_profile").notNull().default("small"),
+    /**
+     * Secret NAMES live in `agent_secret_names` (strongly-consistent D1), not
+     * KV — a just-added secret must show in the UI immediately, and KV `list`
+     * is eventually consistent (up to ~60s). This flag records whether that D1
+     * index has been seeded from the pre-existing KV secrets yet; until it has,
+     * the name read falls back to the KV list once and backfills.
+     *
+     * Absorbed from `workbenches`. Deliberately left FALSE for every row the
+     * workbench migration created: the migration moves the D1 rows it can see,
+     * but it is SQL and cannot see KV, so any secret already written under the
+     * agent namespace by the sandbox settings surface has no D1 row. Leaving
+     * the flag false makes the first read reconcile from KV exactly once.
+     */
+    secretNamesBackfilled: integer("secret_names_backfilled", { mode: "boolean" })
+      .notNull()
+      .default(false),
     createdAt: integer("created_at").notNull(),
+    /** Absorbed from `workbenches`. Defaulted to 0 rather than NOT NULL with no
+     *  default because SQLite can only add a NOT NULL column with a default;
+     *  the migration immediately backfills it to `created_at`. */
+    updatedAt: integer("updated_at").notNull().default(0),
   },
   (table) => ({
     byWorkspace: index("idx_agents_workspace").on(table.workspaceId),
@@ -375,7 +395,7 @@ export const projects = sqliteTable(
     name: text("name").notNull(),
     description: text("description").notNull().default(""),
     customInstructions: text("custom_instructions").notNull().default(""),
-    defaultWorkbenchId: text("default_workbench_id").references(() => workbenches.id),
+    defaultAgentId: text("default_agent_id").references(() => agents.id),
     archivedAt: integer("archived_at"),
     createdAt: integer("created_at").notNull(),
     updatedAt: integer("updated_at").notNull(),
@@ -413,60 +433,23 @@ export const githubAppInstallations = sqliteTable(
   }),
 );
 
-export const workbenches = sqliteTable(
-  "workbenches",
-  {
-    id: text("id").primaryKey(),
-    workspaceId: text("workspace_id")
-      .notNull()
-      .references(() => workspaces.id),
-    name: text("name").notNull(),
-    description: text("description").notNull().default(""),
-    setupScript: text("setup_script").notNull().default(""),
-    resourceProfile: text("resource_profile").notNull().default("small"),
-    sandboxEnvVarsJson: text("sandbox_env_vars_json").notNull().default("{}"),
-    // Additional host allowlist domains, comma/newline separated. Applied
-    // additively on top of the workspace allowlist, and only when the workspace
-    // has network restriction enabled (the workspace toggle is the master
-    // switch). Empty = no additions.
-    sandboxNetworkDomainAllowlist: text("sandbox_network_domain_allowlist").notNull().default(""),
-    // Secret NAMES live in `agent_secret_names` (strongly-consistent D1),
-    // not KV — a just-added secret must show in the UI immediately, and KV
-    // `list` is eventually consistent (up to ~60s). This flag records whether
-    // that D1 index has been seeded from the pre-existing KV secrets yet; until
-    // it has, the name read falls back to the KV list once and backfills.
-    secretNamesBackfilled: integer("secret_names_backfilled", { mode: "boolean" })
-      .notNull()
-      .default(false),
-    archivedAt: integer("archived_at"),
-    createdAt: integer("created_at").notNull(),
-    updatedAt: integer("updated_at").notNull(),
-  },
-  (table) => ({
-    byWorkspaceArchived: index("idx_workbenches_workspace_archived").on(
-      table.workspaceId,
-      table.archivedAt,
-    ),
-  }),
-);
-
 /**
  * Strongly-consistent index of an agent's secret NAMES (values stay
  * encrypted in KV). D1 is the source of truth the UI reads, so a freshly added
  * secret appears at once and a deleted one disappears at once — neither waits on
  * KV `list` propagation. One row per (agent, name).
  *
- * Renamed from `workbench_secret_names` (Task 1 of the workbench merge). The
- * FK still targets `workbenches.id` — the stored values are not yet agent ids;
- * that repointing happens in the data-migration task. This is a schema rename
- * only.
+ * Renamed from `workbench_secret_names`; the FK was repointed at `agents.id`
+ * in the same migration that rewrote its values from workbench ids to agent
+ * ids. Values and key move together — a lag in either direction reads as an
+ * empty secret list with no error anywhere.
  */
 export const agentSecretNames = sqliteTable(
   "agent_secret_names",
   {
     agentId: text("agent_id")
       .notNull()
-      .references(() => workbenches.id),
+      .references(() => agents.id),
     name: text("name").notNull(),
     updatedAt: integer("updated_at").notNull(),
   },
@@ -476,9 +459,10 @@ export const agentSecretNames = sqliteTable(
 );
 
 /**
- * Renamed from `workbench_repositories` (Task 1 of the workbench merge). The
- * FK still targets `workbenches.id` for the same reason as
- * {@link agentSecretNames} — schema rename only, data migration is separate.
+ * Renamed from `workbench_repositories`; the FK was repointed at `agents.id`
+ * in the same migration that rewrote its values, for the same reason as
+ * {@link agentSecretNames}. A one-commit lag in either direction yields zero
+ * repositories for every thread, nothing cloned, and no error anywhere.
  */
 export const agentRepositories = sqliteTable(
   "agent_repositories",
@@ -486,7 +470,7 @@ export const agentRepositories = sqliteTable(
     id: text("id").primaryKey(),
     agentId: text("agent_id")
       .notNull()
-      .references(() => workbenches.id),
+      .references(() => agents.id),
     source: text("source", { enum: ["github", "url"] }).notNull(),
     name: text("name").notNull(),
     url: text("url").notNull(),
@@ -538,7 +522,6 @@ export const threadIndex = sqliteTable(
       .notNull()
       .references(() => agents.id),
     projectId: text("project_id"),
-    workbenchId: text("workbench_id").references(() => workbenches.id),
     modelProvider: text("model_provider"),
     model: text("model"),
     modelInputModalities: text("model_input_modalities"),
@@ -856,7 +839,6 @@ export const automata = sqliteTable(
       .notNull()
       .references(() => agents.id),
     projectId: text("project_id"),
-    workbenchId: text("workbench_id"),
     name: text("name").notNull(),
     prompt: text("prompt").notNull(),
     /**
@@ -1154,7 +1136,6 @@ export type AgentSkillExclusion = typeof agentSkillExclusions.$inferSelect;
 export type AgentSkillResource = typeof agentSkillResources.$inferSelect;
 export type Project = typeof projects.$inferSelect;
 export type GithubAppInstallationRow = typeof githubAppInstallations.$inferSelect;
-export type Workbench = typeof workbenches.$inferSelect;
 export type AgentRepositoryRow = typeof agentRepositories.$inferSelect;
 export type AgentSecretNameRow = typeof agentSecretNames.$inferSelect;
 export type AgentSandboxRow = typeof agentSandboxes.$inferSelect;

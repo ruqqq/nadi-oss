@@ -118,8 +118,6 @@ function cloudflareEffectiveConfig(): EffectiveComputeConfig {
     editableEnv: {},
     agentEditableEnv: {},
     secretEnvNames: [],
-    environmentEditableEnv: {},
-    environmentSecretEnvNames: [],
   };
 }
 

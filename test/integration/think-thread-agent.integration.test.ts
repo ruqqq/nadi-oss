@@ -566,6 +566,10 @@ beforeAll(async () => {
     id: "env-think-context",
     workspaceId: "workspace-think-project-context",
     name: "Think context env",
+    // An environment IS an agent now.
+    systemPrompt: "You are Nadi.",
+    provider: "mock",
+    model: "mock",
     description: "",
     setupScript: "",
     sandboxEnvVarsJson: "{}",
@@ -576,6 +580,10 @@ beforeAll(async () => {
     id: "env-think-archived",
     workspaceId: "workspace-think-project-context",
     name: "Think archived env",
+    // An environment IS an agent now.
+    systemPrompt: "You are Nadi.",
+    provider: "mock",
+    model: "mock",
     description: "",
     setupScript: "",
     sandboxEnvVarsJson: "{}",

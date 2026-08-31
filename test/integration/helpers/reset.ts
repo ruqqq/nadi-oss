@@ -42,12 +42,12 @@ const registryTables = [
   "workspace_privacy_settings",
   "workspace_sandbox_settings",
   "accounts",
+  // Before `agents`: `projects.default_agent_id` FKs it now.
+  "projects",
   "agents",
   "invites",
   "waiting_list",
-  "projects",
   "github_app_installations",
-  "workbenches",
   "workspaces",
   "users",
 ];

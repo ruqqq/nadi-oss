@@ -151,7 +151,7 @@ export function createAutomatonManagementTools(input: { env: Env; threadId: stri
               enabled: row.enabled,
               nextDueAt: row.nextDueAt,
               projectId: row.projectId,
-              workbenchId: row.workbenchId,
+              workbenchId: row.agentId,
               lastRun: row.lastRun,
             })),
           };
@@ -163,7 +163,7 @@ export function createAutomatonManagementTools(input: { env: Env; threadId: stri
 
     list_workbenches: tool({
       description:
-        "List the workspace's workbenches. A workbench bundles the repositories and setup an automaton's run works against. Returns each workbench's id, name, and description. Pass a workbench id as `workbenchId` to create_automaton/update_automaton to override the project's default workbench.",
+        "List the workspace's agents. An agent carries the prompt, model, repositories and setup an automaton's run works against. Returns each agent's id, name, and description. Pass an agent id as `workbenchId` to create_automaton/update_automaton to choose which agent the runs execute as.",
       inputSchema: z.object({}),
       execute: async () => {
         const resolved = await resolveService();
@@ -209,7 +209,7 @@ export function createAutomatonManagementTools(input: { env: Env; threadId: stri
               nextDueAt: automaton.nextDueAt,
               lastFiredAt: automaton.lastFiredAt,
               projectId: automaton.projectId,
-              workbenchId: automaton.workbenchId,
+              workbenchId: automaton.agentId,
               notifyMode: automaton.notifyMode,
             },
             runs: runs.map((r) => ({
@@ -244,10 +244,9 @@ export function createAutomatonManagementTools(input: { env: Env; threadId: stri
             .describe("Optional project id to scope runs to, or null for none."),
           workbenchId: z
             .string()
-            .nullable()
             .optional()
             .describe(
-              "Optional workbench id (from list_workbenches) to override the project's default workbench for this automaton's runs, or null to inherit the project default.",
+              "Optional agent id (from list_workbenches) naming which agent this automaton's runs execute as. Defaults to the workspace's agent.",
             ),
           notifyMode: notifyModeSchema.optional().describe("Defaults to 'all'."),
           enabled: z.boolean().optional().describe("Defaults to true."),
@@ -290,11 +289,8 @@ export function createAutomatonManagementTools(input: { env: Env; threadId: stri
           projectId: z.string().nullable().optional(),
           workbenchId: z
             .string()
-            .nullable()
             .optional()
-            .describe(
-              "Workbench id from list_workbenches to override, or null to inherit the project default.",
-            ),
+            .describe("Agent id from list_workbenches naming which agent the runs execute as."),
           notifyMode: notifyModeSchema.optional(),
           enabled: z.boolean().optional().describe("false disables, true enables."),
           modelProvider: modelProviderSchema,

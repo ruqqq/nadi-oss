@@ -84,6 +84,11 @@ async function seedEnvironment(
     id: input.workbenchId,
     workspaceId: input.workspaceId,
     name: input.name ?? input.workbenchId,
+    // An environment IS an agent now, so seeding one means seeding the columns
+    // `agents` requires.
+    systemPrompt: "You are Nadi.",
+    provider: "mock",
+    model: "mock",
     description: "",
     setupScript: input.setupScript ?? "",
     resourceProfile: input.resourceProfile ?? "small",
@@ -174,7 +179,6 @@ describe("ThreadRepository", () => {
   beforeEach(async () => {
     await drizzle(env.REGISTRY_DB, { schema }).delete(schema.threadIndex);
     await drizzle(env.REGISTRY_DB, { schema }).delete(schema.agentRepositories);
-    await drizzle(env.REGISTRY_DB, { schema }).delete(schema.workbenches);
     await drizzle(env.REGISTRY_DB, { schema }).delete(schema.projects);
     await drizzle(env.REGISTRY_DB, { schema }).delete(schema.agents);
     await drizzle(env.REGISTRY_DB, { schema }).delete(schema.workspaces);
@@ -182,7 +186,6 @@ describe("ThreadRepository", () => {
   afterEach(async () => {
     await drizzle(env.REGISTRY_DB, { schema }).delete(schema.threadIndex);
     await drizzle(env.REGISTRY_DB, { schema }).delete(schema.agentRepositories);
-    await drizzle(env.REGISTRY_DB, { schema }).delete(schema.workbenches);
     await drizzle(env.REGISTRY_DB, { schema }).delete(schema.projects);
     await drizzle(env.REGISTRY_DB, { schema }).delete(schema.agents);
     await drizzle(env.REGISTRY_DB, { schema }).delete(schema.workspaces);
@@ -235,12 +238,15 @@ describe("ThreadRepository", () => {
         createdAt,
         updatedAt: createdAt,
       },
-      null,
+      "agent-workspace-a",
     );
 
-    expect(created.workbenchId).toBeNull();
+    // There is no longer an "unassigned" state to assert: `agent_id` is NOT
+    // NULL and it IS the environment. What is asserted instead is that the
+    // resolved agent is the one persisted — the two must never disagree.
+    expect(created.agentId).toBe("agent-workspace-a");
     await expect(repo.getById("thr_unassigned")).resolves.toEqual(
-      expect.objectContaining({ id: "thr_unassigned", workbenchId: null }),
+      expect.objectContaining({ id: "thr_unassigned", agentId: "agent-workspace-a" }),
     );
   });
 
@@ -288,7 +294,7 @@ describe("ThreadRepository", () => {
     );
 
     await expect(new ThreadRepository(db).getById("thr_env_a")).resolves.toEqual(
-      expect.objectContaining({ workbenchId: "env-a" }),
+      expect.objectContaining({ agentId: "env-a" }),
     );
     // The environment's repositories are read LIVE at use time; nothing is
     // copied onto the thread.
@@ -448,7 +454,7 @@ describe("ThreadRepository", () => {
 
     const row = await new ThreadRepository(db).getSummaryRowById("thr_mid_switch");
     expect(row).toBeTruthy();
-    expect(row?.workbenchId).toBe("env-new");
+    expect(row?.agentId).toBe("env-new");
     expect(row?.snapshotResourceProfile).toBe("medium");
     // env-new has no repositories, so the count follows the live list too.
     expect(row?.repositorySnapshotCount).toBe(0);
@@ -507,7 +513,7 @@ describe("ThreadRepository", () => {
     await expect(new ThreadRepository(db).getById("thr_relabel")).resolves.toEqual(
       expect.objectContaining({
         projectId: "project-b",
-        workbenchId: "env-a",
+        agentId: "env-a",
         updatedAt: createdAt + 50,
       }),
     );
@@ -570,7 +576,7 @@ describe("ThreadRepository", () => {
     await new ThreadRepository(db).updateWorkbench("thr_move", "env-b", createdAt + 50);
 
     await expect(new ThreadRepository(db).getById("thr_move")).resolves.toEqual(
-      expect.objectContaining({ workbenchId: "env-b", updatedAt: createdAt + 50 }),
+      expect.objectContaining({ agentId: "env-b", updatedAt: createdAt + 50 }),
     );
     // The move changes only the pointer: env-b's repositories are its own and
     // are read live, and env-a's are untouched.
@@ -624,12 +630,17 @@ describe("ThreadRepository", () => {
       "env-a",
     );
 
-    await new ThreadRepository(db).updateWorkbench("thr_clear", null, createdAt + 60);
+    // Retargeting to a different agent, since there is no "unassign" any more.
+    await new ThreadRepository(db).updateWorkbench(
+      "thr_clear",
+      "agent-workspace-a",
+      createdAt + 60,
+    );
 
     await expect(new ThreadRepository(db).getById("thr_clear")).resolves.toEqual(
-      expect.objectContaining({ workbenchId: null, updatedAt: createdAt + 60 }),
+      expect.objectContaining({ agentId: "agent-workspace-a", updatedAt: createdAt + 60 }),
     );
-    // Unassigning never deletes the environment's own repositories.
+    // Retargeting never deletes the old agent's own repositories.
     await expect(new WorkbenchRepository(db).listRepositories("env-a")).resolves.toEqual([
       expect.objectContaining({ id: "repo-a" }),
     ]);

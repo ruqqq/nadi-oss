@@ -56,19 +56,22 @@ describe("ComputeEnvSecretsStore", () => {
     expect(await s.deleteWorkspace("ws1", "GH_TOKEN")).toBe(true);
     expect(await s.listWorkspaceNames("ws1")).toEqual([]);
   });
-  it("isolates environment secrets by environmentId and from workspace scope", async () => {
+  // The `sbxenv-env:` (workbench) scope is gone — its values were re-encrypted
+  // into the agent scope. These two cases replace the isolation/delete cases it
+  // used to have, one scope down.
+  it("isolates agent secrets by agentId and from workspace scope", async () => {
     const s = await makeStore();
-    await s.setEnvironment("ws1", "env_a", "TOKEN", "aaa");
-    expect((await s.listEnvironmentNames("ws1", "env_a")).map((n) => n.name)).toEqual(["TOKEN"]);
-    expect(await s.listEnvironmentNames("ws1", "env_b")).toEqual([]);
+    await s.setAgent("ws1", "agent-a", "TOKEN", "aaa");
+    expect((await s.listAgentNames("ws1", "agent-a")).map((n) => n.name)).toEqual(["TOKEN"]);
+    expect(await s.listAgentNames("ws1", "agent-b")).toEqual([]);
     expect(await s.listWorkspaceNames("ws1")).toEqual([]);
-    expect(await s.getEnvironmentValues("ws1", "env_a", ["TOKEN"])).toEqual({ TOKEN: "aaa" });
+    expect(await s.getAgentValues("ws1", "agent-a", ["TOKEN"])).toEqual({ TOKEN: "aaa" });
   });
 
-  it("deletes an environment secret", async () => {
+  it("deletes an agent secret", async () => {
     const s = await makeStore();
-    await s.setEnvironment("ws1", "env_a", "TOKEN", "aaa");
-    expect(await s.deleteEnvironment("ws1", "env_a", "TOKEN")).toBe(true);
-    expect(await s.listEnvironmentNames("ws1", "env_a")).toEqual([]);
+    await s.setAgent("ws1", "agent-a", "TOKEN", "aaa");
+    expect(await s.deleteAgent("ws1", "agent-a", "TOKEN")).toBe(true);
+    expect(await s.listAgentNames("ws1", "agent-a")).toEqual([]);
   });
 });

@@ -25,8 +25,6 @@ function mockEffectiveConfig(): EffectiveComputeConfig {
     editableEnv: {},
     agentEditableEnv: {},
     secretEnvNames: [],
-    environmentEditableEnv: {},
-    environmentSecretEnvNames: [],
   };
 }
 

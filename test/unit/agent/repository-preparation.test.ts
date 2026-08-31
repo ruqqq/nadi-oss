@@ -74,8 +74,9 @@ describe("createRepositoryPreparation", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     registryDbMock.mockReturnValue({ db: "mock" });
-    // Every case runs against a thread assigned to environment `env-1`.
-    getThreadMock.mockResolvedValue({ id: "thread-1", workbenchId: "env-1" });
+    // Every case runs against a thread whose AGENT is `env-1` — the agent IS
+    // the environment, and `agent_repositories.agent_id` is keyed on it.
+    getThreadMock.mockResolvedValue({ id: "thread-1", agentId: "env-1" });
     getWorkbenchMock.mockResolvedValue(undefined);
   });
 
@@ -466,8 +467,8 @@ describe("createRepositoryPreparation", () => {
   // anything. Asserting the ABSENCE of `prepared`/`skipped` (toEqual, not
   // toMatchObject) is the point — the summary string alone cannot tell the two
   // apart. The key the lookup is made with is asserted for the same reason.
-  it("returns the no-repositories summary WITHOUT resolving compute when the thread has no environment assigned", async () => {
-    getThreadMock.mockResolvedValue({ id: "thread-1", workbenchId: null });
+  it("returns the no-repositories summary WITHOUT resolving compute when the thread has no agent", async () => {
+    getThreadMock.mockResolvedValue({ id: "thread-1", agentId: null });
     const resolveComputeService = vi.fn();
 
     const prepareRepositories = createRepositoryPreparation({
@@ -500,7 +501,7 @@ describe("createRepositoryPreparation", () => {
     expect(resolveComputeService).not.toHaveBeenCalled();
   });
 
-  it("returns the no-repositories summary WITHOUT resolving compute when the environment declares none", async () => {
+  it("returns the no-repositories summary WITHOUT resolving compute when the agent declares none", async () => {
     listRepositoriesMock.mockResolvedValue([]);
     const resolveComputeService = vi.fn();
 

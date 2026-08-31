@@ -14,7 +14,6 @@ function cookie(token: string) {
 async function clearRegistry() {
   const db = drizzle(env.REGISTRY_DB, { schema });
   await db.delete(schema.threadIndex);
-  await db.delete(schema.workbenches);
   await db.delete(schema.projects);
   await db.delete(schema.agents);
   await db.delete(schema.workspaceMembers);
@@ -133,10 +132,14 @@ async function insertEnvironment(input: {
   createdAt: number;
 }) {
   const db = drizzle(env.REGISTRY_DB, { schema });
-  await db.insert(schema.workbenches).values({
+  await db.insert(schema.agents).values({
     id: input.id,
     workspaceId: input.workspaceId,
     name: input.name,
+    // An environment IS an agent now.
+    systemPrompt: "You are Nadi.",
+    provider: "mock",
+    model: "mock",
     description: "",
     setupScript: "",
     sandboxEnvVarsJson: "{}",

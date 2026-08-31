@@ -406,7 +406,6 @@ async function getOrCreateFeedbackThread(req: Request, env: Env): Promise<Respon
     agentId: target.agentId,
     kind: "feedback" as const,
     projectId: null,
-    workbenchId: null,
     modelProvider: FEEDBACK_MODEL_PROVIDER,
     model: FEEDBACK_MODEL_ID,
     modelInputModalities: JSON.stringify(["text", "image"]),

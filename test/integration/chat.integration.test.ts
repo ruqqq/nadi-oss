@@ -44,6 +44,10 @@ async function seedProjectRuntimeContext() {
     id: "env-runtime",
     workspaceId: "workspace-project-runtime",
     name: "Runtime env",
+    // An environment IS an agent now.
+    systemPrompt: "You are Nadi.",
+    provider: "mock",
+    model: "mock",
     description: "",
     setupScript: "",
     sandboxEnvVarsJson: "{}",

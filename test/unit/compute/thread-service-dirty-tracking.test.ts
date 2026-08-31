@@ -21,8 +21,6 @@ const CONFIG: EffectiveComputeConfig = {
   editableEnv: {},
   agentEditableEnv: {},
   secretEnvNames: [],
-  environmentEditableEnv: {},
-  environmentSecretEnvNames: [],
 };
 
 // A minimal "Add File" patch: no existing file or expected hash needed, so it

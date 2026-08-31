@@ -42,9 +42,6 @@ import { getGithubAppConfig } from "../github/config";
 import { applyGithubToken } from "./github-token-wiring";
 import { ThreadRepository } from "../db/repositories/threads";
 import { WorkbenchRepository } from "../db/repositories/workbenches";
-import { ComputeEnvSecretsStore } from "../compute/env-secrets";
-import { parseEnvVarsJson } from "../compute/env-vars";
-import { createWorkspaceSecretsServices } from "../secrets";
 import {
   probeWorkspaceCleanliness,
   type WorkspaceCleanliness,
@@ -247,7 +244,7 @@ export async function readThreadWorkbenchResourceProfile(
   threadId: string,
 ): Promise<ComputeResourceProfile | null> {
   const db = registryDb(env);
-  const workbenchId = (await new ThreadRepository(db).getById(threadId))?.workbenchId ?? null;
+  const workbenchId = (await new ThreadRepository(db).getById(threadId))?.agentId ?? null;
   if (workbenchId === null) return null;
   const workbench = await new WorkbenchRepository(db).getById(workbenchId);
   return workbench && isComputeResourceProfile(workbench.resourceProfile)
@@ -256,16 +253,29 @@ export async function readThreadWorkbenchResourceProfile(
 }
 
 /**
- * Whether the thread has an environment assigned — the configuration-level
- * statement that this thread does repository work (it declares repos, a setup
- * script and a sandbox size). Deliberately independent of
- * {@link readThreadWorkbenchResourceProfile}: that helper returns `null` both
- * for "no environment" and for "environment assigned but its stored profile
- * fails validation", and only the former means the thread has no environment.
+ * Whether this thread does REPOSITORY work — the gate on the large tool-step
+ * budget (see `tool-step-limit.ts`).
+ *
+ * It used to be "does the thread have a workbench assigned", which no longer
+ * distinguishes anything: every thread has an agent, and `agent_id` is NOT
+ * NULL, so the old test would hand every thread the coding budget. The
+ * configuration-level statement it was actually making — this thread clones
+ * repositories and runs a setup script — is asked directly instead.
+ *
+ * Deliberately independent of {@link readThreadWorkbenchResourceProfile}: that
+ * helper returns `null` both for a missing agent and for one whose stored
+ * profile fails validation, and neither means "no repository work".
  */
 export async function hasThreadWorkbench(env: Env, threadId: string): Promise<boolean> {
-  const thread = await new ThreadRepository(registryDb(env)).getById(threadId);
-  return thread?.workbenchId != null;
+  const db = registryDb(env);
+  const agentId = (await new ThreadRepository(db).getById(threadId))?.agentId ?? null;
+  if (agentId === null) return false;
+  const repo = new WorkbenchRepository(db);
+  const [agent, repositories] = await Promise.all([
+    repo.getById(agentId),
+    repo.listRepositories(agentId),
+  ]);
+  return repositories.length > 0 || (agent?.setupScript ?? "").trim().length > 0;
 }
 
 /**
@@ -299,16 +309,20 @@ export async function resolveComputeService(hostDeps: ComputeServiceHostDeps): P
   const preliminary = computeConfigFromInputs(inputs, null);
   if (!needsWorkbenchResourceProfile(preliminary)) return null;
 
-  // `threadWorkbenchId` is the thread's assigned environment BUNDLE
-  // (project/env-vars/setup-script grouping) — distinct from the
-  // `environmentId` local below, which names the base OS image for the
-  // selected resource profile. Read LIVE from `threadIndex.workbenchId`: the
-  // per-thread snapshot is gone, because a shared box cannot honour a
-  // per-thread config version. Fetched ONLY once we know compute could
-  // actually be enabled (see above), so this query is paid exactly once and
-  // never on the disabled path.
+  // `threadWorkbenchId` is the thread's AGENT — what used to be a separate
+  // environment bundle (repositories/env-vars/setup-script) is the agent
+  // itself. Distinct from the `environmentId` local below, which names the base
+  // OS image for the selected resource profile. Read LIVE from
+  // `threadIndex.agentId`: the per-thread snapshot is gone, because a shared
+  // box cannot honour a per-thread config version. Fetched ONLY once we know
+  // compute could actually be enabled (see above), so this query is paid
+  // exactly once and never on the disabled path.
+  //
+  // `agentId` is NOT NULL, so unlike the workbench it replaced there is no
+  // "no environment" case here — but the row lookup can still miss, and the
+  // null-guards below are kept for exactly that.
   const threadWorkbenchId =
-    (await new ThreadRepository(registryDb(deps.env)).getById(deps.threadId))?.workbenchId ?? null;
+    (await new ThreadRepository(registryDb(deps.env)).getById(deps.threadId))?.agentId ?? null;
   // One read serves both the profile and the env-vars/allowlist below.
   const workbenchRow = threadWorkbenchId
     ? ((await new WorkbenchRepository(registryDb(deps.env)).getById(threadWorkbenchId)) ?? null)
@@ -348,29 +362,19 @@ export async function resolveComputeService(hostDeps: ComputeServiceHostDeps): P
   const effectiveProfile =
     (hasRuntime ? computeState?.resourceProfile : null) ?? config.value.resourceProfile;
 
-  let environmentEditableEnv: Record<string, string> = {};
-  let environmentSecretEnvNames: string[] = [];
-  // Workbench-level allowlist additions, applied additively on top of the
-  // workspace list. A Daytona workbench can also activate restrictions itself;
-  // that path must restore enabled MCP hosts that the unrestricted workspace
-  // resolution intentionally left out.
-  let workbenchNetworkHosts: string[] = [];
-  if (threadWorkbenchId) {
-    if (workbenchRow) {
-      environmentEditableEnv = parseEnvVarsJson(workbenchRow.sandboxEnvVarsJson);
-      workbenchNetworkHosts = parseDomainList(workbenchRow.sandboxNetworkDomainAllowlist);
-    }
-    const { store: secretsStore, writer: secretsWriter } = createWorkspaceSecretsServices(deps.env);
-    const envSecretsStore = new ComputeEnvSecretsStore({
-      store: secretsStore,
-      writer: secretsWriter,
-    });
-    const envSecretNames = await envSecretsStore.listEnvironmentNames(
-      workspaceId,
-      threadWorkbenchId,
-    );
-    environmentSecretEnvNames = envSecretNames.map((n) => n.name);
-  }
+  // Agent-level allowlist additions, applied additively on top of the workspace
+  // list. A Daytona agent can also activate restrictions itself; that path must
+  // restore enabled MCP hosts that the unrestricted workspace resolution
+  // intentionally left out.
+  //
+  // The env-vars and secret NAMES that used to be gathered here as a separate
+  // "environment" layer are gone from this function, not defaulted to empty:
+  // they now arrive through `config.agentEditableEnv` / `config.secretEnvNames`
+  // (see `loadComputeConfigInputs`), which read the same agent row. Collecting
+  // them twice would have put the same values in two precedence slots.
+  const workbenchNetworkHosts = workbenchRow
+    ? parseDomainList(workbenchRow.sandboxNetworkDomainAllowlist)
+    : [];
 
   const baseAllowlist =
     config.value.provider === "daytona" &&
@@ -388,8 +392,6 @@ export async function resolveComputeService(hostDeps: ComputeServiceHostDeps): P
     ...config.value,
     allowedHosts: widenedAllowlist,
     resourceProfile: effectiveProfile,
-    environmentEditableEnv,
-    environmentSecretEnvNames,
   };
   const existingReference =
     computeState?.status === "active" && computeState.runtimeRef
@@ -425,17 +427,15 @@ export async function resolveComputeService(hostDeps: ComputeServiceHostDeps): P
     env: deps.env,
     workspaceId,
     agentId,
-    // The thread's workbench id, threaded through to layer in its editable +
-    // secret env vars. Unrelated to the base-image `environmentId` local above.
-    environmentId: threadWorkbenchId,
     config: effectiveConfig,
   });
   // Populate GH_TOKEN from a GitHub App installation when configured and unset.
   let effectiveEnv = computeEnv;
   const githubConfig = getGithubAppConfig(deps.env);
   if (githubConfig) {
-    // LIVE repository list for the thread's environment — the token is minted
-    // for whatever it currently declares, not a frozen snapshot.
+    // LIVE repository list for the thread's AGENT — the token is minted for
+    // whatever it currently declares, not a frozen snapshot. Same key as every
+    // other repository read: `thread.agentId`.
     const repositories = threadWorkbenchId
       ? await new WorkbenchRepository(registryDb(deps.env)).listRepositories(threadWorkbenchId)
       : [];

@@ -470,6 +470,13 @@
       "when": 1788182566451,
       "tag": "0066_tiny_bloodscream",
       "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "6",
+      "when": 1788185790363,
+      "tag": "0067_loose_mac_gargan",
+      "breakpoints": true
     }
   ]
 }

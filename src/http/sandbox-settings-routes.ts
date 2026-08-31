@@ -481,8 +481,6 @@ function testEffectiveConfig(
     editableEnv: {},
     agentEditableEnv: {},
     secretEnvNames: [],
-    environmentEditableEnv: {},
-    environmentSecretEnvNames: [],
   };
 }
 

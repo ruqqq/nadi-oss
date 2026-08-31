@@ -37,8 +37,6 @@ const CONFIG: EffectiveComputeConfig = {
   editableEnv: {},
   agentEditableEnv: {},
   secretEnvNames: [],
-  environmentEditableEnv: {},
-  environmentSecretEnvNames: [],
 };
 
 /** Minimal `WorkLedgerSink` spy — mirrors the one in watcher-fault.test.ts. */

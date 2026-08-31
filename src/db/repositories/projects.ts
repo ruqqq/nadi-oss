@@ -49,10 +49,7 @@ export class ProjectRepository {
   async update(
     id: string,
     patch: Partial<
-      Pick<
-        Project,
-        "name" | "description" | "customInstructions" | "defaultWorkbenchId" | "updatedAt"
-      >
+      Pick<Project, "name" | "description" | "customInstructions" | "defaultAgentId" | "updatedAt">
     >,
   ): Promise<void> {
     await this.db.update(projects).set(patch).where(eq(projects.id, id));

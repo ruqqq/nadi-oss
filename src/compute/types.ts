@@ -84,8 +84,6 @@ export interface EffectiveComputeConfig {
   editableEnv: Record<string, string>;
   agentEditableEnv: Record<string, string>;
   secretEnvNames: string[];
-  environmentEditableEnv: Record<string, string>;
-  environmentSecretEnvNames: string[];
 }
 
 export interface ContainerLedgerRow {

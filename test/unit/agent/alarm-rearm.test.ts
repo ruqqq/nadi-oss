@@ -77,8 +77,6 @@ const CONFIG: EffectiveComputeConfig = {
   editableEnv: {},
   agentEditableEnv: {},
   secretEnvNames: [],
-  environmentEditableEnv: {},
-  environmentSecretEnvNames: [],
 };
 
 function openRow(overrides?: Partial<WorkRow>): WorkRow {

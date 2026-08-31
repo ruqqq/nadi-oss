@@ -45,11 +45,17 @@ export function createRepositoryPreparation(input: {
 }): () => Promise<RepositoryPreparationResult> {
   return async () => {
     const db = registryDb(input.env);
-    // LIVE, not snapshotted: a thread clones whatever its environment CURRENTLY
+    // LIVE, not snapshotted: a thread clones whatever its AGENT currently
     // declares, so editing the repository list takes effect on the next
     // preparation. The per-thread snapshot this used to read is gone — a shared
     // box cannot honour a per-thread config version.
-    const configId = (await new ThreadRepository(db).getById(input.threadId))?.workbenchId ?? null;
+    //
+    // Keyed on `agentId`, which is what `agent_repositories.agent_id` holds now.
+    // That column's values and this key moved in one commit deliberately: a lag
+    // in either direction returns zero rows, which lands in the branch below
+    // with an EMPTY `skipped` list, so nothing is cloned and nothing anywhere
+    // says so. See the tests for both no-op branches.
+    const configId = (await new ThreadRepository(db).getById(input.threadId))?.agentId ?? null;
     if (configId === null) {
       return { summary: "No project repositories are configured for this thread." };
     }

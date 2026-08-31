@@ -22,8 +22,6 @@ const COMPUTE_CONFIG: EffectiveComputeConfig = {
   editableEnv: {},
   agentEditableEnv: {},
   secretEnvNames: [],
-  environmentEditableEnv: {},
-  environmentSecretEnvNames: [],
 };
 
 /**

@@ -237,12 +237,12 @@ describe("resolveComputeService (real D1 + real DO storage)", () => {
 
     const workbenchId = "wb_resolve_snapshot_profile";
     await env.REGISTRY_DB.prepare(
-      `INSERT INTO workbenches (id, workspace_id, name, resource_profile, sandbox_env_vars_json, created_at, updated_at)
-       VALUES (?, ?, 'Medium bench', 'medium', '{}', ?, ?)`,
+      `INSERT INTO agents (id, workspace_id, name, system_prompt, provider, model, resource_profile, sandbox_env_vars_json, created_at, updated_at)
+       VALUES (?, ?, 'Medium bench', 'You are Nadi.', 'mock', 'mock', 'medium', '{}', ?, ?)`,
     )
       .bind(workbenchId, workspaceId, NOW, NOW)
       .run();
-    await env.REGISTRY_DB.prepare(`UPDATE thread_index SET workbench_id = ? WHERE id = ?`)
+    await env.REGISTRY_DB.prepare(`UPDATE thread_index SET agent_id = ? WHERE id = ?`)
       .bind(workbenchId, threadId)
       .run();
 
@@ -285,12 +285,12 @@ describe("resolveComputeService (real D1 + real DO storage)", () => {
 
     const workbenchId = "wb_resolve_allowlist";
     await env.REGISTRY_DB.prepare(
-      `INSERT INTO workbenches (id, workspace_id, name, resource_profile, sandbox_env_vars_json, sandbox_network_domain_allowlist, created_at, updated_at)
-       VALUES (?, ?, 'Bench', 'small', '{}', 'wb.example.com', ?, ?)`,
+      `INSERT INTO agents (id, workspace_id, name, system_prompt, provider, model, resource_profile, sandbox_env_vars_json, sandbox_network_domain_allowlist, created_at, updated_at)
+       VALUES (?, ?, 'Bench', 'You are Nadi.', 'mock', 'mock', 'small', '{}', 'wb.example.com', ?, ?)`,
     )
       .bind(workbenchId, workspaceId, NOW, NOW)
       .run();
-    await env.REGISTRY_DB.prepare(`UPDATE thread_index SET workbench_id = ? WHERE id = ?`)
+    await env.REGISTRY_DB.prepare(`UPDATE thread_index SET agent_id = ? WHERE id = ?`)
       .bind(workbenchId, threadId)
       .run();
 
@@ -341,12 +341,12 @@ describe("resolveComputeService (real D1 + real DO storage)", () => {
 
     const workbenchId = "wb_daytona_allowlist";
     await env.REGISTRY_DB.prepare(
-      `INSERT INTO workbenches (id, workspace_id, name, resource_profile, sandbox_env_vars_json, sandbox_network_domain_allowlist, created_at, updated_at)
-       VALUES (?, ?, 'Daytona bench', 'small', '{}', 'api.workbench.test', ?, ?)`,
+      `INSERT INTO agents (id, workspace_id, name, system_prompt, provider, model, resource_profile, sandbox_env_vars_json, sandbox_network_domain_allowlist, created_at, updated_at)
+       VALUES (?, ?, 'Daytona bench', 'You are Nadi.', 'mock', 'mock', 'small', '{}', 'api.workbench.test', ?, ?)`,
     )
       .bind(workbenchId, workspaceId, NOW, NOW)
       .run();
-    await env.REGISTRY_DB.prepare(`UPDATE thread_index SET workbench_id = ? WHERE id = ?`)
+    await env.REGISTRY_DB.prepare(`UPDATE thread_index SET agent_id = ? WHERE id = ?`)
       .bind(workbenchId, threadId)
       .run();
     await env.REGISTRY_DB.prepare(
@@ -449,15 +449,15 @@ describe("resolveComputeService (real D1 + real DO storage)", () => {
       ["wb_switch_medium", "Medium bench", "medium"],
     ] as const) {
       await env.REGISTRY_DB.prepare(
-        `INSERT INTO workbenches (id, workspace_id, name, resource_profile, sandbox_env_vars_json, created_at, updated_at)
-         VALUES (?, ?, ?, ?, '{}', ?, ?)`,
+        `INSERT INTO agents (id, workspace_id, name, system_prompt, provider, model, resource_profile, sandbox_env_vars_json, created_at, updated_at)
+         VALUES (?, ?, ?, 'You are Nadi.', 'mock', 'mock', ?, '{}', ?, ?)`,
       )
         .bind(id, workspaceId, name, profile, NOW, NOW)
         .run();
     }
 
     const assignTo = async (workbenchId: string) => {
-      await env.REGISTRY_DB.prepare(`UPDATE thread_index SET workbench_id = ? WHERE id = ?`)
+      await env.REGISTRY_DB.prepare(`UPDATE thread_index SET agent_id = ? WHERE id = ?`)
         .bind(workbenchId, threadId)
         .run();
     };

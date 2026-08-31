@@ -20,8 +20,6 @@ const CONFIG: EffectiveComputeConfig = {
   editableEnv: {},
   agentEditableEnv: {},
   secretEnvNames: [],
-  environmentEditableEnv: {},
-  environmentSecretEnvNames: [],
 };
 
 /** Records call order across admit/refresh/release so ordering can be asserted. */

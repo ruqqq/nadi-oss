@@ -567,10 +567,14 @@ describe("automaton routes", () => {
   it("accepts and persists workbenchId on create", async () => {
     const seeded = await seedUserWorkspace();
     const workbenchId = "wbk_routes_test";
-    await db().insert(schema.workbenches).values({
+    await db().insert(schema.agents).values({
       id: workbenchId,
       workspaceId: seeded.workspaceId,
       name: "Routes test workbench",
+      // An environment IS an agent now.
+      systemPrompt: "You are Nadi.",
+      provider: "mock",
+      model: "mock",
       description: "",
       setupScript: "",
       sandboxEnvVarsJson: "{}",

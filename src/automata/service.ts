@@ -124,8 +124,15 @@ async function resolveProjectId(
   return { set: true, value: clean };
 }
 
-// Mirrors resolveProjectId: undefined = leave unset, null = clear (inherit the
-// project's default at fire time), a string must be an active workbench here.
+// The agent a run executes as. `undefined` leaves it unset; `null` resets it to
+// the workspace's own agent; a string must name an active agent here.
+//
+// `null` used to mean "clear, and inherit the project's default workbench at
+// fire time". `automata.agent_id` is NOT NULL, so there is no stored value that
+// can mean "inherit" any more — but the workspace's agent is exactly what that
+// inheritance degraded to whenever the project had no default, so null resolves
+// to it eagerly instead of being rejected. Returns null for that case rather
+// than the id, because only the caller knows the context's agent.
 async function resolveWorkbenchId(
   db: Db,
   workspaceId: string,
@@ -134,13 +141,13 @@ async function resolveWorkbenchId(
   if (value === undefined) return { set: false, value: null };
   if (value === null) return { set: true, value: null };
   if (typeof value !== "string" || !value.trim()) {
-    throw new AutomatonValidationError("workbenchId must be a workbench id or null.");
+    throw new AutomatonValidationError("workbenchId must be an agent id or null.");
   }
   const clean = value.trim();
   try {
     await new WorkbenchRepository(db).assertActiveWorkbenchInWorkspace(clean, workspaceId);
   } catch {
-    // 404, not 403: never confirm another workspace's workbench exists.
+    // 404, not 403: never confirm another workspace's agent exists.
     throw new AutomatonProjectNotFoundError("Workbench not found.");
   }
   return { set: true, value: clean };
@@ -296,9 +303,10 @@ export class AutomatonService {
       id: `auto_${crypto.randomUUID()}`,
       workspaceId: this.ctx.workspaceId,
       ownerUserId: this.ctx.ownerUserId,
-      agentId: this.ctx.agentId,
+      // The automaton's agent IS its environment. An explicit `workbenchId`
+      // names it; with none given the run executes as the workspace's agent.
+      agentId: (workbench.set ? workbench.value : null) ?? this.ctx.agentId,
       projectId: project.set ? project.value : null,
-      workbenchId: workbench.set ? workbench.value : null,
       name,
       prompt,
       modelProvider: model.value.modelProvider,
@@ -340,7 +348,7 @@ export class AutomatonService {
     if (project.set) patch.projectId = project.value;
 
     const workbench = await resolveWorkbenchId(this.db, automaton.workspaceId, input.workbenchId);
-    if (workbench.set) patch.workbenchId = workbench.value;
+    if (workbench.set) patch.agentId = workbench.value ?? this.ctx.agentId;
 
     const model = await resolveModelSelection(
       this.ctx.env,

@@ -4,7 +4,6 @@ import { createThreadWithWorkbench } from "../agent/create-thread";
 import { registryDb } from "../db/client";
 import { AutomatonRepository } from "../db/repositories/automata";
 import { ProjectRepository } from "../db/repositories/projects";
-import { WorkbenchRepository } from "../db/repositories/workbenches";
 import { agents } from "../db/schema";
 import type { Automaton } from "../db/schema";
 import type { Env } from "../env";
@@ -111,46 +110,20 @@ export async function startAutomatonRun(
 
     const label =
       opts.dueAt === null ? "Manual run" : formatDueDate(opts.dueAt, automaton.timezone);
-    // The automaton's own workbench overrides the project's default; with none
-    // set (null), the run inherits the project's default workbench. A dangling
-    // project id still fails loudly (assertProjectInWorkspace), matching before.
-    const resolvedWorkbenchId =
-      automaton.workbenchId ??
-      (automaton.projectId
-        ? (
-            await new ProjectRepository(db).assertProjectInWorkspace(
-              automaton.projectId,
-              automaton.workspaceId,
-            )
-          ).defaultWorkbenchId
-        : null);
-    // Matches the manual create-thread path (resolveThreadWorkbenchId in
-    // thread-routes.ts): a workbench that no longer exists or was archived
-    // after being set degrades to no workbench rather than failing the run.
-    // Unlike the manual path, this also covers an explicit
-    // automaton.workbenchId that has since gone stale — an unattended
-    // scheduled run has no caller present to see a 404, so the same
-    // "don't fail the run over an archived workbench" reasoning applies
-    // regardless of where the id came from. (An explicit id is validated at
-    // set time in automata/service.ts, so this only matters if it's archived
-    // later.)
-    const workbenchId =
-      resolvedWorkbenchId === null
-        ? null
-        : await new WorkbenchRepository(db)
-            .assertActiveWorkbenchInWorkspace(resolvedWorkbenchId, automaton.workspaceId)
-            .then(
-              (row) => row.id,
-              () => {
-                log.warn("automata.workbench_dropped", {
-                  automatonId: automaton.id,
-                  workspaceId: automaton.workspaceId,
-                  workbenchId: resolvedWorkbenchId,
-                  source: automaton.workbenchId !== null ? "automaton_override" : "project_default",
-                });
-                return null;
-              },
-            );
+    // `agent_id` IS the environment now, and it is NOT NULL, so there is no
+    // separate workbench to resolve and nothing to degrade to. The project's
+    // default is not consulted at fire time any more: it was only ever the
+    // fallback for an automaton with no workbench override, and the migration
+    // resolved that inheritance into `agent_id` itself. An automaton names the
+    // agent it runs as, exactly as it already did for prompt and model.
+    //
+    // A dangling project id still fails loudly, as before.
+    if (automaton.projectId) {
+      await new ProjectRepository(db).assertProjectInWorkspace(
+        automaton.projectId,
+        automaton.workspaceId,
+      );
+    }
     await createThreadWithWorkbench(
       db,
       {
@@ -174,7 +147,7 @@ export async function startAutomatonRun(
         createdAt: now,
         updatedAt: now,
       },
-      workbenchId,
+      automaton.agentId,
     );
 
     // MUST go through getAgentByName, not a raw `namespace.get(idFromName(...))`

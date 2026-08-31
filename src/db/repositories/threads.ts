@@ -3,8 +3,8 @@ import type { D1Transaction, DrizzleD1Database } from "drizzle-orm/d1";
 import type * as schema from "../schema";
 import {
   agentRepositories,
+  agents,
   automata,
-  workbenches,
   projects,
   threadIndex,
   threadTokenUsage,
@@ -29,10 +29,18 @@ export class ThreadRepository {
     return input;
   }
 
-  /** Environment assignment is a plain column on the row — there is no
-   *  per-thread configuration snapshot to write alongside it any more. */
-  async createWithWorkbench(input: typeof threadIndex.$inferInsert, workbenchId: string | null) {
-    const row = { ...input, workbenchId };
+  /**
+   * Environment assignment is `agent_id` itself now — the agent IS the
+   * environment. There is no separate workbench column and no per-thread
+   * configuration snapshot.
+   *
+   * `agentId` is REQUIRED, not optional-with-a-null-fallback: it is a NOT NULL
+   * FK and it is what every repository, secret and env-var lookup keys on, so a
+   * caller that forgets it must fail to compile rather than produce a thread
+   * that silently clones nothing.
+   */
+  async createWithWorkbench(input: typeof threadIndex.$inferInsert, agentId: string) {
+    const row = { ...input, agentId };
     await this.create(row);
     return row;
   }
@@ -104,27 +112,24 @@ export class ThreadRepository {
     const enrichment = await this.db
       .select({
         projectName: projects.name,
-        workbenchName: workbenches.name,
+        workbenchName: agents.name,
         automatonName: automata.name,
         automatonNotifyMode: automata.notifyMode,
         repositoryCount: sql<number>`count(${agentRepositories.id})`,
-        workbenchResourceProfile: workbenches.resourceProfile,
+        workbenchResourceProfile: agents.resourceProfile,
       })
       .from(threadIndex)
       .leftJoin(projects, eq(projects.id, threadIndex.projectId))
-      .leftJoin(workbenches, eq(workbenches.id, threadIndex.workbenchId))
+      .leftJoin(agents, eq(agents.id, threadIndex.agentId))
       .leftJoin(automata, eq(automata.id, threadIndex.automatonId))
-      // Counts the environment's LIVE repositories; this is the join that can
-      // multiply rows, which is why the aggregate + groupBy stay.
-      .leftJoin(agentRepositories, eq(agentRepositories.agentId, threadIndex.workbenchId))
+      // Counts the AGENT's live repositories; this is the join that can
+      // multiply rows, which is why the aggregate + groupBy stay. Keyed on
+      // `agentId`, which is what `agent_repositories.agent_id` now holds — the
+      // values and this key moved in the same commit, because a lag in either
+      // direction reports zero repositories with no error anywhere.
+      .leftJoin(agentRepositories, eq(agentRepositories.agentId, threadIndex.agentId))
       .where(eq(threadIndex.id, threadId))
-      .groupBy(
-        threadIndex.id,
-        projects.name,
-        workbenches.name,
-        workbenches.resourceProfile,
-        automata.name,
-      )
+      .groupBy(threadIndex.id, projects.name, agents.name, agents.resourceProfile, automata.name)
       .get();
     return {
       ...base,
@@ -265,7 +270,7 @@ export class ThreadRepository {
 
   /**
    * Retargets a thread's project. Repository access no longer flows through
-   * projects — it is keyed on the thread's `workbenchId` (see
+   * projects — it is keyed on the thread's `agentId` (see
    * {@link updateWorkbench}) — so this is a plain column update.
    */
   async updateProject(
@@ -290,16 +295,15 @@ export class ThreadRepository {
   }
 
   /**
-   * Retargets a thread's environment. A plain column update: configuration is
-   * LIVE, so the next turn's sandbox preparation simply reads the new
-   * environment. There is no snapshot to move, and therefore no switch
-   * handshake, no pending marker and no sandbox teardown here.
+   * Retargets a thread to a different AGENT. A plain column update:
+   * configuration is LIVE, so the next turn's sandbox preparation simply reads
+   * the new agent's repositories and setup. There is no snapshot to move, and
+   * therefore no switch handshake, no pending marker and no sandbox teardown
+   * here.
+   *
+   * There is no "no agent" state to retarget to: `agent_id` is NOT NULL.
    */
-  async updateWorkbench(
-    threadId: string,
-    workbenchId: string | null,
-    updatedAt: number,
-  ): Promise<void> {
+  async updateWorkbench(threadId: string, agentId: string, updatedAt: number): Promise<void> {
     const thread = await this.db
       .select()
       .from(threadIndex)
@@ -312,7 +316,7 @@ export class ThreadRepository {
 
     await this.db
       .update(threadIndex)
-      .set({ workbenchId, updatedAt })
+      .set({ agentId, updatedAt })
       .where(eq(threadIndex.id, threadId));
   }
 }

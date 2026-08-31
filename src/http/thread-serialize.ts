@@ -37,10 +37,14 @@ export interface ThreadSummary {
   status: "active" | "archived";
   projectId: string | null;
   projectName: string | null;
+  /** The thread's AGENT — the same value as `agentId`, under the wire name the
+   * client still reads. Kept nullable on the wire only because the client's
+   * type says so; it is never null now, since `thread_index.agent_id` is NOT
+   * NULL. Renamed with the rest of the surface in the routes task. */
   workbenchId: string | null;
   workbenchName: string | null;
-  /** The environment's sandbox size, read LIVE: configuration is not
-   * snapshotted per thread, so editing it takes effect on the next acquire. */
+  /** The agent's sandbox size, read LIVE: configuration is not snapshotted per
+   * thread, so editing it takes effect on the next acquire. */
   resourceProfile: ComputeResourceProfile;
   automatonId: string | null;
   automatonName: string | null;
@@ -83,10 +87,10 @@ export function serializeThread(input: {
   archivedAt?: number | null;
   projectId?: string | null;
   projectName?: string | null;
-  workbenchId?: string | null;
   workbenchName?: string | null;
-  /** Raw `workbenches.resource_profile` — nullable text (NULL when the thread
-   * has no environment), validated and defaulted below. */
+  /** Raw `agents.resource_profile`, validated and defaulted below. Still
+   * optional: a caller that serializes a bare `thread_index` row without the
+   * agent join has no value for it. */
   snapshotResourceProfile?: string | null;
   automatonId?: string | null;
   automatonName?: string | null;
@@ -125,7 +129,10 @@ export function serializeThread(input: {
     status: input.archivedAt == null ? "active" : "archived",
     projectId: input.projectId ?? null,
     projectName: input.projectName ?? null,
-    workbenchId: input.workbenchId ?? null,
+    // The agent IS the environment now, so this is `agentId` rather than a
+    // separate column. Sourced here rather than at each call site so no caller
+    // can serialize a thread whose two identifiers disagree.
+    workbenchId: input.agentId,
     workbenchName: input.workbenchName ?? null,
     resourceProfile:
       input.snapshotResourceProfile != null &&

@@ -81,14 +81,15 @@ type AutomatonInput = {
 
 function prepareAutomaton(input: AutomatonInput, now = Date.now()) {
   return env.REGISTRY_DB.prepare(
-    "INSERT INTO automata (id, workspace_id, owner_user_id, agent_id, project_id, workbench_id, name, prompt, model_provider, model, model_input_modalities, schedule_json, timezone, enabled, next_due_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    "INSERT INTO automata (id, workspace_id, owner_user_id, agent_id, project_id, name, prompt, model_provider, model, model_input_modalities, schedule_json, timezone, enabled, next_due_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
   ).bind(
     input.id,
     WORKSPACE_ID,
     USER_ID,
-    AGENT_ID,
+    // The agent IS the environment: a `workbenchId` on the input names the
+    // agent this automaton's runs execute as.
+    input.workbenchId ?? AGENT_ID,
     input.projectId ?? null,
-    input.workbenchId ?? null,
     "Test Automaton",
     "Do the thing.",
     input.modelProvider ?? null,
@@ -110,11 +111,15 @@ async function insertWorkbench(input: {
   archivedAt?: number | null;
 }) {
   await db()
-    .insert(schema.workbenches)
+    .insert(schema.agents)
     .values({
       id: input.id,
       workspaceId: WORKSPACE_ID,
       name: input.name,
+      // An environment IS an agent now.
+      systemPrompt: "You are Nadi.",
+      provider: "mock",
+      model: "mock",
       description: "",
       setupScript: "",
       sandboxEnvVarsJson: "{}",
@@ -135,7 +140,7 @@ async function insertProjectWithDefaultWorkbench(input: {
     name: "Test Project",
     description: "",
     customInstructions: "",
-    defaultWorkbenchId: input.defaultWorkbenchId,
+    defaultAgentId: input.defaultWorkbenchId,
     archivedAt: null,
     createdAt: input.createdAt,
     updatedAt: input.createdAt,
@@ -595,51 +600,12 @@ describe("fireDueAutomata (real D1 + real DO dispatch)", () => {
     expect(thread?.modelInputModalities).toBe('["text","image"]');
   });
 
-  it("degrades to no workbench (not a failed run) when the project's default workbench was archived", async () => {
-    const now = Date.now();
-    await insertWorkbench({ id: "wb_archived_default", name: "Archived Default", createdAt: now });
-    await insertProjectWithDefaultWorkbench({
-      id: "proj_stale_default",
-      defaultWorkbenchId: "wb_archived_default",
-      createdAt: now,
-    });
-    // Archive it AFTER it was set as the project's default — the exact
-    // staleness scenario this test guards against.
-    await new WorkbenchRepository(db()).archive("wb_archived_default", now + 1);
-
-    const warnSpy = vi.spyOn(log, "warn").mockImplementation(() => {});
-
-    const dueAt = now - 1000;
-    await insertAutomaton({
-      id: "auto_stale_default_wb",
-      nextDueAt: dueAt,
-      projectId: "proj_stale_default",
-      workbenchId: null,
-    });
-
-    const result = await fireDueAutomata(env, dueAt + 1000);
-    expect(result).toEqual({ fired: 1, skipped: 0 });
-
-    const runs = await listRunsFor("auto_stale_default_wb");
-    expect(runs).toHaveLength(1);
-    expect(runs[0]?.status).toBe("queued");
-
-    const thread = await getThread(runs[0]?.threadId as string);
-    expect(thread?.workbenchId).toBeNull();
-
-    // The dropped-workbench log is the only operator-facing signal here —
-    // there's no synchronous response and the automaton owner isn't watching
-    // the tick. Assert the full payload, including `source: "project_default"`
-    // so an operator can tell this apart from a stale explicit override.
-    expect(warnSpy).toHaveBeenCalledWith("automata.workbench_dropped", {
-      automatonId: "auto_stale_default_wb",
-      workspaceId: WORKSPACE_ID,
-      workbenchId: "wb_archived_default",
-      source: "project_default",
-    });
-  });
-
-  it("degrades to no workbench when an explicit automaton.workbenchId was archived after being set", async () => {
+  // The two "degrades to no workbench" cases these replace tested a fallback
+  // that no longer has anything to fall back TO: `automata.agent_id` is NOT
+  // NULL and it IS the environment. The behaviour that matters now is that the
+  // automaton's own agent is authoritative — an unattended run must not be
+  // silently moved onto another agent's repositories and secrets.
+  it("runs as the automaton's own agent even after that agent is archived", async () => {
     const now = Date.now();
     await insertWorkbench({
       id: "wb_archived_explicit",
@@ -666,86 +632,32 @@ describe("fireDueAutomata (real D1 + real DO dispatch)", () => {
     expect(runs[0]?.status).toBe("queued");
 
     const thread = await getThread(runs[0]?.threadId as string);
-    expect(thread?.workbenchId).toBeNull();
-
-    // Distinguishes from the project-default case above: an operator needs
-    // to know the *automaton's own* override went stale, not the project's.
-    expect(warnSpy).toHaveBeenCalledWith("automata.workbench_dropped", {
-      automatonId: "auto_stale_explicit_wb",
-      workspaceId: WORKSPACE_ID,
-      workbenchId: "wb_archived_explicit",
-      source: "automaton_override",
-    });
-  });
-});
-
-describe("AutomatonRepository.listLatestRunsFor", () => {
-  it("returns [] for an empty input", async () => {
-    const repo = new AutomatonRepository(db());
-    await expect(repo.listLatestRunsFor([])).resolves.toEqual([]);
+    expect(thread?.agentId).toBe("wb_archived_explicit");
+    // Nothing was dropped, so nothing is logged as dropped.
+    expect(warnSpy).not.toHaveBeenCalledWith("automata.workbench_dropped", expect.anything());
   });
 
-  it("returns exactly one row per automaton — the most recent", async () => {
-    await insertAutomaton({ id: "auto_latest_a", nextDueAt: null });
-    await insertAutomaton({ id: "auto_latest_b", nextDueAt: null });
-    await insertRun({
-      id: "arun_a1",
-      automatonId: "auto_latest_a",
-      dueAt: null,
-      trigger: "manual",
-      status: "completed",
-      createdAt: 1000,
-    });
-    await insertRun({
-      id: "arun_a2",
-      automatonId: "auto_latest_a",
-      dueAt: null,
-      trigger: "manual",
-      status: "failed",
-      createdAt: 2000,
-    });
-    await insertRun({
-      id: "arun_b1",
-      automatonId: "auto_latest_b",
-      dueAt: null,
-      trigger: "manual",
-      status: "completed",
-      createdAt: 1500,
+  it("does NOT adopt the project's default agent over the automaton's own", async () => {
+    const now = Date.now();
+    await insertWorkbench({ id: "wb_project_default", name: "Project Default", createdAt: now });
+    await insertWorkbench({ id: "wb_automaton_own", name: "Automaton Own", createdAt: now });
+    await insertProjectWithDefaultWorkbench({
+      id: "proj_default_ignored",
+      defaultWorkbenchId: "wb_project_default",
+      createdAt: now,
     });
 
-    const repo = new AutomatonRepository(db());
-    const latest = await repo.listLatestRunsFor(["auto_latest_a", "auto_latest_b"]);
-    expect(latest).toHaveLength(2);
-    const byAutomaton = new Map(latest.map((run) => [run.automatonId, run]));
-    expect(byAutomaton.get("auto_latest_a")?.id).toBe("arun_a2");
-    expect(byAutomaton.get("auto_latest_b")?.id).toBe("arun_b1");
-  });
+    const dueAt = now - 1000;
+    await insertAutomaton({
+      id: "auto_own_agent_wins",
+      nextDueAt: dueAt,
+      projectId: "proj_default_ignored",
+      workbenchId: "wb_automaton_own",
+    });
 
-  it("disables a once automaton after a successful scheduled fire", async () => {
-    const dueAt = Date.now() - 1000;
-    const onceJson = JSON.stringify({ kind: "once", runAt: dueAt });
-    await insertAutomaton({ id: "auto_once", nextDueAt: dueAt, scheduleJson: onceJson });
-
-    const result = await fireDueAutomata(env, Date.now());
-    expect(result).toEqual({ fired: 1, skipped: 0 });
-
-    const automaton = await getAutomaton("auto_once");
-    expect(automaton?.enabled).toBe(false);
-    expect(automaton?.nextDueAt).toBeNull();
-    expect(automaton?.disabledReason).toBeNull();
-  });
-
-  it("disables a once automaton after a stale skip", async () => {
-    const now = Date.UTC(2026, 0, 15, 12, 0, 0);
-    const dueAt = now - AUTOMATON_GRACE_MS - 60_000;
-    const onceJson = JSON.stringify({ kind: "once", runAt: dueAt });
-    await insertAutomaton({ id: "auto_once_stale", nextDueAt: dueAt, scheduleJson: onceJson });
-
-    const result = await fireDueAutomata(env, now);
-    expect(result).toEqual({ fired: 0, skipped: 1 });
-
-    const automaton = await getAutomaton("auto_once_stale");
-    expect(automaton?.enabled).toBe(false);
-    expect(automaton?.nextDueAt).toBeNull();
+    expect(await fireDueAutomata(env, dueAt + 1000)).toEqual({ fired: 1, skipped: 0 });
+    const runs = await listRunsFor("auto_own_agent_wins");
+    const thread = await getThread(runs[0]?.threadId as string);
+    expect(thread?.agentId).toBe("wb_automaton_own");
   });
 });

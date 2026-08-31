@@ -38,7 +38,7 @@ describe("resolveProjectPromptContext", () => {
           threadId: "thread-1",
           workspaceId: "workspace-1",
           projectId: null,
-          workbenchId: "env-1",
+          agentId: "env-1",
         },
       }),
     ).resolves.toBeUndefined();
@@ -48,7 +48,7 @@ describe("resolveProjectPromptContext", () => {
     expect(listRepositoriesMock).not.toHaveBeenCalled();
   });
 
-  it("uses the environment's LIVE repository list, keyed on the thread's environment", async () => {
+  it("uses the AGENT's LIVE repository list, keyed on the thread's agent id", async () => {
     assertProjectInWorkspaceMock.mockResolvedValue({
       name: "Nadi",
       description: "Main app",
@@ -73,7 +73,7 @@ describe("resolveProjectPromptContext", () => {
           threadId: "thread-1",
           workspaceId: "workspace-1",
           projectId: "project-1",
-          workbenchId: "env-1",
+          agentId: "env-1",
         },
       }),
     ).resolves.toEqual({

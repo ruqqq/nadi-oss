@@ -126,8 +126,6 @@ function setup() {
       editableEnv: {},
       agentEditableEnv: {},
       secretEnvNames: [],
-      environmentEditableEnv: {},
-      environmentSecretEnvNames: [],
     },
     environmentId: "lease_test",
     env: {},

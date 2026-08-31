@@ -11,7 +11,17 @@ import { registryDb } from "../db/client";
 import { AutomatonRepository } from "../db/repositories/automata";
 import { WorkspaceRepository } from "../db/repositories/workspaces";
 import { agents, automata, workspaceMembers } from "../db/schema";
+import type { Automaton } from "../db/schema";
 import type { Env } from "../env";
+
+/**
+ * An automaton's environment is its AGENT now — the `workbench_id` column is
+ * gone. The wire field keeps its old name here, and is renamed together with
+ * `web/src/mocks/` in the task that owns the route surface.
+ */
+function serializeAutomaton(row: Automaton): Automaton & { workbenchId: string } {
+  return { ...row, workbenchId: row.agentId };
+}
 
 const LIST_PATH = "/api/automata";
 const ITEM_RE = /^\/api\/automata\/([^/]+)$/;
@@ -80,7 +90,7 @@ async function listAutomata(req: Request, env: Env): Promise<Response> {
     agentId: target.agentId,
     viewerEmail: session.user.email ?? null,
   });
-  return Response.json({ automata: await service.list() });
+  return Response.json({ automata: (await service.list()).map(serializeAutomaton) });
 }
 
 async function createAutomaton(req: Request, env: Env): Promise<Response> {
@@ -114,7 +124,7 @@ async function createAutomaton(req: Request, env: Env): Promise<Response> {
       model: body.model,
       modelInputModalities: body.modelInputModalities,
     });
-    return Response.json({ automaton }, { status: 201 });
+    return Response.json({ automaton: serializeAutomaton(automaton) }, { status: 201 });
   } catch (error) {
     return automatonErrorToResponse(error);
   }
@@ -140,7 +150,7 @@ async function getAutomaton(req: Request, env: Env, id: string): Promise<Respons
   }
 
   const runs = await repo.listRuns(id, 20);
-  return Response.json({ automaton, runs });
+  return Response.json({ automaton: serializeAutomaton(automaton), runs });
 }
 
 async function updateAutomaton(req: Request, env: Env, id: string): Promise<Response> {
@@ -186,7 +196,7 @@ async function updateAutomaton(req: Request, env: Env, id: string): Promise<Resp
       model: body.model,
       modelInputModalities: body.modelInputModalities,
     });
-    return Response.json({ automaton: updated });
+    return Response.json({ automaton: serializeAutomaton(updated) });
   } catch (error) {
     return automatonErrorToResponse(error);
   }
@@ -220,7 +230,7 @@ async function archiveAutomaton(req: Request, env: Env, id: string): Promise<Res
 
   const archived = await repo.getById(id);
   if (!archived) return new Response("Not found", { status: 404 });
-  return Response.json({ automaton: archived });
+  return Response.json({ automaton: serializeAutomaton(archived) });
 }
 
 async function runAutomatonNow(req: Request, env: Env, id: string): Promise<Response> {

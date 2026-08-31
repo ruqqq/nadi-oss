@@ -156,10 +156,14 @@ describe("automaton management tools (integration)", () => {
   });
 
   async function seedWorkbench(workspaceId: string, id: string, name: string, description: string) {
-    await db().insert(schema.workbenches).values({
+    await db().insert(schema.agents).values({
       id,
       workspaceId,
       name,
+      // An environment IS an agent now.
+      systemPrompt: "You are Nadi.",
+      provider: "mock",
+      model: "mock",
       description,
       setupScript: "",
       sandboxEnvVarsJson: "{}",
@@ -169,7 +173,7 @@ describe("automaton management tools (integration)", () => {
     });
   }
 
-  it("list_workbenches returns the workspace's active workbenches", async () => {
+  it("list_workbenches returns the workspace's active agents", async () => {
     const seeded = await seed();
     await seedWorkbench(seeded.workspaceId, "wbk_tools", "Backend", "the backend bench");
     const tools = createAutomatonManagementTools({ env: env as never, threadId });
@@ -187,7 +191,7 @@ describe("automaton management tools (integration)", () => {
     });
   });
 
-  it("create_automaton persists a workbenchId override", async () => {
+  it("create_automaton persists an agent override", async () => {
     const seeded = await seed();
     await seedWorkbench(seeded.workspaceId, "wbk_override", "Override", "");
     const tools = createAutomatonManagementTools({ env: env as never, threadId });
@@ -206,6 +210,6 @@ describe("automaton management tools (integration)", () => {
       .from(schema.automata)
       .where(eq(schema.automata.id, result.automaton.id))
       .get();
-    expect(row?.workbenchId).toBe("wbk_override");
+    expect(row?.agentId).toBe("wbk_override");
   });
 });

@@ -1,6 +1,7 @@
 import { SELF, env } from "cloudflare:test";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { drizzle } from "drizzle-orm/d1";
+import { eq } from "drizzle-orm";
 import type { Env } from "../../src/env";
 import * as schema from "../../src/db/schema";
 import { ComputeEnvSecretsStore } from "../../src/compute/env-secrets";
@@ -23,7 +24,6 @@ async function clearRegistry() {
   const db = drizzle(env.REGISTRY_DB, { schema });
   await db.delete(schema.agentSecretNames);
   await db.delete(schema.agentRepositories);
-  await db.delete(schema.workbenches);
   await db.delete(schema.threadIndex);
   await db.delete(schema.projects);
   await db.delete(schema.agents);
@@ -283,10 +283,14 @@ describe("workbench routes", () => {
       secretNamesBackfilled: boolean;
     }) {
       const db = drizzle(env.REGISTRY_DB, { schema });
-      await db.insert(schema.workbenches).values({
+      await db.insert(schema.agents).values({
         id: input.id,
         workspaceId: input.workspaceId,
         name: "Legacy WB",
+        // An environment IS an agent now.
+        systemPrompt: "You are Nadi.",
+        provider: "mock",
+        model: "mock",
         secretNamesBackfilled: input.secretNamesBackfilled,
         createdAt: now,
         updatedAt: now,
@@ -310,7 +314,7 @@ describe("workbench routes", () => {
         workspaceId: seeded.workspaceId,
         secretNamesBackfilled: false,
       });
-      await secretStore().setEnvironment(seeded.workspaceId, workbenchId, "LEGACY_KEY", "v1");
+      await secretStore().setAgent(seeded.workspaceId, workbenchId, "LEGACY_KEY", "v1");
 
       // First read backfills from the KV list and returns the name.
       expect(await getSecretNames(workbenchId, seeded.token)).toEqual(["LEGACY_KEY"]);
@@ -321,7 +325,11 @@ describe("workbench routes", () => {
         .from(schema.agentSecretNames)
         .all();
       expect(names.map((n) => n.name)).toEqual(["LEGACY_KEY"]);
-      const wb = await db.select().from(schema.workbenches).get();
+      const wb = await db
+        .select()
+        .from(schema.agents)
+        .where(eq(schema.agents.id, workbenchId))
+        .get();
       expect(wb?.secretNamesBackfilled).toBe(true);
     });
 
@@ -343,7 +351,7 @@ describe("workbench routes", () => {
 
       // Drop the KV value out from under the route. Under the old code the name
       // came from the KV list and would vanish; the D1 index keeps it.
-      await secretStore().deleteEnvironment(seeded.workspaceId, workbenchId, "FOO");
+      await secretStore().deleteAgent(seeded.workspaceId, workbenchId, "FOO");
       expect(await getSecretNames(workbenchId, seeded.token)).toEqual(["FOO"]);
     });
 
@@ -355,7 +363,7 @@ describe("workbench routes", () => {
         workspaceId: seeded.workspaceId,
         secretNamesBackfilled: false,
       });
-      await secretStore().setEnvironment(seeded.workspaceId, workbenchId, "OLD", "v1");
+      await secretStore().setAgent(seeded.workspaceId, workbenchId, "OLD", "v1");
 
       const res = await SELF.fetch(`https://nadi.test/api/workbenches/${workbenchId}/secrets/OLD`, {
         method: "DELETE",

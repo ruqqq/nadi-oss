@@ -1518,8 +1518,6 @@ describe("isNetworkRestricted derivation through getComputeSettingsView", () => 
         editableEnv: {},
         agentEditableEnv: {},
         secretEnvNames: [],
-        environmentEditableEnv: {},
-        environmentSecretEnvNames: [],
       },
     });
     try {

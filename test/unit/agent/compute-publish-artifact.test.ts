@@ -32,8 +32,6 @@ function createService(backend = new FakeComputeBackend()) {
       editableEnv: {},
       agentEditableEnv: {},
       secretEnvNames: [],
-      environmentEditableEnv: {},
-      environmentSecretEnvNames: [],
     },
     environmentId: "fake-env",
     env: {},

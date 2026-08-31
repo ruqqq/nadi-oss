@@ -57,13 +57,17 @@ async function seedWorkspace(suffix: string) {
   return { workspaceId, ownerUserId, agentId };
 }
 
-// Seeds an active workbench in the workspace and returns its id.
+// Seeds a second active AGENT in the workspace and returns its id. An agent is
+// what a workbench became.
 async function seedWorkbench(workspaceId: string) {
   const id = `wbk_${crypto.randomUUID()}`;
-  await db().insert(schema.workbenches).values({
+  await db().insert(schema.agents).values({
     id,
     workspaceId,
     name: id,
+    systemPrompt: "You are Nadi.",
+    provider: "mock",
+    model: "mock",
     description: "",
     setupScript: "",
     sandboxEnvVarsJson: "{}",
@@ -74,7 +78,7 @@ async function seedWorkbench(workspaceId: string) {
   return id;
 }
 
-// Seeds a project with the given default workbench and returns its id.
+// Seeds a project with the given default agent and returns its id.
 async function seedProject(workspaceId: string, defaultWorkbenchId: string) {
   const id = `prj_${crypto.randomUUID()}`;
   await db().insert(schema.projects).values({
@@ -83,7 +87,7 @@ async function seedProject(workspaceId: string, defaultWorkbenchId: string) {
     name: id,
     description: "",
     customInstructions: "",
-    defaultWorkbenchId,
+    defaultAgentId: defaultWorkbenchId,
     archivedAt: null,
     createdAt: now,
     updatedAt: now,
@@ -347,7 +351,7 @@ describe("AutomatonService", () => {
     expect(renamed.model).toBe("mock-model");
   });
 
-  it("persists an explicit workbench override on create", async () => {
+  it("persists an explicit agent override on create", async () => {
     const seeded = await seedWorkspace("wb-create");
     const wb = await seedWorkbench(seeded.workspaceId);
     const row = await service(seeded).create({
@@ -357,10 +361,13 @@ describe("AutomatonService", () => {
       schedule: { kind: "hourly", minute: 0 },
       workbenchId: wb,
     });
-    expect(row.workbenchId).toBe(wb);
+    expect(row.agentId).toBe(wb);
   });
 
-  it("defaults workbenchId to null (inherit) when omitted", async () => {
+  // `agent_id` is NOT NULL, so "inherit" has no stored representation any more.
+  // Omitting the override means the workspace's own agent, which is what the
+  // old inherit-at-fire-time degraded to whenever the project had no default.
+  it("defaults to the workspace's agent when no override is given", async () => {
     const seeded = await seedWorkspace("wb-null");
     const row = await service(seeded).create({
       name: "wb",
@@ -368,10 +375,10 @@ describe("AutomatonService", () => {
       timezone: "UTC",
       schedule: { kind: "hourly", minute: 0 },
     });
-    expect(row.workbenchId).toBeNull();
+    expect(row.agentId).toBe(seeded.agentId);
   });
 
-  it("clears the override when workbenchId is null on update", async () => {
+  it("resets to the workspace's agent when workbenchId is null on update", async () => {
     const seeded = await seedWorkspace("wb-clear");
     const wb = await seedWorkbench(seeded.workspaceId);
     const created = await service(seeded).create({
@@ -381,11 +388,12 @@ describe("AutomatonService", () => {
       schedule: { kind: "hourly", minute: 0 },
       workbenchId: wb,
     });
+    expect(created.agentId).toBe(wb);
     const updated = await service(seeded).update(created.id, { workbenchId: null });
-    expect(updated.workbenchId).toBeNull();
+    expect(updated.agentId).toBe(seeded.agentId);
   });
 
-  it("rejects a dangling workbench id", async () => {
+  it("rejects a dangling agent id", async () => {
     const seeded = await seedWorkspace("wb-bad");
     await expect(
       service(seeded).create({
@@ -398,7 +406,7 @@ describe("AutomatonService", () => {
     ).rejects.toThrow();
   });
 
-  it("fires against the override workbench, not the project default", async () => {
+  it("fires against the override agent, not the project default", async () => {
     const seeded = await seedWorkspace("wb-fire");
     const wbA = await seedWorkbench(seeded.workspaceId);
     const wbB = await seedWorkbench(seeded.workspaceId);
@@ -421,10 +429,14 @@ describe("AutomatonService", () => {
       .from(schema.threadIndex)
       .where(eq(schema.threadIndex.id, threadId))
       .get();
-    expect(thread!.workbenchId).toBe(wbB);
+    expect(thread!.agentId).toBe(wbB);
   });
 
-  it("fires against the project default when no override is set", async () => {
+  // The project default is NO LONGER consulted at fire time: the automaton's
+  // own agent is authoritative, and the migration resolved the one-time
+  // inheritance into `agent_id` itself. An unattended run must not move onto a
+  // different agent's repositories because someone edited the project.
+  it("fires against its own agent, ignoring the project default", async () => {
     const seeded = await seedWorkspace("wb-fire-inherit");
     const wbA = await seedWorkbench(seeded.workspaceId);
     const projectId = await seedProject(seeded.workspaceId, wbA);
@@ -445,7 +457,7 @@ describe("AutomatonService", () => {
       .from(schema.threadIndex)
       .where(eq(schema.threadIndex.id, threadId))
       .get();
-    expect(thread!.workbenchId).toBe(wbA);
+    expect(thread!.agentId).toBe(seeded.agentId);
   });
 
   it("creates a once automaton with nextDueAt equal to runAt", async () => {

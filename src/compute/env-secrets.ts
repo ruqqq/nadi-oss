@@ -3,7 +3,11 @@ import { validateEnvVarName } from "./env-vars";
 
 const WS_PREFIX = "sbxenv-ws:";
 const AG_PREFIX = "sbxenv-ag:";
-const ENV_PREFIX = "sbxenv-env:";
+// `sbxenv-env:<workbenchId>:` is GONE. Its values were re-encrypted under
+// `sbxenv-ag:<agentId>:` by scripts/rekey-workbench-secrets.mjs — a decrypt and
+// re-encrypt, not a rename, because `secretAad(workspaceId, name)` authenticates
+// the variable NAME and the name embeds the scope id. Nothing reads the old
+// prefix any more; the script's --verify mode is what proves nothing needs to.
 
 export function buildWorkspaceSecretVarName(name: string): string {
   return `${WS_PREFIX}${name}`;
@@ -11,10 +15,6 @@ export function buildWorkspaceSecretVarName(name: string): string {
 
 export function buildAgentSecretVarName(agentId: string, name: string): string {
   return `${AG_PREFIX}${agentId}:${name}`;
-}
-
-export function buildEnvironmentSecretVarName(environmentId: string, name: string): string {
-  return `${ENV_PREFIX}${environmentId}:${name}`;
 }
 
 export class ComputeEnvSecretsStore {
@@ -63,45 +63,6 @@ export class ComputeEnvSecretsStore {
 
   async deleteAgent(workspaceId: string, agentId: string, name: string): Promise<boolean> {
     return this.writer.delete(workspaceId, buildAgentSecretVarName(agentId, name));
-  }
-
-  async listEnvironmentNames(
-    workspaceId: string,
-    environmentId: string,
-  ): Promise<Array<{ name: string; updatedAt: string }>> {
-    return this.listByPrefix(workspaceId, `${ENV_PREFIX}${environmentId}:`);
-  }
-
-  async setEnvironment(
-    workspaceId: string,
-    environmentId: string,
-    name: string,
-    value: string,
-  ): Promise<void> {
-    await this.writer.ensureWorkspaceDek(workspaceId);
-    await this.writer.set(
-      workspaceId,
-      buildEnvironmentSecretVarName(environmentId, validateEnvVarName(name)),
-      value,
-    );
-  }
-
-  async deleteEnvironment(
-    workspaceId: string,
-    environmentId: string,
-    name: string,
-  ): Promise<boolean> {
-    return this.writer.delete(workspaceId, buildEnvironmentSecretVarName(environmentId, name));
-  }
-
-  async getEnvironmentValues(
-    workspaceId: string,
-    environmentId: string,
-    names: string[],
-  ): Promise<Record<string, string>> {
-    return this.getValues(workspaceId, names, (n) =>
-      buildEnvironmentSecretVarName(environmentId, n),
-    );
   }
 
   async getWorkspaceValues(workspaceId: string, names: string[]): Promise<Record<string, string>> {

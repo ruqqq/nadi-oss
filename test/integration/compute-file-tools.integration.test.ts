@@ -41,8 +41,6 @@ function buildFileTools(backend: FakeComputeBackend) {
       editableEnv: {},
       agentEditableEnv: {},
       secretEnvNames: [],
-      environmentEditableEnv: {},
-      environmentSecretEnvNames: [],
     },
     environmentId: "fake-env",
     env: {},

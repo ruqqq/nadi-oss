@@ -24,9 +24,9 @@ export interface ProjectPromptThreadContext {
   threadId: string;
   workspaceId: string;
   projectId: string | null;
-  /** The thread's environment. REQUIRED, not optional: omitting it would
-   *  silently drop every repository from the prompt. */
-  workbenchId: string | null;
+  /** The thread's AGENT — which is its environment. REQUIRED, not optional:
+   *  omitting it would silently drop every repository from the prompt. */
+  agentId: string;
 }
 
 export async function resolveProjectPromptContext(input: {
@@ -42,12 +42,10 @@ export async function resolveProjectPromptContext(input: {
     input.thread.projectId,
     input.thread.workspaceId,
   );
-  // Read LIVE from the environment's repository list — the per-thread snapshot
-  // is gone. Same ordering (by id) the snapshot rows had.
-  const repositories =
-    input.thread.workbenchId === null
-      ? []
-      : await new WorkbenchRepository(db).listRepositories(input.thread.workbenchId);
+  // Read LIVE from the AGENT's repository list — the per-thread snapshot is
+  // gone. Same ordering (by id) the snapshot rows had. Keyed on the thread's
+  // agent id, which is what `agent_repositories.agent_id` now holds.
+  const repositories = await new WorkbenchRepository(db).listRepositories(input.thread.agentId);
 
   return {
     name: project.name,
