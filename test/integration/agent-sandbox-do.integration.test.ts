@@ -3,6 +3,11 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { drizzle } from "drizzle-orm/d1";
 import * as schema from "../../src/db/schema";
 import { applyRegistryTestSchema } from "./helpers/registry";
+import { FakeComputeBackend } from "../../src/compute/backends/fake";
+import {
+  clearComputeHostTestOverrides,
+  setComputeHostTestOverrides,
+} from "../../src/compute/host-test-overrides";
 
 const now = 1_800_000_000_000;
 
@@ -188,6 +193,90 @@ describe("AgentSandbox durable object", () => {
     it("REFUSES the process monitor when the caller says false", async () => {
       const message = await watchError("thr_sbx_monitor_off", false);
       expect(message).toContain("compute_process_monitor_unavailable");
+    });
+  });
+
+  /**
+   * `backgroundLongRunningExec` is DERIVED in `resolveService`
+   * (`supportsProcessMonitor && !attachedRuntime`), mirroring
+   * `think-thread-agent.ts`'s `sandboxHostDeps()`. It must not be left to
+   * `resolveComputeService`'s default, which is `!deps.attachedRuntime` ALONE
+   * (`compute-tools.ts:469`) — that would let a runtime which cannot deliver a
+   * completion reminder background a long-running exec anyway.
+   *
+   * Like `supportsProcessMonitor` above, getting it wrong is SILENT: the exec
+   * simply takes a different shape. So the assertion is the BACKEND CALL LOG,
+   * which only the instrumented fake records: `backgroundLongRunningExec: false`
+   * routes `exec` to the blocking `runCommand` path (`thread-service.ts:643`),
+   * and `true` routes it to `startProcess` + a watcher. The two cases point in
+   * OPPOSITE directions for the same command, so no single hardcoded value
+   * satisfies both — and deleting the derivation flips the `false` case, since
+   * its default would be `true`.
+   *
+   * The exec-timing knobs come through the host-override registry because they
+   * are service deps no provider can supply; the same pattern
+   * `think-thread-agent.integration.test.ts` uses for the thread-DO twin.
+   */
+  describe("backgroundLongRunningExec is DERIVED, not defaulted", () => {
+    async function execLongRunning(threadId: string, supportsProcessMonitor: boolean) {
+      await seedComputeEnabledThread(threadId);
+      return await runInDurableObject(stub(threadId), async (instance) => {
+        const provider = new FakeComputeBackend();
+        let clock = now;
+        setComputeHostTestOverrides(threadId, {
+          buildBackend: async () => provider,
+          now: () => clock,
+          execForegroundTimeoutMs: 1,
+          execForegroundPollIntervalMs: 1,
+          sleep: async (ms: number) => {
+            clock += ms;
+          },
+        });
+        try {
+          const resolved = await (
+            instance as unknown as {
+              resolveService: (
+                id: string,
+                options: { supportsProcessMonitor: boolean },
+              ) => Promise<{
+                service: {
+                  exec: (i: { command: string; label?: string }) => Promise<{ status: string }>;
+                  deps: { backgroundLongRunningExec?: boolean };
+                };
+              } | null>;
+            }
+          ).resolveService(threadId, { supportsProcessMonitor });
+          if (!resolved) throw new Error("expected a compute service");
+          const execResult = await resolved.service.exec({ command: "sleep 300", label: "build" });
+          return {
+            status: execResult.status,
+            backgroundLongRunningExec: resolved.service.deps.backgroundLongRunningExec,
+            runCommandCalls: provider.runCommandCalls.length,
+            startProcessCalls: provider.startProcessCalls.length,
+          };
+        } finally {
+          clearComputeHostTestOverrides(threadId);
+        }
+      });
+    }
+
+    it("BACKGROUNDS a long exec when the caller admits the process monitor", async () => {
+      const result = await execLongRunning("thr_sbx_bglre_on", true);
+      // Behaviour first: the flag's value is a corroborating detail, the shape
+      // of the backend traffic is the thing that would actually be wrong.
+      expect(result.startProcessCalls).toBe(1);
+      expect(result.runCommandCalls).toBe(0);
+      expect(result.backgroundLongRunningExec).toBe(true);
+    });
+
+    it("runs a long exec SYNCHRONOUSLY when the caller refuses the process monitor", async () => {
+      // The mutation target. Drop the derivation and this case takes the
+      // default (`!attachedRuntime` = true), backgrounding a command whose
+      // completion nobody can report — and only the call log says so.
+      const result = await execLongRunning("thr_sbx_bglre_off", false);
+      expect(result.runCommandCalls).toBe(1);
+      expect(result.startProcessCalls).toBe(0);
+      expect(result.backgroundLongRunningExec).toBe(false);
     });
   });
 });
