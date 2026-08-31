@@ -73,7 +73,6 @@ export function resolveModelConfig(env: Env): ResolvedModelConfig {
       model: env.DEFAULT_MODEL,
       systemPrompt: DEFAULT_SYSTEM_PROMPT,
       modelInputModalities: ["text"],
-      showReasoning: true,
       reasoningEffort: DEFAULT_REASONING_EFFORT,
       modelSupportsReasoning: undefined,
     },
@@ -87,9 +86,7 @@ export interface ResolvedModelConfig {
   apiKey: string;
   systemPrompt: string;
   modelInputModalities: string[];
-  /** Display only: whether the thinking text is rendered. */
-  showReasoning: boolean;
-  /** How hard to think. Independent of showReasoning. */
+  /** How hard to think. */
   reasoningEffort: ReasoningEffort;
   /** `undefined` = unknown; only an explicit `false` withholds reasoning. */
   modelSupportsReasoning: boolean | undefined;
@@ -102,7 +99,6 @@ export function resolveAgentModelConfig(
     | "model"
     | "systemPrompt"
     | "modelInputModalities"
-    | "showReasoning"
     | "reasoningEffort"
     | "modelSupportsReasoning"
   >,
@@ -124,7 +120,6 @@ function resolveModelConfigInput(
     model: string;
     systemPrompt: string;
     modelInputModalities: string[];
-    showReasoning: boolean;
     reasoningEffort: ReasoningEffort;
     modelSupportsReasoning: boolean | undefined;
   },
@@ -142,7 +137,6 @@ function resolveModelConfigInput(
     apiKey: "",
     systemPrompt: input.systemPrompt,
     modelInputModalities: input.modelInputModalities,
-    showReasoning: input.showReasoning,
     reasoningEffort: input.reasoningEffort,
     modelSupportsReasoning: input.modelSupportsReasoning,
   };

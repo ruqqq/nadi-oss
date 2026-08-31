@@ -71,14 +71,12 @@ export async function resolveThreadRuntimeConfigForAgent(
       threadModelProvider: threadIndex.modelProvider,
       threadModel: threadIndex.model,
       threadModelInputModalities: threadIndex.modelInputModalities,
-      threadShowReasoning: threadIndex.showReasoning,
       threadReasoningEffort: threadIndex.reasoningEffort,
       threadModelSupportsReasoning: threadIndex.modelSupportsReasoning,
       provider: agents.provider,
       model: agents.model,
       systemPrompt: agents.systemPrompt,
       modelInputModalities: agents.modelInputModalities,
-      showReasoning: agents.showReasoning,
       reasoningEffort: agents.reasoningEffort,
       modelSupportsReasoning: agents.modelSupportsReasoning,
       flagsJson: workspaces.flagsJson,
@@ -151,9 +149,6 @@ export async function resolveThreadRuntimeConfigForAgent(
       model,
       systemPrompt,
       modelInputModalities,
-      showReasoning: useThreadSnapshot
-        ? (row.threadShowReasoning ?? true)
-        : (row.showReasoning ?? true),
       // The thread snapshot wins when it has one; a NULL snapshot inherits the
       // agent's, which is what pre-existing threads all do.
       // `agents` is LEFT joined, so its columns are nullable here even though

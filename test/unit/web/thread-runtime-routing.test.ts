@@ -15,7 +15,6 @@ function thread(runtime: ThreadSummary["runtime"], threadId = "thr/a b"): Thread
     provider: "openai-oauth",
     model: "gpt-5.5",
     modelInputModalities: ["text"],
-    showReasoning: true,
     reasoningEffort: "medium",
     modelSupportsReasoning: true,
     runtime,

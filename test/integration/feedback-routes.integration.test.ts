@@ -105,7 +105,6 @@ async function seedUserWorkspace(input: {
       provider: "mock",
       model: "mock",
       modelInputModalities: JSON.stringify(["text", "image"]),
-      showReasoning: true,
       createdAt: now,
     })
     .onConflictDoNothing();

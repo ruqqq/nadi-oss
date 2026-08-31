@@ -97,7 +97,6 @@ type ThreadModelSnapshotInput = {
   provider?: unknown;
   model?: unknown;
   modelInputModalities?: unknown;
-  showReasoning?: unknown;
   reasoningEffort?: unknown;
   modelSupportsReasoning?: unknown;
   projectId?: unknown;
@@ -431,7 +430,6 @@ export async function selectThreadSummariesForUser(
       modelProvider: threadIndex.modelProvider,
       model: threadIndex.model,
       modelInputModalities: threadIndex.modelInputModalities,
-      showReasoning: threadIndex.showReasoning,
       reasoningEffort: threadIndex.reasoningEffort,
       modelSupportsReasoning: threadIndex.modelSupportsReasoning,
       kind: threadIndex.kind,
@@ -1085,7 +1083,6 @@ async function createThread(req: Request, env: Env, ctx: ExecutionContext): Prom
     modelProvider: snapshot.value.provider,
     model: snapshot.value.model,
     modelInputModalities: JSON.stringify(snapshot.value.modelInputModalities),
-    showReasoning: snapshot.value.showReasoning,
     reasoningEffort: snapshot.value.reasoningEffort,
     modelSupportsReasoning: snapshot.value.modelSupportsReasoning,
     title: "New thread",
@@ -1235,7 +1232,6 @@ async function selectThreadTarget(env: Env, session: ValidatedSession) {
       provider: agents.provider,
       model: agents.model,
       modelInputModalities: agents.modelInputModalities,
-      showReasoning: agents.showReasoning,
       reasoningEffort: agents.reasoningEffort,
       modelSupportsReasoning: agents.modelSupportsReasoning,
     })
@@ -1252,7 +1248,6 @@ const THREAD_MODEL_SNAPSHOT_MESSAGES: Record<ThreadModelSnapshotError, string> =
   provider_not_usable: "provider is not usable",
   invalid_model: "model must be a non-empty string",
   invalid_modalities: "modelInputModalities must be an array of supported modalities",
-  invalid_show_reasoning: "showReasoning must be a boolean",
   invalid_reasoning_effort: "reasoningEffort must be one of off, low, medium, high",
   invalid_model_supports_reasoning: "modelSupportsReasoning must be a boolean or null",
 };

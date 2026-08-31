@@ -50,7 +50,6 @@ const thread: ThreadSummary = {
   provider: "openai-oauth",
   model: "gpt-5.5",
   modelInputModalities: ["text", "image", "file"],
-  showReasoning: true,
   reasoningEffort: "medium",
   modelSupportsReasoning: true,
   runtime: "legacy",
@@ -247,7 +246,6 @@ describe("thread api helpers", () => {
           provider: "openai-oauth",
           model: "gpt-5.5",
           modelInputModalities: ["text", "image"],
-          showReasoning: false,
         },
         fetch,
       ),
@@ -261,7 +259,6 @@ describe("thread api helpers", () => {
         provider: "openai-oauth",
         model: "gpt-5.5",
         modelInputModalities: ["text", "image"],
-        showReasoning: false,
       }),
     });
   });

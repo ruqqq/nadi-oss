@@ -90,7 +90,6 @@ beforeEach(() => {
       provider: "openai",
       model: "gpt-5.5",
       modelInputModalities: ["text"],
-      showReasoning: true,
     },
     providers: [{ provider: "openai", displayName: "OpenAI", usable: true }],
   });

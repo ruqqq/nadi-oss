@@ -14,7 +14,6 @@ const target: ThreadModelSnapshotTarget = {
   provider: "openai",
   model: "gpt-5",
   modelInputModalities: JSON.stringify(["text"]),
-  showReasoning: true,
   reasoningEffort: "medium",
   modelSupportsReasoning: true,
 };
@@ -30,7 +29,6 @@ describe("resolveThreadModelSnapshotValue", () => {
         provider: "openai",
         model: "gpt-5",
         modelInputModalities: ["text"],
-        showReasoning: true,
         reasoningEffort: "medium",
         modelSupportsReasoning: true,
       },

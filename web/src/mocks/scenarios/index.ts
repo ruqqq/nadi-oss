@@ -58,7 +58,6 @@ export function makeThread(overrides: Partial<ThreadSummary> = {}): ThreadSummar
     provider: "anthropic",
     model: "claude-sonnet-4-5",
     modelInputModalities: ["text", "image"],
-    showReasoning: false,
     reasoningEffort: "medium",
     modelSupportsReasoning: true,
     runtime: "think",
@@ -286,7 +285,6 @@ function makeSettings({ anyConfigured = true }: { anyConfigured?: boolean } = {}
       // the thinking dial by default in every scenario.
       modelSupportsReasoning: true,
       modelInputModalities: ["text", "image"],
-      showReasoning: false,
     },
     providers: makeProviderViews({ anyConfigured }),
   };

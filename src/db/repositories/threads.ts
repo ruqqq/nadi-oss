@@ -181,7 +181,6 @@ export class ThreadRepository {
       provider: string;
       model: string;
       modelInputModalities: string[];
-      showReasoning: boolean;
       reasoningEffort: string;
       modelSupportsReasoning: boolean | null;
     },
@@ -192,7 +191,6 @@ export class ThreadRepository {
         modelProvider: value.provider,
         model: value.model,
         modelInputModalities: JSON.stringify(value.modelInputModalities),
-        showReasoning: value.showReasoning,
         reasoningEffort: value.reasoningEffort,
         modelSupportsReasoning: value.modelSupportsReasoning,
       })

@@ -380,7 +380,6 @@ export function Onboarding({
           reasoningEffort: settings.agent.reasoningEffort,
           selectedProvider: provider,
           providerChanged: true,
-          showReasoning: settings.agent.showReasoning,
         }),
       );
       track("settings_saved", { source: "onboarding", provider, model });

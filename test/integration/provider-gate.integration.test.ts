@@ -16,7 +16,6 @@ const cfg = {
   apiKey: "",
   systemPrompt: "You are Nadi.",
   modelInputModalities: ["text"],
-  showReasoning: true,
   reasoningEffort: "medium" as const,
   modelSupportsReasoning: undefined,
 };

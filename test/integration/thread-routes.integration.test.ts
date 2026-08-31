@@ -113,7 +113,6 @@ async function seedUserWorkspace(input?: {
   memberCreatedAt?: number;
   agentCreatedAt?: number;
   modelInputModalities?: string[];
-  showReasoning?: boolean;
   archivedAt?: number | null;
 }) {
   const db = drizzle(env.REGISTRY_DB, { schema });
@@ -160,7 +159,6 @@ async function seedUserWorkspace(input?: {
     provider: "mock",
     model: "mock",
     modelInputModalities: JSON.stringify(input?.modelInputModalities ?? ["text"]),
-    showReasoning: input?.showReasoning ?? true,
     createdAt: input?.agentCreatedAt ?? now,
   });
 
@@ -179,7 +177,6 @@ async function insertThread(input: {
   modelProvider?: string;
   model?: string;
   modelInputModalities?: string[];
-  showReasoning?: boolean;
   reasoningEffort?: string;
   archivedAt?: number | null;
   projectId?: string | null;
@@ -195,7 +192,6 @@ async function insertThread(input: {
     modelProvider: input.modelProvider ?? "mock",
     model: input.model ?? "mock",
     modelInputModalities: JSON.stringify(input.modelInputModalities ?? ["text"]),
-    showReasoning: input.showReasoning ?? true,
     reasoningEffort: input.reasoningEffort ?? null,
     title: input.title,
     runtime: input.runtime ?? "legacy",
@@ -558,7 +554,6 @@ describe("thread routes", () => {
       modelProvider: "mock",
       model: "mock",
       modelInputModalities: JSON.stringify(["text"]),
-      showReasoning: true,
       runtime: "legacy" as const,
       title: "Serialize",
       source: "manual" as const,
@@ -652,7 +647,6 @@ describe("thread routes", () => {
           provider: "mock",
           model: "mock",
           modelInputModalities: ["text"],
-          showReasoning: true,
           reasoningEffort: "medium",
           modelSupportsReasoning: null,
           runtime: "legacy",
@@ -679,7 +673,6 @@ describe("thread routes", () => {
           provider: "mock",
           model: "mock",
           modelInputModalities: ["text"],
-          showReasoning: true,
           reasoningEffort: "medium",
           modelSupportsReasoning: null,
           runtime: "legacy",
@@ -1016,7 +1009,6 @@ describe("thread routes", () => {
       userId: "user-default-snapshot",
       token: "default-snapshot-token",
       modelInputModalities: ["text", "image"],
-      showReasoning: false,
     });
 
     const res = await routeThreads(
@@ -1035,14 +1027,12 @@ describe("thread routes", () => {
         provider: string;
         model: string;
         modelInputModalities: string[];
-        showReasoning: boolean;
       };
     };
     expect(body.thread).toMatchObject({
       provider: "mock",
       model: "mock",
       modelInputModalities: ["text", "image"],
-      showReasoning: false,
     });
 
     const db = drizzle(env.REGISTRY_DB, { schema });
@@ -1055,7 +1045,6 @@ describe("thread routes", () => {
       modelProvider: "mock",
       model: "mock",
       modelInputModalities: '["text","image"]',
-      showReasoning: false,
     });
   });
 
@@ -1357,7 +1346,6 @@ describe("thread routes", () => {
           provider: "mock-tool-call",
           model: "mock-tool-call",
           modelInputModalities: ["text", "image"],
-          showReasoning: false,
         }),
       }),
       env,
@@ -1371,14 +1359,12 @@ describe("thread routes", () => {
         provider: string;
         model: string;
         modelInputModalities: string[];
-        showReasoning: boolean;
       };
     };
     expect(body.thread).toMatchObject({
       provider: "mock-tool-call",
       model: "mock-tool-call",
       modelInputModalities: ["text", "image"],
-      showReasoning: false,
     });
 
     const db = drizzle(env.REGISTRY_DB, { schema });
@@ -1391,7 +1377,6 @@ describe("thread routes", () => {
       modelProvider: "mock-tool-call",
       model: "mock-tool-call",
       modelInputModalities: '["text","image"]',
-      showReasoning: false,
     });
   });
 

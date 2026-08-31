@@ -64,7 +64,6 @@ async function seedUserWorkspace(input: { userId: string; token: string; workspa
     provider: "mock",
     model: "mock",
     modelInputModalities: JSON.stringify(["text"]),
-    showReasoning: true,
     createdAt: now,
   });
 

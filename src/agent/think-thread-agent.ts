@@ -6662,7 +6662,6 @@ export class ThinkThreadAgent extends Think<Env> {
         provider: runtimeConfig.modelConfig.provider,
         model: runtimeConfig.modelConfig.model,
         modelInputModalities: JSON.stringify(runtimeConfig.modelConfig.modelInputModalities),
-        showReasoning: runtimeConfig.modelConfig.showReasoning,
         reasoningEffort: runtimeConfig.modelConfig.reasoningEffort,
         modelSupportsReasoning: runtimeConfig.modelConfig.modelSupportsReasoning ?? null,
       },

@@ -69,7 +69,6 @@ async function setupThread() {
     provider: "mock",
     model: "mock",
     modelInputModalities: JSON.stringify(["text"]),
-    showReasoning: true,
     createdAt: now,
   });
   await conn.insert(schema.threadIndex).values({

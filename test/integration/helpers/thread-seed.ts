@@ -51,7 +51,6 @@ export async function seedUserWorkspace(prefix: string) {
     provider: "mock",
     model: "mock",
     modelInputModalities: JSON.stringify(["text"]),
-    showReasoning: true,
     createdAt: now,
   });
 

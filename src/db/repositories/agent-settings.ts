@@ -10,7 +10,6 @@ export interface AgentSettingsPatch {
   provider?: string;
   model?: string;
   modelInputModalities?: string;
-  showReasoning?: boolean;
   reasoningEffort?: string;
   modelSupportsReasoning?: boolean | null;
   sandboxEnabled?: boolean | null;
@@ -55,7 +54,6 @@ export class AgentSettingsRepository {
     if (patch.modelInputModalities !== undefined) {
       update.modelInputModalities = patch.modelInputModalities;
     }
-    if (patch.showReasoning !== undefined) update.showReasoning = patch.showReasoning;
     if (patch.reasoningEffort !== undefined) update.reasoningEffort = patch.reasoningEffort;
     if (patch.modelSupportsReasoning !== undefined) {
       update.modelSupportsReasoning = patch.modelSupportsReasoning;

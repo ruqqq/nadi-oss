@@ -38,7 +38,6 @@ function settings(overrides: Partial<AgentSettingsResponse> = {}): AgentSettings
       provider: "openai-oauth",
       model: "gpt-5.5",
       modelInputModalities: ["text", "image", "file"],
-      showReasoning: false,
       reasoningEffort: "medium",
       modelSupportsReasoning: null,
     },
@@ -54,7 +53,6 @@ describe("new chat model state", () => {
       provider: "openai-oauth",
       model: "gpt-5.5",
       modelInputModalities: ["text", "image", "file"],
-      showReasoning: false,
       reasoningEffort: "medium",
       modelSupportsReasoning: null,
     });
@@ -147,7 +145,6 @@ describe("deriveNewChatModelState with curated providers", () => {
           provider: "openai",
           model: "gpt-5.5",
           modelInputModalities: ["text"],
-          showReasoning: false,
           reasoningEffort: "medium",
           modelSupportsReasoning: null,
         },

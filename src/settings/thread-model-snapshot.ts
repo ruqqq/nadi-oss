@@ -22,7 +22,6 @@ export type ThreadModelSnapshotTarget = {
   provider: string;
   model: string;
   modelInputModalities: string;
-  showReasoning: boolean;
   reasoningEffort: string;
   modelSupportsReasoning: boolean | null;
 };
@@ -31,7 +30,6 @@ export type ThreadModelSnapshotValue = {
   provider: string;
   model: string;
   modelInputModalities: string[];
-  showReasoning: boolean;
   reasoningEffort: ReasoningEffort;
   modelSupportsReasoning: boolean | null;
 };
@@ -42,7 +40,6 @@ export type ThreadModelSnapshotError =
   | "provider_not_usable"
   | "invalid_model"
   | "invalid_modalities"
-  | "invalid_show_reasoning"
   | "invalid_reasoning_effort"
   | "invalid_model_supports_reasoning";
 
@@ -50,7 +47,6 @@ type ThreadModelSnapshotInput = {
   provider?: unknown;
   model?: unknown;
   modelInputModalities?: unknown;
-  showReasoning?: unknown;
   reasoningEffort?: unknown;
   modelSupportsReasoning?: unknown;
 };
@@ -97,14 +93,6 @@ export async function resolveThreadModelSnapshotValue(
     modelInputModalities = parsed;
   }
 
-  let showReasoning = target.showReasoning;
-  if (input.showReasoning !== undefined) {
-    if (typeof input.showReasoning !== "boolean") {
-      return { ok: false, error: "invalid_show_reasoning" };
-    }
-    showReasoning = input.showReasoning;
-  }
-
   let reasoningEffort = parseReasoningEffort(target.reasoningEffort) ?? DEFAULT_REASONING_EFFORT;
   if (input.reasoningEffort !== undefined) {
     const parsed = parseReasoningEffort(input.reasoningEffort);
@@ -133,7 +121,6 @@ export async function resolveThreadModelSnapshotValue(
       provider,
       model,
       modelInputModalities,
-      showReasoning,
       reasoningEffort,
       modelSupportsReasoning,
     },

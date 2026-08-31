@@ -32,7 +32,6 @@ function settingsWith(anthropicModels: AgentSettingsResponse["providers"][number
       provider: "anthropic",
       model: "claude-opus-5",
       modelInputModalities: ["text"],
-      showReasoning: false,
     },
     providers: [
       {

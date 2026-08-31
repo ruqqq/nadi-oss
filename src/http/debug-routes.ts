@@ -693,7 +693,6 @@ export async function routeDebug(req: Request, env: Env): Promise<Response | nul
         provider: agents.provider,
         model: agents.model,
         modelInputModalities: agents.modelInputModalities,
-        showReasoning: agents.showReasoning,
       })
       .from(agents)
       .where(eq(agents.workspaceId, workspaceId))
@@ -737,7 +736,6 @@ export async function routeDebug(req: Request, env: Env): Promise<Response | nul
       modelProvider: provider,
       model,
       modelInputModalities: agent.modelInputModalities,
-      showReasoning: agent.showReasoning,
       title: "debug thread",
       titleSet: true,
       runtime: "think",

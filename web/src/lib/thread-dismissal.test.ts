@@ -16,7 +16,6 @@ function thread(over: Partial<ThreadSummary> = {}): ThreadSummary {
     provider: "openai-oauth",
     model: "gpt-5.5",
     modelInputModalities: ["text"],
-    showReasoning: true,
     reasoningEffort: "medium",
     modelSupportsReasoning: true,
     runtime: "think",

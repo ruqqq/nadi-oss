@@ -71,7 +71,6 @@ describe("resolveModelConfig", () => {
       model: "gpt-5.4-mini",
       systemPrompt: "Use the workspace prompt.",
       modelInputModalities: '["text","image","file"]',
-      showReasoning: true,
       reasoningEffort: "medium",
       modelSupportsReasoning: null,
     });
@@ -82,7 +81,6 @@ describe("resolveModelConfig", () => {
       apiKey: "",
       systemPrompt: "Use the workspace prompt.",
       modelInputModalities: ["text", "image", "file"],
-      showReasoning: true,
       reasoningEffort: "medium",
       // The column stores NULL for unknown; the resolved config normalizes that
       // to `undefined`, which is what the provider-options builder reads.
@@ -97,7 +95,6 @@ describe("resolveModelConfig", () => {
         model: "model",
         systemPrompt: "Prompt",
         modelInputModalities: '["text"]',
-        showReasoning: true,
         reasoningEffort: "medium",
         modelSupportsReasoning: null,
       }),
@@ -105,31 +102,16 @@ describe("resolveModelConfig", () => {
   });
 });
 
-describe("resolveAgentModelConfig showReasoning", () => {
-  it("carries showReasoning through from the agent row", () => {
-    const cfg = resolveAgentModelConfig({
-      provider: "mock",
-      model: "mock",
-      systemPrompt: "You are Nadi.",
-      modelInputModalities: '["text"]',
-      showReasoning: false,
-      reasoningEffort: "medium",
-      modelSupportsReasoning: null,
-    });
-    expect(cfg.showReasoning).toBe(false);
-  });
-
+describe("resolveAgentModelConfig providers", () => {
   it("accepts the mock-reasoning provider", () => {
     const cfg = resolveAgentModelConfig({
       provider: "mock-reasoning",
       model: "mock-reasoning",
       systemPrompt: "You are Nadi.",
       modelInputModalities: '["text"]',
-      showReasoning: true,
       reasoningEffort: "medium",
       modelSupportsReasoning: null,
     });
     expect(cfg.provider).toBe("mock-reasoning");
-    expect(cfg.showReasoning).toBe(true);
   });
 });

@@ -29,6 +29,30 @@ async function seedUser(userId: string, token: string) {
   });
 }
 
+async function seedOwnedWorkspace(userId: string) {
+  const db = drizzle(env.REGISTRY_DB, { schema });
+  await db.insert(schema.workspaces).values({
+    id: "ws-prefs",
+    name: "Prefs",
+    createdAt: now,
+  });
+  await db.insert(schema.workspaceMembers).values({
+    workspaceId: "ws-prefs",
+    userId,
+    role: "owner",
+    createdAt: now,
+  });
+  await db.insert(schema.agents).values({
+    id: "agent-prefs-default",
+    workspaceId: "ws-prefs",
+    name: "Default",
+    systemPrompt: "Initial prompt",
+    provider: "mock",
+    model: "mock",
+    createdAt: now,
+  });
+}
+
 function authed(token: string, init: RequestInit = {}): RequestInit {
   return {
     ...init,
@@ -98,6 +122,26 @@ describe("user preferences routes", () => {
       }),
     );
     expect(res.status).toBe(400);
+  });
+
+  it("no longer accepts showReasoning on the agent settings payload", async () => {
+    await seedOwnedWorkspace("pref-user");
+    const res = await SELF.fetch(
+      "https://nadi.test/api/settings/agents/default",
+      authed("pref-token", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ agent: { showReasoning: false } }),
+      }),
+    );
+    // The field is ignored, not honoured: nothing persists it any more.
+    const after = await SELF.fetch(
+      "https://nadi.test/api/settings/agents/default",
+      authed("pref-token"),
+    );
+    const body = (await after.json()) as { agent: Record<string, unknown> };
+    expect(res.status).toBeLessThan(500);
+    expect(body.agent).not.toHaveProperty("showReasoning");
   });
 
   it("rejects an unsupported method", async () => {

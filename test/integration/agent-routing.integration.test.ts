@@ -18,7 +18,6 @@ async function seedRegisteredThread(input?: {
   provider?: string;
   model?: string;
   modelInputModalities?: string[];
-  showReasoning?: boolean;
   threadProvider?: string;
   threadModel?: string;
   threadModelInputModalities?: string[];
@@ -72,7 +71,6 @@ async function seedRegisteredThread(input?: {
     provider: input?.provider ?? "mock",
     model: input?.model ?? "mock",
     modelInputModalities: JSON.stringify(input?.modelInputModalities ?? ["text"]),
-    showReasoning: input?.showReasoning ?? true,
     createdAt,
   });
   await db.insert(schema.threadIndex).values({
@@ -84,7 +82,6 @@ async function seedRegisteredThread(input?: {
     modelInputModalities: input?.threadModelInputModalities
       ? JSON.stringify(input.threadModelInputModalities)
       : null,
-    showReasoning: input?.threadShowReasoning ?? null,
     title: "Registered",
     source: "manual",
     automatonId: null,
@@ -266,11 +263,9 @@ describe("thread runtime config export", () => {
       provider: "mock",
       model: "mock",
       modelInputModalities: ["text"],
-      showReasoning: true,
       threadProvider: "mock-tool-call",
       threadModel: "mock-tool-call",
       threadModelInputModalities: ["text", "image"],
-      threadShowReasoning: false,
     });
 
     const db = drizzle(env.REGISTRY_DB, { schema });
@@ -280,7 +275,6 @@ describe("thread runtime config export", () => {
         provider: "mock",
         model: "mock",
         modelInputModalities: JSON.stringify(["text"]),
-        showReasoning: true,
       })
       .where(eq(schema.agents.id, `agent-${seeded.workspaceId}`));
 
@@ -293,7 +287,6 @@ describe("thread runtime config export", () => {
         provider: "mock-tool-call",
         model: "mock-tool-call",
         modelInputModalities: ["text", "image"],
-        showReasoning: false,
       },
     });
   });
@@ -305,7 +298,6 @@ describe("thread runtime config export", () => {
       provider: "mock",
       model: "mock",
       modelInputModalities: ["text"],
-      showReasoning: true,
     });
     const db = drizzle(env.REGISTRY_DB, { schema });
     await db
@@ -326,11 +318,9 @@ describe("thread runtime config export", () => {
       provider: "mock",
       model: "mock",
       modelInputModalities: ["text"],
-      showReasoning: true,
       threadProvider: "not-a-provider",
       threadModel: "mock-tool-call",
       threadModelInputModalities: ["text", "image"],
-      threadShowReasoning: false,
     });
 
     await expect(resolveThreadRuntimeConfigForAgent(env, seeded.threadId)).resolves.toMatchObject({
@@ -340,7 +330,6 @@ describe("thread runtime config export", () => {
         provider: "mock",
         model: "mock",
         modelInputModalities: ["text"],
-        showReasoning: true,
       },
     });
   });

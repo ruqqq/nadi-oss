@@ -101,7 +101,6 @@ async function seedUser(input: {
       provider: "mock",
       model: "mock",
       modelInputModalities: JSON.stringify(["text"]),
-      showReasoning: true,
       createdAt: now,
     })
     .onConflictDoNothing();

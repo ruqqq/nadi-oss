@@ -27,7 +27,6 @@ const cachedBootstrap = {
       provider: "openai-oauth",
       model: "gpt-5.5",
       modelInputModalities: ["text"],
-      showReasoning: false,
     },
     // A usable provider AND a thread both independently mean
     // `deriveNeedsOnboarding` says "done" — the only reason the wizard should

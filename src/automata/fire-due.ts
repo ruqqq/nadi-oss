@@ -161,7 +161,6 @@ export async function startAutomatonRun(
         modelProvider,
         model,
         modelInputModalities,
-        showReasoning: agent.showReasoning,
         title: `${automaton.name} — ${label}`,
         // Skip the auto-namer: the automaton already named this thread.
         titleSet: true,

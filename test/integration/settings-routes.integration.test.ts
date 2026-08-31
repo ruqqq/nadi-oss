@@ -157,25 +157,6 @@ describe("settings routes", () => {
     expect(JSON.stringify(body)).not.toContain("sk-plain-should-not-leak");
   });
 
-  it("updates and returns showReasoning", async () => {
-    const { token } = await seedUserWorkspace();
-
-    const res = await SELF.fetch("https://nadi.test/api/settings/agents/default", {
-      method: "PUT",
-      headers: { ...cookie(token), "Content-Type": "application/json" },
-      body: JSON.stringify({ agent: { showReasoning: false } }),
-    });
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { agent: { showReasoning: boolean } };
-    expect(body.agent.showReasoning).toBe(false);
-
-    const after = await SELF.fetch("https://nadi.test/api/settings/agents/default", {
-      headers: cookie(token),
-    });
-    const afterBody = (await after.json()) as { agent: { showReasoning: boolean } };
-    expect(afterBody.agent.showReasoning).toBe(false);
-  });
-
   it("returns privacy settings disabled by default for the current owner workspace", async () => {
     const { token } = await seedUserWorkspace();
 

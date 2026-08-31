@@ -13,7 +13,6 @@ export interface ThreadSummary {
   provider: string;
   model: string;
   modelInputModalities: ModelInputModality[];
-  showReasoning: boolean;
   reasoningEffort: ReasoningEffort;
   /** `null` = unknown — never conflate with false. */
   modelSupportsReasoning: boolean | null;
@@ -68,7 +67,6 @@ export type CreateThreadInput = {
   provider?: SettingsProvider;
   model?: string;
   modelInputModalities?: ModelInputModality[];
-  showReasoning?: boolean;
   reasoningEffort?: ReasoningEffort;
   /** `null` clears the capability back to unknown. */
   modelSupportsReasoning?: boolean | null;

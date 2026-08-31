@@ -717,7 +717,6 @@ function AgentSettingsForm({
   const [modelInputModalities, setModelInputModalities] = useState<ModelInputModality[]>(
     settings.agent.modelInputModalities,
   );
-  const [showReasoning, setShowReasoning] = useState(settings.agent.showReasoning);
   const [reasoningEffort, setReasoningEffort] = useState(settings.agent.reasoningEffort);
   const [modelSupportsReasoning, setModelSupportsReasoning] = useState(
     settings.agent.modelSupportsReasoning,
@@ -743,7 +742,6 @@ function AgentSettingsForm({
     setProviderChanged(false);
     setModel(settings.agent.model);
     setModelInputModalities(settings.agent.modelInputModalities);
-    setShowReasoning(settings.agent.showReasoning);
     setReasoningEffort(settings.agent.reasoningEffort);
     setModelSupportsReasoning(settings.agent.modelSupportsReasoning);
     setError(null);
@@ -752,7 +750,6 @@ function AgentSettingsForm({
     settings.agent.provider,
     settings.agent.model,
     settings.agent.modelInputModalities,
-    settings.agent.showReasoning,
     settings.agent.reasoningEffort,
     settings.agent.modelSupportsReasoning,
   ]);
@@ -771,7 +768,6 @@ function AgentSettingsForm({
           currentProvider: settings.agent.provider,
           selectedProvider: provider,
           providerChanged,
-          showReasoning,
           reasoningEffort,
           modelSupportsReasoning,
         }),
@@ -809,7 +805,6 @@ function AgentSettingsForm({
       provider,
       model,
       modelInputModalities,
-      showReasoning,
       reasoningEffort,
       modelSupportsReasoning,
       selectedProviderUsable,
@@ -924,23 +919,6 @@ function AgentSettingsForm({
             </Select>
           </div>
           )}
-
-          <div className="flex items-center justify-between gap-3">
-            <div className="space-y-0.5">
-              <Label htmlFor="agent-show-reasoning">Show reasoning</Label>
-              <p className="text-muted-foreground text-sm">
-                Display the model&apos;s thinking in every chat. Does not change how hard
-                it thinks.
-              </p>
-            </div>
-            <Switch
-              id="agent-show-reasoning"
-              checked={showReasoning}
-              onCheckedChange={setShowReasoning}
-              disabled={saving}
-              aria-label="Show reasoning"
-            />
-          </div>
 
           {error && (
             <Alert variant="destructive" role="alert">

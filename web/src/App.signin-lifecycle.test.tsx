@@ -50,7 +50,6 @@ const authenticatedBootstrap = {
       provider: "openai-oauth",
       model: "gpt-5.5",
       modelInputModalities: ["text"],
-      showReasoning: false,
     },
     providers: [{ provider: "openai-oauth", usable: true }],
   },

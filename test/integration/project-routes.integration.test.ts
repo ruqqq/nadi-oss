@@ -163,7 +163,6 @@ async function insertThread(input: {
       modelProvider: "mock",
       model: "mock",
       modelInputModalities: JSON.stringify(["text"]),
-      showReasoning: true,
       title: input.id,
       runtime: "legacy",
       source: "manual",

@@ -18,7 +18,6 @@ export interface ThreadSummary {
   provider: string;
   model: string;
   modelInputModalities: string[];
-  showReasoning: boolean;
   /** Thread snapshot; missing/invalid values serialize as the runtime default. */
   reasoningEffort: ReasoningEffort;
   /** NULL = unknown — never conflate with false. */
@@ -74,7 +73,6 @@ export function serializeThread(input: {
   modelProvider?: string | null;
   model?: string | null;
   modelInputModalities?: string | null;
-  showReasoning?: boolean | null;
   reasoningEffort?: string | null;
   modelSupportsReasoning?: boolean | null;
   runtime: ThreadRuntime;
@@ -116,7 +114,6 @@ export function serializeThread(input: {
     provider: input.modelProvider ?? "",
     model: input.model ?? "",
     modelInputModalities: parseStoredModelInputModalities(input.modelInputModalities),
-    showReasoning: input.showReasoning ?? true,
     reasoningEffort: parseReasoningEffort(input.reasoningEffort) ?? DEFAULT_REASONING_EFFORT,
     modelSupportsReasoning: input.modelSupportsReasoning ?? null,
     runtime: input.runtime,

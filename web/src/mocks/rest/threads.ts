@@ -72,7 +72,6 @@ export const threadHandlers = [
       provider?: string;
       model?: string;
       modelInputModalities?: ThreadSummary["modelInputModalities"];
-      showReasoning?: boolean;
       reasoningEffort?: string;
       modelSupportsReasoning?: boolean | null;
       projectId?: string | null;
@@ -89,7 +88,6 @@ export const threadHandlers = [
       provider: input.provider ?? store.settings?.agent.provider ?? "anthropic",
       model: input.model ?? store.settings?.agent.model ?? "claude-sonnet-4-5",
       modelInputModalities: input.modelInputModalities ?? ["text"],
-      showReasoning: input.showReasoning ?? false,
       reasoningEffort:
         input.reasoningEffort === "off" ||
         input.reasoningEffort === "low" ||

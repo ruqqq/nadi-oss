@@ -67,7 +67,6 @@ async function seedOwner(input?: { token?: string; withThread?: boolean }) {
     provider: "mock",
     model: "mock",
     modelInputModalities: JSON.stringify(["text"]),
-    showReasoning: true,
     createdAt: now,
   });
 
@@ -79,7 +78,6 @@ async function seedOwner(input?: { token?: string; withThread?: boolean }) {
       modelProvider: "mock",
       model: "mock",
       modelInputModalities: JSON.stringify(["text"]),
-      showReasoning: true,
       title: "First thread",
       runtime: "legacy",
       source: "manual",
@@ -187,7 +185,6 @@ describe("bootstrap route", () => {
         modelProvider: "mock",
         model: "mock",
         modelInputModalities: JSON.stringify(["text"]),
-        showReasoning: true,
         title: `Chat ${i}`,
         runtime: "legacy",
         source: "manual",

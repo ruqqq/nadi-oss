@@ -23,8 +23,7 @@ export interface NewChatModelState {
   provider: SettingsProvider | null;
   model: string;
   modelInputModalities: ModelInputModality[];
-  showReasoning: boolean;
-  /** How hard the new thread should think. Independent of showReasoning. */
+  /** How hard the new thread should think. */
   reasoningEffort: ReasoningEffort;
   /**
    * Whether the selected model can reason. `null` = UNKNOWN.
@@ -66,7 +65,6 @@ export function deriveNewChatModelState(settings: AgentSettingsResponse): NewCha
           : "",
     modelInputModalities:
       provider === agentProvider ? settings.agent.modelInputModalities : ["text"],
-    showReasoning: settings.agent.showReasoning,
     reasoningEffort: settings.agent.reasoningEffort,
     // Only meaningful for the agent's own model; any other provider's default
     // model is a different model whose capability we have not looked up.
@@ -83,7 +81,6 @@ export function emptyNewChatModelState(): NewChatModelState {
     provider: null,
     model: "",
     modelInputModalities: ["text"],
-    showReasoning: true,
     reasoningEffort: "medium",
     modelSupportsReasoning: null,
     modelReasoningControls: undefined,

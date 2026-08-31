@@ -32,7 +32,6 @@ async function seedThreads(
       modelProvider: "mock",
       model: "mock",
       modelInputModalities: JSON.stringify(["text"]),
-      showReasoning: true,
       title: row.title ?? row.id,
       runtime: "legacy",
       source: "manual",

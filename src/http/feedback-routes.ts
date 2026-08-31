@@ -410,7 +410,6 @@ async function getOrCreateFeedbackThread(req: Request, env: Env): Promise<Respon
     modelProvider: FEEDBACK_MODEL_PROVIDER,
     model: FEEDBACK_MODEL_ID,
     modelInputModalities: JSON.stringify(["text", "image"]),
-    showReasoning: false,
     title: "Feedback",
     titleSet: true,
     runtime: "think" as const,

@@ -2434,7 +2434,6 @@ export function ChatApp({
         provider: selectedProvider,
         model: newChatModel,
         modelInputModalities: newChatModelInputModalities,
-        showReasoning: agentShowReasoning,
         reasoningEffort: newChatReasoningEffort,
         modelSupportsReasoning: newChatModelSupportsReasoning,
         ...(selectedProjectId ? { projectId: selectedProjectId } : {}),
@@ -3345,7 +3344,6 @@ export function ChatApp({
                     provider: newChatProvider,
                     model: newChatModel,
                     modelInputModalities: newChatModelInputModalities,
-                    showReasoning: agentShowReasoning,
                     reasoningEffort: newChatReasoningEffort,
                     modelSupportsReasoning: newChatModelSupportsReasoning,
                     modelReasoningControls: newChatReasoningControls,
@@ -3363,7 +3361,6 @@ export function ChatApp({
                     provider: newChatProvider,
                     model: newChatModel,
                     modelInputModalities: newChatModelInputModalities,
-                    showReasoning: agentShowReasoning,
                     reasoningEffort: newChatReasoningEffort,
                     modelSupportsReasoning: newChatModelSupportsReasoning,
                     modelReasoningControls: newChatReasoningControls,
@@ -3380,7 +3377,6 @@ export function ChatApp({
                     provider: newChatProvider,
                     model: newChatModel,
                     modelInputModalities: newChatModelInputModalities,
-                    showReasoning: agentShowReasoning,
                     reasoningEffort: newChatReasoningEffort,
                     modelSupportsReasoning: newChatModelSupportsReasoning,
                     modelReasoningControls: newChatReasoningControls,
@@ -4224,7 +4220,7 @@ function LegacyArchiveThread({
 }: {
   thread: ThreadSummary;
   projects: ProjectSummary[];
-  /** Workspace agent display preference — same source as live threads. */
+  /** Per-user display preference — same source as live threads. */
   showReasoning?: boolean;
   leading: React.ReactNode;
   onDeleteThread?: (threadId: string) => void;
@@ -4444,8 +4440,8 @@ interface ThreadChatProps {
   /** Used to resolve per-model effort options for the composer dial. */
   providers?: ProviderSettingsView[];
   /**
-   * Workspace agent display preference — not the thread snapshot. Thinking
-   * effort is per-thread; whether reasoning text is shown follows Settings.
+   * Per-user display preference — not agent or thread state. Thinking effort
+   * is per-thread; whether reasoning text is shown follows Settings.
    */
   showReasoning?: boolean;
   leading: React.ReactNode;

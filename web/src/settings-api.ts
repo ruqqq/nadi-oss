@@ -20,7 +20,6 @@ export type SaveDefaultAgentSettingsInput = {
     provider?: string;
     model?: string;
     modelInputModalities?: ModelInputModality[];
-    showReasoning?: boolean;
     reasoningEffort?: ReasoningEffort;
     modelSupportsReasoning?: boolean | null;
   };
@@ -125,7 +124,6 @@ export interface AgentSettingsResponse {
     provider: string;
     model: string;
     modelInputModalities: ModelInputModality[];
-    showReasoning: boolean;
     reasoningEffort: ReasoningEffort;
     /** `null` = unknown. Never conflate with `false`. */
     modelSupportsReasoning: boolean | null;
@@ -161,7 +159,6 @@ export function buildDefaultAgentSettingsSaveInput(input: {
   currentProvider: string;
   selectedProvider: SettingsProvider;
   providerChanged: boolean;
-  showReasoning: boolean;
   reasoningEffort: ReasoningEffort;
   modelSupportsReasoning?: boolean | null;
 }): SaveDefaultAgentSettingsInput {
@@ -169,7 +166,6 @@ export function buildDefaultAgentSettingsSaveInput(input: {
     systemPrompt: input.systemPrompt,
     model: input.model,
     modelInputModalities: input.modelInputModalities ?? ["text"],
-    showReasoning: input.showReasoning,
     reasoningEffort: input.reasoningEffort,
     ...(input.modelSupportsReasoning === undefined
       ? {}

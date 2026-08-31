@@ -331,7 +331,6 @@ async function updateDefaultAgentSettings(req: Request, env: Env): Promise<Respo
       provider?: unknown;
       model?: unknown;
       modelInputModalities?: unknown;
-      showReasoning?: unknown;
       reasoningEffort?: unknown;
       modelSupportsReasoning?: unknown;
     };
@@ -370,13 +369,6 @@ async function updateDefaultAgentSettings(req: Request, env: Env): Promise<Respo
       });
     }
     patch.modelInputModalities = JSON.stringify(parsed.modalities);
-  }
-
-  if (body?.agent?.showReasoning !== undefined) {
-    if (typeof body.agent.showReasoning !== "boolean") {
-      return new Response("showReasoning must be a boolean", { status: 400 });
-    }
-    patch.showReasoning = body.agent.showReasoning;
   }
 
   if (body?.agent?.reasoningEffort !== undefined) {
@@ -935,7 +927,6 @@ function serializeAgent(agent: {
   provider: string;
   model: string;
   modelInputModalities?: string | null;
-  showReasoning: boolean;
   reasoningEffort?: string | null;
   modelSupportsReasoning?: boolean | null;
 }) {
@@ -946,7 +937,6 @@ function serializeAgent(agent: {
     provider: agent.provider,
     model: agent.model,
     modelInputModalities: parseStoredModelInputModalities(agent.modelInputModalities),
-    showReasoning: agent.showReasoning,
     reasoningEffort: parseReasoningEffort(agent.reasoningEffort) ?? DEFAULT_REASONING_EFFORT,
     // Sent as null rather than omitted so the client can tell "unknown" from
     // "the field is missing because the Worker is old".

@@ -128,7 +128,6 @@ describe("routeDebug — POST /api/debug/thread", () => {
     provider: "anthropic",
     model: "claude-default",
     modelInputModalities: '["text"]',
-    showReasoning: true,
   };
 
   function fakeDb(agent: unknown) {

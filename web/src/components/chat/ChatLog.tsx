@@ -133,9 +133,9 @@ export function ChatLog({
    * the only place thinking is actually shown, since MessageRow is always
    * passed `showReasoning={false}`.
    *
-   * Source of truth is the workspace agent setting (`settings.agent.showReasoning`),
-   * not the per-thread snapshot. Effort decides whether the model thinks; this
-   * flag only decides whether that thinking is shown.
+   * Source of truth is the per-user display preference
+   * (`GET /api/settings/preferences`), not agent or thread state. Effort decides
+   * whether the model thinks; this flag only decides whether it is shown.
    */
   showReasoning?: boolean;
   error?: Error;

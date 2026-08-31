@@ -37,7 +37,6 @@ describe("ThreadRepository.updateModelSnapshot", () => {
       provider: "openai",
       model: "gpt-5",
       modelInputModalities: ["text", "image"],
-      showReasoning: true,
       reasoningEffort: "high",
       modelSupportsReasoning: true,
     });
@@ -49,7 +48,6 @@ describe("ThreadRepository.updateModelSnapshot", () => {
       modelProvider: "openai",
       model: "gpt-5",
       modelInputModalities: JSON.stringify(["text", "image"]),
-      showReasoning: true,
       reasoningEffort: "high",
       modelSupportsReasoning: true,
     });
@@ -76,7 +74,6 @@ describe("ThreadRepository.updateModelSnapshot", () => {
       provider: "anthropic",
       model: "claude-sonnet-5",
       modelInputModalities: ["text"],
-      showReasoning: false,
       reasoningEffort: "medium",
       modelSupportsReasoning: null,
     });

@@ -38,7 +38,6 @@ const settings = {
     provider: "openai",
     model: "gpt-5.4-mini",
     modelInputModalities: ["text" as const],
-    showReasoning: false,
     reasoningEffort: "medium" as const,
     modelSupportsReasoning: null,
   },

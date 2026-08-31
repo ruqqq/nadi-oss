@@ -28,7 +28,6 @@ function feedbackThread(): ThreadSummary {
     provider: "workers-ai",
     model: "@cf/moonshotai/kimi-k2.7-code",
     modelInputModalities: ["text", "image"],
-    showReasoning: false,
     reasoningEffort: "medium",
     modelSupportsReasoning: null,
     runtime: "think",

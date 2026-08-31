@@ -42,7 +42,6 @@ const settingsResponse: AgentSettingsResponse = {
     provider: "openai",
       model: "gpt-5.4-mini",
       modelInputModalities: ["text"],
-      showReasoning: true,
       reasoningEffort: "medium" as const,
       modelSupportsReasoning: null,
   },
@@ -155,7 +154,6 @@ describe("settings api helpers", () => {
         currentProvider: "future-provider",
         selectedProvider: "openai",
         providerChanged: false,
-        showReasoning: true,
         reasoningEffort: "medium" as const,
         modelSupportsReasoning: null,
       }),
@@ -164,7 +162,6 @@ describe("settings api helpers", () => {
         systemPrompt: "Prompt",
         model: "mock-model",
         modelInputModalities: ["text"],
-        showReasoning: true,
         reasoningEffort: "medium" as const,
         modelSupportsReasoning: null,
       },
@@ -177,7 +174,6 @@ describe("settings api helpers", () => {
         currentProvider: "future-provider",
         selectedProvider: "anthropic",
         providerChanged: true,
-        showReasoning: true,
         reasoningEffort: "medium" as const,
         modelSupportsReasoning: null,
       }),
@@ -187,7 +183,6 @@ describe("settings api helpers", () => {
         provider: "anthropic",
         model: "gpt-5.4-mini",
         modelInputModalities: ["text"],
-        showReasoning: true,
         reasoningEffort: "medium" as const,
         modelSupportsReasoning: null,
       },
@@ -337,7 +332,7 @@ describe("settings api helpers", () => {
     });
   });
 
-  it("forwards showReasoning in the default agent save input", () => {
+  it("builds the default agent save input without a showReasoning member", () => {
     expect(
       buildDefaultAgentSettingsSaveInput({
         systemPrompt: "Prompt",
@@ -345,7 +340,6 @@ describe("settings api helpers", () => {
         currentProvider: "openai",
         selectedProvider: "openai",
         providerChanged: false,
-        showReasoning: false,
         reasoningEffort: "medium" as const,
       }),
     ).toEqual({
@@ -354,7 +348,6 @@ describe("settings api helpers", () => {
         model: "gpt-5.4-mini",
         provider: "openai",
         modelInputModalities: ["text"],
-        showReasoning: false,
         reasoningEffort: "medium" as const,
       },
     });
