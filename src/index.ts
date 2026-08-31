@@ -22,6 +22,7 @@ export {
   NadiSandboxSmall,
   NadiSandboxMedium,
 } from "./compute/cloudflare-sandbox-classes";
+export { AgentSandbox } from "./compute/agent-sandbox-do";
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {

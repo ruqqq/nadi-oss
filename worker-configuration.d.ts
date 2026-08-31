@@ -41,6 +41,7 @@ interface __BaseEnv_Env {
   WORKSPACE_MCP_AGENT: DurableObjectNamespace<import("./src/index").WorkspaceMcpAgent>;
   USER_HUB: DurableObjectNamespace<import("./src/index").UserHub>;
   VOICE_AGENT: DurableObjectNamespace<import("./src/index").VoiceAgent>;
+  AGENT_SANDBOX: DurableObjectNamespace<import("./src/index").AgentSandbox>;
 }
 declare namespace Cloudflare {
   interface GlobalProps {

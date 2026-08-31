@@ -26,6 +26,7 @@
       { "name": "VOICE_AGENT", "class_name": "VoiceAgent" },
       { "name": "NADI_SANDBOX_SMALL", "class_name": "NadiSandboxSmall" },
       { "name": "NADI_SANDBOX_MEDIUM", "class_name": "NadiSandboxMedium" },
+      { "name": "AGENT_SANDBOX", "class_name": "AgentSandbox" },
     ],
   },
   "containers": [
@@ -77,6 +78,11 @@
       "tag": "v9_delete_thread_agent_v2_namespace",
       "deleted_classes": ["ThreadAgentV2"],
     },
+    // Owns the compute store and service that used to live in each thread's own
+    // DO. Keyed by threadId, so behaviour matches the thread-local path exactly;
+    // P3 re-keys it to agentId, which is what makes one sandbox shared by all of
+    // an agent's threads.
+    { "tag": "v10_agent_sandbox", "new_sqlite_classes": ["AgentSandbox"] },
   ],
   "d1_databases": [
     {

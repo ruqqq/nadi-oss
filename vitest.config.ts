@@ -122,6 +122,7 @@ function integrationPlugins() {
           WORKSPACE_MCP_AGENT: { className: "WorkspaceMcpAgent", useSQLite: true },
           USER_HUB: { className: "UserHub", useSQLite: true },
           VOICE_AGENT: { className: "VoiceAgent", useSQLite: true },
+          AGENT_SANDBOX: { className: "AgentSandbox", useSQLite: true },
           // TEST-ONLY: SubAgent is a facet-only class (no wrangler.jsonc
           // binding — it's only ever reached via getSubAgentByName from a
           // parent ThinkThreadAgent). This binding lets integration tests

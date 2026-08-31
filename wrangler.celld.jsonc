@@ -31,6 +31,7 @@
       { "name": "WORKSPACE_MCP_AGENT", "class_name": "WorkspaceMcpAgent" },
       { "name": "USER_HUB", "class_name": "UserHub" },
       { "name": "VOICE_AGENT", "class_name": "VoiceAgent" },
+      { "name": "AGENT_SANDBOX", "class_name": "AgentSandbox" },
     ],
   },
   "migrations": [
@@ -38,6 +39,7 @@
     { "tag": "v2", "new_sqlite_classes": ["UserHub"] },
     { "tag": "v3", "new_sqlite_classes": ["ThinkThreadAgent"] },
     { "tag": "v4", "new_sqlite_classes": ["VoiceAgent"] },
+    { "tag": "v5", "new_sqlite_classes": ["AgentSandbox"] },
     // v5 created RegistryDatabase, the DO that held the whole registry while
     // celld had no D1. celld v0.3.0 has one, so the registry is a real
     // `d1_databases` binding below and the class is gone.
