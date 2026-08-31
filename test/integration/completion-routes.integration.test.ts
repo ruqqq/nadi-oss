@@ -8,7 +8,7 @@
  */
 import { SELF, env, runInDurableObject } from "cloudflare:test";
 import { drizzle } from "drizzle-orm/d1";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import * as schema from "../../src/db/schema";
 import type { ThinkThreadAgent } from "../../src/agent/think-thread-agent";
 import type { WorkLedgerStore } from "../../src/agent/work-ledger-store";
@@ -115,7 +115,18 @@ async function seedThread(threadId: string, options?: { sandbox?: boolean }) {
  * express them, so selecting `mock` in D1 would leave this test waiting out the
  * real 30s foreground window.
  */
+/**
+ * Every thread this file registers an override for, so `afterAll` can clear
+ * exactly those and nothing else. `integration-fast` runs `isolate: false`, so
+ * the override map is ONE map shared by every file in the project run — a
+ * blanket clear here would reach into other files' registrations, and leaving
+ * `startWatchedProcess`'s deliberate non-cleanup in place past this file would
+ * leak a `FakeComputeBackend` into them.
+ */
+const REGISTERED_THREADS = new Set<string>();
+
 function primeCompute(threadId: string, backend: FakeComputeBackend): () => void {
+  REGISTERED_THREADS.add(threadId);
   setComputeHostTestOverrides(threadId, {
     buildBackend: async () => backend,
     execForegroundTimeoutMs: 1,
@@ -241,6 +252,11 @@ function postCompletion(token: string, body: unknown) {
     body: JSON.stringify(body),
   });
 }
+
+afterAll(() => {
+  for (const threadId of REGISTERED_THREADS) clearComputeHostTestOverrides(threadId);
+  REGISTERED_THREADS.clear();
+});
 
 beforeAll(async () => {
   drizzle(env.REGISTRY_DB, { schema });

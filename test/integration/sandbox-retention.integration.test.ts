@@ -17,7 +17,7 @@
  * bit, the tool wiring, the service's idle-release decision — is real.
  */
 import { env, runInDurableObject } from "cloudflare:test";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import type { ThinkThreadAgent } from "../../src/agent/think-thread-agent";
 import { createComputeTools, type ComputeToolHostDeps } from "../../src/agent/compute-tools";
 import { FakeComputeBackend } from "../../src/compute/backends/fake";
@@ -75,10 +75,6 @@ describe("sandbox retention loop (DO + D1 integration)", () => {
     await applyRegistryTestSchema(env.REGISTRY_DB);
   });
 
-  afterEach(() => {
-    clearComputeHostTestOverrides();
-  });
-
   it("declaring clean then writing again re-arms preservation", async () => {
     // The whole point of the bit: a declaration only covers the state it was
     // made about. If a write after the declaration didn't clear it, a stale
@@ -121,48 +117,55 @@ describe("sandbox retention loop (DO + D1 integration)", () => {
     await seedComputeEnabledWorkspace(workspaceId);
 
     const stub = stubFor(threadId);
-    await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
-      const testInstance = instance as TestableAgent;
-      await testInstance.__unsafe_ensureInitialized();
-      const backend = new FakeComputeBackend();
-      let nowValue = NOW;
-      // Approach: the thread-keyed host-override registry. The `mock` provider
-      // cannot express EITHER half of this test — it has no way to script the
-      // git-porcelain stdout `probeWorkspaceCleanliness` parses, and it records
-      // no `releaseCalls` for the idle-release disposition assertion — so the
-      // instrumented fake stays, reached through a seam that survives the
-      // service moving into `AgentSandbox`.
-      setComputeHostTestOverrides(threadId, {
-        buildBackend: async () => backend,
-        now: () => nowValue,
+    try {
+      await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
+        const testInstance = instance as TestableAgent;
+        await testInstance.__unsafe_ensureInitialized();
+        const backend = new FakeComputeBackend();
+        let nowValue = NOW;
+        // Approach: the thread-keyed host-override registry. The `mock` provider
+        // cannot express EITHER half of this test — it has no way to script the
+        // git-porcelain stdout `probeWorkspaceCleanliness` parses, and it records
+        // no `releaseCalls` for the idle-release disposition assertion — so the
+        // instrumented fake stays, reached through a seam that survives the
+        // service moving into `AgentSandbox`.
+        setComputeHostTestOverrides(threadId, {
+          buildBackend: async () => backend,
+          now: () => nowValue,
+        });
+
+        const resolved = await testInstance.resolveComputeServiceForTest();
+        expect(resolved).not.toBeNull();
+        await resolved!.service.ensureRuntimeReference();
+
+        // Drive the REAL confirm_work_saved from the REAL buildComputeToolDefs
+        // map (via createComputeTools), not a hand-built stand-in.
+        const tools = await createComputeTools(hostDepsOf(instance));
+        expect(tools).toHaveProperty("confirm_work_saved");
+
+        backend.setNextProcessResult({ status: "exited", exitCode: 0, stdout: DIRTY_PROBE_STDOUT });
+        const message = await (
+          tools.confirm_work_saved as {
+            execute: (input: unknown, options: unknown) => Promise<unknown>;
+          }
+        ).execute({}, { toolCallId: "t1", messages: [] });
+
+        expect(String(message)).toContain("/workspace/app");
+        expect(String(message)).toContain("a.txt");
+        expect(await testInstance.getSandboxDeclaredClean()).toBe(false);
+
+        // Idle-release must reach the SAME conclusion the tool just refused:
+        // preserved, not discarded.
+        nowValue += IDLE_TIMEOUT_MS;
+        backend.setNextProcessResult({ status: "exited", exitCode: 0, stdout: DIRTY_PROBE_STDOUT });
+        await resolved!.service.releaseIfIdle();
+        expect(backend.releaseCalls.at(-1)?.options.disposition).toBe("recoverable");
       });
-
-      const resolved = await testInstance.resolveComputeServiceForTest();
-      expect(resolved).not.toBeNull();
-      await resolved!.service.ensureRuntimeReference();
-
-      // Drive the REAL confirm_work_saved from the REAL buildComputeToolDefs
-      // map (via createComputeTools), not a hand-built stand-in.
-      const tools = await createComputeTools(hostDepsOf(instance));
-      expect(tools).toHaveProperty("confirm_work_saved");
-
-      backend.setNextProcessResult({ status: "exited", exitCode: 0, stdout: DIRTY_PROBE_STDOUT });
-      const message = await (
-        tools.confirm_work_saved as {
-          execute: (input: unknown, options: unknown) => Promise<unknown>;
-        }
-      ).execute({}, { toolCallId: "t1", messages: [] });
-
-      expect(String(message)).toContain("/workspace/app");
-      expect(String(message)).toContain("a.txt");
-      expect(await testInstance.getSandboxDeclaredClean()).toBe(false);
-
-      // Idle-release must reach the SAME conclusion the tool just refused:
-      // preserved, not discarded.
-      nowValue += IDLE_TIMEOUT_MS;
-      backend.setNextProcessResult({ status: "exited", exitCode: 0, stdout: DIRTY_PROBE_STDOUT });
-      await resolved!.service.releaseIfIdle();
-      expect(backend.releaseCalls.at(-1)?.options.disposition).toBe("recoverable");
-    });
+    } finally {
+      // Scoped to the ONE thread this test registered. A blanket clear would
+      // reach across files: `integration-fast` runs `isolate: false`, so the
+      // override map is shared by every file in the project run.
+      clearComputeHostTestOverrides(threadId);
+    }
   });
 });

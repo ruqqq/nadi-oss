@@ -205,7 +205,12 @@ function stubFor(threadId: string) {
 
 /** The agent's own thread id — the key the host-override registry is keyed by. */
 function threadIdOf(instance: ThinkThreadAgent): string {
-  return (instance as unknown as { name: string }).name;
+  const name = (instance as unknown as { name?: string }).name;
+  // Not defensive padding: the registry is KEYED by this. An empty id would
+  // register the override under `""`, nothing would ever read it, and every
+  // test in this file would pass vacuously against a real backend.
+  if (!name) throw new Error("expected the agent's thread id (agent.name) to be populated");
+  return name;
 }
 
 /**
