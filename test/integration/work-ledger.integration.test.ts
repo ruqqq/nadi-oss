@@ -10,6 +10,10 @@ import {
 } from "../../src/agent/work-ledger";
 import type { WorkLedgerStore } from "../../src/agent/work-ledger-store";
 import { FakeComputeBackend } from "../../src/compute/backends/fake";
+import {
+  clearComputeHostTestOverrides,
+  setComputeHostTestOverrides,
+} from "../../src/compute/host-test-overrides";
 import { ComputeError } from "../../src/compute/errors";
 import { ThreadComputeService } from "../../src/compute/thread-service";
 import { ThreadComputeStore } from "../../src/compute/thread-store";
@@ -48,12 +52,6 @@ const BASE = 1_800_000_000_000;
 
 type LedgerTestableAgent = ThinkThreadAgent & {
   __unsafe_ensureInitialized(): Promise<void>;
-  _testSandboxServiceOverrides?: {
-    buildBackend?: () => Promise<FakeComputeBackend>;
-    execForegroundTimeoutMs?: number;
-    execForegroundPollIntervalMs?: number;
-    sleep?: (ms: number) => Promise<void>;
-  };
   resolveComputeServiceForTest(): Promise<{ service: ThreadComputeService } | null>;
 };
 
@@ -205,26 +203,39 @@ function stubFor(threadId: string) {
   return env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
 }
 
+/** The agent's own thread id — the key the host-override registry is keyed by. */
+function threadIdOf(instance: ThinkThreadAgent): string {
+  return (instance as unknown as { name: string }).name;
+}
+
 /**
  * Prime the agent for compute work: fake backend, instant backgrounding, and a
  * `sleep` that advances the SAME faked clock everything else reads. Keeps
  * proactive injections in the durable buffer (`_turnQueue.isActive`) so a test
  * can count reminders instead of racing a real turn.
+ *
+ * Approach: the thread-keyed host-override registry, NOT the D1 `mock`
+ * provider. Three of the four knobs here are not backend properties at all —
+ * the foreground exec window, its poll interval, and a `sleep` that advances
+ * vitest's faked `Date` rather than burning wall time — so no provider choice
+ * can supply them. The fourth, the backend itself, is an INSTRUMENTED fake:
+ * `tripwireBackend` below patches every one of its methods to record and throw,
+ * which is the entire assertion of the backend-free-sweep test.
  */
 function primeCompute(instance: ThinkThreadAgent, backend: FakeComputeBackend): () => void {
-  const testInstance = instance as LedgerTestableAgent;
-  testInstance._testSandboxServiceOverrides = {
+  const threadId = threadIdOf(instance);
+  setComputeHostTestOverrides(threadId, {
     buildBackend: async () => backend,
     execForegroundTimeoutMs: 1,
     execForegroundPollIntervalMs: 1,
     sleep: async (ms: number) => {
       vi.setSystemTime(Date.now() + ms);
     },
-  };
+  });
   const turnQueueHolder = instance as unknown as { _turnQueue?: { isActive: boolean } };
   turnQueueHolder._turnQueue = { isActive: true };
   return () => {
-    delete testInstance._testSandboxServiceOverrides;
+    clearComputeHostTestOverrides(threadId);
     delete turnQueueHolder._turnQueue;
   };
 }
@@ -458,7 +469,7 @@ describe("work ledger (DO integration)", () => {
 
       const afterSecond = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
         const injections = injectionsOf(instance);
-        delete (instance as LedgerTestableAgent)._testSandboxServiceOverrides;
+        clearComputeHostTestOverrides(threadIdOf(instance));
         delete (instance as unknown as { _turnQueue?: unknown })._turnQueue;
         return { injections };
       });

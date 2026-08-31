@@ -17,10 +17,14 @@
  * bit, the tool wiring, the service's idle-release decision — is real.
  */
 import { env, runInDurableObject } from "cloudflare:test";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { ThinkThreadAgent } from "../../src/agent/think-thread-agent";
 import { createComputeTools, type ComputeToolHostDeps } from "../../src/agent/compute-tools";
 import { FakeComputeBackend } from "../../src/compute/backends/fake";
+import {
+  clearComputeHostTestOverrides,
+  setComputeHostTestOverrides,
+} from "../../src/compute/host-test-overrides";
 import type { ThreadComputeService } from "../../src/compute/thread-service";
 import { applyRegistryTestSchema, seedRegistryThread } from "./helpers/registry";
 
@@ -30,10 +34,6 @@ const IDLE_TIMEOUT_MS = 900_000;
 /** Matches the DO-internal test hooks think-thread-agent.ts exposes for exactly this purpose. */
 type TestableAgent = ThinkThreadAgent & {
   __unsafe_ensureInitialized(): Promise<void>;
-  _testSandboxServiceOverrides?: {
-    buildBackend?: () => Promise<FakeComputeBackend>;
-    now?: () => number;
-  };
   resolveComputeServiceForTest(): Promise<{ service: ThreadComputeService } | null>;
   getSandboxDeclaredClean(): Promise<boolean>;
   setSandboxDeclaredClean(clean: boolean): Promise<void>;
@@ -48,15 +48,18 @@ function hostDepsOf(instance: ThinkThreadAgent): ComputeToolHostDeps {
   return (instance as unknown as { sandboxHostDeps(): ComputeToolHostDeps }).sandboxHostDeps();
 }
 
-async function seedComputeEnabledWorkspace(workspaceId: string) {
+async function seedComputeEnabledWorkspace(
+  workspaceId: string,
+  provider: "cloudflare" | "mock" = "cloudflare",
+) {
   await env.REGISTRY_DB.prepare(
     `INSERT INTO workspace_sandbox_settings
       (workspace_id, enabled, provider, provider_config_json,
        image, idle_timeout_ms, recovery_ttl_ms, max_process_runtime_ms, limits_json,
        network_restriction_enabled, network_domain_allowlist)
-     VALUES (?, 1, 'cloudflare', ?, '', ?, 86400000, 600000, '{}', 0, '')`,
+     VALUES (?, 1, ?, ?, '', ?, 86400000, 600000, '{}', 0, '')`,
   )
-    .bind(workspaceId, JSON.stringify({ kind: "cloudflare" }), IDLE_TIMEOUT_MS)
+    .bind(workspaceId, provider, JSON.stringify({ kind: provider }), IDLE_TIMEOUT_MS)
     .run();
 }
 
@@ -72,6 +75,10 @@ describe("sandbox retention loop (DO + D1 integration)", () => {
     await applyRegistryTestSchema(env.REGISTRY_DB);
   });
 
+  afterEach(() => {
+    clearComputeHostTestOverrides();
+  });
+
   it("declaring clean then writing again re-arms preservation", async () => {
     // The whole point of the bit: a declaration only covers the state it was
     // made about. If a write after the declaration didn't clear it, a stale
@@ -81,15 +88,16 @@ describe("sandbox retention loop (DO + D1 integration)", () => {
       threadId,
       runtime: "think",
     });
-    await seedComputeEnabledWorkspace(workspaceId);
+    // Approach: the D1 `mock` provider. Nothing here needs a scripted backend
+    // response or a backend call log — only that a REAL write path runs and
+    // clears the bit — so the in-memory provider the deployment itself can
+    // select expresses it, and no test seam is needed at all.
+    await seedComputeEnabledWorkspace(workspaceId, "mock");
 
     const stub = stubFor(threadId);
     await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
       const testInstance = instance as TestableAgent;
       await testInstance.__unsafe_ensureInitialized();
-      testInstance._testSandboxServiceOverrides = {
-        buildBackend: async () => new FakeComputeBackend(),
-      };
 
       const resolved = await testInstance.resolveComputeServiceForTest();
       expect(resolved).not.toBeNull();
@@ -118,10 +126,16 @@ describe("sandbox retention loop (DO + D1 integration)", () => {
       await testInstance.__unsafe_ensureInitialized();
       const backend = new FakeComputeBackend();
       let nowValue = NOW;
-      testInstance._testSandboxServiceOverrides = {
+      // Approach: the thread-keyed host-override registry. The `mock` provider
+      // cannot express EITHER half of this test — it has no way to script the
+      // git-porcelain stdout `probeWorkspaceCleanliness` parses, and it records
+      // no `releaseCalls` for the idle-release disposition assertion — so the
+      // instrumented fake stays, reached through a seam that survives the
+      // service moving into `AgentSandbox`.
+      setComputeHostTestOverrides(threadId, {
         buildBackend: async () => backend,
         now: () => nowValue,
-      };
+      });
 
       const resolved = await testInstance.resolveComputeServiceForTest();
       expect(resolved).not.toBeNull();

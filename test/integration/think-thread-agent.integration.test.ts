@@ -29,6 +29,10 @@ import { ThreadRepositorySnapshotRepository } from "../../src/db/repositories/th
 import * as posthogObservability from "../../src/observability/posthog";
 import { saveDaytonaApiKey } from "../../src/compute/settings";
 import { FakeComputeBackend } from "../../src/compute/backends/fake";
+import {
+  clearComputeHostTestOverrides,
+  setComputeHostTestOverrides,
+} from "../../src/compute/host-test-overrides";
 import { ThreadComputeService } from "../../src/compute/thread-service";
 import { DEFAULT_MONITOR_POLL_INTERVAL_MS } from "../../src/compute/watchers";
 import { applyRegistryTestSchema, seedRegistryThread } from "./helpers/registry";
@@ -47,13 +51,6 @@ type InitializableAgent = ThinkThreadAgentType & {
 type TestDb = DrizzleD1Database<typeof schema>;
 
 type SandboxServiceTestableAgent = InitializableAgent & {
-  _testSandboxServiceOverrides?: {
-    buildBackend?: () => Promise<FakeComputeBackend>;
-    now?: () => number;
-    execForegroundTimeoutMs?: number;
-    execForegroundPollIntervalMs?: number;
-    sleep?: (ms: number) => Promise<void>;
-  };
   resolveComputeServiceForTest(): Promise<{
     service: ThreadComputeService;
     workspaceId: string;
@@ -75,7 +72,25 @@ type FeedbackRuntimeProbe = {
   messageText?: string;
 };
 
-async function seedSandboxEnabledWorkspace(workspaceId: string) {
+/**
+ * A compute-enabled workspace. `provider: "mock"` selects the in-memory
+ * `MockComputeBackend` through the SAME D1 path production reads, so a test
+ * whose only need is "a compute service that runs commands" needs no test seam
+ * at all; the daytona default stays for the workspaces whose tests instrument
+ * the backend (`runCommandCalls`, `finishProcess`) and therefore inject a fake.
+ */
+async function seedSandboxEnabledWorkspace(
+  workspaceId: string,
+  provider: "daytona" | "mock" = "daytona",
+) {
+  if (provider === "mock") {
+    await env.REGISTRY_DB.prepare(
+      "INSERT OR IGNORE INTO workspace_sandbox_settings (workspace_id, enabled, provider, provider_config_json, image, idle_timeout_ms, max_process_runtime_ms, limits_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+      .bind(workspaceId, 1, "mock", JSON.stringify({ kind: "mock" }), "", 900_000, 600_000, "{}")
+      .run();
+    return;
+  }
   const providerConfigJson = JSON.stringify({
     kind: "daytona",
     apiKeySecretName: "sandbox:daytona",
@@ -297,7 +312,7 @@ beforeAll(async () => {
     provider: "mock",
     model: "mock",
   });
-  await seedSandboxEnabledWorkspace("workspace-think-tool-probe-enabled");
+  await seedSandboxEnabledWorkspace("workspace-think-tool-probe-enabled", "mock");
   await seedRegistryThread(env.REGISTRY_DB, {
     workspaceId: "workspace-think-exec-quick",
     agentId: "agent-think-exec-quick",
@@ -306,7 +321,7 @@ beforeAll(async () => {
     provider: "mock",
     model: "mock",
   });
-  await seedSandboxEnabledWorkspace("workspace-think-exec-quick");
+  await seedSandboxEnabledWorkspace("workspace-think-exec-quick", "mock");
   await seedRegistryThread(env.REGISTRY_DB, {
     workspaceId: "workspace-think-exec-background",
     agentId: "agent-think-exec-background",
@@ -1013,9 +1028,8 @@ describe("ThinkThreadAgent spike", () => {
 
   it("runs long exec synchronously without watchers when background work is disabled", async () => {
     const previous = featureEnv.BACKGROUND_WORK_ENABLED;
-    const stub = env.THINK_THREAD_AGENT.get(
-      env.THINK_THREAD_AGENT.idFromName("think-exec-background-disabled"),
-    );
+    const threadId = "think-exec-background-disabled";
+    const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
 
     try {
       featureEnv.BACKGROUND_WORK_ENABLED = "";
@@ -1025,7 +1039,11 @@ describe("ThinkThreadAgent spike", () => {
         const provider = new FakeComputeBackend();
         let now = 1000;
         try {
-          testInstance._testSandboxServiceOverrides = {
+          // Approach: the thread-keyed host-override registry. The assertion IS
+          // the backend call log (`runCommandCalls` / `startProcessCalls`), which
+          // only the instrumented fake records, and the exec-timing knobs are
+          // service deps no provider can supply.
+          setComputeHostTestOverrides(threadId, {
             buildBackend: async () => provider,
             now: () => now,
             execForegroundTimeoutMs: 1,
@@ -1033,7 +1051,7 @@ describe("ThinkThreadAgent spike", () => {
             sleep: async (ms) => {
               now += ms;
             },
-          };
+          });
           const resolved = await testInstance.resolveComputeServiceForTest();
           if (!resolved) throw new Error("expected sandbox service");
           const execResult = await resolved.service.exec({ command: "sleep 300", label: "build" });
@@ -1047,7 +1065,7 @@ describe("ThinkThreadAgent spike", () => {
             startProcessCalls: provider.startProcessCalls,
           };
         } finally {
-          delete testInstance._testSandboxServiceOverrides;
+          clearComputeHostTestOverrides(threadId);
         }
       });
 
@@ -1644,17 +1662,12 @@ describe("ThinkThreadAgent spike", () => {
     const stub = env.THINK_THREAD_AGENT.get(
       env.THINK_THREAD_AGENT.idFromName("think-tool-probe-enabled"),
     );
-    const probe = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
-      const testInstance = instance as SandboxServiceTestableAgent;
-      try {
-        testInstance._testSandboxServiceOverrides = {
-          buildBackend: async () => new FakeComputeBackend(),
-        };
-        return testInstance.beforeTurnProbeForTest();
-      } finally {
-        delete testInstance._testSandboxServiceOverrides;
-      }
-    });
+    // Approach: the D1 `mock` provider (its workspace is seeded with it). This
+    // test only needs compute to RESOLVE so the exec tool set appears; it never
+    // touches the backend, so no seam is required.
+    const probe = await runInDurableObject(stub, async (instance: ThinkThreadAgent) =>
+      (instance as SandboxServiceTestableAgent).beforeTurnProbeForTest(),
+    );
 
     const toolNames = probe.activeTools ?? [];
     expect(toolNames).toContain("exec");
@@ -1667,18 +1680,14 @@ describe("ThinkThreadAgent spike", () => {
   it("exec quick command returns output in one tool result", async () => {
     const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName("think-exec-quick"));
     const result = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
+      // Approach: the D1 `mock` provider. `MockComputeBackend` echoes `echo`
+      // just as a shell does, which is exactly the round-trip this asserts —
+      // so the real provider path replaces the injected fake with no loss.
       const testInstance = instance as SandboxServiceTestableAgent;
       await testInstance.__unsafe_ensureInitialized();
-      try {
-        testInstance._testSandboxServiceOverrides = {
-          buildBackend: async () => new FakeComputeBackend(),
-        };
-        const resolved = await testInstance.resolveComputeServiceForTest();
-        if (!resolved) throw new Error("expected sandbox service");
-        return resolved.service.exec({ command: "echo hello", label: "greet" });
-      } finally {
-        delete testInstance._testSandboxServiceOverrides;
-      }
+      const resolved = await testInstance.resolveComputeServiceForTest();
+      if (!resolved) throw new Error("expected sandbox service");
+      return resolved.service.exec({ command: "echo hello", label: "greet" });
     });
 
     expect(result).toMatchObject({
@@ -1695,9 +1704,8 @@ describe("ThinkThreadAgent spike", () => {
   });
 
   it("exec watcher completion is delivered through the Durable Object tick path", async () => {
-    const stub = env.THINK_THREAD_AGENT.get(
-      env.THINK_THREAD_AGENT.idFromName("think-exec-background"),
-    );
+    const threadId = "think-exec-background";
+    const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
     const result = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
       const testInstance = instance as SandboxServiceTestableAgent;
       await testInstance.__unsafe_ensureInitialized();
@@ -1705,7 +1713,10 @@ describe("ThinkThreadAgent spike", () => {
       let now = 1000;
       const turnQueueHolder = testInstance as unknown as { _turnQueue?: { isActive: boolean } };
       try {
-        testInstance._testSandboxServiceOverrides = {
+        // Approach: the thread-keyed host-override registry. `provider.finishProcess`
+        // scripts the exit this tick path is supposed to observe — the `mock`
+        // provider has no equivalent, and the exec-timing knobs are service deps.
+        setComputeHostTestOverrides(threadId, {
           buildBackend: async () => provider,
           now: () => now,
           execForegroundTimeoutMs: 1,
@@ -1713,7 +1724,7 @@ describe("ThinkThreadAgent spike", () => {
           sleep: async (ms) => {
             now += ms;
           },
-        };
+        });
         // Keep proactive watcher completion in the durable injection buffer so
         // this test can assert the completion metadata before beforeStep drains it.
         turnQueueHolder._turnQueue = { isActive: true };
@@ -1748,7 +1759,7 @@ describe("ThinkThreadAgent spike", () => {
           completions,
         };
       } finally {
-        delete testInstance._testSandboxServiceOverrides;
+        clearComputeHostTestOverrides(threadId);
         delete turnQueueHolder._turnQueue;
       }
     });

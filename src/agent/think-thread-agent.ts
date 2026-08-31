@@ -555,12 +555,6 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
   _lastBeforeTurnActiveToolsForTest?: string[] | undefined;
   /** @internal for tests only — shrinks MAX_TOOL_STEPS so wind-down is testable without looping the full budget */
   _testMaxToolSteps?: number | undefined;
-  /** @internal for tests only — overrides sandbox host dependencies such as the provider builder. */
-  _testSandboxServiceOverrides?: Pick<
-    ComputeToolHostDeps,
-    "buildBackend" | "now" | "execForegroundTimeoutMs" | "execForegroundPollIntervalMs" | "sleep"
-  >;
-
   /** Composed system prompt of the in-flight turn, reused by the wind-down step. */
   private currentTurnWindDownSystem?: string;
   /**
@@ -4695,7 +4689,6 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
           }
         };
       })(),
-      ...this._testSandboxServiceOverrides,
     };
   }
 

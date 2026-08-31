@@ -13,6 +13,7 @@ import { ThreadComputeStore } from "../compute/thread-store";
 import { ThreadComputeService } from "../compute/thread-service";
 import { resolveComputeEnvVars } from "../compute/env-resolve";
 import { buildComputeBackend } from "../compute/registry";
+import { applyComputeHostTestOverrides } from "../compute/host-test-overrides";
 import { ComputeError } from "../compute/errors";
 import { ContainerLedger } from "../compute/container-ledger";
 import type { DaytonaConfigurationMode } from "../compute/daytona-config";
@@ -274,11 +275,15 @@ export async function adoptCommittedWorkbenchResourceProfile(
  * effective configuration is incomplete — callers MUST treat `null` as "no
  * compute" (hide all compute exec tools, schedule no eviction alarm).
  */
-export async function resolveComputeService(deps: ComputeToolHostDeps): Promise<{
+export async function resolveComputeService(hostDeps: ComputeToolHostDeps): Promise<{
   service: ThreadComputeService;
   workspaceId: string;
   config: EffectiveComputeConfig;
 } | null> {
+  // Test-only substitution of the backend factory / clock / exec timing. A
+  // no-op in production; see `src/compute/host-test-overrides.ts` for why it is
+  // a thread-keyed module registry and not a property on the calling DO.
+  const deps = applyComputeHostTestOverrides(hostDeps);
   const { workspaceId, agentId } = await deps.resolveRuntimeConfig();
 
   // The D1-backed config inputs (workspace/agent settings, MCP hosts, secret
@@ -1129,7 +1134,11 @@ export function buildComputeToolDefs(
  * hides all compute exec tools from the model (design spec: the model must not
  * see tools guaranteed to fail because no compute backend is configured).
  */
-export async function createComputeTools(deps: ComputeToolHostDeps): Promise<ToolSet> {
+export async function createComputeTools(hostDeps: ComputeToolHostDeps): Promise<ToolSet> {
+  // Same test-only substitution `resolveComputeService` applies — repeated here
+  // because this factory reads `deps.now` itself (the `work_saved` probe's
+  // clock) rather than only through the resolved service.
+  const deps = applyComputeHostTestOverrides(hostDeps);
   const { supportsProcessMonitor, backgroundLongRunningExec, attachedRuntime } = deps;
   const resolved = await resolveComputeService(deps);
   if (!resolved) return {};

@@ -14,17 +14,16 @@ import type { ThinkThreadAgent } from "../../src/agent/think-thread-agent";
 import type { WorkLedgerStore } from "../../src/agent/work-ledger-store";
 import { deriveCompletionSecret, signCompletionToken } from "../../src/compute/completion-token";
 import { FakeComputeBackend } from "../../src/compute/backends/fake";
+import {
+  clearComputeHostTestOverrides,
+  setComputeHostTestOverrides,
+} from "../../src/compute/host-test-overrides";
 import type { ThreadComputeService } from "../../src/compute/thread-service";
 import { saveDaytonaApiKey } from "../../src/compute/settings";
 import { applyRegistryTestSchema, seedRegistryThread } from "./helpers/registry";
 
 type LedgerTestableAgent = ThinkThreadAgent & {
   __unsafe_ensureInitialized(): Promise<void>;
-  _testSandboxServiceOverrides?: {
-    buildBackend?: () => Promise<FakeComputeBackend>;
-    execForegroundTimeoutMs?: number;
-    execForegroundPollIntervalMs?: number;
-  };
   resolveComputeServiceForTest(): Promise<{ service: ThreadComputeService } | null>;
 };
 
@@ -106,23 +105,31 @@ async function seedThread(threadId: string, options?: { sandbox?: boolean }) {
   if (options?.sandbox !== false) await seedSandboxEnabledWorkspace(workspaceId);
 }
 
-/** Prime the agent for compute work: fake backend, instant backgrounding. */
-function primeCompute(instance: ThinkThreadAgent, backend: FakeComputeBackend): () => void {
-  const testInstance = instance as LedgerTestableAgent;
-  testInstance._testSandboxServiceOverrides = {
+/**
+ * Prime the agent for compute work: fake backend, instant backgrounding.
+ *
+ * Approach: the thread-keyed host-override registry, NOT the D1 `mock`
+ * provider. The two knobs that make `sleep 300` background after 1ms
+ * (`execForegroundTimeoutMs`/`execForegroundPollIntervalMs`) are host deps of
+ * the compute SERVICE, not properties of any backend — no provider choice can
+ * express them, so selecting `mock` in D1 would leave this test waiting out the
+ * real 30s foreground window.
+ */
+function primeCompute(threadId: string, backend: FakeComputeBackend): () => void {
+  setComputeHostTestOverrides(threadId, {
     buildBackend: async () => backend,
     execForegroundTimeoutMs: 1,
     execForegroundPollIntervalMs: 1,
-  };
+  });
   return () => {
-    delete testInstance._testSandboxServiceOverrides;
+    clearComputeHostTestOverrides(threadId);
   };
 }
 
 /**
  * Start a real backgrounded, watched process; returns its real ledger row id.
  *
- * Deliberately does NOT clean up `_testSandboxServiceOverrides` afterward
+ * Deliberately does NOT clear the registered host overrides afterward
  * (unlike `work-ledger.integration.test.ts`'s equivalent, which re-primes
  * before every later call that needs one). The completion HTTP route resolves
  * the compute service independently, INSIDE the same live DO instance but
@@ -138,7 +145,7 @@ async function startWatchedProcess(threadId: string): Promise<{ processId: strin
   return runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
     const testInstance = instance as LedgerTestableAgent;
     await testInstance.__unsafe_ensureInitialized();
-    primeCompute(instance, new FakeComputeBackend());
+    primeCompute(threadId, new FakeComputeBackend());
     // Keep the completion's proactive injection sitting in the durable
     // buffer instead of being drained straight into `submitMessages` (which
     // needs a real chat session this test never sets up) — same trick
@@ -211,7 +218,7 @@ async function computeStateOf(
     // never actually called, but `resolveComputeService` still needs an
     // override to avoid constructing a real Daytona backend, mirroring
     // `startWatchedProcess`.
-    const cleanup = primeCompute(instance, new FakeComputeBackend());
+    const cleanup = primeCompute(threadId, new FakeComputeBackend());
     try {
       const resolved = await testInstance.resolveComputeServiceForTest();
       if (!resolved) throw new Error("expected compute service");
