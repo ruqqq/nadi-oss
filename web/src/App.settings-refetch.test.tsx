@@ -4,10 +4,16 @@ import { render, cleanup, waitFor, act } from "@testing-library/react";
 import type { AgentSettingsResponse } from "./settings-api";
 
 const getDefaultAgentSettings = vi.fn();
+const getUserPreferences = vi.fn();
 
 vi.mock("./settings-api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./settings-api")>()),
   getDefaultAgentSettings: (...args: unknown[]) => getDefaultAgentSettings(...args),
+}));
+
+vi.mock("./user-preferences-api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./user-preferences-api")>()),
+  getUserPreferences: (...args: unknown[]) => getUserPreferences(...args),
 }));
 
 vi.mock("./workbenches-api", async (importOriginal) => ({
@@ -60,6 +66,8 @@ function navigate(path: string) {
 beforeEach(() => {
   window.history.replaceState({}, "", "/");
   getDefaultAgentSettings.mockReset();
+  getUserPreferences.mockReset();
+  getUserPreferences.mockResolvedValue({ showReasoning: true });
   // jsdom has no matchMedia; useMediaQuery reads it synchronously on mount.
   window.matchMedia = (query: string) =>
     ({
@@ -126,5 +134,70 @@ describe("agent settings refetch on leaving Settings", () => {
     await waitFor(() => {
       expect(getDefaultAgentSettings).toHaveBeenCalledTimes(2);
     });
+  });
+});
+
+describe("show-reasoning preference refetch on leaving Settings", () => {
+  it("re-reads the preference when Settings closes, so the toggle reaches the chat", async () => {
+    // The toggle is edited in Settings but consumed by the transcript. Settings
+    // is a client route inside ChatApp, so nothing remounts on the way out —
+    // a mount-only read leaves the chat on the pre-edit value until a reload.
+    getDefaultAgentSettings.mockResolvedValue(settingsWith(null));
+    getUserPreferences.mockResolvedValue({ showReasoning: true });
+    render(
+      <ChatApp
+        consentWorkspaceId={null}
+        user={{ id: "u1", email: "you@example.com" } as never}
+        initialProjects={[]}
+        initialThreads={[]}
+        initialThreadsNextCursor={null}
+        onActiveWorkspaceChange={() => {}}
+        onSignOut={() => {}}
+        voiceEnabled={false}
+        backgroundWorkEnabled={false}
+        feedbackAdminEnabled={false}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(getUserPreferences).toHaveBeenCalledTimes(1);
+    });
+
+    navigate("/settings/general");
+    // Settings owns its own copy while it is open.
+    await waitFor(() => {
+      expect(getUserPreferences).toHaveBeenCalledTimes(1);
+    });
+
+    getUserPreferences.mockResolvedValue({ showReasoning: false });
+    navigate("/");
+    await waitFor(() => {
+      expect(getUserPreferences).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it("keeps the standing value when the preference read fails", async () => {
+    getDefaultAgentSettings.mockResolvedValue(settingsWith(null));
+    getUserPreferences.mockRejectedValue(new Error("offline"));
+    render(
+      <ChatApp
+        consentWorkspaceId={null}
+        user={{ id: "u1", email: "you@example.com" } as never}
+        initialProjects={[]}
+        initialThreads={[]}
+        initialThreadsNextCursor={null}
+        onActiveWorkspaceChange={() => {}}
+        onSignOut={() => {}}
+        voiceEnabled={false}
+        backgroundWorkEnabled={false}
+        feedbackAdminEnabled={false}
+      />,
+    );
+
+    // A rejected read is swallowed: the app still renders rather than blanking.
+    await waitFor(() => {
+      expect(getUserPreferences).toHaveBeenCalledTimes(1);
+    });
+    expect(document.body.textContent).not.toBe("");
   });
 });

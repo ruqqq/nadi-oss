@@ -1782,20 +1782,24 @@ export function ChatApp({
 
   // Display preference, not agent config: it loads on its own rather than
   // riding the settings fetch, so a settings failure never hides thinking.
+  // Keyed on `inSettings` for the same reason as the fetch above — the toggle
+  // lives in Settings but is consumed here, and Settings is a route, not a page
+  // load, so a mount-only read would never see the edit.
   useEffect(() => {
+    if (inSettings) return;
     let active = true;
     void getUserPreferences()
       .then((prefs) => {
         if (active) setAgentShowReasoning(prefs.showReasoning);
       })
       .catch(() => {
-        // Default (true) already stands; a failed preference read must not
-        // blank the chat.
+        // Previous value (default true) already stands; a failed preference
+        // read must not blank the chat.
       });
     return () => {
       active = false;
     };
-  }, []);
+  }, [inSettings]);
 
   useEffect(() => {
     if (initialProjects.length > 0) {
@@ -2488,7 +2492,6 @@ export function ChatApp({
       newChatModel,
       newChatModelInputModalities,
       newChatProvider,
-      agentShowReasoning,
       newChatReasoningEffort,
       newChatModelSupportsReasoning,
       projects,

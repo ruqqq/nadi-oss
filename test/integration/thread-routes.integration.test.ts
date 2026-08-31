@@ -1004,6 +1004,37 @@ describe("thread routes", () => {
     });
   });
 
+  it("ignores a showReasoning member in the create body and never serializes one", async () => {
+    // Showing reasoning is a per-user preference now, not thread state. A stale
+    // client may still post the field; it must not be stored or echoed back.
+    const seeded = await seedUserWorkspace({
+      userId: "user-thread-create-show-reasoning",
+      token: "thread-create-show-reasoning-token",
+      workspaceId: "workspace-thread-create-show-reasoning",
+    });
+
+    const res = await SELF.fetch("https://nadi.test/api/threads", {
+      method: "POST",
+      headers: {
+        cookie: `better-auth.session_token=${seeded.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ showReasoning: false }),
+    });
+
+    expect(res.status).toBe(201);
+    const created = (await res.json()) as { thread: Record<string, unknown> };
+    expect(created.thread).not.toHaveProperty("showReasoning");
+
+    const threadId = created.thread.threadId as string;
+    const fetched = await SELF.fetch(`https://nadi.test/api/threads/${threadId}`, {
+      headers: { cookie: `better-auth.session_token=${seeded.token}` },
+    });
+    expect(fetched.status).toBe(200);
+    const body = (await fetched.json()) as { thread: Record<string, unknown> };
+    expect(body.thread).not.toHaveProperty("showReasoning");
+  });
+
   it("creates a thread with the default agent model snapshot", async () => {
     const seeded = await seedUserWorkspace({
       userId: "user-default-snapshot",

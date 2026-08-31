@@ -134,13 +134,35 @@ describe("user preferences routes", () => {
         body: JSON.stringify({ agent: { showReasoning: false } }),
       }),
     );
-    // The field is ignored, not honoured: nothing persists it any more.
+    // Stripped, not honoured: with nothing else in the payload the patch is
+    // empty, which is exactly what "no field named showReasoning exists" looks
+    // like from the outside.
+    expect(res.status).toBe(400);
+    expect(await res.text()).toBe("No valid fields to update");
+
+    // The shape a stale client actually sends — buildDefaultAgentSettingsSaveInput
+    // carries the whole agent block — still succeeds, and the response never
+    // echoes the dropped field back.
+    const withRealField = await SELF.fetch(
+      "https://nadi.test/api/settings/agents/default",
+      authed("pref-token", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          agent: { systemPrompt: "You are Nadi.", showReasoning: false },
+        }),
+      }),
+    );
+    expect(withRealField.status).toBe(200);
+    const saved = (await withRealField.json()) as { agent: Record<string, unknown> };
+    expect(saved.agent).not.toHaveProperty("showReasoning");
+    expect(saved.agent.systemPrompt).toBe("You are Nadi.");
+
     const after = await SELF.fetch(
       "https://nadi.test/api/settings/agents/default",
       authed("pref-token"),
     );
     const body = (await after.json()) as { agent: Record<string, unknown> };
-    expect(res.status).toBeLessThan(500);
     expect(body.agent).not.toHaveProperty("showReasoning");
   });
 
