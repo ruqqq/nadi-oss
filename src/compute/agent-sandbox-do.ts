@@ -4,6 +4,7 @@ import { registryDb } from "../db/client";
 import { ThreadRepository } from "../db/repositories/threads";
 import { resolveComputeService } from "../agent/compute-tools";
 import { ThreadComputeStore } from "./thread-store";
+import { createSandboxThreadHostDeps } from "./sandbox-thread-host";
 import { log } from "../log";
 
 /**
@@ -28,6 +29,15 @@ function failure(code: string, message: string): SandboxCallResult<never> {
  * P3 re-keys it to `agentId`.
  */
 export class AgentSandbox extends DurableObject<Env> {
+  /**
+   * The capabilities that stayed on the thread DO — transcript reminders and
+   * the idle-eviction schedule — reached by RPC. Best-effort by construction:
+   * see `createSandboxThreadHostDeps`.
+   */
+  private threadHostDeps(threadId: string) {
+    return createSandboxThreadHostDeps(this.env, threadId);
+  }
+
   /** Builds the compute service against THIS DO's storage. */
   private async resolveService(threadId: string) {
     return resolveComputeService({
@@ -39,10 +49,7 @@ export class AgentSandbox extends DurableObject<Env> {
         if (!thread) throw new Error(`thread_not_found: ${threadId}`);
         return { workspaceId: thread.workspaceId, agentId: thread.agentId };
       },
-      // Task 2 replaces these three with calls back into the thread DO.
-      scheduleEviction: async () => {},
-      cancelEviction: async () => {},
-      deliverSystemReminder: async () => {},
+      ...this.threadHostDeps(threadId),
       supportsProcessMonitor: false,
     });
   }

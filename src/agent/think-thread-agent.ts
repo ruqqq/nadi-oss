@@ -190,7 +190,13 @@ import {
   type WorkStopActor,
   type WorkTerminal,
 } from "./work-ledger";
-import { buildSystemReminderMessage, buildWatcherCompletionMessage } from "./system-reminder";
+import {
+  buildSystemReminderMessage,
+  buildWatcherCompletionMessage,
+  type WatcherCompletionInfo,
+} from "./system-reminder";
+import type { SandboxCallResult } from "../compute/agent-sandbox-do";
+import type { SandboxThreadHost } from "../compute/sandbox-thread-host";
 import { buildThreadStartClockReminder, isFirstTurn } from "./thread-start-clock";
 import { buildWorkbenchSwitchMessage } from "./workbench-switch-message";
 import { InjectionBuffer, type InjectionKind } from "./injection-buffer";
@@ -529,7 +535,11 @@ function trailingUserMessageIds(messages: Array<{ id?: unknown; role?: unknown }
   return ids;
 }
 
-export class ThinkThreadAgent extends Think<Env> {
+// `implements SandboxThreadHost` is the only compile-time check on the sandbox
+// back-call contract: `createSandboxThreadHostDeps` reaches this class through
+// an unchecked `as unknown as SandboxThreadHost` cast (a DO stub cannot be
+// typed as the class), so a signature drift would otherwise be invisible.
+export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
   workspaceBash = false;
   /** Cap on concurrent non-terminal agent-tool runs this thread may own at once (shared-sandbox subagents). */
   maxConcurrentAgentTools = 4;
@@ -4429,6 +4439,159 @@ export class ThinkThreadAgent extends Think<Env> {
    * callback: DO SQLite storage, the runtime config resolver, the SDK-scheduler
    * bridge for idle eviction, and the deferred system-reminder delivery hook.
    */
+  /**
+   * (Re)arm this thread's single idle-eviction alarm. The ONE implementation:
+   * `sandboxHostDeps().scheduleEviction` calls it, and so does
+   * {@link scheduleSandboxEviction} on behalf of the sandbox DO. Throws on
+   * failure — the in-process callers depend on that.
+   */
+  private armComputeEviction(timestampMs: number): Promise<void> {
+    return scheduleComputeEviction(
+      {
+        storage: this.ctx.storage,
+        schedule: (when, callback) => this.schedule(when, callback as keyof this),
+        cancelSchedule: (id) => this.cancelSchedule(id),
+      },
+      timestampMs,
+      "runSandboxEviction",
+    );
+  }
+
+  /** Cancel the outstanding idle-eviction alarm. Counterpart of {@link armComputeEviction}. */
+  private disarmComputeEviction(): Promise<void> {
+    return cancelComputeEviction({
+      storage: this.ctx.storage,
+      cancelSchedule: (id) => this.cancelSchedule(id),
+    });
+  }
+
+  /**
+   * Deliver a hidden system-reminder into this thread. The ONE implementation
+   * behind both the in-process `sandboxHostDeps().deliverSystemReminder` closure
+   * and the {@link deliverSystemReminderFromSandbox} RPC.
+   *
+   * THROWS on failure, deliberately: the work ledger's retry path is built on
+   * it (a delivery that throws skips `deleteWatcher`/`markDelivered`, leaving
+   * the row owed so the next sweep retries).
+   */
+  private async raiseSystemReminder(
+    body: string,
+    mode: "deferred" | "proactive",
+    options?: { watcher?: WatcherCompletionInfo },
+  ): Promise<void> {
+    // A watcher completion carries structured metadata so the web
+    // transcript renders it as a visible card; every other reminder is the
+    // plain hidden variant. Both keep the same `<system-reminder>` body, so
+    // the model reads them identically.
+    const message = options?.watcher
+      ? buildWatcherCompletionMessage(body, options.watcher)
+      : buildSystemReminderMessage(body);
+    if (mode === "deferred") {
+      // `addMessages` is Think's documented no-turn append primitive —
+      // unlike `saveMessages` (which runs a turn), it only writes into the
+      // Session tree + live cache. During beforeTurn setup, also append the
+      // converted message to the in-flight model input so turn-start resume
+      // and expiry notices are visible immediately.
+      await this.addMessages([message]);
+      this.currentTurnSetupReminders?.push(...(await convertToModelMessages([message])));
+      return;
+    }
+    // Proactive: route through the injection buffer so a mid-turn
+    // completion STEERS into the running turn's next step instead of
+    // queuing behind it.
+    if (options?.watcher) {
+      this.deliverInjection({
+        dedupeKey: `watcher:${options.watcher.processId}:${options.watcher.outcome}`,
+        kind: "watcher-completion",
+        message,
+      });
+      return;
+    }
+    // Non-watcher proactive reminders (none today) keep enqueuing through
+    // the same queued-submission path client messages use (see
+    // submitQueuedUserMessage below), so it merges with any waiting batch
+    // and drains into its own turn via the SDK's submission drain loop —
+    // no connected client required (see the spike note in
+    // queued-user-messages.ts / task-4-report.md). The item preview is
+    // built by hand rather than via normalizeQueuedUserMessageInput, since
+    // that helper's `hasContent` check is tuned for real user text and the
+    // preview is never shown anyway — serializeQueuedUserMessageSubmissionRows
+    // strips system-reminder messages (and the watcher-completion variant)
+    // from the queued strip.
+    const normalized: NormalizedQueuedUserMessage = {
+      message,
+      item: {
+        clientMessageId: message.id,
+        textPreview: "",
+        attachmentCount: 0,
+        attachments: [],
+      },
+      attachmentIds: [],
+    };
+    await this.serializeQueuedRpc(() =>
+      submitQueuedUserMessageBatch(this.queuedSubmissionPort(), normalized),
+    );
+  }
+
+  /**
+   * {@link SandboxThreadHost} — the back-call surface `AgentSandbox` uses. The
+   * sandbox DO owns the machine; the transcript and the eviction schedule stay
+   * here, so those two capabilities are reached by RPC.
+   *
+   * Nothing below throws: a throw over DO RPC reaches the caller as a phantom
+   * rejection it cannot attribute to a call, so failures are ENCODED. The near
+   * side (createSandboxThreadHostDeps) logs and swallows them.
+   */
+  async deliverSystemReminderFromSandbox(input: {
+    body: string;
+    mode: "deferred" | "proactive";
+    watcher?: WatcherCompletionInfo;
+  }): Promise<SandboxCallResult<null>> {
+    try {
+      await this.raiseSystemReminder(
+        input.body,
+        input.mode,
+        input.watcher ? { watcher: input.watcher } : undefined,
+      );
+      return { ok: true, value: null };
+    } catch (error) {
+      log.warn("think_thread.sandbox_reminder_failed", {
+        threadId: this.name,
+        mode: input.mode,
+        error: String(error),
+      });
+      return { ok: false, error: { code: "deliver_reminder_failed", message: String(error) } };
+    }
+  }
+
+  /** {@link SandboxThreadHost} — arm this thread's idle-eviction alarm. */
+  async scheduleSandboxEviction(input: { timestampMs: number }): Promise<SandboxCallResult<null>> {
+    try {
+      await this.armComputeEviction(input.timestampMs);
+      return { ok: true, value: null };
+    } catch (error) {
+      log.warn("think_thread.sandbox_schedule_eviction_failed", {
+        threadId: this.name,
+        error: String(error),
+      });
+      return { ok: false, error: { code: "schedule_eviction_failed", message: String(error) } };
+    }
+  }
+
+  /** {@link SandboxThreadHost} — cancel this thread's idle-eviction alarm. */
+  async cancelSandboxEviction(): Promise<SandboxCallResult<null>> {
+    try {
+      await this.disarmComputeEviction();
+      return { ok: true, value: null };
+    } catch (error) {
+      log.warn("think_thread.sandbox_cancel_eviction_failed", {
+        threadId: this.name,
+        error: String(error),
+      });
+      return { ok: false, error: { code: "cancel_eviction_failed", message: String(error) } };
+    }
+  }
+
   private sandboxHostDeps(backgroundWorkAdmission?: boolean): ComputeToolHostDeps {
     const attachedRuntime = this.attachedRuntimeForThisAgent();
     const processMonitorEnabled = backgroundWorkAdmission ?? this.processMonitorEnabled();
@@ -4445,75 +4608,13 @@ export class ThinkThreadAgent extends Think<Env> {
         return { workspaceId: config.workspaceId, agentId: config.agentId };
       },
       ...(attachedRuntime ? { attachedRuntime } : {}),
-      scheduleEviction: (timestampMs) =>
-        scheduleComputeEviction(
-          {
-            storage: this.ctx.storage,
-            schedule: (when, callback) => this.schedule(when, callback as keyof this),
-            cancelSchedule: (id) => this.cancelSchedule(id),
-          },
-          timestampMs,
-          "runSandboxEviction",
-        ),
-      cancelEviction: () =>
-        cancelComputeEviction({
-          storage: this.ctx.storage,
-          cancelSchedule: (id) => this.cancelSchedule(id),
-        }),
-      deliverSystemReminder: async (body, mode, options) => {
-        // A watcher completion carries structured metadata so the web
-        // transcript renders it as a visible card; every other reminder is the
-        // plain hidden variant. Both keep the same `<system-reminder>` body, so
-        // the model reads them identically.
-        const message = options?.watcher
-          ? buildWatcherCompletionMessage(body, options.watcher)
-          : buildSystemReminderMessage(body);
-        if (mode === "deferred") {
-          // `addMessages` is Think's documented no-turn append primitive —
-          // unlike `saveMessages` (which runs a turn), it only writes into the
-          // Session tree + live cache. During beforeTurn setup, also append the
-          // converted message to the in-flight model input so turn-start resume
-          // and expiry notices are visible immediately.
-          await this.addMessages([message]);
-          this.currentTurnSetupReminders?.push(...(await convertToModelMessages([message])));
-          return;
-        }
-        // Proactive: route through the injection buffer so a mid-turn
-        // completion STEERS into the running turn's next step instead of
-        // queuing behind it.
-        if (options?.watcher) {
-          this.deliverInjection({
-            dedupeKey: `watcher:${options.watcher.processId}:${options.watcher.outcome}`,
-            kind: "watcher-completion",
-            message,
-          });
-          return;
-        }
-        // Non-watcher proactive reminders (none today) keep enqueuing through
-        // the same queued-submission path client messages use (see
-        // submitQueuedUserMessage below), so it merges with any waiting batch
-        // and drains into its own turn via the SDK's submission drain loop —
-        // no connected client required (see the spike note in
-        // queued-user-messages.ts / task-4-report.md). The item preview is
-        // built by hand rather than via normalizeQueuedUserMessageInput, since
-        // that helper's `hasContent` check is tuned for real user text and the
-        // preview is never shown anyway — serializeQueuedUserMessageSubmissionRows
-        // strips system-reminder messages (and the watcher-completion variant)
-        // from the queued strip.
-        const normalized: NormalizedQueuedUserMessage = {
-          message,
-          item: {
-            clientMessageId: message.id,
-            textPreview: "",
-            attachmentCount: 0,
-            attachments: [],
-          },
-          attachmentIds: [],
-        };
-        await this.serializeQueuedRpc(() =>
-          submitQueuedUserMessageBatch(this.queuedSubmissionPort(), normalized),
-        );
-      },
+      // All three delegate to the methods below, which are ALSO the RPC surface
+      // `AgentSandbox` calls back on (see src/compute/sandbox-thread-host.ts).
+      // One implementation, two callers — the closure is deleted once the tools
+      // move into the sandbox DO.
+      scheduleEviction: (timestampMs) => this.armComputeEviction(timestampMs),
+      cancelEviction: () => this.disarmComputeEviction(),
+      deliverSystemReminder: (body, mode, options) => this.raiseSystemReminder(body, mode, options),
       // Defer idle eviction of the shared machine while any subagent is live.
       // DERIVED from the ledger now (an open `kind: "subagent"` row IS the
       // lease), so a reaped run releases the hold with nothing to forget.
