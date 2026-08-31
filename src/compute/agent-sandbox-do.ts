@@ -9,20 +9,21 @@ import { createRepositoryPreparation } from "../agent/repository-preparation";
 import { probeWorkspaceCleanliness } from "./workspace-cleanliness";
 import type { ThreadComputeService } from "./thread-service";
 import type { BackendReference } from "./backend";
+import { SandboxSession, sandboxFailure, type SandboxCallResult } from "./agent-sandbox-session";
+import type { EffectiveComputeConfig } from "./types";
 import { log } from "../log";
 
 /**
  * Every method returns one of these. NOTHING throws across the RPC boundary:
  * a throw over DO RPC reaches the caller as a phantom rejection it cannot
  * attribute to a call, so failures are encoded and re-thrown on the near side.
+ *
+ * Defined alongside {@link SandboxSession} — the session target is the largest
+ * consumer of the convention — and re-exported here because every existing
+ * caller (`sandbox-thread-host.ts`, `think-thread-agent.ts`) names it off this
+ * module.
  */
-export type SandboxCallResult<T> =
-  | { ok: true; value: T }
-  | { ok: false; error: { code: string; message: string } };
-
-function failure(code: string, message: string): SandboxCallResult<never> {
-  return { ok: false, error: { code, message } };
-}
+export type { SandboxCallResult, SandboxCallError } from "./agent-sandbox-session";
 
 /**
  * Owns a compute sandbox and the SQLite that tracks it — the store, processes,
@@ -137,6 +138,61 @@ export class AgentSandbox extends DurableObject<Env> {
     return resolved;
   }
 
+  /**
+   * Opens a per-turn session: ONE resolved {@link ThreadComputeService} wrapped
+   * in an {@link SandboxSession} `RpcTarget`, so the several D1 reads and the
+   * GitHub App token mint `resolveComputeService` costs are paid once for the
+   * turn — matching the thread DO's own memoization at
+   * `think-thread-agent.ts:1418`, which is why a flat method-per-operation
+   * surface was rejected.
+   *
+   * `workspaceId` and `config` ride along because every consumer of
+   * `resolveComputeService` needs them beside the service (tool gating reads
+   * `config.allowedHosts`, `config.secretEnvNames`, `config.editableEnv`) and
+   * they are plain JSON, so shipping them with the session costs nothing and
+   * saves a second round trip.
+   *
+   * `value: null` means compute is DISABLED for this thread — the same signal
+   * `resolveComputeService` gives by returning `null`, which callers must treat
+   * as "hide every compute tool, schedule no eviction alarm". That is distinct
+   * from `ok: false`, which means the resolve itself failed.
+   */
+  async session(input: {
+    threadId: string;
+    /** Required — see {@link resolveService}. The caller states it; no default. */
+    supportsProcessMonitor: boolean;
+    /** An attached subagent's parent runtime, when this thread shares a machine. */
+    attachedRuntime?: BackendReference;
+  }): Promise<
+    SandboxCallResult<{
+      session: SandboxSession;
+      workspaceId: string;
+      config: EffectiveComputeConfig;
+    } | null>
+  > {
+    try {
+      const resolved = await this.resolveService(input.threadId, {
+        supportsProcessMonitor: input.supportsProcessMonitor,
+        ...(input.attachedRuntime ? { attachedRuntime: input.attachedRuntime } : {}),
+      });
+      if (!resolved) return { ok: true, value: null };
+      return {
+        ok: true,
+        value: {
+          session: new SandboxSession(resolved.service),
+          workspaceId: resolved.workspaceId,
+          config: resolved.config,
+        },
+      };
+    } catch (error) {
+      log.warn("agent_sandbox.session_failed", {
+        threadId: input.threadId,
+        error: String(error),
+      });
+      return sandboxFailure("session_failed", String(error));
+    }
+  }
+
   async runCommand(input: {
     threadId: string;
     command: string;
@@ -152,7 +208,8 @@ export class AgentSandbox extends DurableObject<Env> {
         supportsProcessMonitor: input.supportsProcessMonitor,
         ...(input.attachedRuntime ? { attachedRuntime: input.attachedRuntime } : {}),
       });
-      if (!resolved) return failure("compute_disabled", "compute is not enabled for this thread");
+      if (!resolved)
+        return sandboxFailure("compute_disabled", "compute is not enabled for this thread");
       const result = await resolved.service.execRun({
         command: input.command,
         ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
@@ -171,7 +228,7 @@ export class AgentSandbox extends DurableObject<Env> {
         threadId: input.threadId,
         error: String(error),
       });
-      return failure("run_command_failed", String(error));
+      return sandboxFailure("run_command_failed", String(error));
     }
   }
 
@@ -187,7 +244,8 @@ export class AgentSandbox extends DurableObject<Env> {
         supportsProcessMonitor: input.supportsProcessMonitor,
         ...(input.attachedRuntime ? { attachedRuntime: input.attachedRuntime } : {}),
       });
-      if (!resolved) return failure("compute_disabled", "compute is not enabled for this thread");
+      if (!resolved)
+        return sandboxFailure("compute_disabled", "compute is not enabled for this thread");
       // `ThreadComputeService` exposes no public state getter — the store it
       // wraps holds `getComputeState()`. Rebuilding it against the SAME
       // storage/limits `resolveComputeService` just used is cheap (`migrate()`
@@ -199,7 +257,7 @@ export class AgentSandbox extends DurableObject<Env> {
       if (!state) return { ok: true, value: null };
       return { ok: true, value: { status: state.status, provider: state.provider ?? null } };
     } catch (error) {
-      return failure("get_state_failed", String(error));
+      return sandboxFailure("get_state_failed", String(error));
     }
   }
 }
