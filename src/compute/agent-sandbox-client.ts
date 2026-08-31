@@ -174,9 +174,30 @@ export async function openSandboxSession(
   });
   if (!opened.ok) throw decodeSandboxError(opened.error);
   if (!opened.value) return null;
-  return {
-    service: unwrapping(opened.value.session),
-    workspaceId: opened.value.workspaceId,
-    config: opened.value.config,
-  };
+  return nearSideSandboxSession(
+    opened.value.session,
+    opened.value.workspaceId,
+    opened.value.config,
+  );
+}
+
+/**
+ * Wrap a session stub that arrived by some route other than {@link
+ * openSandboxSession} — today, the one the sandbox DO's alarm PASSES INTO the
+ * thread DO's ledger sweep so the sweep reuses the tick's resolution instead of
+ * paying a second `resolveComputeService`.
+ *
+ * The same lifetime rule applies, and is what makes that safe: the stub is
+ * valid for the invocation that opened it, and the sweep runs inside the
+ * alarm's own invocation, awaited by it.
+ */
+export function nearSideSandboxSession(
+  // `object`, like {@link unwrapping}: what actually arrives is a `Stub<...>`,
+  // whose type is not the class it stands for. The `SandboxSessionClient` result
+  // is where the typing is enforced.
+  session: object,
+  workspaceId: string,
+  config: EffectiveComputeConfig,
+): SandboxSessionResolution {
+  return { service: unwrapping(session), workspaceId, config };
 }

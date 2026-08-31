@@ -25,18 +25,16 @@ import { applyRegistryTestSchema, seedRegistryThread } from "./helpers/registry"
 /**
  * END-TO-END coverage for the background-work reaper, through a REAL
  * ThinkThreadAgent Durable Object: the real `WorkLedgerStore` on real DO SQLite,
- * the real `ThreadComputeService`, the real `sandboxHostDeps()` wiring, the real
- * `scheduleComputeEviction`, and the real Agents SDK scheduler. Only the compute
- * BACKEND is a fake.
+ * the real `ThreadComputeService`, the real `AgentSandbox` alarm, and the real
+ * `ctx.storage.setAlarm` it arms. Only the compute BACKEND is a fake.
  *
  * This file exists because the unit suite structurally cannot pin the two
  * invariants that actually broke in production. `alarm-rearm.test.ts` drives
- * `runSandboxEviction` over a hand-built `this` whose `sandboxHostDeps()` is a
- * two-key object literal and whose `scheduleComputeEviction` is mocked to a
- * no-op — so it can never observe what the REAL host wiring arms, nor that
- * `scheduleComputeEviction` is cancel-then-SET on a single stored schedule id
- * rather than a min-fold. Here `schedule()` is spied on the real agent instance,
- * so a second arm is visible as what it is: a CANCEL of the first.
+ * `runSandboxComputeAlarm` over a hand-built host whose `setAlarm` is a spy — so
+ * it can never observe what the REAL wiring arms, nor that a Durable Object has
+ * exactly ONE alarm, which a second arm SETS OVER rather than min-folding into.
+ * Here `setAlarm` is spied on the real sandbox DO's own storage, so a second arm
+ * is visible as what it is: an overwrite of the first.
  *
  * CLOCK: `vi.useFakeTimers({ toFake: ["Date"] })`, deliberately, and no `now`
  * override on the compute service. `runWorkLedgerSweep` reads `Date.now()` while
@@ -90,34 +88,58 @@ function injectionsOf(instance: ThinkThreadAgent): Array<{ kind: string; text: s
 }
 
 /**
- * Record every `schedule()` the agent makes. This is THE arm site: the host's
- * `scheduleEviction` -> `scheduleComputeEviction` -> `host.schedule(...)`, and
- * `sandboxHostDeps()` reaches it via a late `this.schedule` lookup, so an
- * own-property shadow observes the real call without touching production code.
+ * Record every arm on the SANDBOX DO's own alarm. That is THE arm site now: the
+ * host's `scheduleEviction` is `this.ctx.storage.setAlarm` (the machine's alarm
+ * belongs to the DO that owns the machine), and the alarm's own fallback reaches
+ * the same call. An own-property shadow on the live storage object, so it
+ * observes the real call without touching production code.
  */
-function spySchedule(instance: ThinkThreadAgent): {
-  calls: Array<{ at: number; callback: string }>;
-  restore: () => void;
-} {
-  const calls: Array<{ at: number; callback: string }> = [];
-  const agent = instance as unknown as {
-    schedule: (when: Date, callback: string, payload?: unknown) => Promise<{ id: string }>;
-  };
-  const original = agent.schedule.bind(agent);
-  agent.schedule = async (when: Date, callback: string, payload?: unknown) => {
-    calls.push({ at: when.getTime(), callback });
-    return original(when, callback, payload);
-  };
+async function spySandboxAlarm(threadId: string): Promise<{
+  calls: number[];
+  restore: () => Promise<void>;
+}> {
+  const calls: number[] = [];
+  await runInDurableObject(sandboxStubFor(threadId), async (_instance: AgentSandbox, state) => {
+    const storage = state.storage as unknown as {
+      setAlarm: (timestamp: number) => Promise<void>;
+      __armSpyInstalled?: boolean;
+    };
+    // The shadow must be the ONLY one: a second install would wrap the wrapper
+    // and double-count every arm, turning "exactly one" into a lie.
+    if (storage.__armSpyInstalled) throw new Error("sandbox alarm spy already installed");
+    const original = storage.setAlarm.bind(state.storage);
+    storage.__armSpyInstalled = true;
+    storage.setAlarm = async (timestamp: number) => {
+      calls.push(timestamp);
+      return original(timestamp);
+    };
+  });
   return {
     calls,
-    restore: () => {
-      delete (instance as unknown as { schedule?: unknown }).schedule;
+    restore: async () => {
+      await runInDurableObject(sandboxStubFor(threadId), async (_i: AgentSandbox, state) => {
+        const storage = state.storage as unknown as {
+          setAlarm?: unknown;
+          __armSpyInstalled?: boolean;
+        };
+        delete storage.setAlarm;
+        delete storage.__armSpyInstalled;
+      });
     },
   };
 }
 
-const evictionArms = (calls: Array<{ at: number; callback: string }>) =>
-  calls.filter((call) => call.callback === "runSandboxEviction");
+/**
+ * Run the sandbox DO's REAL `alarm()` handler — the compute tick, the chained
+ * ledger sweep on the thread DO, and the fallback re-arm, in that order. Called
+ * directly on the instance rather than over RPC because `alarm` is a reserved
+ * handler name that DO RPC will not dispatch.
+ */
+async function runSandboxAlarm(threadId: string): Promise<void> {
+  await runInDurableObject(sandboxStubFor(threadId), async (instance: AgentSandbox) => {
+    await instance.alarm();
+  });
+}
 
 async function seedSandboxEnabledWorkspace(workspaceId: string) {
   const providerConfigJson = JSON.stringify({
@@ -423,19 +445,22 @@ describe("work ledger (DO integration)", () => {
 
   describe("work ledger: the reaper runs off a REAL alarm", () => {
     /**
-     * This drives a GENUINELY real alarm. `runDurableObjectAlarm` invokes the
-     * Durable Object's physical `alarm()` handler — the Agents SDK's own override,
-     * which selects due rows out of `cf_agents_schedules` and dispatches the
-     * callback BY NAME. Nothing here calls `runSandboxEviction`; the only reason it
-     * runs is that the real `exec` path armed a real schedule through the real
-     * `scheduleComputeEviction`, under the callback name production registers.
+     * This drives a GENUINELY real alarm, on the SANDBOX DO. `runDurableObjectAlarm`
+     * invokes that Durable Object's physical `alarm()` handler. Nothing here calls
+     * the alarm body; the only reason it runs is that the real `exec` path armed a
+     * real `ctx.storage.setAlarm` on the sandbox that owns the machine.
      *
-     * RED IF: the arm is removed from the exec path, the schedule callback name
-     * stops matching the method, `runSandboxEviction` stops sweeping the ledger, or
-     * `terminalize`'s exactly-once gate stops gating delivery (the second alarm
-     * would then deliver a duplicate).
+     * It also proves the SPLIT holds end to end: the tick fires on the sandbox's
+     * alarm, and the sweep it chains still runs on the THREAD DO — the reminder
+     * below lands in the thread's own injection buffer, and the row it closes is
+     * the thread's own ledger row.
+     *
+     * RED IF: the arm is removed from the exec path, the sandbox stops overriding
+     * `alarm()`, the alarm stops chaining the thread's sweep, or `terminalize`'s
+     * exactly-once gate stops gating delivery (the second alarm would then deliver
+     * a duplicate).
      */
-    it("dispatches runSandboxEviction and delivers exactly one reminder", async () => {
+    it("dispatches the SANDBOX alarm and delivers exactly one reminder", async () => {
       const stub = stubFor(THREADS.alarm);
 
       const setup = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
@@ -475,7 +500,7 @@ describe("work ledger (DO integration)", () => {
       // Past the schedule the exec path armed (BASE + one poll interval), so the
       // SDK's `WHERE time <= now` finds it.
       vi.setSystemTime(BASE + DEFAULT_MONITOR_POLL_INTERVAL_MS + 1_000);
-      const ranFirst = await runDurableObjectAlarm(stub);
+      const ranFirst = await runDurableObjectAlarm(sandboxStubFor(THREADS.alarm));
 
       const afterFirst = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => ({
         row: ledgerOf(instance).get(setup.runId),
@@ -497,7 +522,7 @@ describe("work ledger (DO integration)", () => {
       // The tick re-armed, so a SECOND real alarm is available. Exactly-once means
       // it must add nothing: the row is already terminal.
       vi.setSystemTime(BASE + 60_000);
-      const ranSecond = await runDurableObjectAlarm(stub);
+      const ranSecond = await runDurableObjectAlarm(sandboxStubFor(THREADS.alarm));
 
       const afterSecond = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
         const injections = injectionsOf(instance);
@@ -600,39 +625,48 @@ describe("work ledger (DO integration)", () => {
       // "far more than the stale window elapsed" assertion at the bottom.
       const PASSES = Math.ceil((PROCESS_STALE_AFTER_MS * 4) / ADVANCE_MS) + 1;
       const stub = stubFor(THREADS.healthy);
-      const result = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
-        const testInstance = instance as LedgerTestableAgent;
-        await testInstance.__unsafe_ensureInitialized();
-        const cleanup = primeCompute(instance, new FakeComputeBackend());
-        try {
-          const { processId } = await startWatchedProcess(instance);
-          const stamps: number[] = [];
-          const states: Array<{ terminal: unknown; watchers: number }> = [];
+      // Split across invocations: the alarm now fires on the SANDBOX DO, and
+      // reaching another DO means leaving this one.
+      let cleanup = () => {};
+      let result;
+      try {
+        const started = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
+          const testInstance = instance as LedgerTestableAgent;
+          await testInstance.__unsafe_ensureInitialized();
+          cleanup = primeCompute(instance, new FakeComputeBackend());
+          return startWatchedProcess(instance);
+        });
+        const stamps: number[] = [];
+        const states: Array<{ terminal: unknown; watchers: number }> = [];
 
-          // Never finished on the backend: the process really is still running.
-          for (let index = 0; index < PASSES; index += 1) {
-            vi.setSystemTime(Date.now() + ADVANCE_MS);
-            await instance.runSandboxEviction();
-            const row = ledgerOf(instance).get(processId);
-            stamps.push(row?.lastAliveAt ?? -1);
+        // Never finished on the backend: the process really is still running.
+        for (let index = 0; index < PASSES; index += 1) {
+          vi.setSystemTime(Date.now() + ADVANCE_MS);
+          await runSandboxAlarm(THREADS.healthy);
+          const pass = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
+            const testInstance = instance as LedgerTestableAgent;
+            const row = ledgerOf(instance).get(started.processId);
             const resolved = await testInstance.resolveComputeServiceForTest();
-            states.push({
+            return {
+              stamp: row?.lastAliveAt ?? -1,
               terminal: row?.terminal ?? null,
               watchers: (await resolved?.service.listActiveWatchersView())?.length ?? -1,
-            });
-          }
-
-          return {
-            processId,
-            elapsedMs: Date.now() - BASE,
-            stamps,
-            states,
-            injections: injectionsOf(instance),
-          };
-        } finally {
-          cleanup();
+            };
+          });
+          stamps.push(pass.stamp);
+          states.push({ terminal: pass.terminal, watchers: pass.watchers });
         }
-      });
+
+        result = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => ({
+          processId: started.processId,
+          elapsedMs: Date.now() - BASE,
+          stamps,
+          states,
+          injections: injectionsOf(instance),
+        }));
+      } finally {
+        cleanup();
+      }
 
       // ANTI-VACUITY: the row was really observed and really re-stamped each pass.
       // A row nothing stamps would repeat one value here and go stale below.
@@ -653,13 +687,13 @@ describe("work ledger (DO integration)", () => {
 
   describe("work ledger: the tick arms EXACTLY once, at the poll time", () => {
     /**
-     * INVARIANT A — never overwrite an arm. `scheduleComputeEviction` is
-     * cancel-then-SET on a single stored schedule id, NOT a min-fold, so a second
-     * arm CANCELS the first. That silently stretched a 7s watcher poll to 21s.
+     * INVARIANT A — never overwrite an arm. A Durable Object has exactly ONE
+     * alarm and `setAlarm` SETS it, NOT a min-fold, so a second arm overwrites the
+     * first. That silently stretched a 7s watcher poll to 21s.
      *
      * This is the invariant every unit test misses: re-adding an unconditional
-     * `scheduleEviction` to the end of `runSandboxEviction` leaves the whole unit
-     * suite green, and reds this test on the arm COUNT — two arms instead of one.
+     * arm to the end of the alarm body leaves the whole unit suite green, and reds
+     * this test on the arm COUNT — two arms instead of one.
      * (Not on the time: with the `if (armed) return;` gate gone the fallback
      * still min-folds the WATCHER horizon, so the surviving arm lands at the
      * same 7s poll time. The count is the whole signal.)
@@ -670,34 +704,38 @@ describe("work ledger (DO integration)", () => {
      */
     it("arms once at the watcher poll, not at the ledger's later horizon", async () => {
       const stub = stubFor(THREADS.oneArm);
-      const result = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
-        const testInstance = instance as LedgerTestableAgent;
-        await testInstance.__unsafe_ensureInitialized();
-        const cleanup = primeCompute(instance, new FakeComputeBackend());
-        const spy = spySchedule(instance);
-        try {
-          const { processId } = await startWatchedProcess(instance);
-          // Spy AFTER exec so the exec path's own arm is not counted; make the
-          // watcher due so the tick genuinely polls and re-arms.
-          spy.calls.length = 0;
-          vi.setSystemTime(Date.now() + DEFAULT_MONITOR_POLL_INTERVAL_MS);
-          const tickAt = Date.now();
+      let cleanup = () => {};
+      let spy: Awaited<ReturnType<typeof spySandboxAlarm>> | undefined;
+      let result;
+      try {
+        const started = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
+          const testInstance = instance as LedgerTestableAgent;
+          await testInstance.__unsafe_ensureInitialized();
+          cleanup = primeCompute(instance, new FakeComputeBackend());
+          return startWatchedProcess(instance);
+        });
+        // Spy AFTER exec so the exec path's own arm is not counted; make the
+        // watcher due so the tick genuinely polls and re-arms.
+        spy = await spySandboxAlarm(THREADS.oneArm);
+        vi.setSystemTime(Date.now() + DEFAULT_MONITOR_POLL_INTERVAL_MS);
+        const tickAt = Date.now();
 
-          await instance.runSandboxEviction();
+        await runSandboxAlarm(THREADS.oneArm);
 
-          const row = ledgerOf(instance).get(processId);
+        result = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
+          const row = ledgerOf(instance).get(started.processId);
           return {
-            processId,
+            processId: started.processId,
             tickAt,
-            arms: evictionArms(spy.calls),
-            allCalls: spy.calls.length,
+            arms: spy!.calls.slice(),
+            allCalls: spy!.calls.length,
             row: row ? { lastAliveAt: row.lastAliveAt, terminal: row.terminal } : null,
           };
-        } finally {
-          spy.restore();
-          cleanup();
-        }
-      });
+        });
+      } finally {
+        await spy?.restore();
+        cleanup();
+      }
 
       // ANTI-VACUITY: the row is open, so it DOES contribute a horizon to the
       // min-fold — "armed at the poll time" is a real discrimination, not a
@@ -713,7 +751,7 @@ describe("work ledger (DO integration)", () => {
 
       // EXACTLY one arm, at the NEARER of the two.
       expect(result.arms).toHaveLength(1);
-      expect(result.arms[0]?.at).toBe(pollAt);
+      expect(result.arms[0]).toBe(pollAt);
       expect(result.allCalls).toBe(1);
     });
   });
@@ -727,8 +765,8 @@ describe("work ledger (DO integration)", () => {
      * kill.
      *
      * The throw is injected on the real `ThreadComputeService.prototype`, so it
-     * originates at the REAL call site inside the real `runSandboxEviction`, over
-     * real host wiring and the real scheduler.
+     * originates at the REAL call site inside the real sandbox alarm, over real
+     * host wiring and the real DO alarm.
      *
      * RED IF: the fallback re-arm block is removed, is moved inside the tick's
      * try-block, or is gated on "the tick did not throw" instead of on the FACT
@@ -738,33 +776,37 @@ describe("work ledger (DO integration)", () => {
       const stub = stubFor(THREADS.tickThrows);
       const tickSpy = vi.spyOn(ThreadComputeService.prototype, "runComputeTick");
       try {
-        const result = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
-          const testInstance = instance as LedgerTestableAgent;
-          await testInstance.__unsafe_ensureInitialized();
-          const cleanup = primeCompute(instance, new FakeComputeBackend());
-          const spy = spySchedule(instance);
-          try {
-            const { processId } = await startWatchedProcess(instance);
-            const startedAt = Date.now();
-            spy.calls.length = 0;
-            // Only now — the exec path above needs a working tick-free service.
-            tickSpy.mockRejectedValue(new Error("quota refresh failed"));
+        let cleanup = () => {};
+        let spy: Awaited<ReturnType<typeof spySandboxAlarm>> | undefined;
+        let result;
+        try {
+          const started = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
+            const testInstance = instance as LedgerTestableAgent;
+            await testInstance.__unsafe_ensureInitialized();
+            cleanup = primeCompute(instance, new FakeComputeBackend());
+            return startWatchedProcess(instance);
+          });
+          const startedAt = Date.now();
+          spy = await spySandboxAlarm(THREADS.tickThrows);
+          // Only now — the exec path above needs a working tick-free service.
+          tickSpy.mockRejectedValue(new Error("quota refresh failed"));
 
-            // Must NOT throw: the alarm callback swallows and logs.
-            await expect(instance.runSandboxEviction()).resolves.toBeUndefined();
+          // Must NOT throw: the alarm handler swallows and logs.
+          await expect(runSandboxAlarm(THREADS.tickThrows)).resolves.toBeUndefined();
 
-            const row = ledgerOf(instance).get(processId);
+          result = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
+            const row = ledgerOf(instance).get(started.processId);
             return {
               startedAt,
               tickAttempts: tickSpy.mock.calls.length,
-              arms: evictionArms(spy.calls),
+              arms: spy!.calls.slice(),
               row: row ? { terminal: row.terminal } : null,
             };
-          } finally {
-            spy.restore();
-            cleanup();
-          }
-        });
+          });
+        } finally {
+          await spy?.restore();
+          cleanup();
+        }
 
         // ANTI-VACUITY: the tick was really reached and really threw. Without this,
         // "an alarm was armed" could just be the ordinary happy path.
@@ -775,7 +817,7 @@ describe("work ledger (DO integration)", () => {
         // The fallback armed, exactly once. The watcher's poll (still ahead of now)
         // is nearer than the ledger's 21s horizon, so it wins the fold.
         expect(result.arms).toHaveLength(1);
-        expect(result.arms[0]?.at).toBe(result.startedAt + DEFAULT_MONITOR_POLL_INTERVAL_MS);
+        expect(result.arms[0]).toBe(result.startedAt + DEFAULT_MONITOR_POLL_INTERVAL_MS);
       } finally {
         tickSpy.mockRestore();
       }
@@ -795,11 +837,12 @@ describe("work ledger (DO integration)", () => {
      */
     it("arms once at nextSweepAt when the compute service never resolves", async () => {
       const stub = stubFor(THREADS.disabled);
-      const result = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
-        const testInstance = instance as LedgerTestableAgent;
-        await testInstance.__unsafe_ensureInitialized();
-        const spy = spySchedule(instance);
-        try {
+      let spy: Awaited<ReturnType<typeof spySandboxAlarm>> | undefined;
+      let result;
+      try {
+        const before = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
+          const testInstance = instance as LedgerTestableAgent;
+          await testInstance.__unsafe_ensureInitialized();
           const resolved = await testInstance.resolveComputeServiceForTest();
 
           const processId = "proc_disabled_1";
@@ -814,22 +857,28 @@ describe("work ledger (DO integration)", () => {
             terminal: null,
             deliveredAt: null,
           });
-          const horizon = Date.now() + PROCESS_STALE_AFTER_MS;
-          spy.calls.length = 0;
-
-          await instance.runSandboxEviction();
-
-          const row = ledgerOf(instance).get(processId);
           return {
+            processId,
             resolvedIsNull: resolved === null,
-            horizon,
-            arms: evictionArms(spy.calls),
+            horizon: Date.now() + PROCESS_STALE_AFTER_MS,
+          };
+        });
+        spy = await spySandboxAlarm(THREADS.disabled);
+
+        await runSandboxAlarm(THREADS.disabled);
+
+        result = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
+          const row = ledgerOf(instance).get(before.processId);
+          return {
+            resolvedIsNull: before.resolvedIsNull,
+            horizon: before.horizon,
+            arms: spy!.calls.slice(),
             row: row ? { terminal: row.terminal } : null,
           };
-        } finally {
-          spy.restore();
-        }
-      });
+        });
+      } finally {
+        await spy?.restore();
+      }
 
       // ANTI-VACUITY: compute really is unresolved (this is the `!resolved` branch,
       // not the ordinary armed path), and the row really is still open — a closed
@@ -840,7 +889,76 @@ describe("work ledger (DO integration)", () => {
       // Exactly one arm, at the ledger's horizon: with no compute service there is
       // no watcher horizon to fold against.
       expect(result.arms).toHaveLength(1);
-      expect(result.arms[0]?.at).toBe(result.horizon);
+      expect(result.arms[0]).toBe(result.horizon);
+    });
+
+    /**
+     * The other half of "the ledger outlives the compute service": not just that
+     * the alarm still ARMS with compute off, but that it still SWEEPS. Closing
+     * rows is exactly what must keep happening when the sandbox is gone, and the
+     * sweep now runs on the thread DO only because the sandbox's alarm calls
+     * back for it — so a split that dropped the back-call on the disabled path
+     * would strand every open row forever.
+     *
+     * RED IF: the alarm skips `sweepWorkLedger` when the session is null, the
+     * back-call stops reaching `runWorkLedgerSweep`, or the `disabled` case is
+     * folded into `unresolved` (which would make the sweep re-resolve a service
+     * that cannot exist).
+     */
+    it("still sweeps the THREAD DO's ledger when compute is disabled", async () => {
+      const stub = stubFor(THREADS.disabled);
+      const processId = "proc_disabled_sweep";
+      const before = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
+        const testInstance = instance as LedgerTestableAgent;
+        await testInstance.__unsafe_ensureInitialized();
+        // Hold the reminder in the durable injection buffer instead of racing a
+        // real proactive turn, so it can be counted below.
+        (instance as unknown as { _turnQueue?: { isActive: boolean } })._turnQueue = {
+          isActive: true,
+        };
+        const resolved = await testInstance.resolveComputeServiceForTest();
+        // Silent for well over its stale window: the sweep is the only thing
+        // that can ever close it, and there is no compute service to help.
+        ledgerOf(instance).register({
+          id: processId,
+          kind: "process",
+          startedAt: Date.now() - PROCESS_STALE_AFTER_MS * 4,
+          lastAliveAt: Date.now() - PROCESS_STALE_AFTER_MS * 4,
+          staleAfterMs: PROCESS_STALE_AFTER_MS,
+          deadlineAt: Date.now() + 600_000,
+          generation: "gen-before-disable",
+          terminal: null,
+          deliveredAt: null,
+        });
+        return {
+          resolvedIsNull: resolved === null,
+          openBefore: ledgerOf(instance)
+            .listOpen()
+            .map((row) => row.id),
+        };
+      });
+
+      await runSandboxAlarm(THREADS.disabled);
+
+      const after = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
+        const observed = {
+          row: ledgerOf(instance).get(processId),
+          injections: injectionsOf(instance),
+        };
+        delete (instance as unknown as { _turnQueue?: unknown })._turnQueue;
+        return observed;
+      });
+
+      // ANTI-VACUITY: compute really is disabled (so no tick ran and nothing but
+      // the sweep could have closed this), and the row really was open first.
+      expect(before.resolvedIsNull).toBe(true);
+      expect(before.openBefore).toContain(processId);
+
+      expect(after.row?.terminal).toMatchObject({ outcome: "fault", reason: "no_liveness" });
+      // ...and the model was told, in the THREAD's own buffer.
+      expect(after.injections.filter((entry) => entry.kind === "watcher-completion")).toHaveLength(
+        1,
+      );
     });
   });
 

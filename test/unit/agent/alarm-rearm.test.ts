@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { WorkSweepResult } from "../../../src/agent/think-thread-agent";
 import { ThinkThreadAgent } from "../../../src/agent/think-thread-agent";
+import { runSandboxComputeAlarm, type SandboxAlarmHost } from "../../../src/compute/sandbox-alarm";
 import {
   PROCESS_STALE_AFTER_MS,
   SUBAGENT_STALE_AFTER_MS,
@@ -19,11 +20,12 @@ import { createMemoryComputeStore } from "../compute/helpers/memory-store";
 import { localWorkLedgerSink } from "../../../src/agent/work-ledger-store";
 
 /**
- * The ALARM RE-ARM WIRING of `ThinkThreadAgent.runSandboxEviction`.
+ * The ALARM RE-ARM WIRING of `runSandboxComputeAlarm` — the body of
+ * `AgentSandbox.alarm()`.
  *
- * The thread has exactly one alarm and `scheduleComputeEviction` is
- * cancel-then-SET on a single stored schedule id — not a min-fold. So the alarm
- * callback must make two things true at once:
+ * The sandbox has exactly one alarm and `ctx.storage.setAlarm` is a SET on that
+ * single alarm — not a min-fold. So the alarm callback must make two things
+ * true at once:
  *
  *   1. never a SECOND arm — arming after the tick already armed CANCELS the
  *      tick's nearer alarm (this tripled the 7s watcher poll to 21s), and
@@ -37,8 +39,10 @@ import { localWorkLedgerSink } from "../../../src/agent/work-ledger-store";
  * such a proxy, and it is wrong in both directions: a tick can throw AFTER
  * arming, and can return having armed nothing.
  *
- * These drive the real `runSandboxEviction` over a real `ThreadComputeService`;
- * only the store, backend and host wiring are fakes.
+ * These drive the real `runSandboxComputeAlarm` over a real
+ * `ThreadComputeService`; only the store, backend and host wiring are fakes.
+ * The sweep is a HOST call here because it is one in production too: the sweep
+ * stays on the thread DO and the alarm chains it behind the tick.
  */
 
 vi.mock("../../../src/db/client", () => ({ registryDb: () => ({}) }));
@@ -52,8 +56,6 @@ const holder = vi.hoisted(() => ({
 vi.mock("../../../src/agent/compute-tools", () => ({
   resolveComputeService: async () => holder.resolved,
   createComputeTools: () => ({}),
-  scheduleComputeEviction: async () => undefined,
-  cancelComputeEviction: async () => undefined,
 }));
 
 const CONFIG: EffectiveComputeConfig = {
@@ -66,7 +68,7 @@ const CONFIG: EffectiveComputeConfig = {
   // Mirrors production (`resolveEffectiveComputeConfig` in compute/config.ts):
   // the watcher's own registered cadence and the rearm gate's fallback floor
   // (`DEFAULT_MONITOR_POLL_INTERVAL_MS`, read directly by
-  // `ThinkThreadAgent.runSandboxEviction`) are the SAME value in production.
+  // `runSandboxComputeAlarm`) are the SAME value in production.
   // A hardcoded literal here drifted from that constant once already (see
   // "floors a watcher whose nextPollAt is already PAST" below).
   monitorPollIntervalMs: DEFAULT_MONITOR_POLL_INTERVAL_MS,
@@ -171,18 +173,23 @@ function setup(input: {
   });
   holder.resolved = { service };
 
-  /** The narrowest `this` that gets `runSandboxEviction` to its arm decision. */
+  /**
+   * The narrowest THREAD-side collaborator the sweep needs. In production this
+   * is the `ThinkThreadAgent` the alarm back-calls; here it is also what the
+   * host below reads its ledger horizon out of.
+   */
   const agent = {
     name: "thr_test",
     env: {},
     primeAttachedContext: vi.fn(async () => undefined),
-    // The compute session `runSandboxEviction` opens (the sandbox DO's, in
-    // production) and the one arm site its fallback reaches.
     openSandbox: async () => holder.resolved ?? null,
-    armComputeEviction: scheduleEviction,
     // The sweep's own decisions are covered by reaper.test.ts; here it must only
     // not interfere with the arm decision.
-    runWorkLedgerSweep: vi.fn(async () => ({ classified: [], terminalized: [], redelivered: [] })),
+    runWorkLedgerSweep: vi.fn(async (_resolved?: unknown) => ({
+      classified: [],
+      terminalized: [],
+      redelivered: [],
+    })),
     // The REAL horizon fold (open rows + a retry wake for anything owed) — this
     // is what the fallback re-arm decides on, so it must not be a stub.
     workHorizon: (ThinkThreadAgent.prototype as unknown as { workHorizon: unknown }).workHorizon,
@@ -191,16 +198,30 @@ function setup(input: {
       listUndelivered: () => [],
       countUndelivered: () => 0,
     },
-    setSandboxDeclaredClean: vi.fn(async () => undefined),
+    setSandboxDeclaredClean: vi.fn(async (_clean: boolean) => undefined),
   };
-  return { agent, backend, store, service, scheduleEviction };
+
+  /**
+   * The sandbox DO's side. `openSession` resolves fresh per invocation (an alarm
+   * may reuse nothing), `sweepWorkLedger` is the back-call into the thread, and
+   * `setAlarm` is this sandbox's single alarm.
+   */
+  const host: SandboxAlarmHost<{ service: ThreadComputeService }> = {
+    threadId: agent.name,
+    openSession: async () =>
+      (holder.resolved as { service: ThreadComputeService } | undefined) ?? null,
+    sweepWorkLedger: async (resolved) => {
+      await agent.runWorkLedgerSweep(resolved);
+    },
+    workHorizon: async (at) =>
+      (agent.workHorizon as (this: unknown, now: number) => number | null).call(agent, at),
+    setAlarm: (timestampMs) => scheduleEviction(timestampMs),
+    setSandboxDeclaredClean: (clean) => agent.setSandboxDeclaredClean(clean),
+  };
+  return { agent, host, backend, store, service, scheduleEviction };
 }
 
-const runSandboxEviction = ThinkThreadAgent.prototype.runSandboxEviction as (
-  this: unknown,
-) => Promise<void>;
-
-describe("runSandboxEviction re-arm gate", () => {
+describe("sandbox compute alarm re-arm gate", () => {
   it("continues polling a watcher admitted before monitoring is disabled", async () => {
     const now = { value: 1_000 };
     const rows = [openRow({ lastAliveAt: 1_000 })];
@@ -239,14 +260,14 @@ describe("runSandboxEviction re-arm gate", () => {
       },
       release: async () => undefined,
     };
-    const { agent, service, scheduleEviction } = setup({ now, rows, quota });
+    const { host, service, scheduleEviction } = setup({ now, rows, quota });
 
     await service.execStart({ command: "sleep 600", label: "long" });
     scheduleEviction.mockClear();
     failRefresh.value = true;
     now.value = 2_000;
 
-    await runSandboxEviction.call(agent);
+    await runSandboxComputeAlarm(host);
 
     // Resolution SUCCEEDED here — gating on that fact leaves the thread with a
     // dead alarm until the next user turn, and the open row never sweeps again.
@@ -257,7 +278,7 @@ describe("runSandboxEviction re-arm gate", () => {
   it("arms the fallback when the tick RETURNS without arming (status releasing)", async () => {
     const now = { value: 1_000 };
     const rows = [openRow()];
-    const { agent, store, service, scheduleEviction } = setup({ now, rows });
+    const { host, store, service, scheduleEviction } = setup({ now, rows });
 
     await service.execStart({ command: "sleep 600", label: "long" });
     // `releaseIfIdle` early-returns on any status but `active` — reachable as
@@ -268,7 +289,7 @@ describe("runSandboxEviction re-arm gate", () => {
     scheduleEviction.mockClear();
     now.value = 2_000;
 
-    await runSandboxEviction.call(agent);
+    await runSandboxComputeAlarm(host);
 
     expect(scheduleEviction).toHaveBeenCalledTimes(1);
     expect(scheduleEviction).toHaveBeenCalledWith(nextSweepAt(rows));
@@ -280,7 +301,7 @@ describe("runSandboxEviction re-arm gate", () => {
     // watcher's next poll (2_000 + 7s) — the everyday case, since the poll that
     // just stamped the row always leaves the horizon further out.
     const rows = [openRow({ lastAliveAt: 1_000 })];
-    const { agent, service, scheduleEviction } = setup({ now, rows });
+    const { host, service, scheduleEviction } = setup({ now, rows });
 
     const started = await service.execStart({ command: "sleep 600", label: "long" });
     await service.execWatch({ processId: started.processId });
@@ -288,7 +309,7 @@ describe("runSandboxEviction re-arm gate", () => {
     // The watcher is due.
     now.value = 2_000 + CONFIG.monitorPollIntervalMs;
 
-    await runSandboxEviction.call(agent);
+    await runSandboxComputeAlarm(host);
 
     // Exactly ONE arm, at the watcher's next poll — not the ledger horizon. A
     // second arm here would not add an alarm, it would REPLACE this one.
@@ -306,7 +327,7 @@ describe("runSandboxEviction re-arm gate", () => {
     const now = { value: 1_000 };
     // A row whose horizon is already in the past: this pass's sweep closes it.
     const rows = [openRow({ deadlineAt: 5_000 })];
-    const { agent, service, scheduleEviction } = setup({ now, rows });
+    const { agent, host, service, scheduleEviction } = setup({ now, rows });
 
     const started = await service.execStart({ command: "sleep 600", label: "long" });
     await service.execWatch({ processId: started.processId });
@@ -325,7 +346,7 @@ describe("runSandboxEviction re-arm gate", () => {
     scheduleEviction.mockClear();
     now.value = 2_000 + CONFIG.monitorPollIntervalMs;
 
-    await runSandboxEviction.call(agent);
+    await runSandboxComputeAlarm(host);
 
     // The tick armed folding a horizon (5_000) the sweep then closed — an alarm
     // in the past, i.e. one immediate wake that finds nothing. That is the
@@ -346,7 +367,7 @@ describe("runSandboxEviction re-arm gate", () => {
     const now = { value: 1_000 };
     const rows: WorkRow[] = [];
     const ledger = memoryLedger(rows);
-    const { agent, service } = setup({ now, rows, ledger });
+    const { agent, host, service } = setup({ now, rows, ledger });
 
     const started = await service.execStart({ command: "sleep 600", label: "long" });
     await service.execWatch({ processId: started.processId });
@@ -365,7 +386,7 @@ describe("runSandboxEviction re-arm gate", () => {
     // `{...agent}` alone does not: an earlier version of this test spread a
     // plain object literal and the sweep died on its first line
     // (`ensureLegacySubagentBackfill is not a function`), was swallowed by
-    // runSandboxEviction's sweep guard, and the assertions below passed for the
+    // the alarm's sweep guard, and the assertions below passed for the
     // wrong reason — the ordering they exist to pin was never exercised.
     // `sweepResult`/`sweepError` are what keep that from silently recurring.
     const sweep = ThinkThreadAgent.prototype.runWorkLedgerSweep as (
@@ -398,7 +419,7 @@ describe("runSandboxEviction re-arm gate", () => {
     }.bind(sweepThis) as never;
 
     try {
-      await runSandboxEviction.call(agent);
+      await runSandboxComputeAlarm(host);
     } finally {
       dateNow.mockRestore();
     }
@@ -439,7 +460,7 @@ describe("runSandboxEviction re-arm gate", () => {
       },
       release: async () => undefined,
     };
-    const { agent, service, scheduleEviction } = setup({ now, rows, quota });
+    const { host, service, scheduleEviction } = setup({ now, rows, quota });
 
     const started = await service.execStart({ command: "sleep 600", label: "long" });
     await service.execWatch({ processId: started.processId });
@@ -451,7 +472,7 @@ describe("runSandboxEviction re-arm gate", () => {
     failRefresh.value = true;
     now.value = 2_000;
 
-    await runSandboxEviction.call(agent);
+    await runSandboxComputeAlarm(host);
 
     // Armed at the live watcher's next poll, from the ledger-blind fallback.
     expect(scheduleEviction).toHaveBeenCalledTimes(1);
@@ -477,7 +498,7 @@ describe("runSandboxEviction re-arm gate", () => {
       },
       release: async () => undefined,
     };
-    const { agent, service, scheduleEviction } = setup({ now, rows, quota });
+    const { host, service, scheduleEviction } = setup({ now, rows, quota });
 
     const started = await service.execStart({ command: "sleep 600", label: "long" });
     await service.execWatch({ processId: started.processId });
@@ -490,7 +511,7 @@ describe("runSandboxEviction re-arm gate", () => {
     // (1_000 + monitorPollIntervalMs) by a wide margin.
     now.value = 1_000 + CONFIG.monitorPollIntervalMs * 2;
 
-    await runSandboxEviction.call(agent);
+    await runSandboxComputeAlarm(host);
 
     // Must NOT re-arm at the past nextPollAt (immediate refire, forever, while
     // the write stays down) — floors to now + one poll interval instead.
@@ -501,10 +522,10 @@ describe("runSandboxEviction re-arm gate", () => {
   it("arms the fallback when compute never resolved at all", async () => {
     const now = { value: 1_000 };
     const rows = [openRow()];
-    const { agent, scheduleEviction } = setup({ now, rows });
+    const { host, scheduleEviction } = setup({ now, rows });
     holder.resolved = undefined;
 
-    await runSandboxEviction.call(agent);
+    await runSandboxComputeAlarm(host);
 
     expect(scheduleEviction).toHaveBeenCalledTimes(1);
     expect(scheduleEviction).toHaveBeenCalledWith(nextSweepAt(rows));
@@ -513,13 +534,13 @@ describe("runSandboxEviction re-arm gate", () => {
   it("arms the fallback even when the SWEEP throws (compute disabled + sweep failure)", async () => {
     const now = { value: 1_000 };
     const rows = [openRow()];
-    const { agent, scheduleEviction } = setup({ now, rows });
+    const { agent, host, scheduleEviction } = setup({ now, rows });
     holder.resolved = undefined;
     agent.runWorkLedgerSweep = vi.fn(async () => {
       throw new Error("sweep exploded");
     }) as unknown as typeof agent.runWorkLedgerSweep;
 
-    await runSandboxEviction.call(agent);
+    await runSandboxComputeAlarm(host);
 
     expect(scheduleEviction).toHaveBeenCalledTimes(1);
   });
@@ -558,7 +579,7 @@ describe("runSandboxEviction re-arm gate", () => {
       }),
     ];
     const ledger = memoryLedger(rows);
-    const { agent, scheduleEviction } = setup({ now, rows, ledger });
+    const { agent, host, scheduleEviction } = setup({ now, rows, ledger });
     // The thread has no compute at all: no tick, no watcher, no eviction
     // horizon. The ledger is the ONLY thing that could ever arm this alarm.
     holder.resolved = undefined;
@@ -593,7 +614,7 @@ describe("runSandboxEviction re-arm gate", () => {
 
     const dateNow = vi.spyOn(Date, "now").mockReturnValue(wall);
     try {
-      await runSandboxEviction.call(agent);
+      await runSandboxComputeAlarm(host);
     } finally {
       dateNow.mockRestore();
     }
@@ -612,10 +633,10 @@ describe("runSandboxEviction re-arm gate", () => {
 
   it("arms nothing when there is no open work and nothing to wake for", async () => {
     const now = { value: 1_000 };
-    const { agent, scheduleEviction } = setup({ now, rows: [] });
+    const { host, scheduleEviction } = setup({ now, rows: [] });
     holder.resolved = undefined;
 
-    await runSandboxEviction.call(agent);
+    await runSandboxComputeAlarm(host);
 
     expect(scheduleEviction).not.toHaveBeenCalled();
   });

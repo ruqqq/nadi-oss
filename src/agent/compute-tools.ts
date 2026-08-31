@@ -110,7 +110,12 @@ export interface ComputeServiceHostDeps {
   /** The `AgentSandbox` DO's own SQLite. See the type's doc: nothing else may supply this. */
   storage: DurableObjectStorage;
   resolveRuntimeConfig: () => Promise<{ workspaceId: string; agentId: string }>;
-  /** Bridges {@link ThreadComputeService}'s `setAlarm` onto the Agents SDK scheduler. */
+  /**
+   * Bridges {@link ThreadComputeService}'s `setAlarm` onto the sandbox DO's own
+   * `ctx.storage.setAlarm` — the machine's alarm belongs to the DO that owns the
+   * machine. A Durable Object has exactly ONE alarm, which is the same
+   * single-outstanding-wake shape `armAlarm`'s min-fold is built on.
+   */
   scheduleEviction: (timestampMs: number) => Promise<void>;
   /** Cancels the outstanding idle-eviction alarm; used by `exec_shutdown` after teardown. */
   cancelEviction: () => Promise<void>;
@@ -624,74 +629,6 @@ async function reclaimContainer(env: Env, threadId: string): Promise<boolean> {
   } finally {
     clearTimeout(timer);
   }
-}
-
-/** DO storage key: id of the single outstanding compute-eviction schedule. */
-export const COMPUTE_EVICTION_SCHEDULE_KEY = "sandbox:eviction-schedule-id";
-
-/**
- * The Agents SDK owns the physical Durable Object `alarm()` (it drives the
- * framework's scheduler), so compute idle eviction is scheduled through the
- * documented `schedule()`/`cancelSchedule()` hooks rather than by overriding
- * `alarm()`. This narrow interface is what {@link scheduleComputeEviction}
- * needs from the host agent.
- */
-export interface ComputeAlarmHost {
-  storage: DurableObjectStorage;
-  schedule: (when: Date, callback: string) => Promise<{ id: string }>;
-  cancelSchedule: (id: string) => Promise<boolean>;
-}
-
-/**
- * (Re)arm the thread's single idle-eviction alarm at `timestampMs`. Because
- * {@link ThreadComputeService} calls this after every compute operation to push
- * the eviction time forward, we cancel the prior schedule first so exactly one
- * eviction callback is ever outstanding (no accumulation across refreshes).
- */
-export async function scheduleComputeEviction(
-  host: ComputeAlarmHost,
-  timestampMs: number,
-  callbackName: string,
-): Promise<void> {
-  // Race note (benign, self-healing): cancel-prior then schedule-new is not
-  // atomic, so two rapid refreshes interleaving at these awaits could briefly
-  // leave an orphan schedule (a stale callback whose id is no longer stored).
-  // That is harmless — the eviction tick is idempotent and reschedules itself
-  // when the environment is still within its idle budget, and releaseIfIdle
-  // no-ops on an already-released environment. The DO's single-threaded event
-  // model also serializes these calls in practice (each refresh awaits before
-  // the next compute op), so at most one schedule is normally outstanding. A
-  // stored id is always the most recent, so the next refresh cancels the right
-  // one.
-  const priorId = await host.storage.get<string>(COMPUTE_EVICTION_SCHEDULE_KEY);
-  if (priorId) {
-    try {
-      await host.cancelSchedule(priorId);
-    } catch {
-      /* prior schedule already fired or was cleared */
-    }
-  }
-  const created = await host.schedule(new Date(timestampMs), callbackName);
-  await host.storage.put(COMPUTE_EVICTION_SCHEDULE_KEY, created.id);
-}
-
-/**
- * Cancel the thread's outstanding idle-eviction alarm and forget its id. Used
- * by `exec_shutdown`, which tears the environment down immediately so there is
- * nothing left to evict. Safe to call when no schedule is outstanding (no-op).
- */
-export async function cancelComputeEviction(host: {
-  storage: DurableObjectStorage;
-  cancelSchedule: (id: string) => Promise<boolean>;
-}): Promise<void> {
-  const priorId = await host.storage.get<string>(COMPUTE_EVICTION_SCHEDULE_KEY);
-  if (!priorId) return;
-  try {
-    await host.cancelSchedule(priorId);
-  } catch {
-    /* schedule already fired or was cleared */
-  }
-  await host.storage.delete(COMPUTE_EVICTION_SCHEDULE_KEY);
 }
 
 interface ComputeFileContext {

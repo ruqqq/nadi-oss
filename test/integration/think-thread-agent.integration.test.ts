@@ -14,6 +14,7 @@ import {
   ThinkThreadAgent,
   type ThinkThreadAgent as ThinkThreadAgentType,
 } from "../../src/agent/think-thread-agent";
+import type { AgentSandbox } from "../../src/compute/agent-sandbox-do";
 import * as threadAgentModule from "../../src/agent/thread-agent-config";
 import { resolveContextBudget } from "../../src/agent/context-budget";
 import { DEFAULT_TOOL_OUTPUT_CAP_CHARS } from "../../src/agent/tool-output-cap";
@@ -1701,38 +1702,43 @@ describe("ThinkThreadAgent spike", () => {
     });
   });
 
-  it("exec watcher completion is delivered through the Durable Object tick path", async () => {
+  it("exec watcher completion is delivered from the SANDBOX DO's own alarm", async () => {
+    // The Task 9 proof: a watcher registered through the sandbox DO fires from
+    // that DO's OWN `alarm()` — not from any schedule on the thread — and its
+    // completion reminder still lands in the OWNING thread's transcript. That
+    // exercises the back-call from an alarm rather than from a turn.
     const threadId = "think-exec-background";
     const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
-    const result = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
-      const testInstance = instance as SandboxServiceTestableAgent;
-      await testInstance.__unsafe_ensureInitialized();
-      const provider = new FakeComputeBackend();
-      // A REALISTIC epoch, not 1000. The sandbox arms its idle/watcher alarm off
-      // this clock and the thread DO schedules against the real one, so an epoch
-      // near zero arms an alarm in 1970 — it fires immediately, the reaper sweeps,
-      // and the watcher this test is about is torn down before the first
-      // assertion reads it. Same skew existed before the service moved out of
-      // this DO; the RPC hops are what made it observable.
-      let now = 1_800_000_000_000;
-      const turnQueueHolder = testInstance as unknown as { _turnQueue?: { isActive: boolean } };
-      try {
-        // Approach: the thread-keyed host-override registry. `provider.finishProcess`
-        // scripts the exit this tick path is supposed to observe — the `mock`
-        // provider has no equivalent, and the exec-timing knobs are service deps.
-        setComputeHostTestOverrides(threadId, {
-          buildBackend: async () => provider,
-          now: () => now,
-          execForegroundTimeoutMs: 1,
-          execForegroundPollIntervalMs: 1,
-          sleep: async (ms) => {
-            now += ms;
-          },
-        });
+    const sandboxStub = env.AGENT_SANDBOX.get(env.AGENT_SANDBOX.idFromName(threadId));
+    const provider = new FakeComputeBackend();
+    // A REALISTIC epoch, not 1000. The sandbox arms its idle/watcher alarm off
+    // this clock, so an epoch near zero arms an alarm in 1970 — it fires
+    // immediately, the reaper sweeps, and the watcher this test is about is torn
+    // down before the first assertion reads it.
+    let now = 1_800_000_000_000;
+    let result;
+    try {
+      // Approach: the thread-keyed host-override registry. `provider.finishProcess`
+      // scripts the exit this alarm path is supposed to observe — the `mock`
+      // provider has no equivalent, and the exec-timing knobs are service deps.
+      setComputeHostTestOverrides(threadId, {
+        buildBackend: async () => provider,
+        now: () => now,
+        execForegroundTimeoutMs: 1,
+        execForegroundPollIntervalMs: 1,
+        sleep: async (ms) => {
+          now += ms;
+        },
+      });
+
+      const started = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
+        const testInstance = instance as SandboxServiceTestableAgent;
+        await testInstance.__unsafe_ensureInitialized();
         // Keep proactive watcher completion in the durable injection buffer so
         // this test can assert the completion metadata before beforeStep drains it.
-        turnQueueHolder._turnQueue = { isActive: true };
-
+        (testInstance as unknown as { _turnQueue?: { isActive: boolean } })._turnQueue = {
+          isActive: true,
+        };
         const resolved = await testInstance.resolveComputeServiceForTest();
         if (!resolved) throw new Error("expected sandbox service");
         const execResult = await resolved.service.exec({ command: "sleep 300", label: "build" });
@@ -1744,29 +1750,42 @@ describe("ThinkThreadAgent spike", () => {
         if (!processAfterExec?.backendProcessRef) {
           throw new Error("expected backend process reference for background process");
         }
-
-        provider.finishProcess(processAfterExec.backendProcessRef, "exited", 0);
-        now += DEFAULT_MONITOR_POLL_INTERVAL_MS;
-        await instance.runSandboxEviction();
-
-        const watchersAfterTick = await resolved.service.listActiveWatchersView();
-        const listedAfterTick = await resolved.service.execList({ status: "all", limit: 10 });
-        const processAfterTick = listedAfterTick.processes.find(
-          (process) => process.id === execResult.processId,
-        );
-        const completions = testInstance.watcherCompletionsForTest();
         return {
           execResult,
           watchersAfterExec,
-          watchersAfterTick,
-          processAfterTick,
-          completions,
+          backendProcessRef: processAfterExec.backendProcessRef,
         };
-      } finally {
-        clearComputeHostTestOverrides(threadId);
-        delete turnQueueHolder._turnQueue;
-      }
-    });
+      });
+
+      provider.finishProcess(started.backendProcessRef, "exited", 0);
+      now += DEFAULT_MONITOR_POLL_INTERVAL_MS;
+      // THE alarm under test: the sandbox DO's own handler, invoked on the
+      // instance because `alarm` is a reserved name DO RPC will not dispatch.
+      await runInDurableObject(sandboxStub, async (instance: AgentSandbox) => {
+        await instance.alarm();
+      });
+
+      result = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
+        const testInstance = instance as SandboxServiceTestableAgent;
+        const resolved = await testInstance.resolveComputeServiceForTest();
+        if (!resolved) throw new Error("expected sandbox service");
+        const listedAfterTick = await resolved.service.execList({ status: "all", limit: 10 });
+        return {
+          execResult: started.execResult,
+          watchersAfterExec: started.watchersAfterExec,
+          watchersAfterTick: await resolved.service.listActiveWatchersView(),
+          processAfterTick: listedAfterTick.processes.find(
+            (process) => process.id === started.execResult.processId,
+          ),
+          completions: testInstance.watcherCompletionsForTest(),
+        };
+      });
+    } finally {
+      clearComputeHostTestOverrides(threadId);
+      await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
+        delete (instance as unknown as { _turnQueue?: unknown })._turnQueue;
+      });
+    }
 
     expect(result.execResult).toMatchObject({
       ok: true,

@@ -287,7 +287,7 @@ export class SubAgent extends ThinkThreadAgent {
     return { name: "subagent-role", text: SUBAGENT_ROLE_PROMPT };
   }
 
-  /** A rehydrated SubAgent (e.g. the alarm-driven `runSandboxEviction`, which
+  /** A rehydrated SubAgent (e.g. the sandbox alarm's sweep back-call, which
    *  never goes through `beforeTurn`) needs the parent's shared runtime
    *  reference cached before `attachedRuntimeForThisAgent()` is read (see H2). */
   protected override async primeAttachedContext(): Promise<void> {

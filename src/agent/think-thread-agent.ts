@@ -151,13 +151,12 @@ import {
   createComputeTools,
   readThreadWorkbenchResourceProfile,
   hasThreadWorkbench,
-  scheduleComputeEviction,
-  cancelComputeEviction,
   type ComputeToolDeps,
 } from "./compute-tools";
 import {
   adoptCommittedResourceProfileOnSandbox,
   openSandboxSession,
+  nearSideSandboxSession,
   type SandboxSessionClient,
   type SandboxSessionResolution,
 } from "../compute/agent-sandbox-client";
@@ -199,7 +198,7 @@ import {
   type WatcherCompletionInfo,
 } from "./system-reminder";
 import type { SandboxCallResult } from "../compute/agent-sandbox-do";
-import type { SandboxThreadHost } from "../compute/sandbox-thread-host";
+import type { SandboxSweepResolution, SandboxThreadHost } from "../compute/sandbox-thread-host";
 import { buildThreadStartClockReminder, isFirstTurn } from "./thread-start-clock";
 import { buildWorkbenchSwitchMessage } from "./workbench-switch-message";
 import { InjectionBuffer, type InjectionKind } from "./injection-buffer";
@@ -235,7 +234,6 @@ import {
 } from "./workbench-switch-commit";
 import { MIN_STEP_WATCH_AGE_MS } from "../compute/thread-service";
 import type { BackendReference, ComputeSpec } from "../compute/backend";
-import { DEFAULT_MONITOR_POLL_INTERVAL_MS } from "../compute/watchers";
 import { sha256Hex } from "../compute/files/hash";
 import {
   PRESIGN_EXPIRES_SECONDS,
@@ -2301,7 +2299,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
   /**
    * Hook for a rehydrated facet to prime whatever context it needs BEFORE
    * `attachedRuntimeForThisAgent()`/`openSandbox()` are consulted
-   * outside a normal turn (e.g. the alarm-driven `runSandboxEviction`, which
+   * outside a normal turn (e.g. the sandbox DO's alarm, whose sweep back-call
    * never goes through `beforeTurn`). No-op by default; overridden in
    * {@link SubAgent} to pull+cache the parent's shared runtime reference (see H2).
    */
@@ -4463,32 +4461,6 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
   }
 
   /**
-   * (Re)arm this thread's single idle-eviction alarm. The ONE implementation:
-   * the sandbox DO's `scheduleEviction` back-call reaches it, and so does
-   * {@link scheduleSandboxEviction} on behalf of the sandbox DO. Throws on
-   * failure — the in-process callers depend on that.
-   */
-  private armComputeEviction(timestampMs: number): Promise<void> {
-    return scheduleComputeEviction(
-      {
-        storage: this.ctx.storage,
-        schedule: (when, callback) => this.schedule(when, callback as keyof this),
-        cancelSchedule: (id) => this.cancelSchedule(id),
-      },
-      timestampMs,
-      "runSandboxEviction",
-    );
-  }
-
-  /** Cancel the outstanding idle-eviction alarm. Counterpart of {@link armComputeEviction}. */
-  private disarmComputeEviction(): Promise<void> {
-    return cancelComputeEviction({
-      storage: this.ctx.storage,
-      cancelSchedule: (id) => this.cancelSchedule(id),
-    });
-  }
-
-  /**
    * Deliver a hidden system-reminder into this thread. The ONE implementation
    * behind both the sandbox DO's `deliverSystemReminder` back-call
    * and the {@link deliverSystemReminderFromSandbox} RPC.
@@ -4587,31 +4559,62 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
     }
   }
 
-  /** {@link SandboxThreadHost} — arm this thread's idle-eviction alarm. */
-  async scheduleSandboxEviction(input: { timestampMs: number }): Promise<SandboxCallResult<null>> {
+  /**
+   * {@link SandboxThreadHost} — run the work-ledger sweep, called from the
+   * SANDBOX DO's alarm immediately after its compute tick.
+   *
+   * The sweep stays here (it reads a ledger that spans subagent runs and
+   * delivers into this thread's transcript) but its TRIGGER moved with the tick,
+   * and that is the whole point: a Durable Object has one alarm each, so two
+   * independent alarms would be sequenced by nothing and the sweep would
+   * routinely classify against the PREVIOUS tick's liveness stamps — the false
+   * fault documented on `runSandboxComputeAlarm`. Chaining it behind the
+   * tick inside one invocation is what keeps `tick -> sweep` true.
+   *
+   * `input.resolution` carries the tick's OWN session so the sweep does not
+   * re-resolve (a GitHub App token mint plus several D1 reads):
+   *   - `"session"` — use it as-is;
+   *   - `"disabled"` — compute is off for this thread, pass `null` through so
+   *     the sweep does not try to resolve one;
+   *   - `"unresolved"` — resolution never completed, so resolve independently.
+   * That three-way split IS `runWorkLedgerSweep`'s `undefined`/`null` contract,
+   * made explicit because RPC serialization is not a safe place to carry the
+   * difference between an absent key and an `undefined` one.
+   */
+  async sweepSandboxWorkLedger(input: {
+    resolution: SandboxSweepResolution;
+  }): Promise<SandboxCallResult<null>> {
     try {
-      await this.armComputeEviction(input.timestampMs);
+      // A rehydrated SubAgent facet has not gone through `beforeTurn` (which
+      // primes `subagentContext()`), and the sweep can reach `openSandbox()` —
+      // in the `unresolved` case, and from `workFacts`/`getCurrentGeneration`.
+      // Without this its `attachedRuntimeForThisAgent()` is unset and the
+      // release-if-idle attached no-op does not trip, which could delete the
+      // shared machine out from under a live sibling (H2). Guarded: a priming
+      // failure must not cost the sweep, which is the reaper's whole point.
+      try {
+        await this.primeAttachedContext();
+      } catch (error) {
+        log.warn("think_thread.sandbox_sweep_prime_failed", {
+          threadId: this.name,
+          error: String(error),
+        });
+      }
+      const { resolution } = input;
+      const resolved =
+        resolution.kind === "unresolved"
+          ? undefined
+          : resolution.kind === "disabled"
+            ? null
+            : nearSideSandboxSession(resolution.session, resolution.workspaceId, resolution.config);
+      await this.runWorkLedgerSweep(resolved);
       return { ok: true, value: null };
     } catch (error) {
-      log.warn("think_thread.sandbox_schedule_eviction_failed", {
+      log.warn("think_thread.sandbox_work_ledger_sweep_failed", {
         threadId: this.name,
         error: String(error),
       });
-      return { ok: false, error: { code: "schedule_eviction_failed", message: String(error) } };
-    }
-  }
-
-  /** {@link SandboxThreadHost} — cancel this thread's idle-eviction alarm. */
-  async cancelSandboxEviction(): Promise<SandboxCallResult<null>> {
-    try {
-      await this.disarmComputeEviction();
-      return { ok: true, value: null };
-    } catch (error) {
-      log.warn("think_thread.sandbox_cancel_eviction_failed", {
-        threadId: this.name,
-        error: String(error),
-      });
-      return { ok: false, error: { code: "cancel_eviction_failed", message: String(error) } };
+      return { ok: false, error: { code: "work_ledger_sweep_failed", message: String(error) } };
     }
   }
 
@@ -4682,8 +4685,16 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
    * into the compute service's single alarm. Derived from the same rows
    * {@link sandboxWorkLedgerRegister} writes, so it stays here with them.
    */
-  async getSandboxWorkHorizon(): Promise<SandboxCallResult<number | null>> {
-    return this.encodeLedgerCall("workHorizon", () => this.workHorizon(Date.now()));
+  async getSandboxWorkHorizon(input?: {
+    /**
+     * The clock to fold the owed-retry component against. Supplied by the
+     * sandbox alarm's fallback, which reads the compute service's `now()` so its
+     * arm is computed against the same clock the tick used; omitted by
+     * `armAlarm`, which has no reason to prefer either side's.
+     */
+    now?: number;
+  }): Promise<SandboxCallResult<number | null>> {
+    return this.encodeLedgerCall("workHorizon", () => this.workHorizon(input?.now ?? Date.now()));
   }
 
   /** Shared encoder for the ledger back-calls: nothing throws across RPC. */
@@ -5175,181 +5186,6 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
   }
 
   /**
-   * Compute alarm callback, dispatched by the Agents SDK scheduler (see
-   * {@link scheduleComputeEviction}). Kept under its historical name
-   * (`runSandboxEviction`) since it's also the Agents SDK schedule callback
-   * id, but it now runs the generalized tick (watcher polling + keep-alive +
-   * idle eviction), not just plain eviction. When sandbox execution is
-   * disabled the compute tick is skipped entirely (nothing is deleted), but
-   * the work-ledger sweep below still runs — the ledger outlives the compute
-   * service by design, since closing rows is exactly what must keep happening
-   * when the sandbox is gone.
-   *
-   * Re-arming is the compute service's job, not this method's: the ledger's
-   * horizon is min-folded into `armAlarm` via the `getWorkHorizon` dep, so one
-   * alarm serves eviction, watcher polls and the sweep. This method arms only
-   * as a FALLBACK, gated on the fact that nothing else armed (see below).
-   *
-   * ORDER IS LOAD-BEARING: resolve -> tick -> sweep -> fallback. The tick must
-   * run BEFORE the sweep, and this has now been broken three times — do not
-   * "optimize" it back.
-   *
-   * The tick polls processes and stamps `lastAliveAt`; the sweep classifies
-   * rows against those stamps. Sweeping first classifies staleness from the
-   * PREVIOUS tick's stamps, one line before the tick would refresh them. The
-   * `PROCESS_STALE_AFTER_MS` is 3x the poll interval, so an alarm two poll
-   * intervals late — or that long spent inside `resolveComputeService` (a GitHub
-   * token mint plus several D1 reads) — would fault a HEALTHY, still-running
-   * process as
-   * `no_liveness`. The reaper must never false-positive: a false fault is worse
-   * than the hang this project exists to fix.
-   *
-   * The accepted cost of tick-first is one spurious wake: the tick's `armAlarm`
-   * folds `getWorkHorizon` over pre-sweep rows, so a row the sweep is about to
-   * close can contribute a stale (possibly immediate) horizon — at most ONE
-   * extra immediate wake per stale event, self-limiting because that same pass
-   * closes the row and the next arm is correct. Every alternative is worse:
-   * sweeping first re-opens the false-fault channel above; re-arming after the
-   * sweep would CANCEL and overwrite the tick's nearer alarm (the round-3
-   * Critical); clamping the horizon would hide real staleness.
-   */
-  async runSandboxEviction(): Promise<void> {
-    // The scheduler invokes this outside a chat turn, so an unregistered thread
-    // (`think_thread_not_registered:*`) or any resolution error would otherwise
-    // surface as an uncaught rejection in the alarm callback. Swallow + log.
-    //
-    // `resolved` is threaded into the sweep below so it does not re-run
-    // `resolveComputeService` (several D1 reads: agent settings, skill
-    // domains, repo-env snapshot, secrets) a second time in the same tick.
-    // Left `undefined` if resolution itself never completed (thread
-    // unregistered, resolve threw) — the sweep then falls back to its own
-    // independent resolve, isolated from whatever failed here.
-    let resolved: SandboxSessionResolution | null | undefined;
-    // The FACT the fallback below gates on: did anything actually arm this
-    // pass? Never inferred from "the tick did not throw" — a tick can throw
-    // after arming (fallback would then overwrite a nearer alarm) and can
-    // return without arming at all (fallback must run).
-    let armed = false;
-    try {
-      // Attached subagents must build deps WITH attachedRuntime set, or the
-      // release-if-idle attached no-op won't trip and could delete the shared
-      // machine (H2). A rehydrated SubAgent instance hasn't gone through
-      // beforeTurn (which primes subagentContext()), so prime it here before
-      // openSandbox() reads attachedRuntimeForThisAgent().
-      await this.primeAttachedContext();
-      resolved = await this.openSandbox();
-    } catch (error) {
-      log.warn("think_thread.sandbox_eviction_failed", {
-        threadId: this.name,
-        error: String(error),
-      });
-    }
-    // Own guard: a tick failure must not skip the sweep or the fallback arm
-    // below — that is the whole point of sampling `alarmArmCount`.
-    if (resolved) {
-      const service = resolved.service;
-      const armCountBefore = await service.alarmArmCount();
-      try {
-        await service.runComputeTick();
-        // Backstop: once the environment is gone, any prior "clean" claim no
-        // longer applies to it.
-        if (!(await service.isComputeLive())) {
-          await this.setSandboxDeclaredClean(false);
-        }
-      } catch (error) {
-        log.warn("think_thread.sandbox_eviction_failed", {
-          threadId: this.name,
-          error: String(error),
-        });
-      } finally {
-        armed = (await service.alarmArmCount()) > armCountBefore;
-      }
-    }
-    // Own guard: a sweep failure must never prevent the compute tick above from
-    // having run, and must never surface as an uncaught rejection in the alarm
-    // callback. Runs AFTER the tick so it classifies against fresh liveness
-    // stamps — see the doc comment above; this ordering is not negotiable, and
-    // the late-alarm test in alarm-rearm.test.ts fails if it is reverted.
-    try {
-      await this.runWorkLedgerSweep(resolved);
-    } catch (error) {
-      log.warn("think_thread.work_ledger_sweep_failed", {
-        threadId: this.name,
-        error: String(error),
-      });
-    }
-    // Fallback re-arm, outside every guard above. The tick's `armAlarm` is the
-    // thread's one arm site and min-folds the ledger horizon, so when it armed
-    // there is nothing to add: `scheduleComputeEviction` is cancel-then-set on
-    // a single schedule id, so arming here would CANCEL the tick's (nearer)
-    // alarm and stretch the watcher poll out to the ledger's later horizon.
-    // When nothing armed — compute disabled or unresolved, the tick threw
-    // (e.g. an unguarded D1 quota write), or the tick exited without arming
-    // (state `acquiring`/`releasing`/`discarding` falls through `releaseIfIdle`
-    // early) — nothing else will ever wake this thread, and an open row would
-    // never be swept again. That is the original bug this project exists to
-    // kill, so this branch is not optional.
-    //
-    // The horizon covers open WORK, not just open ledger rows (invariant B is
-    // "never strand open work"). A live watcher whose row is already closed is
-    // invisible to `listOpen()` — reachable here, since terminal-first closes
-    // the row while a `deliverSystemReminder` throw skips `deleteWatcher` — so
-    // fold in the watchers' next poll too, or that watcher never polls again.
-    // `nextWatcherWakeAt` is a read-only store read: no backend call, so it
-    // keeps the fallback's load-bearing property of never blocking on a dead
-    // sandbox. `resolved` is the tick's already-completed resolution; when it is
-    // absent there is no store to read and open rows alone are the best we have.
-    //
-    // The horizon also covers rows that are terminal-but-OWED (`workHorizon`
-    // folds them in), and this is the one arm site that must: the sweep directly
-    // above is what leaves a row owed — its delivery throws, the row is already
-    // closed, and `listOpen()` goes empty. On a thread with no watcher and no
-    // other open row that is the whole wake source, and without it the retry
-    // pass can never run again.
-    //
-    // The ledger-row component needs no floor: the sweep above closed every
-    // non-alive row in this same pass, and an `alive` row's horizon
-    // (min(deadlineAt, lastAliveAt + staleAfterMs)) is by definition >= now. The
-    // owed component needs none either — it is `now + WORK_DELIVERY_RETRY_MS`.
-    //
-    // The watcher component DOES need a floor. `nextPollAt` only advances
-    // inside `pollDueWatchers`, which runs from `runComputeTick` above, AFTER
-    // the unguarded `quota.refresh()` D1 write. This fallback is reached
-    // precisely when that tick did NOT run to completion (it threw, e.g. that
-    // D1 write failing, or exited before polling) — i.e. exactly when
-    // `nextPollAt` was NOT stamped forward. Unlike a ledger row, nothing
-    // closes or advances a watcher when the tick throws before polling, so a
-    // `nextPollAt` already due can stay pinned in the past indefinitely,
-    // re-arming the alarm hot (immediate refire, paying a full
-    // `resolveComputeService` each time) for as long as the write keeps
-    // failing. Only clamp when it is actually stuck in the past — a watcher
-    // due soon but still ahead of `now` is a normal near-term wake and must
-    // fire on schedule, not be pushed out to a full poll interval.
-    if (armed) return;
-    try {
-      const rawWatcherHorizon = (await resolved?.service.nextWatcherWakeAt()) ?? null;
-      const now = (await resolved?.service.now()) ?? Date.now();
-      const workHorizon = this.workHorizon(now);
-      const watcherHorizon =
-        rawWatcherHorizon === null
-          ? null
-          : rawWatcherHorizon <= now
-            ? now + DEFAULT_MONITOR_POLL_INTERVAL_MS
-            : rawWatcherHorizon;
-      const horizon =
-        workHorizon === null || (watcherHorizon !== null && watcherHorizon < workHorizon)
-          ? watcherHorizon
-          : workHorizon;
-      if (horizon !== null) await this.armComputeEviction(horizon);
-    } catch (error) {
-      log.warn("think_thread.work_ledger_rearm_failed", {
-        threadId: this.name,
-        error: String(error),
-      });
-    }
-  }
-
-  /**
    * Build the model-facing terminal message, deliver it, and close the DELIVERY
    * gate. Delivery ONLY — no teardown — because the sweep's retry path reuses
    * this on a row whose teardown is long since decided.
@@ -5522,8 +5358,8 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
    * the same `terminalized` funnel (populated via `terminalize`'s exactly-once
    * return), so it fires once per row and only for real transitions.
    *
-   * `resolvedService`, when supplied, is the SAME resolution `runSandboxEviction`
-   * already performed this tick — reuse it rather than resolving again. Pass
+   * `resolvedService`, when supplied, is the SAME resolution the sandbox DO's
+   * alarm already performed this tick — reuse it rather than resolving again. Pass
    * nothing (or `undefined`) to force an independent resolve, which is what
    * every direct/test caller of this method wants.
    */
@@ -5727,7 +5563,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
    * populates the store runs on the POLL path (`pollDueWatchers`'s catch).
    *
    * `resolvedService === undefined` means "resolve it now" (the default for
-   * every caller except `runSandboxEviction`'s already-resolved passthrough);
+   * every caller except the alarm sweep's already-resolved passthrough);
    * a resolved value of `null` (compute disabled) is passed straight through
    * without re-resolving.
    */

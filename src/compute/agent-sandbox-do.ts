@@ -8,7 +8,8 @@ import {
   type ComputeServiceHostDeps,
 } from "../agent/compute-tools";
 import { ThreadComputeStore } from "./thread-store";
-import { createSandboxThreadHostDeps } from "./sandbox-thread-host";
+import { createSandboxThreadHostDeps, type SandboxSweepResolution } from "./sandbox-thread-host";
+import { runSandboxComputeAlarm } from "./sandbox-alarm";
 import { createRepositoryPreparation } from "../agent/repository-preparation";
 import { probeWorkspaceCleanliness } from "./workspace-cleanliness";
 import type { ThreadComputeService } from "./thread-service";
@@ -35,6 +36,34 @@ import { log } from "../log";
 export type { SandboxCallResult, SandboxCallError } from "./agent-sandbox-session";
 
 /**
+ * DO storage key for {@link SandboxAlarmParams}.
+ *
+ * The alarm has no caller, and two of the values it needs are caller-supplied
+ * BY DESIGN: `supportsProcessMonitor` decides whether background work is
+ * admitted at all, and `runtimeConfig` cannot be derived from `threadId`
+ * (a `SubAgent`'s facet name is a run id with no `thread_index` row). So the
+ * last session's inputs are recorded here and replayed by the alarm. Nothing is
+ * acquired by omission: an alarm that finds no record does NOT tick.
+ */
+const ALARM_PARAMS_KEY = "sandbox:alarm-params";
+
+/**
+ * The session inputs the alarm replays. Written on every `session()` open, so
+ * they track the owning agent's current answers rather than the first ones.
+ */
+interface SandboxAlarmParams {
+  /**
+   * Recorded rather than read off `ctx.id.name`, which is populated for an
+   * `idFromName` id but is not something this class should depend on for a
+   * value it already has in hand.
+   */
+  threadId: string;
+  supportsProcessMonitor: boolean;
+  runtimeConfig: { workspaceId: string; agentId: string };
+  attachedRuntime?: BackendReference;
+}
+
+/**
  * Owns a compute sandbox and the SQLite that tracks it — the store, processes,
  * output chunks and watchers that used to live in each thread's own Durable
  * Object. The thread DO keeps the conversation; this owns the machine.
@@ -44,9 +73,18 @@ export type { SandboxCallResult, SandboxCallError } from "./agent-sandbox-sessio
  */
 export class AgentSandbox extends DurableObject<Env> {
   /**
+   * The alarm params as last WRITTEN by this instance, so a turn's ~25
+   * `session()` opens pay one storage write between them instead of 25. A pure
+   * write-elision cache and nothing more: it is only ever compared against what
+   * this same instance just persisted, so an evicted instance costs one extra
+   * write and never a stale record.
+   */
+  private lastAlarmParams: string | undefined;
+
+  /**
    * The capabilities that stayed on the thread DO — transcript reminders, the
-   * idle-eviction schedule, the work ledger, the child-subagent lease and the
-   * "workspace verified clean" bit — reached by RPC. Best-effort by
+   * work ledger and its sweep, the child-subagent lease and the "workspace
+   * verified clean" bit — reached by RPC. Best-effort by
    * construction, with ONE deliberate exception on the watcher-poll reminder:
    * see `createSandboxThreadHostDeps`.
    */
@@ -189,6 +227,15 @@ export class AgentSandbox extends DurableObject<Env> {
       storage: this.ctx.storage,
       resolveRuntimeConfig: async () => options.runtimeConfig ?? this.runtimeConfigFor(threadId),
       ...this.threadHostDeps(threadId),
+      // THIS DO's own alarm, not a back-call. A Durable Object has exactly one
+      // alarm, which is the same single-outstanding-wake shape the thread DO's
+      // cancel-then-set schedule id used to give `armAlarm` — so `armAlarm`
+      // stays the one arm site and its min-fold still holds. Local because the
+      // sandbox owns the machine: the tick that this alarm drives reads and
+      // writes THIS DO's store, and routing its wake through another DO only
+      // added a hop that could fail.
+      scheduleEviction: (timestampMs) => this.ctx.storage.setAlarm(timestampMs),
+      cancelEviction: () => this.ctx.storage.deleteAlarm(),
       supportsProcessMonitor: options.supportsProcessMonitor,
       // NOT on the plan's list of thread-bound deps, and it had to be: the
       // thread DO supplies `processMonitorEnabled && !attachedRuntime`, while
@@ -253,6 +300,23 @@ export class AgentSandbox extends DurableObject<Env> {
     } | null>
   > {
     try {
+      // Recorded BEFORE the resolve, and on every open: these are the inputs the
+      // alarm has no caller to ask for. Written even when the resolve then
+      // returns `null` (compute disabled) — the values are still the right ones
+      // to replay if compute is turned back on before the next wake, and an
+      // alarm that finds them still refuses to tick a disabled thread, because
+      // `resolveService` returns `null` for it too.
+      const params: SandboxAlarmParams = {
+        threadId: input.threadId,
+        supportsProcessMonitor: input.supportsProcessMonitor,
+        runtimeConfig: input.runtimeConfig,
+        ...(input.attachedRuntime ? { attachedRuntime: input.attachedRuntime } : {}),
+      };
+      const encoded = JSON.stringify(params);
+      if (encoded !== this.lastAlarmParams) {
+        await this.ctx.storage.put<SandboxAlarmParams>(ALARM_PARAMS_KEY, params);
+        this.lastAlarmParams = encoded;
+      }
       const resolved = await this.resolveService(input.threadId, {
         supportsProcessMonitor: input.supportsProcessMonitor,
         runtimeConfig: input.runtimeConfig,
@@ -384,5 +448,64 @@ export class AgentSandbox extends DurableObject<Env> {
     } catch (error) {
       return sandboxFailure("get_state_failed", String(error));
     }
+  }
+
+  /**
+   * The compute alarm — the machine's own tick, on the DO that owns the machine.
+   *
+   * The ordering-critical body is {@link runSandboxComputeAlarm}; this method is
+   * its wiring. Read that doc before changing anything here: `resolve -> tick ->
+   * sweep -> fallback` has been broken three times.
+   *
+   * The session is opened HERE, inside this invocation, and nothing is reused
+   * from an earlier one: an alarm is a new invocation, and whether an RPC stub
+   * survives one is unproven.
+   */
+  async alarm(): Promise<void> {
+    const params = (await this.ctx.storage.get<SandboxAlarmParams>(ALARM_PARAMS_KEY)) ?? null;
+    // `ctx.id.name` is populated for the `idFromName` id every caller uses, and
+    // is the only identity an alarm that predates the first recorded session
+    // has. Without either there is no thread to sweep for and nothing to tick.
+    const threadId = params?.threadId ?? this.ctx.id.name;
+    if (!threadId) {
+      log.warn("agent_sandbox.alarm_without_thread_id", {});
+      return;
+    }
+    const host = this.threadHostDeps(threadId);
+    await runSandboxComputeAlarm({
+      threadId,
+      openSession: async () => {
+        // No recorded session inputs means no tick: `supportsProcessMonitor`
+        // and `runtimeConfig` are required precisely so nothing acquires them
+        // by omission, and an alarm is not exempt. The sweep below still runs —
+        // that is the half that must keep happening when compute is gone.
+        if (!params) return null;
+        return this.resolveService(threadId, {
+          supportsProcessMonitor: params.supportsProcessMonitor,
+          runtimeConfig: params.runtimeConfig,
+          ...(params.attachedRuntime ? { attachedRuntime: params.attachedRuntime } : {}),
+        });
+      },
+      sweepWorkLedger: async (resolved) => {
+        const resolution: SandboxSweepResolution =
+          resolved === undefined
+            ? { kind: "unresolved" }
+            : resolved === null
+              ? { kind: "disabled" }
+              : {
+                  kind: "session",
+                  // A FRESH target over the tick's already-resolved service, not
+                  // a stashed one: it lives exactly as long as this alarm
+                  // invocation, which is the span the sweep runs in.
+                  session: new SandboxSession(resolved.service),
+                  workspaceId: resolved.workspaceId,
+                  config: resolved.config,
+                };
+        await host.sweepWorkLedger(resolution);
+      },
+      workHorizon: (now) => host.getWorkHorizon(now),
+      setAlarm: (timestampMs) => this.ctx.storage.setAlarm(timestampMs),
+      setSandboxDeclaredClean: (clean) => host.setSandboxDeclaredClean(clean),
+    });
   }
 }

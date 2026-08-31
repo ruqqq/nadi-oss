@@ -3,7 +3,6 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { drizzle } from "drizzle-orm/d1";
 import * as schema from "../../src/db/schema";
 import { applyRegistryTestSchema } from "./helpers/registry";
-import { COMPUTE_EVICTION_SCHEDULE_KEY } from "../../src/agent/compute-tools";
 import { createSandboxThreadHostDeps } from "../../src/compute/sandbox-thread-host";
 import type { Env } from "../../src/env";
 
@@ -99,14 +98,6 @@ async function backCalls(threadId: string) {
       runInSandboxDo(sandboxStub(threadId), async (instance: any) => {
         await instance.threadHostDeps(threadId).deliverSystemReminder(body, mode);
       }),
-    schedule: (timestampMs: number) =>
-      runInSandboxDo(sandboxStub(threadId), async (instance: any) => {
-        await instance.threadHostDeps(threadId).scheduleEviction(timestampMs);
-      }),
-    cancel: () =>
-      runInSandboxDo(sandboxStub(threadId), async (instance: any) => {
-        await instance.threadHostDeps(threadId).cancelEviction();
-      }),
     /** Run anything against the DO's own dep object, from inside the DO. */
     with: <T>(fn: (deps: any) => Promise<T>): Promise<T> =>
       runInSandboxDo(sandboxStub(threadId), async (instance: any) =>
@@ -149,24 +140,37 @@ describe("AgentSandbox back-calls into the owning thread DO", () => {
     expect(await transcriptText(sibling)).not.toContain(body);
   });
 
-  it("arms and cancels eviction on the THREAD DO's storage", async () => {
-    const threadId = "thr_cb_evict";
+  it("runs the THREAD DO's ledger sweep from the sandbox's back-call", async () => {
+    // The sweep is the one capability whose TRIGGER moved without its code: the
+    // sandbox's alarm chains it behind the tick, but it still reads the thread's
+    // ledger and still delivers into the thread's transcript.
+    const threadId = "thr_cb_sweep";
     await seedComputeEnabledThread(threadId, true);
-
     const calls = await backCalls(threadId);
-    await calls.schedule(now + 60_000);
+    const id = "proc_cb_sweep";
 
-    const armed = await runInThinkDo(threadStub(threadId), async (instance: any) => {
+    // Registered already silent past `staleAfterMs`, measured against the REAL
+    // clock the sweep classifies with — this file fakes no timers, and the `now`
+    // fixture is a FUTURE epoch, so a row built from it reads as freshly alive.
+    // Stamped-in staleness is not an option: `stampAlive` never moves backwards.
+    const stale = Date.now() - 10_000_000;
+    await calls.with((deps: any) =>
+      deps.workLedger.register({
+        ...processRow(id),
+        startedAt: stale,
+        lastAliveAt: stale,
+        deadlineAt: Date.now() + 600_000,
+      }),
+    );
+    await calls.with((deps: any) => deps.sweepWorkLedger({ kind: "disabled" }));
+
+    const rows = await runInThinkDo(threadStub(threadId), async (instance: any) => {
       await instance.__unsafe_ensureInitialized();
-      return await instance.ctx.storage.get(COMPUTE_EVICTION_SCHEDULE_KEY);
+      return (await instance.debugWorkLedger()).rows;
     });
-    expect(typeof armed).toBe("string");
-
-    await calls.cancel();
-    const cleared = await runInThinkDo(threadStub(threadId), async (instance: any) => {
-      return await instance.ctx.storage.get(COMPUTE_EVICTION_SCHEDULE_KEY);
-    });
-    expect(cleared).toBeUndefined();
+    const row = rows.find((entry: any) => entry.id === id);
+    expect(row.terminal).not.toBeNull();
+    expect(row.terminal.reason).toBe("no_liveness");
   });
 
   it("writes the sandbox's process rows into the THREAD DO's work ledger", async () => {
@@ -244,8 +248,7 @@ describe("AgentSandbox back-calls into the owning thread DO", () => {
       "thr_cb_unreachable",
     );
     await expect(deps.deliverSystemReminder("orphan-marker", "deferred")).resolves.toBeUndefined();
-    await expect(deps.scheduleEviction(now + 1_000)).resolves.toBeUndefined();
-    await expect(deps.cancelEviction()).resolves.toBeUndefined();
+    await expect(deps.sweepWorkLedger({ kind: "unresolved" })).resolves.toBeUndefined();
     // A watcher-completion reminder is still a COMMAND result unless the caller
     // says otherwise; only `mustDeliver` changes the semantics.
     await expect(

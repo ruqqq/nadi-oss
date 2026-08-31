@@ -4,16 +4,38 @@ import type { WatcherCompletionInfo } from "../agent/system-reminder";
 import type { WorkRow, WorkTerminal } from "../agent/work-ledger";
 import type { WorkLedgerSink } from "../agent/work-ledger-store";
 import type { SandboxCallResult } from "./agent-sandbox-do";
+import type { SandboxSession } from "./agent-sandbox-session";
+import type { EffectiveComputeConfig } from "./types";
 import { log } from "../log";
 
 /**
+ * How the sandbox alarm tells the thread DO's sweep what session to use. The
+ * three cases are `runWorkLedgerSweep`'s own `undefined`/`null` contract made
+ * explicit, because an RPC boundary is not a safe place to carry the difference
+ * between an absent key and an `undefined` one.
+ */
+export type SandboxSweepResolution =
+  | { kind: "unresolved" }
+  | { kind: "disabled" }
+  | {
+      kind: "session";
+      session: SandboxSession;
+      workspaceId: string;
+      config: EffectiveComputeConfig;
+    };
+
+/**
  * The capabilities the compute service needs that live on the CONVERSATION,
- * not on the machine: the transcript (system reminders), the thread DO's
- * idle-eviction schedule, the background work ledger (which spans subagent
- * runs and is read by the reaper on the thread DO), the child-subagent lease,
- * and the "workspace verified clean" bit (whose SubAgent override targets the
- * PARENT thread). `AgentSandbox` owns the sandbox but not the thread, so it
- * calls back for these.
+ * not on the machine: the transcript (system reminders), the background work
+ * ledger (which spans subagent runs and is read by the reaper on the thread DO)
+ * and its sweep, the child-subagent lease, and the "workspace verified clean"
+ * bit (whose SubAgent override targets the PARENT thread). `AgentSandbox` owns
+ * the sandbox but not the thread, so it calls back for these.
+ *
+ * The idle-eviction SCHEDULE is no longer among them: the sandbox owns the
+ * machine, so it owns the machine's alarm — `AgentSandbox` arms its own
+ * `ctx.storage.setAlarm` directly. What crosses back is the ledger SWEEP, which
+ * the alarm chains behind its tick.
  *
  * Implemented by `ThinkThreadAgent`. Every method returns a
  * {@link SandboxCallResult} rather than throwing: a throw over DO RPC reaches
@@ -25,8 +47,9 @@ export interface SandboxThreadHost {
     mode: "deferred" | "proactive";
     watcher?: WatcherCompletionInfo;
   }): Promise<SandboxCallResult<null>>;
-  scheduleSandboxEviction(input: { timestampMs: number }): Promise<SandboxCallResult<null>>;
-  cancelSandboxEviction(): Promise<SandboxCallResult<null>>;
+  sweepSandboxWorkLedger(input: {
+    resolution: SandboxSweepResolution;
+  }): Promise<SandboxCallResult<null>>;
   sandboxWorkLedgerRegister(input: { row: WorkRow }): Promise<SandboxCallResult<null>>;
   sandboxWorkLedgerStampAlive(input: { id: string; at: number }): Promise<SandboxCallResult<null>>;
   sandboxWorkLedgerTerminalize(input: {
@@ -39,7 +62,7 @@ export interface SandboxThreadHost {
   }): Promise<SandboxCallResult<boolean>>;
   sandboxWorkLedgerIsDelivered(input: { id: string }): Promise<SandboxCallResult<boolean>>;
   sandboxWorkLedgerDeleteRow(input: { id: string }): Promise<SandboxCallResult<null>>;
-  getSandboxWorkHorizon(): Promise<SandboxCallResult<number | null>>;
+  getSandboxWorkHorizon(input?: { now?: number }): Promise<SandboxCallResult<number | null>>;
   sandboxHasBlockingWork(): Promise<SandboxCallResult<boolean>>;
   setSandboxDeclaredCleanFromSandbox(input: { clean: boolean }): Promise<SandboxCallResult<null>>;
   isSandboxDeclaredCleanFromSandbox(): Promise<SandboxCallResult<boolean>>;
@@ -62,8 +85,9 @@ async function threadHostStub(env: Env, threadId: string): Promise<SandboxThread
 }
 
 /**
- * The subset of `ComputeServiceHostDeps` that the sandbox DO cannot satisfy from
- * its own storage, wired to call back into the thread DO that owns `threadId`.
+ * The subset of `ComputeServiceHostDeps` (plus the alarm's sweep) that the
+ * sandbox DO cannot satisfy from its own storage, wired to call back into the
+ * thread DO that owns `threadId`.
  *
  * Best-effort BY DEFAULT: a failure (thread DO gone, RPC error, encoded failure
  * on the far side) is logged and swallowed, never re-thrown into the compute
@@ -88,15 +112,14 @@ export function createSandboxThreadHostDeps(
   env: Env,
   threadId: string,
 ): {
-  scheduleEviction: (timestampMs: number) => Promise<void>;
-  cancelEviction: () => Promise<void>;
+  sweepWorkLedger: (resolution: SandboxSweepResolution) => Promise<void>;
   deliverSystemReminder: (
     body: string,
     mode: "deferred" | "proactive",
     options?: { watcher?: WatcherCompletionInfo; mustDeliver?: boolean },
   ) => Promise<void>;
   workLedger: WorkLedgerSink;
-  getWorkHorizon: () => Promise<number | null>;
+  getWorkHorizon: (now?: number) => Promise<number | null>;
   hasBlockingWork: () => Promise<boolean>;
   markSandboxDirty: () => Promise<void>;
   setSandboxDeclaredClean: (clean: boolean) => Promise<void>;
@@ -149,9 +172,11 @@ export function createSandboxThreadHostDeps(
   }
 
   return {
-    scheduleEviction: (timestampMs) =>
-      call("scheduleEviction", (host) => host.scheduleSandboxEviction({ timestampMs })),
-    cancelEviction: () => call("cancelEviction", (host) => host.cancelSandboxEviction()),
+    // The alarm's chained sweep. Swallowed like every other fire-and-forget
+    // back-call: the tick above already ran, and the alarm's fallback re-arm
+    // must still get its chance to give the thread another wake.
+    sweepWorkLedger: (resolution) =>
+      call("sweepWorkLedger", (host) => host.sweepSandboxWorkLedger({ resolution })),
     deliverSystemReminder: async (body, mode, options) => {
       const result = await attempt("deliverSystemReminder", (host) =>
         host.deliverSystemReminderFromSandbox({
@@ -201,7 +226,12 @@ export function createSandboxThreadHostDeps(
     // `null` = "no ledger wake to fold in". The alarm's other components
     // (watcher polls, the release time) still arm, and the alarm callback's own
     // fallback arm covers a fold that never ran.
-    getWorkHorizon: () => read("getWorkHorizon", (host) => host.getSandboxWorkHorizon(), null),
+    getWorkHorizon: (now) =>
+      read(
+        "getWorkHorizon",
+        (host) => host.getSandboxWorkHorizon(now === undefined ? {} : { now }),
+        null,
+      ),
     // `true` = "assume a child subagent holds this machine". The consequence of
     // a wrong `false` is deleting a shared container out from under a live
     // child; the consequence of a wrong `true` is a sandbox that stays up until
