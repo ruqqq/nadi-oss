@@ -2370,7 +2370,7 @@ export class ThreadComputeService {
     await this.deps.quota?.release();
   }
 
-  isComputeLive(): boolean {
+  async isComputeLive(): Promise<boolean> {
     const state = this.deps.store.getComputeState();
     return Boolean(
       (state?.status === "active" && state.runtimeRef) ||
@@ -2394,7 +2394,9 @@ export class ThreadComputeService {
    * costs at worst one redundant save-work prompt.
    */
   async isComputeLiveOrAcquiring(): Promise<boolean> {
-    return this.isComputeLive() || this.deps.store.getComputeState()?.status === "acquiring";
+    return (
+      (await this.isComputeLive()) || this.deps.store.getComputeState()?.status === "acquiring"
+    );
   }
 
   async destroyRecoverableComputeIfPresent(): Promise<void> {

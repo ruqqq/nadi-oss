@@ -559,13 +559,17 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
   private currentTurnWindDownSystem?: string;
   /**
    * Resolved tool-step budget of the in-flight turn (50 or the coding-work 500).
-   * Stashed in `beforeTurn` because `beforeStep` is synchronous and must wind
-   * down at the SAME budget the turn started on, not recompute a default.
+   * Stashed in `beforeTurn` because the turn must wind down at the SAME budget
+   * it started on, not recompute a default — and because the D1 lookup that
+   * produces it is far too expensive to repeat on every step. (`beforeStep` is
+   * itself `async`; the reason for stashing is cost and turn-stability, NOT an
+   * inability to await. An earlier version of this comment claimed the latter
+   * and misled a later refactor.)
    */
   private currentTurnMaxSteps?: number;
   /** Resolved workbench presence of the in-flight turn, stashed alongside
-   *  `currentTurnMaxSteps` so `beforeStep` can log the wind-down without
-   *  re-deriving it (the D1 lookup that produced it is async; `beforeStep` is not). */
+   *  `currentTurnMaxSteps` so `beforeStep` can log the wind-down without paying
+   *  the D1 lookup that produced it again on every step. */
   private currentTurnHasWorkbench?: boolean;
   private _cachedWorkspaceId?: string;
   /** Memoized MCP connect-readiness. Kicked in the background from `onStart` and
@@ -1431,9 +1435,9 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
         ? sanitizeOpenAIOAuthMessages(preparedMessages)
         : preparedMessages;
 
-    // Resolve the turn's tool-step budget once and stash it: `beforeStep` is
-    // synchronous, so it can't re-read the workbench and must wind down at the
-    // SAME budget this turn started on.
+    // Resolve the turn's tool-step budget once and stash it: the turn must wind
+    // down at the SAME budget it started on, and re-reading the workbench (a D1
+    // lookup) on every step would be far too expensive.
     const maxSteps = this._testMaxToolSteps ?? resolveToolStepBudget(hasWorkbench);
     this.currentTurnMaxSteps = maxSteps;
     this.currentTurnHasWorkbench = hasWorkbench;
@@ -5073,7 +5077,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
         await service.runComputeTick();
         // Backstop: once the environment is gone, any prior "clean" claim no
         // longer applies to it.
-        if (!service.isComputeLive()) {
+        if (!(await service.isComputeLive())) {
           await this.setSandboxDeclaredClean(false);
         }
       } catch (error) {
