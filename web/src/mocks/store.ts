@@ -26,6 +26,7 @@ import type { AgentSettingsResponse, PrivacySettings, WebToolsSettings } from ".
 import type { Skill } from "../skills-api";
 import type { ThreadSummary } from "../threads-api";
 import type { VoiceSettingsResponse } from "../voice-settings-api";
+import type { UserPreferences } from "../user-preferences-api";
 import type { WorkbenchSummary } from "../workbenches-api";
 import { SCENARIOS } from "./scenarios";
 
@@ -107,6 +108,7 @@ export interface MockStore {
   /** Whether the scenario's operator-provided Daytona configuration is complete. */
   daytonaSystemAvailable: boolean;
   voice: VoiceSettingsResponse;
+  preferences: UserPreferences;
   features: {
     feedbackAdmin: boolean;
     /** Workspace-effective background work capability returned by bootstrap. */

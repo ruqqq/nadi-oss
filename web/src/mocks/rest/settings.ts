@@ -1,6 +1,6 @@
 /**
  * `/api/settings/**` — agent defaults, providers, privacy, web tools, voice,
- * sandbox, and GitHub.
+ * sandbox, GitHub, and per-user preferences.
  *
  * Two shapes worth calling out:
  *  - `POST /api/settings/sandbox/test` is parsed as JSON even on a non-2xx, so a
@@ -229,6 +229,18 @@ export const settingsHandlers = [
     const next = store.voice.supported.find((l) => l === input.language);
     if (next) store.voice = { ...store.voice, language: next };
     return HttpResponse.json(store.voice);
+  }),
+
+  http.get("/api/settings/preferences", () => HttpResponse.json(getStore().preferences)),
+
+  http.put("/api/settings/preferences", async ({ request }) => {
+    const store = getStore();
+    const input = (await request.json()) as { showReasoning?: unknown };
+    if (typeof input.showReasoning !== "boolean") {
+      return HttpResponse.json({ error: "showReasoning must be true or false." }, { status: 400 });
+    }
+    store.preferences = { showReasoning: input.showReasoning };
+    return HttpResponse.json(store.preferences);
   }),
 
   // --- sandbox -------------------------------------------------------------

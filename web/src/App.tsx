@@ -111,6 +111,7 @@ import {
   type ReasoningEffort,
   type SettingsProvider,
 } from "./settings-api";
+import { getUserPreferences } from "./user-preferences-api";
 import { deriveNeedsOnboarding, isOnboardingForced, parseOnboardingStep } from "./lib/onboarding";
 import { detectInstallPlatform } from "./lib/install-platform";
 import {
@@ -1722,7 +1723,7 @@ export function ChatApp({
   const [newChatModelInputModalities, setNewChatModelInputModalities] = useState(
     newChatSeed.modelInputModalities,
   );
-  const [agentShowReasoning, setAgentShowReasoning] = useState(newChatSeed.showReasoning);
+  const [agentShowReasoning, setAgentShowReasoning] = useState(true);
   const [newChatReasoningEffort, setNewChatReasoningEffort] = useState(newChatSeed.reasoningEffort);
   const [newChatModelSupportsReasoning, setNewChatModelSupportsReasoning] = useState(
     newChatSeed.modelSupportsReasoning,
@@ -1755,7 +1756,6 @@ export function ChatApp({
         const state = deriveNewChatModelState(settings);
         setNewChatProviders(state.providers);
         setNewChatAnyUsable(state.anyUsableProvider);
-        setAgentShowReasoning(state.showReasoning);
         setNewChatReasoningEffort(state.reasoningEffort);
 
         // The provider/model the user picked for the chat they're composing is
@@ -1779,6 +1779,23 @@ export function ChatApp({
       active = false;
     };
   }, [inSettings]);
+
+  // Display preference, not agent config: it loads on its own rather than
+  // riding the settings fetch, so a settings failure never hides thinking.
+  useEffect(() => {
+    let active = true;
+    void getUserPreferences()
+      .then((prefs) => {
+        if (active) setAgentShowReasoning(prefs.showReasoning);
+      })
+      .catch(() => {
+        // Default (true) already stands; a failed preference read must not
+        // blank the chat.
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (initialProjects.length > 0) {

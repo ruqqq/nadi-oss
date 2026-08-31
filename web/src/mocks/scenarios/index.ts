@@ -433,6 +433,7 @@ function baseExtras(): Pick<
   | "sandbox"
   | "daytonaSystemAvailable"
   | "voice"
+  | "preferences"
 > {
   return {
     invites: {
@@ -453,6 +454,7 @@ function baseExtras(): Pick<
     sandbox: makeSandbox(),
     daytonaSystemAvailable: true,
     voice: { language: "en", supported: ["en", "es", "fr", "de", "ja"] },
+    preferences: { showReasoning: true },
   };
 }
 
@@ -472,6 +474,7 @@ function richExtras(): Pick<
   | "sandbox"
   | "daytonaSystemAvailable"
   | "voice"
+  | "preferences"
 > {
   return {
     ...baseExtras(),

@@ -65,6 +65,7 @@ import { ConnectionsSection } from "./settings/ConnectionsSection";
 import { WorkbenchesSection } from "./settings/WorkbenchesSection";
 import { ProvidersSection } from "./settings/ProvidersSection";
 import { SandboxSection } from "./settings/SandboxSection";
+import { ReasoningDisplaySection } from "./settings/ReasoningDisplaySection";
 import { VoiceSection } from "./settings/VoiceSection";
 import { WebToolsSection } from "./settings/WebToolsSection";
 import { FORM_ACTION_BUTTON, FormActions, PaneFooter, SectionHeading } from "./settings/section-ui";
@@ -398,6 +399,7 @@ function GeneralSection({
   return (
     <>
       <AppearanceSection />
+      <ReasoningDisplaySection />
       <BrowserNotificationsSection />
       {voiceEnabled && <VoiceSection />}
       <PrivacySection consentWorkspaceId={consentWorkspaceId} />
