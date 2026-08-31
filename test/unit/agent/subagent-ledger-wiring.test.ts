@@ -2,6 +2,7 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ThinkThreadAgent } from "../../../src/agent/think-thread-agent";
 import { SubAgent } from "../../../src/agent/subagent";
+import type { SubagentContext } from "../../../src/agent/think-thread-agent";
 import { WorkLedgerStore } from "../../../src/agent/work-ledger-store";
 import {
   SUBAGENT_DEADLINE_MS,
@@ -41,8 +42,6 @@ import {
 vi.mock("../../../src/agent/compute-tools", () => ({
   resolveComputeService: async () => null,
   createComputeTools: () => ({}),
-  scheduleComputeEviction: async () => undefined,
-  cancelComputeEviction: async () => undefined,
 }));
 
 const LEGACY_LEASE_KEY = "subagent:active-runs";
@@ -634,5 +633,76 @@ describe("the reaper must not double-notify", () => {
       expect(self.deliverInjection).not.toHaveBeenCalled();
       expect(await hasBlockingWork(self)).toBe(true);
     });
+  });
+});
+
+/**
+ * H2, and the ONE thing the alarm split could silently lose.
+ *
+ * The compute tick moved to `AgentSandbox.alarm()`, which takes its
+ * `attachedRuntime` from the session inputs it recorded — so the alarm no longer
+ * calls `primeAttachedContext()`. But the SWEEP it chains back into the thread DO
+ * can still reach `openSandbox()` (the `unresolved` case, and `workFacts` /
+ * `getCurrentGeneration`), and a REHYDRATED SubAgent facet has not gone through
+ * `beforeTurn`, so its `subagentContext()` is unpulled and
+ * `attachedRuntimeForThisAgent()` is `undefined`. Unprimed, `resolveIdleDisposition`
+ * does not take the attached no-op arm and the PARENT's shared machine can be
+ * deleted out from under a live child.
+ *
+ * So the prime moved into `sweepSandboxWorkLedger`. Nothing else calls it any
+ * more: the base implementation is a no-op, `alarm-rearm.test.ts`'s host calls
+ * `runWorkLedgerSweep` directly, and the callbacks suite drives the back-call on
+ * a top-level thread. Deleting the prime left all six projects green — which is
+ * the "believed invariant, no detector" shape that let the tick/sweep ordering
+ * break three times. This is the detector.
+ *
+ * RED IF: the `primeAttachedContext()` call is removed from
+ * `sweepSandboxWorkLedger`, is moved AFTER `runWorkLedgerSweep`, or `SubAgent`
+ * stops overriding it to pull the parent context.
+ */
+describe("the alarm's sweep primes a rehydrated SubAgent facet (H2)", () => {
+  const CONTEXT: SubagentContext = {
+    parentThreadId: "thr_parent",
+    workspaceId: "ws_1",
+    agentId: "agent_1",
+    attachedRuntime: { provider: "cloudflare", version: 1, payload: { id: "parent-machine" } },
+  };
+
+  it("attachedRuntimeForThisAgent() is set BY THE TIME the sweep runs", async () => {
+    // Prototyped off the REAL SubAgent, so `primeAttachedContext` and
+    // `attachedRuntimeForThisAgent` are the real overrides (and the private
+    // `subagentContext` the first calls is reachable) rather than stand-ins.
+    const facet = Object.create(SubAgent.prototype) as any;
+    // `defineProperty`, not assignment: `name` is a getter on the SDK's Agent
+    // prototype (the facet name IS the run id), so a plain write throws.
+    Object.defineProperty(facet, "name", { value: "sub_h2" });
+    // The documented seam: skips the real `parentAgent()` facet RPC, and is the
+    // ONLY thing that populates `_attachedRuntime` — through `subagentContext()`,
+    // which is exactly what `primeAttachedContext()` awaits.
+    facet._testSubagentContext = CONTEXT;
+
+    // Observed INSIDE the sweep, not after it: "primed at some point" is not the
+    // invariant — "primed before anything can resolve a sandbox" is.
+    let attachedDuringSweep: unknown = "the sweep never ran";
+    let sweepCalls = 0;
+    facet.runWorkLedgerSweep = async () => {
+      sweepCalls += 1;
+      attachedDuringSweep = facet.attachedRuntimeForThisAgent();
+      return { classified: [], terminalized: [], redelivered: [] };
+    };
+
+    // ANTI-VACUITY: a rehydrated facet genuinely knows nothing about the
+    // parent's machine until something primes it.
+    expect(facet.attachedRuntimeForThisAgent()).toBeUndefined();
+
+    const result = await facet.sweepSandboxWorkLedger({ resolution: { kind: "disabled" } });
+
+    // ANTI-VACUITY: the back-call really succeeded and the sweep really ran —
+    // `sweepSandboxWorkLedger` swallows its own failures, so without these a
+    // sweep that never happened would satisfy nothing and still look fine.
+    expect(result).toEqual({ ok: true, value: null });
+    expect(sweepCalls).toBe(1);
+
+    expect(attachedDuringSweep).toEqual(CONTEXT.attachedRuntime);
   });
 });

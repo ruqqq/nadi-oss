@@ -40,8 +40,6 @@ vi.mock("../../../src/agent/compute-tools", () => ({
     return holder.resolved;
   },
   createComputeTools: () => ({}),
-  scheduleComputeEviction: async () => undefined,
-  cancelComputeEviction: async () => undefined,
 }));
 
 function openRow(overrides?: Partial<WorkRow>): WorkRow {

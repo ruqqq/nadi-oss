@@ -30,8 +30,6 @@ vi.mock("../../../src/db/client", () => ({ registryDb: () => ({}) }));
 vi.mock("../../../src/agent/compute-tools", () => ({
   resolveComputeService: async () => null,
   createComputeTools: () => ({}),
-  scheduleComputeEviction: async () => undefined,
-  cancelComputeEviction: async () => undefined,
 }));
 
 function subagentRow(overrides?: Partial<WorkRow>): WorkRow {

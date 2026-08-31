@@ -30,8 +30,6 @@ const resolved = vi.hoisted(() => ({
 vi.mock("../../../src/agent/compute-tools", () => ({
   resolveComputeService: async () => ({ service: resolved.service }),
   createComputeTools: () => ({}),
-  scheduleComputeEviction: async () => undefined,
-  cancelComputeEviction: async () => undefined,
 }));
 
 function makeService() {

@@ -385,9 +385,9 @@ describe("settled work closes its own ledger row (I-1)", () => {
 });
 
 /**
- * C-1: the reaper piggybacks the thread's SINGLE alarm. `scheduleComputeEviction`
- * is cancel-then-set on one stored schedule id, so anything arming its own alarm
- * for the ledger horizon does not add a wake — it REPLACES the watcher poll.
+ * C-1: the reaper piggybacks the sandbox's SINGLE alarm. A Durable Object has
+ * exactly one, and `setAlarm` SETS it, so anything arming its own alarm for the
+ * ledger horizon does not add a wake — it REPLACES the watcher poll.
  * Since a healthy poll stamps liveness immediately before the horizon is
  * computed, that horizon is always LATER (stamp + 21s vs stamp + 7s), so a
  * separate arm could only ever delay the poll — tripling completion latency.
