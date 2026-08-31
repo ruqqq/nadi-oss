@@ -8,6 +8,7 @@ import {
   type AgentSettingsPatch,
 } from "../db/repositories/agent-settings";
 import { VoiceRepository } from "../db/repositories/voice";
+import { UserPreferencesRepository } from "../db/repositories/user-preferences";
 import { WorkspacePrivacySettingsRepository } from "../db/repositories/workspace-privacy-settings";
 import { WorkspaceRepository } from "../db/repositories/workspaces";
 import {
@@ -80,6 +81,16 @@ export async function routeSettings(
       return withNoStore(await handleGetVoiceSettings(env, session.user.id));
     if (req.method === "PUT")
       return withNoStore(await handlePutVoiceSettings(req, env, session.user.id));
+    return withNoStore(new Response("Method not allowed", { status: 405 }));
+  }
+
+  if (url.pathname === "/api/settings/preferences") {
+    const session = await validateRequestSession(env, req);
+    if (!session) return withNoStore(new Response("Unauthorized", { status: 401 }));
+    if (req.method === "GET")
+      return withNoStore(await handleGetUserPreferences(env, session.user.id));
+    if (req.method === "PUT")
+      return withNoStore(await handlePutUserPreferences(req, env, session.user.id));
     return withNoStore(new Response("Method not allowed", { status: 405 }));
   }
 
@@ -217,6 +228,31 @@ export async function handlePutVoiceSettings(
     now: Date.now(),
   });
   return Response.json({ language: body.language });
+}
+
+export async function handleGetUserPreferences(env: Env, userId: string): Promise<Response> {
+  const showReasoning = await new UserPreferencesRepository(registryDb(env)).getShowReasoning(
+    userId,
+  );
+  // No row is not "off": a user who has never touched the toggle sees thinking.
+  return Response.json({ showReasoning: showReasoning ?? true });
+}
+
+export async function handlePutUserPreferences(
+  req: Request,
+  env: Env,
+  userId: string,
+): Promise<Response> {
+  const body = (await req.json().catch(() => null)) as { showReasoning?: unknown } | null;
+  if (typeof body?.showReasoning !== "boolean") {
+    return Response.json({ error: "showReasoning must be true or false." }, { status: 400 });
+  }
+  await new UserPreferencesRepository(registryDb(env)).setShowReasoning({
+    userId,
+    showReasoning: body.showReasoning,
+    now: Date.now(),
+  });
+  return Response.json({ showReasoning: body.showReasoning });
 }
 
 async function requireOwnerWorkspace(req: Request, env: Env) {

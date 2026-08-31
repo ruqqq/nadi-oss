@@ -31,6 +31,7 @@ const registryTables = [
   "push_subscriptions",
   "user_notification_settings",
   "user_voice_settings",
+  "user_preferences",
   "sessions",
   "archived_message",
   "thread_search_messages",
