@@ -257,7 +257,7 @@ async function startWatchedProcess(
     processId: string;
   };
   expect(execResult.status).toBe("backgrounded");
-  const generation = resolved.service.getGeneration();
+  const generation = await resolved.service.getGeneration();
   if (!generation) throw new Error("expected a provisioned generation nonce");
   return { processId: execResult.processId, generation };
 }
@@ -322,7 +322,7 @@ describe("work ledger (DO integration)", () => {
           // generation is positively KNOWN (an `unknown` generation can never be a
           // reset, so a sweep over it would pass for the wrong reason).
           const openBefore = ledgerOf(instance).listOpen();
-          const generationBefore = (
+          const generationBefore = await (
             await testInstance.resolveComputeServiceForTest()
           )?.service.getGenerationView();
 
@@ -591,7 +591,7 @@ describe("work ledger (DO integration)", () => {
             const resolved = await testInstance.resolveComputeServiceForTest();
             states.push({
               terminal: row?.terminal ?? null,
-              watchers: resolved?.service.listActiveWatchersView().length ?? -1,
+              watchers: (await resolved?.service.listActiveWatchersView())?.length ?? -1,
             });
           }
 

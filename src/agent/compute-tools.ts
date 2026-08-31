@@ -822,7 +822,7 @@ export function buildComputeToolDefs(
           // its `status` is the store's locally-known value, not a fresh
           // provider read. That is exactly what lets the refusal below decide
           // without ever touching the backend.
-          const watchers = service.listActiveWatchersView();
+          const watchers = await service.listActiveWatchersView();
           const watcherEntry = watchers.find((w) => w.processId === input.processId);
           const isWatched = Boolean(watcherEntry);
           const isRunning = watcherEntry?.status === "running";

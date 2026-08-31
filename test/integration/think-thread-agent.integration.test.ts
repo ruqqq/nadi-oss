@@ -1060,7 +1060,7 @@ describe("ThinkThreadAgent spike", () => {
               resolved.service as unknown as { deps: { backgroundLongRunningExec?: boolean } }
             ).deps.backgroundLongRunningExec,
             execResult,
-            activeWatchers: resolved.service.listActiveWatchersView(),
+            activeWatchers: await resolved.service.listActiveWatchersView(),
             runCommandCalls: provider.runCommandCalls,
             startProcessCalls: provider.startProcessCalls,
           };
@@ -1732,7 +1732,7 @@ describe("ThinkThreadAgent spike", () => {
         const resolved = await testInstance.resolveComputeServiceForTest();
         if (!resolved) throw new Error("expected sandbox service");
         const execResult = await resolved.service.exec({ command: "sleep 300", label: "build" });
-        const watchersAfterExec = resolved.service.listActiveWatchersView();
+        const watchersAfterExec = await resolved.service.listActiveWatchersView();
         const listedAfterExec = await resolved.service.execList({ status: "all", limit: 10 });
         const processAfterExec = listedAfterExec.processes.find(
           (process) => process.id === execResult.processId,
@@ -1745,7 +1745,7 @@ describe("ThinkThreadAgent spike", () => {
         now += DEFAULT_MONITOR_POLL_INTERVAL_MS;
         await instance.runSandboxEviction();
 
-        const watchersAfterTick = resolved.service.listActiveWatchersView();
+        const watchersAfterTick = await resolved.service.listActiveWatchersView();
         const listedAfterTick = await resolved.service.execList({ status: "all", limit: 10 });
         const processAfterTick = listedAfterTick.processes.find(
           (process) => process.id === execResult.processId,

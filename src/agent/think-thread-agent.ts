@@ -2445,7 +2445,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
       // construction, and no row exists yet (`registered` is still false), so the
       // outer catch would degrade the spawn to `{ error }`, never roll anything back.
       await resolved?.service.refreshGeneration();
-      const generation = resolved?.service.getGeneration() ?? UNKNOWN_GENERATION;
+      const generation = (await resolved?.service.getGeneration()) ?? UNKNOWN_GENERATION;
       const now = Date.now();
       await this.serializeLeaseMutation(async () =>
         this.workLedger.register({
@@ -3563,7 +3563,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
         JSON.stringify(watch),
       );
 
-      generationBefore = service.getGeneration();
+      generationBefore = await service.getGeneration();
       const rowBefore = this.workLedger.get(processId);
       step(
         "3. read generation + open ledger row",
@@ -3593,16 +3593,14 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
       // not a real negative. Only a settled answer ends the wait: `absent`, or a
       // nonce that actually DIVERGED.
       const probeDeadline = Date.now() + 30_000;
-      let view = service.getGenerationView();
+      let view = await service.getGenerationView();
       const unsettled = (v: CurrentGeneration) =>
         v.kind === "unknown" || (v.kind === "known" && v.nonce === generationBefore);
       while (Date.now() < probeDeadline && unsettled(view)) {
         await sleep(2_000);
-        view = (
+        view = (await (
           await resolveComputeService(this.sandboxHostDeps())
-        )?.service.getGenerationView() ?? {
-          kind: "unknown",
-        };
+        )?.service.getGenerationView()) ?? { kind: "unknown" };
       }
       generationAfter = view.kind === "known" ? view.nonce : null;
       generationState = view.kind;
@@ -3821,7 +3819,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
         watch.watching === true,
         JSON.stringify(watch),
       );
-      generation = service.getGeneration();
+      generation = await service.getGeneration();
       const registeredAt = this.workLedger.get(processId)?.lastAliveAt ?? startedAt;
 
       // Run past the stale window while the watcher polls normally.
@@ -5070,7 +5068,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
     // below — that is the whole point of sampling `alarmArmCount`.
     if (resolved) {
       const service = resolved.service;
-      const armCountBefore = service.alarmArmCount();
+      const armCountBefore = await service.alarmArmCount();
       try {
         await service.runComputeTick();
         // Backstop: once the environment is gone, any prior "clean" claim no
@@ -5084,7 +5082,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
           error: String(error),
         });
       } finally {
-        armed = service.alarmArmCount() > armCountBefore;
+        armed = (await service.alarmArmCount()) > armCountBefore;
       }
     }
     // Own guard: a sweep failure must never prevent the compute tick above from
@@ -5149,8 +5147,8 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
     // fire on schedule, not be pushed out to a full poll interval.
     if (armed) return;
     try {
-      const rawWatcherHorizon = resolved?.service.nextWatcherWakeAt() ?? null;
-      const now = resolved?.service.now() ?? Date.now();
+      const rawWatcherHorizon = (await resolved?.service.nextWatcherWakeAt()) ?? null;
+      const now = (await resolved?.service.now()) ?? Date.now();
       const workHorizon = this.workHorizon(now);
       const watcherHorizon =
         rawWatcherHorizon === null
@@ -5321,7 +5319,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
           ? resolvedService
           : await resolveComputeService(this.sandboxHostDeps());
       const service = resolved?.service ?? null;
-      const view = service?.processReapView(id) ?? null;
+      const view = (await service?.processReapView(id)) ?? null;
       return { label: view?.label ?? id, command: view?.command ?? "", service };
     } catch {
       return { label: id, command: "", service: null };
@@ -5483,7 +5481,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
       // delivery gate" reopens double delivery: this skip is what stops the
       // sweep from delivering out from under a watcher that still owes the
       // same row.
-      if (row.kind === "process" && resolved?.service.hasWatcher(row.id)) continue;
+      if (row.kind === "process" && (await resolved?.service.hasWatcher(row.id))) continue;
       try {
         await this.deliverWorkTerminal({
           id: row.id,
@@ -5552,7 +5550,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
         resolvedService !== undefined
           ? resolvedService
           : await resolveComputeService(this.sandboxHostDeps());
-      return resolved?.service.getGenerationView() ?? { kind: "unknown" };
+      return (await resolved?.service.getGenerationView()) ?? { kind: "unknown" };
     } catch {
       return { kind: "unknown" };
     }
@@ -5620,7 +5618,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
   > {
     const resolved = await resolveComputeService(this.sandboxHostDeps());
     if (!resolved) return [];
-    return resolved.service.listActiveWatchersView();
+    return await resolved.service.listActiveWatchersView();
   }
 
   /**
@@ -6543,7 +6541,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
     const resolved = await resolveComputeService(this.sandboxHostDeps());
     // Widened deliberately: a sandbox still `acquiring` must defer the switch,
     // or it comes up cloned from the OLD workbench with no marker to fix it.
-    return resolved?.service.isComputeLiveOrAcquiring() ?? false;
+    return (await resolved?.service.isComputeLiveOrAcquiring()) ?? false;
   }
 
   /**

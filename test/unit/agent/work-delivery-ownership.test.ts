@@ -233,7 +233,7 @@ describe("delivery ownership is DECLARED, not inferred from the terminal's reaso
         await service.runComputeTick();
         expect(ledger.get(processId)?.terminal).toMatchObject({ reason: "process_exit" });
         expect(ledger.get(processId)?.deliveredAt).toBeNull();
-        expect(service.hasWatcher(processId)).toBe(true);
+        expect(await service.hasWatcher(processId)).toBe(true);
 
         // Same alarm: the sweep sees an owed row. It must YIELD — the watcher
         // owes this row too, delivers a strictly better message (with the output
@@ -253,7 +253,7 @@ describe("delivery ownership is DECLARED, not inferred from the terminal's reaso
         expect(injected).toEqual([]);
         expect(ledger.get(processId)?.deliveredAt).not.toBeNull();
         // ...and the watcher is finally torn down, so it cannot speak again.
-        expect(service.hasWatcher(processId)).toBe(false);
+        expect(await service.hasWatcher(processId)).toBe(false);
       },
     );
   });
@@ -280,7 +280,7 @@ describe("delivery ownership is DECLARED, not inferred from the terminal's reaso
         now.value += WATCH_ABSOLUTE_TIMEOUT_MS + 1_000;
         await service.runComputeTick();
         expect(ledger.get(processId)?.deliveredAt).toBeNull();
-        expect(service.hasWatcher(processId)).toBe(true);
+        expect(await service.hasWatcher(processId)).toBe(true);
 
         // No resolved service: the sweep cannot see the watcher, so it delivers
         // — correctly, since with compute gone it is the row's only voice.
@@ -297,7 +297,7 @@ describe("delivery ownership is DECLARED, not inferred from the terminal's reaso
 
         expect(reminders).toEqual([]);
         expect(injected).toHaveLength(1);
-        expect(service.hasWatcher(processId)).toBe(false);
+        expect(await service.hasWatcher(processId)).toBe(false);
       },
     );
   });

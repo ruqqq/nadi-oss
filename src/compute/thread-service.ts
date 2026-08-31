@@ -385,7 +385,7 @@ export class ThreadComputeService {
    * a fallback that fires while the tick already armed does not add an alarm,
    * it REPLACES a nearer one.
    */
-  alarmArmCount(): number {
+  async alarmArmCount(): Promise<number> {
     return this.armCount;
   }
 
@@ -399,7 +399,7 @@ export class ThreadComputeService {
    * new instance's first touch would overwrite a healthy container's nonce
    * (finding #2).
    */
-  getGeneration(): string | null {
+  async getGeneration(): Promise<string | null> {
     return this.deps.store.getComputeState()?.generation ?? null;
   }
 
@@ -418,7 +418,7 @@ export class ThreadComputeService {
    * dead sandbox. Pinned by "the sweep's generation source never touches the
    * backend" in `watcher-fault.test.ts`.
    */
-  getGenerationView(): CurrentGeneration {
+  async getGenerationView(): Promise<CurrentGeneration> {
     const state = this.deps.store.getComputeState();
     if (state?.generation != null) return { kind: "known", nonce: state.generation };
     if (state?.generationAbsentAt != null)
@@ -504,9 +504,9 @@ export class ThreadComputeService {
    * IDENTICAL row, and two copies of it drift — the generation stamp especially,
    * which is the whole reset signal.
    *
-   * Callers must `await refreshGeneration()` first: `getGeneration()` below is a
-   * store read, and stamping it against an unprobed advertisement is the stale
-   * window this design closes.
+   * Callers must `await refreshGeneration()` first: the generation read below is
+   * a store read (the same one `getGeneration()` exposes), and stamping it
+   * against an unprobed advertisement is the stale window this design closes.
    */
   private buildProcessWorkRow(processId: string, now: number): WorkRow {
     return {
@@ -516,7 +516,7 @@ export class ThreadComputeService {
       lastAliveAt: now,
       staleAfterMs: PROCESS_STALE_AFTER_MS,
       deadlineAt: now + MAX_WATCH_TIMEOUT_MS,
-      generation: this.getGeneration() ?? UNKNOWN_GENERATION,
+      generation: this.deps.store.getComputeState()?.generation ?? UNKNOWN_GENERATION,
       terminal: null,
       deliveredAt: null,
     };
@@ -1699,7 +1699,7 @@ export class ThreadComputeService {
   }
 
   async execWatchList() {
-    return { ok: true as const, watchers: this.listActiveWatchersView() };
+    return { ok: true as const, watchers: await this.listActiveWatchersView() };
   }
 
   /**
@@ -1707,7 +1707,7 @@ export class ThreadComputeService {
    * only — no backend call — so it keeps the reaper's load-bearing property of
    * never blocking or throwing on a dead sandbox.
    */
-  processReapView(processId: string): { label: string; command: string } | null {
+  async processReapView(processId: string): Promise<{ label: string; command: string } | null> {
     const process = this.deps.store.getProcess(processId);
     if (!process) return null;
     return {
@@ -1845,7 +1845,7 @@ export class ThreadComputeService {
    * and a delivery throw skips `deleteWatcher`) is invisible to `listOpen()`,
    * and would otherwise never be polled again.
    */
-  nextWatcherWakeAt(): number | null {
+  async nextWatcherWakeAt(): Promise<number | null> {
     return nextWakeAt(this.deps.store.listWatchers(), null);
   }
 
@@ -1860,7 +1860,7 @@ export class ThreadComputeService {
    * the watcher down. So an owed row that still has one is not stranded — it is
    * spoken for, and the watcher's own `nextPollAt` keeps the alarm armed for it.
    */
-  hasWatcher(processId: string): boolean {
+  async hasWatcher(processId: string): Promise<boolean> {
     return this.deps.store.listWatchers().some((watcher) => watcher.processId === processId);
   }
 
@@ -1869,11 +1869,11 @@ export class ThreadComputeService {
    * can floor `nextWatcherWakeAt()` against the SAME "now" the service (and
    * its tests) use, instead of a real wall clock the tests don't control.
    */
-  now(): number {
+  async now(): Promise<number> {
     return this.deps.now();
   }
 
-  listActiveWatchersView() {
+  async listActiveWatchersView() {
     return this.deps.store.listWatchers().map((watcher) => ({
       processId: watcher.processId,
       label: watcher.label,
@@ -2393,7 +2393,7 @@ export class ThreadComputeService {
    * marker set, nothing ever tears it down or re-clones. Deferring instead
    * costs at worst one redundant save-work prompt.
    */
-  isComputeLiveOrAcquiring(): boolean {
+  async isComputeLiveOrAcquiring(): Promise<boolean> {
     return this.isComputeLive() || this.deps.store.getComputeState()?.status === "acquiring";
   }
 

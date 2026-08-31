@@ -191,7 +191,7 @@ describe("watcher liveness stamping", () => {
 
     const started = await service.execStart({ command: "sleep 60", label: "long" });
     await service.execWatch({ processId: started.processId });
-    const written = service.getGeneration();
+    const written = await service.getGeneration();
     expect(written).not.toBeNull();
 
     // The container OOM'd and came back fresh: same id, empty filesystem, so
@@ -208,7 +208,7 @@ describe("watcher liveness stamping", () => {
 
     // If this still returns the written nonce, the reaper compares a value
     // against itself and sandbox_reset can never fire.
-    expect(service.getGeneration()).toBeNull();
+    expect(await service.getGeneration()).toBeNull();
   });
 
   it("a poll that throws never escapes runComputeTick", async () => {
@@ -443,7 +443,7 @@ describe("sandbox generation nonce persistence (per-container, not per-instance)
 
     const serviceA = makeServiceOnSharedStore({ backend, store, now });
     await serviceA.execStart({ command: "pwd" });
-    const written = serviceA.getGeneration();
+    const written = await serviceA.getGeneration();
     expect(written).not.toBeNull();
     expect(generationWrites(backend)).toBe(1);
 
@@ -455,7 +455,7 @@ describe("sandbox generation nonce persistence (per-container, not per-instance)
     const serviceB = makeServiceOnSharedStore({ backend, store, now });
     await serviceB.execStart({ command: "pwd" });
 
-    expect(serviceB.getGeneration()).toBe(written);
+    expect(await serviceB.getGeneration()).toBe(written);
     expect(generationWrites(backend)).toBe(1);
   });
 
@@ -469,7 +469,7 @@ describe("sandbox generation nonce persistence (per-container, not per-instance)
     // survives active→releasing→recoverable untouched.
     const serviceA = makeServiceOnSharedStore({ backend, store, now });
     await serviceA.execStart({ command: "pwd" });
-    const preRelease = serviceA.getGeneration();
+    const preRelease = await serviceA.getGeneration();
     expect(preRelease).not.toBeNull();
     expect(generationWrites(backend)).toBe(1);
 
@@ -490,9 +490,9 @@ describe("sandbox generation nonce persistence (per-container, not per-instance)
     expect(backend.acquireCalls.at(-1)?.recovery).toBeDefined();
 
     expect(generationWrites(backend)).toBe(2);
-    expect(serviceB.getGeneration()).not.toBeNull();
-    expect(serviceB.getGeneration()).not.toBe(preRelease);
-    expect(store.getComputeState()?.generation).toBe(serviceB.getGeneration());
+    expect(await serviceB.getGeneration()).not.toBeNull();
+    expect(await serviceB.getGeneration()).not.toBe(preRelease);
+    expect(store.getComputeState()?.generation).toBe(await serviceB.getGeneration());
   });
 
   it("REGRESSION (C2): a transient probe failure never licenses a nonce overwrite on a live container", async () => {
@@ -522,7 +522,7 @@ describe("sandbox generation nonce persistence (per-container, not per-instance)
     // there, the read merely failed. Calling that a reset tells the model its
     // work is lost when it is not — strictly worse than saying nothing.
     expect(store.getComputeState()?.generationAbsentAt).toBeNull();
-    expect(serviceA.getGenerationView()).toEqual({ kind: "unknown" });
+    expect(await serviceA.getGenerationView()).toEqual({ kind: "unknown" });
 
     // The blip passes. A later service instance must NOT read that persisted
     // null as "this container has no nonce, write one" — the container is
@@ -543,7 +543,7 @@ describe("sandbox generation nonce persistence (per-container, not per-instance)
 
     const parent = makeServiceOnSharedStore({ backend, store: parentStore, now });
     await parent.execStart({ command: "pwd" });
-    const parentNonce = parent.getGeneration();
+    const parentNonce = await parent.getGeneration();
     expect(generationWrites(backend)).toBe(1);
     const attachedRuntime = parentStore.getComputeState()?.runtimeRef;
     expect(attachedRuntime).toBeDefined();
@@ -572,7 +572,7 @@ describe("sandbox generation nonce persistence (per-container, not per-instance)
     const serviceA = makeServiceOnSharedStore({ backend, store, now });
     const started = await serviceA.execStart({ command: "sleep 60", label: "long" });
     await serviceA.execWatch({ processId: started.processId });
-    const written = serviceA.getGeneration();
+    const written = await serviceA.getGeneration();
     expect(written).not.toBeNull();
 
     // Stand in for the reaper: a completely separate service instance,
@@ -582,8 +582,8 @@ describe("sandbox generation nonce persistence (per-container, not per-instance)
     // (which resolves a fresh service every call) never saw a value and the
     // sandbox_reset branch of `classifyWork` was dead code in production.
     const serviceB = makeServiceOnSharedStore({ backend, store, now });
-    expect(serviceB.getGeneration()).not.toBeNull();
-    expect(serviceB.getGeneration()).toBe(written);
+    expect(await serviceB.getGeneration()).not.toBeNull();
+    expect(await serviceB.getGeneration()).toBe(written);
   });
 
   // The 2026-07-16 live finding: after a destroy/OOM Cloudflare silently hands
@@ -600,7 +600,7 @@ describe("sandbox generation nonce persistence (per-container, not per-instance)
     const serviceA = makeServiceOnSharedStore({ backend, store, now, workLedger: ledger.sink });
     const started = await serviceA.execStart({ command: "sleep 60", label: "long" });
     await serviceA.execWatch({ processId: started.processId });
-    const preWipeNonce = serviceA.getGeneration();
+    const preWipeNonce = await serviceA.getGeneration();
     expect(ledger.rows.get(started.processId)?.generation).toBe(preWipeNonce);
     expect(generationWrites(backend)).toBe(1);
 
@@ -620,7 +620,7 @@ describe("sandbox generation nonce persistence (per-container, not per-instance)
     // evidence — and restored the invariant that a live container carries one.
     // NO re-provision: Cloudflare handed the same working container back.
     const serviceB = makeServiceOnSharedStore({ backend, store, now });
-    const view = serviceB.getGenerationView();
+    const view = await serviceB.getGenerationView();
     expect(view.kind).toBe("known");
     expect(view.kind === "known" && view.nonce).not.toBe(preWipeNonce);
     expect(generationWrites(backend)).toBe(2);
@@ -676,7 +676,7 @@ describe("sandbox generation nonce persistence (per-container, not per-instance)
     expect(
       classifyWork({
         row: ledger.rows.get(doomed.processId)!,
-        currentGeneration: serviceA.getGenerationView(),
+        currentGeneration: await serviceA.getGenerationView(),
         now: 2_100,
       }),
     ).toEqual({ state: "fault", outcome: "fault", reason: "sandbox_reset" });
@@ -700,7 +700,7 @@ describe("sandbox generation nonce persistence (per-container, not per-instance)
     const serviceB = makeServiceOnSharedStore({ backend, store, now });
     const classified = classifyWork({
       row: ledger.rows.get(redone.processId)!,
-      currentGeneration: serviceB.getGenerationView(),
+      currentGeneration: await serviceB.getGenerationView(),
       now: 9_100,
     });
     expect(classified).not.toEqual({ state: "fault", outcome: "fault", reason: "sandbox_reset" });
@@ -737,11 +737,11 @@ describe("sandbox generation nonce persistence (per-container, not per-instance)
     // reset: the row degrades to the under-informative no_liveness path, which
     // is the trade the design takes over a false "your files are gone".
     expect(generationWrites(backend)).toBe(1);
-    expect(serviceA.getGenerationView()).toEqual({ kind: "unknown" });
+    expect(await serviceA.getGenerationView()).toEqual({ kind: "unknown" });
     expect(
       classifyWork({
         row: ledger.rows.get(started.processId)!,
-        currentGeneration: serviceA.getGenerationView(),
+        currentGeneration: await serviceA.getGenerationView(),
         now: 2_000 + PROCESS_STALE_AFTER_MS + 1,
       }),
     ).toEqual({ state: "stale", outcome: "fault", reason: "no_liveness" });
@@ -768,13 +768,13 @@ describe("sandbox generation nonce persistence (per-container, not per-instance)
 
     now.value = 2_000;
     await serviceA.runComputeTick();
-    expect(serviceA.getGenerationView()).toEqual({ kind: "absent", observedAt: 2_000 });
+    expect(await serviceA.getGenerationView()).toEqual({ kind: "absent", observedAt: 2_000 });
 
     // A later probe of the SAME unresolved absence must not manufacture a
     // fresh wipe timestamp — that is what made every later row look reset.
     now.value = 9_000;
     await serviceA.runComputeTick();
-    expect(serviceA.getGenerationView()).toEqual({ kind: "absent", observedAt: 2_000 });
+    expect(await serviceA.getGenerationView()).toEqual({ kind: "absent", observedAt: 2_000 });
   });
 
   /**
@@ -804,7 +804,7 @@ describe("sandbox generation nonce persistence (per-container, not per-instance)
     const serviceA = makeServiceOnSharedStore({ backend, store, now, workLedger: ledger.sink });
     const preWipe = await serviceA.execStart({ command: "sleep 60", label: "pre-wipe" });
     await serviceA.execWatch({ processId: preWipe.processId });
-    const genA = serviceA.getGeneration();
+    const genA = await serviceA.getGeneration();
     expect(genA).not.toBeNull();
 
     // T: a REAL wipe, unwitnessed. The container answers; its nonce is gone.
@@ -817,7 +817,7 @@ describe("sandbox generation nonce persistence (per-container, not per-instance)
     now.value = 3_000;
     const intact = await serviceA.execStart({ command: "sleep 60", label: "post-wipe" });
     await serviceA.execWatch({ processId: intact.processId });
-    const view = serviceA.getGenerationView();
+    const view = await serviceA.getGenerationView();
     expect(view.kind).toBe("known");
     expect(view.kind === "known" && view.nonce).not.toBe(genA);
     expect(ledger.rows.get(intact.processId)?.generation).toBe(
@@ -858,7 +858,7 @@ describe("sandbox generation nonce persistence (per-container, not per-instance)
     const serviceA = makeServiceOnSharedStore({ backend, store, now, workLedger: ledger.sink });
     const doomed = await serviceA.execStart({ command: "sleep 60", label: "pre-wipe" });
     await serviceA.execWatch({ processId: doomed.processId });
-    const genA = serviceA.getGeneration();
+    const genA = await serviceA.getGeneration();
 
     const runtime = store.getComputeState()?.runtimeRef;
     if (runtime) await backend.deletePath(runtime, GENERATION_PATH);
@@ -869,7 +869,7 @@ describe("sandbox generation nonce persistence (per-container, not per-instance)
     const later = await serviceA.execStart({ command: "sleep 60", label: "post-wipe" });
     await serviceA.execWatch({ processId: later.processId });
 
-    const view = serviceA.getGenerationView();
+    const view = await serviceA.getGenerationView();
     expect(view.kind === "known" && view.nonce).not.toBe(genA);
     expect(ledger.rows.get(doomed.processId)?.generation).toBe(genA);
     expect(
@@ -896,7 +896,7 @@ describe("sandbox generation nonce persistence (per-container, not per-instance)
 
     const serviceA = makeServiceOnSharedStore({ backend, store, now, workLedger: ledger.sink });
     await serviceA.execStart({ command: "echo provision", label: "provision" });
-    expect(serviceA.getGeneration()).not.toBeNull();
+    expect(await serviceA.getGeneration()).not.toBeNull();
 
     // The probe cannot get an answer. Nothing was learned.
     backend.listDirectory = async () => {
@@ -906,7 +906,7 @@ describe("sandbox generation nonce persistence (per-container, not per-instance)
     const started = await serviceA.execStart({ command: "sleep 60", label: "blind" });
     await serviceA.execWatch({ processId: started.processId });
 
-    expect(serviceA.getGenerationView()).toEqual({ kind: "unknown" });
+    expect(await serviceA.getGenerationView()).toEqual({ kind: "unknown" });
     expect(ledger.rows.get(started.processId)?.generation).toBe(UNKNOWN_GENERATION);
 
     // Under-informative beats a false fault: never `sandbox_reset`.
@@ -947,12 +947,12 @@ describe("sandbox generation nonce persistence (per-container, not per-instance)
     now.value = 2_000;
     const first = await serviceA.execStart({ command: "sleep 60", label: "first" });
     await serviceA.execWatch({ processId: first.processId });
-    expect(serviceA.getGenerationView()).toEqual({ kind: "absent", observedAt: 2_000 });
+    expect(await serviceA.getGenerationView()).toEqual({ kind: "absent", observedAt: 2_000 });
 
     now.value = 9_000;
     const second = await serviceA.execStart({ command: "sleep 60", label: "second" });
     await serviceA.execWatch({ processId: second.processId });
-    expect(serviceA.getGenerationView()).toEqual({ kind: "absent", observedAt: 2_000 });
+    expect(await serviceA.getGenerationView()).toEqual({ kind: "absent", observedAt: 2_000 });
 
     // The row registered during the absence carries the placeholder, so the
     // preserved `observedAt` cannot fault it either.
@@ -974,7 +974,7 @@ describe("sandbox generation nonce persistence (per-container, not per-instance)
     const serviceA = makeServiceOnSharedStore({ backend, store, now, workLedger: ledger.sink });
     const preWipe = await serviceA.execStart({ command: "sleep 60", label: "pre-wipe" });
     await serviceA.execWatch({ processId: preWipe.processId });
-    const genA = serviceA.getGeneration();
+    const genA = await serviceA.getGeneration();
 
     const runtime = store.getComputeState()?.runtimeRef;
     if (runtime) await backend.deletePath(runtime, GENERATION_PATH);
@@ -992,7 +992,7 @@ describe("sandbox generation nonce persistence (per-container, not per-instance)
     // nonce-less, and the store's `generation` is null.
     now.value = 2_000;
     await serviceA.runComputeTick();
-    expect(serviceA.getGenerationView()).toEqual({ kind: "absent", observedAt: 2_000 });
+    expect(await serviceA.getGenerationView()).toEqual({ kind: "absent", observedAt: 2_000 });
 
     // The model redoes the work on the same live (wiped) container. There is no
     // nonce to observe, so the row carries the placeholder.
@@ -1007,7 +1007,7 @@ describe("sandbox generation nonce persistence (per-container, not per-instance)
     backend.writeFile = originalWriteFile;
     now.value = 4_000;
     await serviceA.runComputeTick();
-    const view = serviceA.getGenerationView();
+    const view = await serviceA.getGenerationView();
     expect(view.kind).toBe("known");
     expect(view.kind === "known" && view.nonce).not.toBe(genA);
 
@@ -1038,7 +1038,7 @@ describe("sandbox generation nonce persistence (per-container, not per-instance)
 
     const serviceA = makeServiceOnSharedStore({ backend, store, now });
     await serviceA.execStart({ command: "pwd" });
-    const oldNonce = serviceA.getGeneration();
+    const oldNonce = await serviceA.getGeneration();
     expect(oldNonce).not.toBeNull();
 
     // The container is destroyed outright (e.g. exec_shutdown, or a discard
@@ -1049,7 +1049,7 @@ describe("sandbox generation nonce persistence (per-container, not per-instance)
     // The next service instance provisions a genuinely NEW container.
     const serviceB = makeServiceOnSharedStore({ backend, store, now });
     await serviceB.execStart({ command: "pwd" });
-    const newNonce = serviceB.getGeneration();
+    const newNonce = await serviceB.getGeneration();
     expect(newNonce).not.toBeNull();
     expect(newNonce).not.toBe(oldNonce);
   });
@@ -1098,13 +1098,13 @@ describe("the sweep's generation source never touches the backend", () => {
     // Provision normally, so the store carries a real nonce and a live runtime.
     const serviceA = makeServiceOnSharedStore({ backend, store, now });
     await serviceA.execStart({ command: "pwd" });
-    const nonce = serviceA.getGeneration();
+    const nonce = await serviceA.getGeneration();
     expect(nonce).not.toBeNull();
 
     // The sweep resolves its OWN service instance over the same store.
     const calls = tripwireBackend(backend);
     const sweepService = makeServiceOnSharedStore({ backend, store, now });
-    expect(sweepService.getGenerationView()).toEqual({ kind: "known", nonce });
+    expect(await sweepService.getGenerationView()).toEqual({ kind: "known", nonce });
     expect(calls).toEqual([]);
 
     // Anti-vacuity: the tripwire is live. The REGISTRATION probe does call the
@@ -1581,7 +1581,7 @@ describe("teardown closes its own ledger rows", () => {
     expect(
       classifyWork({
         row: ledger.rows.get(started.processId)!,
-        currentGeneration: serviceB.getGenerationView(),
+        currentGeneration: await serviceB.getGenerationView(),
         now: 3_000,
       }),
     ).toEqual({ state: "alive" });
@@ -1617,7 +1617,7 @@ describe("teardown closes its own ledger rows", () => {
     expect(
       classifyWork({
         row: ledger.rows.get(started.processId)!,
-        currentGeneration: serviceB.getGenerationView(),
+        currentGeneration: await serviceB.getGenerationView(),
         now: now.value + 60_000,
       }),
     ).toEqual({ state: "alive" });

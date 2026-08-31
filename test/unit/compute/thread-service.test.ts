@@ -571,7 +571,7 @@ describe("ThreadComputeService.listActiveWatchersView output tail", () => {
       now: now.value,
     });
 
-    const views = service.listActiveWatchersView();
+    const views = await service.listActiveWatchersView();
 
     expect(views).toHaveLength(1);
     expect(views[0]).toMatchObject({
@@ -587,7 +587,7 @@ describe("ThreadComputeService.listActiveWatchersView output tail", () => {
     const started = await service.execStart({ command: "sleep 300" });
     await service.execWatch({ processId: started.processId, timeoutMs: 1_000 });
 
-    const views = service.listActiveWatchersView();
+    const views = await service.listActiveWatchersView();
 
     expect(views[0]?.outputTail).toBe("");
   });

@@ -233,9 +233,9 @@ async function computeStateOf(
     try {
       const resolved = await testInstance.resolveComputeServiceForTest();
       if (!resolved) throw new Error("expected compute service");
-      const watched = resolved.service
-        .listActiveWatchersView()
-        .some((watcher) => watcher.processId === processId);
+      const watched = (await resolved.service.listActiveWatchersView()).some(
+        (watcher) => watcher.processId === processId,
+      );
       const { processes } = await resolved.service.execList({ status: "all" });
       const process = processes.find((p) => p.id === processId);
       return { watched, status: process?.status, exitCode: process?.exitCode };

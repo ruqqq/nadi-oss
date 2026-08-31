@@ -211,13 +211,13 @@ describe("runSandboxEviction re-arm gate", () => {
       store: first.store,
       backend: first.backend,
     });
-    const dueBeforeTick = disabled.service.nextWatcherWakeAt();
+    const dueBeforeTick = await disabled.service.nextWatcherWakeAt();
     expect(dueBeforeTick).not.toBeNull();
     now.value += CONFIG.monitorPollIntervalMs;
 
     await disabled.service.runComputeTick();
 
-    expect(disabled.service.nextWatcherWakeAt()).toBeGreaterThan(dueBeforeTick!);
+    expect(await disabled.service.nextWatcherWakeAt()).toBeGreaterThan(dueBeforeTick!);
   });
 
   it("arms the fallback when the compute tick THROWS before arming", async () => {
