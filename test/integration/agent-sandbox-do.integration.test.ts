@@ -83,6 +83,7 @@ describe("AgentSandbox durable object", () => {
     const result = await stub(threadId).runCommand({
       threadId,
       command: "echo hello",
+      supportsProcessMonitor: true,
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -99,8 +100,15 @@ describe("AgentSandbox durable object", () => {
     const threadId = "thr_sbx_state";
     await seedComputeEnabledThread(threadId);
 
-    await stub(threadId).runCommand({ threadId, command: "echo hi" });
-    const view = await stub(threadId).getComputeStateView({ threadId });
+    await stub(threadId).runCommand({
+      threadId,
+      command: "echo hi",
+      supportsProcessMonitor: true,
+    });
+    const view = await stub(threadId).getComputeStateView({
+      threadId,
+      supportsProcessMonitor: true,
+    });
     expect(view.ok).toBe(true);
     if (!view.ok) return;
     expect(view.value?.status).toBe("active");
@@ -110,7 +118,10 @@ describe("AgentSandbox durable object", () => {
     const threadId = "thr_sbx_empty";
     await seedComputeEnabledThread(threadId);
 
-    const view = await stub(threadId).getComputeStateView({ threadId });
+    const view = await stub(threadId).getComputeStateView({
+      threadId,
+      supportsProcessMonitor: true,
+    });
     expect(view.ok).toBe(true);
     if (!view.ok) return;
     expect(view.value).toBeNull();
@@ -120,9 +131,63 @@ describe("AgentSandbox durable object", () => {
     const result = await stub("thr_missing").runCommand({
       threadId: "thr_missing",
       command: "echo hello",
+      supportsProcessMonitor: true,
     });
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(typeof result.error.code).toBe("string");
+  });
+
+  /**
+   * The caller's `supportsProcessMonitor` must reach the resolved service. It
+   * is the single flag that admits background work, and getting it wrong is
+   * SILENT: with it false `execWatch` refuses, long-running exec is
+   * backgrounded without a watcher, and watcher polling returns nothing — the
+   * tool surface merely changes shape, so a suite that never asserts on it
+   * stays green while the feature is off.
+   *
+   * `execWatch` is the discriminator because its gate
+   * (`thread-service.ts:1660`) runs BEFORE any process lookup: with the flag
+   * false an unknown process id yields `compute_process_monitor_unavailable`,
+   * and with it true the SAME call gets as far as `process_missing`. So the
+   * two outcomes cannot both be produced by a hardcoded value.
+   *
+   * Reached through `runInDurableObject` on the DO's own private
+   * `resolveService` — a PRODUCTION method (`runCommand` uses it), not a
+   * test-only RPC — which is this repo's existing way into DO internals.
+   */
+  describe("supportsProcessMonitor reaches the resolved service", () => {
+    async function watchError(threadId: string, supportsProcessMonitor: boolean) {
+      await seedComputeEnabledThread(threadId);
+      return await runInDurableObject(stub(threadId), async (instance) => {
+        const resolved = await (
+          instance as unknown as {
+            resolveService: (
+              id: string,
+              options: { supportsProcessMonitor: boolean },
+            ) => Promise<{
+              service: { execWatch: (i: { processId: string }) => Promise<unknown> };
+            }>;
+          }
+        ).resolveService(threadId, { supportsProcessMonitor });
+        try {
+          await resolved.service.execWatch({ processId: "proc_does_not_exist" });
+          return "no_error";
+        } catch (error) {
+          return String(error);
+        }
+      });
+    }
+
+    it("ADMITS the process monitor when the caller says true", async () => {
+      const message = await watchError("thr_sbx_monitor_on", true);
+      expect(message).not.toContain("compute_process_monitor_unavailable");
+      expect(message).toContain("process_missing");
+    });
+
+    it("REFUSES the process monitor when the caller says false", async () => {
+      const message = await watchError("thr_sbx_monitor_off", false);
+      expect(message).toContain("compute_process_monitor_unavailable");
+    });
   });
 });

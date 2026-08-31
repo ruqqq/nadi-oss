@@ -38,8 +38,22 @@ export class AgentSandbox extends DurableObject<Env> {
     return createSandboxThreadHostDeps(this.env, threadId);
   }
 
-  /** Builds the compute service against THIS DO's storage. */
-  private async resolveService(threadId: string) {
+  /**
+   * Builds the compute service against THIS DO's storage.
+   *
+   * `supportsProcessMonitor` is a REQUIRED caller-supplied value, never a
+   * default. It is the flag that admits background work at all: with it false
+   * `execWatch` throws `compute_process_monitor_unavailable`
+   * (`thread-service.ts:1660`), a long-running `exec` is backgrounded WITHOUT a
+   * watcher (`:1189`), and `autoWatchRunningProcesses` returns an empty list
+   * (`:1893`). None of that FAILS — the tool surface merely changes shape — so a
+   * wrong value here turns background work off silently, with every test still
+   * green. Making it required is what stops a caller acquiring that behaviour by
+   * forgetting to state it; the thread DO's real value is
+   * `ThinkThreadAgent.processMonitorEnabled()`, threaded through
+   * `sandboxHostDeps()`.
+   */
+  private async resolveService(threadId: string, options: { supportsProcessMonitor: boolean }) {
     return resolveComputeService({
       env: this.env,
       threadId,
@@ -50,18 +64,22 @@ export class AgentSandbox extends DurableObject<Env> {
         return { workspaceId: thread.workspaceId, agentId: thread.agentId };
       },
       ...this.threadHostDeps(threadId),
-      supportsProcessMonitor: false,
+      supportsProcessMonitor: options.supportsProcessMonitor,
     });
   }
 
   async runCommand(input: {
     threadId: string;
     command: string;
+    /** Required — see {@link resolveService}. The caller states it; no default. */
+    supportsProcessMonitor: boolean;
     cwd?: string;
     timeoutMs?: number;
   }): Promise<SandboxCallResult<{ exitCode: number; stdout: string; stderr: string }>> {
     try {
-      const resolved = await this.resolveService(input.threadId);
+      const resolved = await this.resolveService(input.threadId, {
+        supportsProcessMonitor: input.supportsProcessMonitor,
+      });
       if (!resolved) return failure("compute_disabled", "compute is not enabled for this thread");
       const result = await resolved.service.execRun({
         command: input.command,
@@ -87,9 +105,13 @@ export class AgentSandbox extends DurableObject<Env> {
 
   async getComputeStateView(input: {
     threadId: string;
+    /** Required — see {@link resolveService}. The caller states it; no default. */
+    supportsProcessMonitor: boolean;
   }): Promise<SandboxCallResult<{ status: string; provider: string | null } | null>> {
     try {
-      const resolved = await this.resolveService(input.threadId);
+      const resolved = await this.resolveService(input.threadId, {
+        supportsProcessMonitor: input.supportsProcessMonitor,
+      });
       if (!resolved) return failure("compute_disabled", "compute is not enabled for this thread");
       // `ThreadComputeService` exposes no public state getter — the store it
       // wraps holds `getComputeState()`. Rebuilding it against the SAME
