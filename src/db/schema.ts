@@ -932,6 +932,22 @@ export const userVoiceSettings = sqliteTable("user_voice_settings", {
   updatedAt: integer("updated_at").notNull(),
 });
 
+/**
+ * Per-user display preferences. `showReasoning` decides only whether the
+ * model's thinking is DISPLAYED — `agents.reasoningEffort` decides whether the
+ * model thinks at all, and the two are deliberately unrelated. This is a
+ * viewer preference, not agent or thread state: two people looking at the same
+ * thread may reasonably want different answers.
+ */
+export const userPreferences = sqliteTable("user_preferences", {
+  userId: text("user_id")
+    .primaryKey()
+    .references(() => users.id),
+  showReasoning: integer("show_reasoning", { mode: "boolean" }).notNull().default(true),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+});
+
 export const mcpServers = sqliteTable("mcp_servers", {
   id: text("id").primaryKey(),
   workspaceId: text("workspace_id")
