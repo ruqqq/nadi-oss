@@ -6,6 +6,7 @@ import * as schema from "../../src/db/schema";
 import { applyRegistryTestSchema } from "./helpers/registry";
 import { WorkspaceRepository } from "../../src/db/repositories/workspaces";
 import { AutomatonRepository } from "../../src/db/repositories/automata";
+import { WorkbenchRepository } from "../../src/db/repositories/workbenches";
 import { startAutomatonRun } from "../../src/automata/fire-due";
 import {
   AutomatonService,
@@ -393,6 +394,86 @@ describe("AutomatonService", () => {
     expect(updated.agentId).toBe(seeded.agentId);
   });
 
+  // The project-default fallback, at the SAME precedence thread creation uses.
+  // `agent_id` is NOT NULL, so nothing can mean "inherit at fire time" any
+  // more - the inheritance has to happen here, at write time. Lose it and an
+  // automaton created under a project silently runs on the workspace's agent,
+  // against a different set of repositories and secrets, with nothing to say so.
+  it("falls back to the PROJECT's default agent, not the workspace agent, on create", async () => {
+    const seeded = await seedWorkspace("wb-project-default");
+    const wbA = await seedWorkbench(seeded.workspaceId);
+    const projectId = await seedProject(seeded.workspaceId, wbA);
+    const row = await service(seeded).create({
+      name: "wb",
+      prompt: "p",
+      timezone: "UTC",
+      schedule: { kind: "hourly", minute: 0 },
+      projectId,
+    });
+    expect(row.agentId).toBe(wbA);
+    expect(row.agentId).not.toBe(seeded.agentId);
+  });
+
+  it("prefers an explicit agent over the project's default on create", async () => {
+    const seeded = await seedWorkspace("wb-explicit-over-default");
+    const wbDefault = await seedWorkbench(seeded.workspaceId);
+    const wbExplicit = await seedWorkbench(seeded.workspaceId);
+    const projectId = await seedProject(seeded.workspaceId, wbDefault);
+    const row = await service(seeded).create({
+      name: "wb",
+      prompt: "p",
+      timezone: "UTC",
+      schedule: { kind: "hourly", minute: 0 },
+      projectId,
+      workbenchId: wbExplicit,
+    });
+    expect(row.agentId).toBe(wbExplicit);
+  });
+
+  it("degrades to the workspace agent when the project's default is archived", async () => {
+    const seeded = await seedWorkspace("wb-default-archived");
+    const wbA = await seedWorkbench(seeded.workspaceId);
+    const projectId = await seedProject(seeded.workspaceId, wbA);
+    // Archived AFTER being set as the default: the caller never asked for it,
+    // so this must degrade rather than 404 the write.
+    await new WorkbenchRepository(db()).archive(wbA, now + 1);
+    const row = await service(seeded).create({
+      name: "wb",
+      prompt: "p",
+      timezone: "UTC",
+      schedule: { kind: "hourly", minute: 0 },
+      projectId,
+    });
+    expect(row.agentId).toBe(seeded.agentId);
+  });
+
+  it("resolves a null agent on update against the project the patch leaves behind", async () => {
+    const seeded = await seedWorkspace("wb-update-default");
+    const wbExplicit = await seedWorkbench(seeded.workspaceId);
+    const wbOldDefault = await seedWorkbench(seeded.workspaceId);
+    const wbNewDefault = await seedWorkbench(seeded.workspaceId);
+    const oldProject = await seedProject(seeded.workspaceId, wbOldDefault);
+    const newProject = await seedProject(seeded.workspaceId, wbNewDefault);
+
+    const created = await service(seeded).create({
+      name: "wb",
+      prompt: "p",
+      timezone: "UTC",
+      schedule: { kind: "hourly", minute: 0 },
+      projectId: oldProject,
+      workbenchId: wbExplicit,
+    });
+    expect(created.agentId).toBe(wbExplicit);
+
+    // Clearing the agent and moving the project in ONE update must land on the
+    // NEW project's default, not the old one's and not the workspace agent.
+    const updated = await service(seeded).update(created.id, {
+      projectId: newProject,
+      workbenchId: null,
+    });
+    expect(updated.agentId).toBe(wbNewDefault);
+  });
+
   it("rejects a dangling agent id", async () => {
     const seeded = await seedWorkspace("wb-bad");
     await expect(
@@ -436,9 +517,15 @@ describe("AutomatonService", () => {
   // own agent is authoritative, and the migration resolved the one-time
   // inheritance into `agent_id` itself. An unattended run must not move onto a
   // different agent's repositories because someone edited the project.
-  it("fires against its own agent, ignoring the project default", async () => {
+  // The project default is resolved ONCE, when the automaton is written, and is
+  // NOT consulted again at fire time. Both halves matter: the run must land on
+  // the default the automaton was created under, and a later edit to the
+  // project must not silently move an unattended run onto different
+  // repositories and secrets.
+  it("fires against the project default it was created under, frozen at write time", async () => {
     const seeded = await seedWorkspace("wb-fire-inherit");
     const wbA = await seedWorkbench(seeded.workspaceId);
+    const wbLater = await seedWorkbench(seeded.workspaceId);
     const projectId = await seedProject(seeded.workspaceId, wbA);
     const created = await service(seeded).create({
       name: "wb",
@@ -447,6 +534,14 @@ describe("AutomatonService", () => {
       schedule: { kind: "hourly", minute: 0 },
       projectId,
     });
+    expect(created.agentId).toBe(wbA);
+
+    // Move the project's default AFTER the automaton exists.
+    await db()
+      .update(schema.projects)
+      .set({ defaultAgentId: wbLater })
+      .where(eq(schema.projects.id, projectId));
+
     const automaton = await new AutomatonRepository(db()).getById(created.id);
     const { threadId } = await startAutomatonRun(env, db(), automaton!, {
       trigger: "manual",
@@ -457,7 +552,7 @@ describe("AutomatonService", () => {
       .from(schema.threadIndex)
       .where(eq(schema.threadIndex.id, threadId))
       .get();
-    expect(thread!.agentId).toBe(seeded.agentId);
+    expect(thread!.agentId).toBe(wbA);
   });
 
   it("creates a once automaton with nextDueAt equal to runAt", async () => {

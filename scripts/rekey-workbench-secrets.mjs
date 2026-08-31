@@ -25,8 +25,27 @@
 //              its new name before the old key is removed; a value that fails
 //              is REPORTED AND LEFT ALONE, never forced.
 //   --verify   after the migration: proves every name in `agent_secret_names`
-//              decrypts under its agent-scoped KV name, and that no
-//              `sbxenv-env:` key is left behind.
+//              decrypts under its agent-scoped KV name, and that no UNEXPECTED
+//              `sbxenv-env:` key is left behind. The keys the collision policy
+//              deliberately keeps are reconstructed from the same rule that
+//              kept them and reported under `expectedLeftover`, which is
+//              informational — so a red verify always means something real.
+//
+// IF --apply IS INTERRUPTED: RUN THE SAME COMMAND AGAIN.
+//
+//     ... --apply --config <wrangler config> --remote
+//
+// It snapshots its write list into `workspaces/<id>/rekey-plan` BEFORE the
+// first write and re-uses it, so a resumed run reaches the same end state as an
+// uninterrupted one. Re-planning from a half-migrated store would NOT: once the
+// adopting workbench's secrets are on the legacy agent they are
+// indistinguishable from its own, and the copy pass would push them out to
+// every other agent — variables a thread on that workbench never saw.
+//
+// Nothing is lost at any crash point. Both keys exist until the source delete,
+// the index is written twice per secret (so it never names a deleted key), and
+// a run with failures KEEPS its plan so the retry redoes the same list. The
+// plan holds variable names only, never a plaintext.
 //
 // Requires SECRETS_STORE_KEK_RAW_B64 (the same value the Worker holds) and a
 // wrangler target:
@@ -113,6 +132,14 @@ export const secretAad = (workspaceId, name) => `${workspaceId}:${name}`;
 export const dekKey = (workspaceId) => `workspaces/${workspaceId}/dek`;
 export const secretKey = (workspaceId, name) => `workspaces/${workspaceId}/secrets/${name}`;
 export const indexKey = (workspaceId) => `workspaces/${workspaceId}/secret-index`;
+/**
+ * The write list an interrupted `--apply` left behind. Holds variable NAMES
+ * only — never a plaintext — and the names are already in the secret index, so
+ * it exposes nothing new. Deliberately NOT under `buildWorkspaceSecretPrefix`,
+ * for the same reason the index isn't: a backfill must not ingest it as if it
+ * were a secret.
+ */
+export const planKey = (workspaceId) => `workspaces/${workspaceId}/rekey-plan`;
 
 // ---------------------------------------------------------------- mapping
 
@@ -127,13 +154,7 @@ export const indexKey = (workspaceId) => `workspaces/${workspaceId}/secret-index
  *     created_at, then id) adopts that agent's id;
  *   - every other workbench becomes `agt_<workbenchId>`.
  */
-export function deriveAgentIdForWorkbench(agents, workbenches) {
-  const byWorkspace = new Map();
-  for (const workbench of workbenches) {
-    const list = byWorkspace.get(workbench.workspace_id) ?? [];
-    list.push(workbench);
-    byWorkspace.set(workbench.workspace_id, list);
-  }
+export function legacyAgentByWorkspace(agents) {
   const legacyByWorkspace = new Map();
   for (const agent of [...agents].sort(
     (left, right) => left.created_at - right.created_at || compare(left.id, right.id),
@@ -142,6 +163,17 @@ export function deriveAgentIdForWorkbench(agents, workbenches) {
       legacyByWorkspace.set(agent.workspace_id, agent.id);
     }
   }
+  return legacyByWorkspace;
+}
+
+export function deriveAgentIdForWorkbench(agents, workbenches) {
+  const byWorkspace = new Map();
+  for (const workbench of workbenches) {
+    const list = byWorkspace.get(workbench.workspace_id) ?? [];
+    list.push(workbench);
+    byWorkspace.set(workbench.workspace_id, list);
+  }
+  const legacyByWorkspace = legacyAgentByWorkspace(agents);
 
   const mapping = new Map();
   for (const [workspaceId, list] of byWorkspace) {
@@ -166,6 +198,32 @@ export function deriveAgentIdForWorkbench(agents, workbenches) {
 
 function compare(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/**
+ * Migration 0067's precondition: every workspace that has workbenches must
+ * already have an agent.
+ *
+ * A workspace with workbenches and NO agent inserts nothing at 0067's step 3 —
+ * the `JOIN __wb_legacy_agent` matches no row — so its workbenches never become
+ * agents, and step 10's rebuild of `agent_repositories` then fails its FK and
+ * takes the WHOLE migration batch down with it. It fails loudly, which is the
+ * right direction, but the operator should learn it from a read-only --plan
+ * rather than from a half-applied migration on production D1.
+ *
+ * Returns the offending workspace ids, with the workbenches that would be
+ * stranded.
+ */
+export function workspacesMissingAnAgent(agents, workbenches) {
+  const withAgent = new Set(agents.map((agent) => agent.workspace_id));
+  const stranded = new Map();
+  for (const workbench of workbenches) {
+    if (withAgent.has(workbench.workspace_id)) continue;
+    const list = stranded.get(workbench.workspace_id) ?? [];
+    list.push(workbench.id);
+    stranded.set(workbench.workspace_id, list);
+  }
+  return [...stranded].map(([workspaceId, workbenchIds]) => ({ workspaceId, workbenchIds }));
 }
 
 /**
@@ -203,6 +261,7 @@ export async function rekeyWorkspace({ store, kek, workspaceId, mapping, apply }
     failed: [],
     unmappedWorkbenches: [],
     skipped: null,
+    resumed: false,
   };
 
   const dekRaw = await store.get(dekKey(workspaceId));
@@ -251,8 +310,11 @@ export async function rekeyWorkspace({ store, kek, workspaceId, mapping, apply }
     byWorkbench.set(parsed.scopeId, list);
   }
 
+  // newName -> { plaintext, updatedAt, deleteSource }. `deleteSource` is the
+  // key this value came FROM and may be removed once the new one is proven
+  // readable; null for a copy of a legacy-agent secret, whose source key stays
+  // exactly where it is.
   const writes = new Map();
-  const deletes = new Set();
 
   for (const [workbenchId, secrets] of byWorkbench) {
     const target = mapping.get(workbenchId);
@@ -293,8 +355,12 @@ export async function rekeyWorkspace({ store, kek, workspaceId, mapping, apply }
         });
         continue;
       }
-      writes.set(newName, { plaintext, updatedAt: secret.updatedAt });
-      deletes.add(secret.oldName);
+      writes.set(newName, {
+        plaintext,
+        sourceName: secret.oldName,
+        updatedAt: secret.updatedAt,
+        deleteSource: true,
+      });
       report.moved.push({ from: secret.oldName, to: newName });
     }
   }
@@ -322,14 +388,103 @@ export async function rekeyWorkspace({ store, kek, workspaceId, mapping, apply }
         });
         continue;
       }
-      writes.set(newName, { plaintext, updatedAt: index.entries[oldName].updated_at });
+      writes.set(newName, {
+        plaintext,
+        sourceName: oldName,
+        updatedAt: index.entries[oldName].updated_at,
+        deleteSource: false,
+      });
       report.copiedFromLegacyAgent.push({ from: oldName, to: newName });
     }
   }
 
   if (!apply) return report;
 
-  for (const [newName, { plaintext, updatedAt }] of writes) {
+  // THE PLAN IS SNAPSHOTTED BEFORE THE FIRST WRITE, and re-used if one is
+  // already there.
+  //
+  // Without it a resumed run computes a DIFFERENT plan from the half-migrated
+  // store and produces a different end state — proven by
+  // `is resumable ...` in the unit tests. The legacy-agent copy pass reads
+  // "the secrets the legacy agent holds", and once the first run has moved the
+  // adopting workbench's secrets ONTO the legacy agent those become
+  // indistinguishable from its own, so the re-run copies them out to every
+  // other agent. Pre-migration, a thread on workbench B never saw workbench A's
+  // variables; that copy would invent one.
+  //
+  // Names only, never plaintext: each value is re-read from `sourceName` when
+  // it is written.
+  const storedPlan = await store.get(planKey(workspaceId));
+  if (storedPlan !== null) {
+    const plan = JSON.parse(storedPlan);
+    report.resumed = true;
+    report.moved = [];
+    report.copiedFromLegacyAgent = [];
+    writes.clear();
+    for (const entry of plan.writes) {
+      const sourceRaw = await store.get(secretKey(workspaceId, entry.sourceName));
+      if (sourceRaw === null) {
+        // Its source is gone, which only happens after that entry completed.
+        continue;
+      }
+      let plaintext;
+      try {
+        plaintext = await decrypt(
+          dek,
+          JSON.parse(sourceRaw).ciphertext,
+          secretAad(workspaceId, entry.sourceName),
+        );
+      } catch (error) {
+        report.failed.push({
+          name: entry.sourceName,
+          stage: "decrypt",
+          error: String(error?.message ?? error),
+        });
+        continue;
+      }
+      writes.set(entry.newName, { ...entry, plaintext });
+      (entry.deleteSource ? report.moved : report.copiedFromLegacyAgent).push({
+        from: entry.sourceName,
+        to: entry.newName,
+      });
+    }
+  } else {
+    await store.put(
+      planKey(workspaceId),
+      JSON.stringify({
+        version: 1,
+        writes: [...writes].map(([newName, entry]) => ({
+          newName,
+          sourceName: entry.sourceName,
+          deleteSource: entry.deleteSource,
+          updatedAt: entry.updatedAt,
+        })),
+      }),
+    );
+  }
+
+  const writeIndex = () => store.put(indexKey(workspaceId), JSON.stringify(index));
+
+  // ONE SECRET AT A TIME, index persisted twice per secret. The index is not a
+  // listing convenience — `ComputeEnvSecretsStore.listAgentNames` resolves the
+  // env vars a sandbox is injected with FROM it, so a value that is present but
+  // unindexed is a value that never reaches the box.
+  //
+  // The two writes give every crash point a benign state:
+  //   * after the value, before its index entry -> the value is orphaned but
+  //     its SOURCE is still present and still indexed, so nothing is lost and a
+  //     re-run redoes it;
+  //   * after the index entry, before the delete -> both keys exist and both
+  //     are indexed; the new one already resolves;
+  //   * after the delete -> the source is gone from KV and from the index
+  //     together.
+  // What is never produced is an index entry naming a key that was deleted.
+  //
+  // That also makes --apply RESUMABLE: re-running it sees only the sources that
+  // are still in the index, and re-encrypting an already-copied value is
+  // idempotent (same plaintext, fresh IV). Recovery from a crash is the same
+  // command, re-run.
+  for (const [newName, { plaintext, updatedAt, deleteSource, sourceName }] of writes) {
     const record = {
       ciphertext: await encrypt(dek, plaintext, secretAad(workspaceId, newName)),
       dek_version: 1,
@@ -340,9 +495,11 @@ export async function rekeyWorkspace({ store, kek, workspaceId, mapping, apply }
     // removed. A write that landed but cannot be read back is the one failure
     // that would otherwise be silent and unrecoverable.
     try {
+      const raw = await store.get(secretKey(workspaceId, newName));
+      if (raw === null) throw new Error("write did not land");
       const roundTrip = await decrypt(
         dek,
-        JSON.parse(await store.get(secretKey(workspaceId, newName))).ciphertext,
+        JSON.parse(raw).ciphertext,
         secretAad(workspaceId, newName),
       );
       if (roundTrip !== plaintext) throw new Error("round-trip mismatch");
@@ -352,29 +509,50 @@ export async function rekeyWorkspace({ store, kek, workspaceId, mapping, apply }
         stage: "verify",
         error: String(error?.message ?? error),
       });
-      // Keep the source: do NOT delete anything this value came from.
-      for (const entry of report.moved) {
-        if (entry.to === newName) deletes.delete(entry.from);
-      }
+      // The source is NOT deleted and NOT de-indexed: it is still the only
+      // readable copy. The unreadable new key is left for a human to look at
+      // rather than being indexed, so nothing tries to inject it.
       continue;
     }
     index.entries[newName] = { updated_at: updatedAt };
+    await writeIndex();
+
+    if (deleteSource) {
+      await store.delete(secretKey(workspaceId, sourceName));
+      delete index.entries[sourceName];
+      await writeIndex();
+    }
   }
 
-  for (const oldName of deletes) {
-    await store.delete(secretKey(workspaceId, oldName));
-    delete index.entries[oldName];
-  }
-  await store.put(indexKey(workspaceId), JSON.stringify(index));
+  // Last, and only once every entry has been dealt with: the plan is the record
+  // of unfinished work, so it outlives anything that could still need redoing.
+  // A run that left failures keeps it, so the re-run after a repair picks up
+  // exactly the same list.
+  if (report.failed.length === 0) await store.delete(planKey(workspaceId));
   return report;
 }
 
 /**
  * After the migration: every name in `agent_secret_names` must decrypt under
- * `sbxenv-ag:<agentId>:<name>`, and no `sbxenv-env:` key may remain.
+ * `sbxenv-ag:<agentId>:<name>`, and no UNEXPECTED `sbxenv-env:` key may remain.
+ *
+ * "Unexpected" is load-bearing. The collision policy DELIBERATELY leaves an
+ * `sbxenv-env:` key in place when the legacy agent already held that variable
+ * name: the agent's value won at resolution, and deleting the workbench's copy
+ * would destroy the only copy of a value nobody asked to lose. Reporting those
+ * as failures would mean any workspace with a single collision gets a red
+ * verify on a CORRECT migration — which teaches the operator to ignore this
+ * step, precisely when it is the only thing standing between them and an
+ * unrecoverable secret.
+ *
+ * So they are reconstructed from the same rule that kept them, using
+ * `legacyAgentId` (the workspace's earliest agent — the same pick
+ * `deriveAgentIdForWorkbench` makes), and reported under `expectedLeftover`,
+ * which is informational. `leftover` keeps only keys nothing explains, and a
+ * red verify means something real.
  */
-export async function verifyWorkspace({ store, kek, workspaceId, secretNameRows }) {
-  const report = { workspaceId, verified: [], failed: [], leftover: [] };
+export async function verifyWorkspace({ store, kek, workspaceId, secretNameRows, legacyAgentId }) {
+  const report = { workspaceId, verified: [], failed: [], leftover: [], expectedLeftover: [] };
   const dekRaw = await store.get(dekKey(workspaceId));
   if (dekRaw === null) return report;
   const dek = await importRawKey(
@@ -383,8 +561,20 @@ export async function verifyWorkspace({ store, kek, workspaceId, secretNameRows 
   const indexRaw = await store.get(indexKey(workspaceId));
   const index = indexRaw === null ? { entries: {} } : JSON.parse(indexRaw);
 
+  // The variable names the legacy agent holds. A surviving environment-scoped
+  // key for one of these is the collision policy working as designed.
+  const legacyAgentVars = new Set();
+  if (legacyAgentId) {
+    for (const name of Object.keys(index.entries)) {
+      const parsed = parseScopedName(AG_PREFIX, name);
+      if (parsed?.scopeId === legacyAgentId) legacyAgentVars.add(parsed.varName);
+    }
+  }
   for (const name of Object.keys(index.entries)) {
-    if (name.startsWith(ENV_PREFIX)) report.leftover.push(name);
+    const parsed = parseScopedName(ENV_PREFIX, name);
+    if (parsed === null) continue;
+    if (legacyAgentVars.has(parsed.varName)) report.expectedLeftover.push(name);
+    else report.leftover.push(name);
   }
   for (const row of secretNameRows) {
     const name = `${AG_PREFIX}${row.agent_id}:${row.name}`;
@@ -536,7 +726,11 @@ async function main(argv) {
 
   if (mode === "verify") {
     const rows = d1Query(d1, "SELECT agent_id, name FROM agent_secret_names");
-    const agents = d1Query(d1, "SELECT id, workspace_id FROM agents");
+    const agents = d1Query(d1, "SELECT id, workspace_id, created_at FROM agents");
+    // Recomputed rather than carried over from --apply: it re-derives from the
+    // same rule against live data, so there is no saved file to lose and no
+    // second source of truth to drift.
+    const legacyByWorkspace = legacyAgentByWorkspace(agents);
     const workspaceOf = new Map(agents.map((a) => [a.id, a.workspace_id]));
     const byWorkspace = new Map();
     for (const row of rows) {
@@ -548,7 +742,15 @@ async function main(argv) {
     }
     let failures = 0;
     for (const [workspaceId, secretNameRows] of byWorkspace) {
-      const report = await verifyWorkspace({ store, kek, workspaceId, secretNameRows });
+      const report = await verifyWorkspace({
+        store,
+        kek,
+        workspaceId,
+        secretNameRows,
+        legacyAgentId: legacyByWorkspace.get(workspaceId) ?? null,
+      });
+      // `expectedLeftover` is NOT counted: those keys are the collision policy
+      // doing its job.
       failures += report.failed.length + report.leftover.length;
       console.log(JSON.stringify(report, null, 2));
     }
@@ -561,6 +763,20 @@ async function main(argv) {
     d1,
     "SELECT id, workspace_id, created_at, archived_at FROM workbenches",
   );
+  // Checked BEFORE anything is printed as a plan, and before --apply writes a
+  // single KV key: a workspace in this state makes migration 0067 fail its FK
+  // and roll the whole batch back.
+  const missing = workspacesMissingAnAgent(agents, workbenches);
+  if (missing.length > 0) {
+    console.error(
+      "error: migration 0067 would FAIL — these workspaces have workbenches but no agent,\n" +
+        "       so their workbenches cannot become agents and agent_repositories'\n" +
+        "       foreign key will reject the whole batch:",
+    );
+    console.error(JSON.stringify(missing, null, 2));
+    return 2;
+  }
+
   const mapping = deriveAgentIdForWorkbench(agents, workbenches);
   console.log("== workbench -> agent mapping");
   for (const [workbenchId, target] of mapping) {

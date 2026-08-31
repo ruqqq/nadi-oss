@@ -288,6 +288,158 @@ describe("rekey-workbench-secrets: the re-key", () => {
     expect([...store.map.entries()]).toEqual([...before.entries()]);
   });
 
+  // FIX 2. The index is not a listing convenience:
+  // `ComputeEnvSecretsStore.listAgentNames` resolves the env vars a sandbox is
+  // injected with FROM it, so a re-encrypted value that is not in the index is a
+  // value that never reaches the box. Writing it once at the end meant a crash
+  // mid-run left exactly that state.
+  it("indexes each secret BEFORE removing its source, so a crash cannot strand it", async () => {
+    const { store, kekRaw } = await seedWorkspace([
+      { name: "sbxenv-env:env_a:ONE", value: "1" },
+      { name: "sbxenv-env:env_b:TWO", value: "2" },
+    ]);
+    // Every index state the run passes through.
+    const indexStates: Array<Record<string, unknown>> = [];
+    const observed = {
+      ...store,
+      async put(key: string, value: string) {
+        await store.put(key, value);
+        if (key === buildWorkspaceSecretIndexKey(WORKSPACE)) {
+          indexStates.push(JSON.parse(value).entries);
+        }
+      },
+    };
+    await rekey.rekeyWorkspace({
+      store: observed,
+      kek: await rekey.importRawKey(kekRaw),
+      workspaceId: WORKSPACE,
+      mapping,
+      apply: true,
+    });
+
+    // Not once at the end: twice per secret.
+    expect(indexStates.length).toBe(4);
+    // The invariant that makes every crash point recoverable: an index entry is
+    // never left naming a key the run has already deleted. Checked against what
+    // the store actually holds at each step is not possible after the fact, so
+    // the ordering is checked instead — the new name appears BEFORE the old one
+    // disappears.
+    const names = indexStates.map((entries) => Object.keys(entries).sort());
+    expect(names[0]).toContain("sbxenv-ag:ag_1:ONE");
+    expect(names[0]).toContain("sbxenv-env:env_a:ONE");
+    expect(names[1]).toContain("sbxenv-ag:ag_1:ONE");
+    expect(names[1]).not.toContain("sbxenv-env:env_a:ONE");
+    expect(names[3]).toEqual(["sbxenv-ag:ag_1:ONE", "sbxenv-ag:agt_env_b:TWO"]);
+  });
+
+  it("leaves the SOURCE intact and unindexed-new when the read-back fails", async () => {
+    const { store, dek, kekRaw } = await seedWorkspace([
+      { name: "sbxenv-env:env_a:TOKEN", value: "a-token" },
+    ]);
+    // A store whose write of the NEW key silently does not land — the one
+    // failure that is otherwise invisible and unrecoverable.
+    const lossy = {
+      ...store,
+      async put(key: string, value: string) {
+        if (key.endsWith("sbxenv-ag:ag_1:TOKEN")) return;
+        await store.put(key, value);
+      },
+    };
+    const report = await rekey.rekeyWorkspace({
+      store: lossy,
+      kek: await rekey.importRawKey(kekRaw),
+      workspaceId: WORKSPACE,
+      mapping,
+      apply: true,
+    });
+
+    expect(report.failed).toEqual([
+      { name: "sbxenv-ag:ag_1:TOKEN", stage: "verify", error: "write did not land" },
+    ]);
+    // The source survives, still readable and still indexed: it is the only
+    // copy left.
+    expect(await readValue(store, dek, "sbxenv-env:env_a:TOKEN")).toBe("a-token");
+    const index = JSON.parse((await store.get(buildWorkspaceSecretIndexKey(WORKSPACE)))!);
+    expect(Object.keys(index.entries)).toEqual(["sbxenv-env:env_a:TOKEN"]);
+  });
+
+  // The reason a resumed run needs the SNAPSHOTTED plan rather than a freshly
+  // computed one. Once the first run has moved the adopting workbench's secrets
+  // onto the legacy agent, they are indistinguishable in KV from the legacy
+  // agent's own — so a re-planned run would copy them out to every other agent.
+  // Pre-migration a thread on workbench B never saw workbench A's variables, so
+  // that copy would invent one.
+  it("is resumable: re-running --apply after a partial run finishes it and changes nothing else", async () => {
+    const { store, dek, kekRaw } = await seedWorkspace([
+      { name: "sbxenv-env:env_a:ONE", value: "1" },
+      { name: "sbxenv-env:env_b:TWO", value: "2" },
+    ]);
+    const kek = await rekey.importRawKey(kekRaw);
+    // Stop the run after the first secret is fully moved.
+    let puts = 0;
+    const crashing = {
+      ...store,
+      async put(key: string, value: string) {
+        if (puts++ >= 4) throw new Error("simulated crash");
+        await store.put(key, value);
+      },
+    };
+    await expect(
+      rekey.rekeyWorkspace({
+        store: crashing,
+        kek,
+        workspaceId: WORKSPACE,
+        mapping,
+        apply: true,
+      }),
+    ).rejects.toThrow("simulated crash");
+
+    // Re-run the SAME command against the half-migrated store.
+    const report = await rekey.rekeyWorkspace({
+      store,
+      kek,
+      workspaceId: WORKSPACE,
+      mapping,
+      apply: true,
+    });
+    expect(report.resumed).toBe(true);
+    expect(report.failed).toEqual([]);
+    expect(await readValue(store, dek, "sbxenv-ag:ag_1:ONE")).toBe("1");
+    expect(await readValue(store, dek, "sbxenv-ag:agt_env_b:TWO")).toBe("2");
+    // Byte-for-byte the end state a single clean run produces. In particular
+    // `agt_env_b` did NOT acquire `ONE`, which only ever belonged to the agent
+    // that adopted workbench A.
+    const index = JSON.parse((await store.get(buildWorkspaceSecretIndexKey(WORKSPACE)))!);
+    expect(Object.keys(index.entries).sort()).toEqual([
+      "sbxenv-ag:ag_1:ONE",
+      "sbxenv-ag:agt_env_b:TWO",
+    ]);
+    // The plan is the record of unfinished work; a clean finish clears it.
+    expect(await store.get(rekey.planKey(WORKSPACE))).toBeNull();
+  });
+
+  it("keeps the plan when the run left failures, so the retry redoes the same list", async () => {
+    const { store, kekRaw } = await seedWorkspace([
+      { name: "sbxenv-env:env_a:TOKEN", value: "a-token" },
+    ]);
+    const lossy = {
+      ...store,
+      async put(key: string, value: string) {
+        if (key.endsWith("sbxenv-ag:ag_1:TOKEN")) return;
+        await store.put(key, value);
+      },
+    };
+    const report = await rekey.rekeyWorkspace({
+      store: lossy,
+      kek: await rekey.importRawKey(kekRaw),
+      workspaceId: WORKSPACE,
+      mapping,
+      apply: true,
+    });
+    expect(report.failed).toHaveLength(1);
+    expect(await store.get(rekey.planKey(WORKSPACE))).not.toBeNull();
+  });
+
   it("refuses a workspace that has a DEK but no index rather than reading it as empty", async () => {
     const { store, kekRaw } = await seedWorkspace([
       { name: "sbxenv-env:env_a:TOKEN", value: "a-token" },
@@ -326,6 +478,44 @@ describe("rekey-workbench-secrets: verify", () => {
         secretNameRows: [{ agent_id: "ag_1", name: "MISSING" }],
       }),
     ).resolves.toMatchObject({ verified: [] });
+  });
+
+  // FIX 3. The collision policy DELIBERATELY leaves these keys, so counting
+  // them as failures would make a CORRECT migration report red — and train the
+  // operator to ignore the one step that catches a real loss.
+  it("does NOT fail on the sbxenv-env: key the collision policy deliberately keeps", async () => {
+    const { store, kekRaw } = await seedWorkspace([
+      { name: "sbxenv-ag:ag_1:TOKEN", value: "agent-wins" },
+      { name: "sbxenv-env:env_a:TOKEN", value: "workbench-loses" },
+    ]);
+    const report = await rekey.verifyWorkspace({
+      store,
+      kek: await rekey.importRawKey(kekRaw),
+      workspaceId: WORKSPACE,
+      secretNameRows: [{ agent_id: "ag_1", name: "TOKEN" }],
+      legacyAgentId: "ag_1",
+    });
+    expect(report.leftover).toEqual([]);
+    expect(report.expectedLeftover).toEqual(["sbxenv-env:env_a:TOKEN"]);
+    expect(report.failed).toEqual([]);
+  });
+
+  it("still fails on an sbxenv-env: key nothing explains", async () => {
+    const { store, kekRaw } = await seedWorkspace([
+      { name: "sbxenv-ag:ag_1:TOKEN", value: "agent-wins" },
+      // A different variable name: the legacy agent does not hold it, so no
+      // collision kept it and it should have moved.
+      { name: "sbxenv-env:env_a:UNRELATED", value: "stale" },
+    ]);
+    const report = await rekey.verifyWorkspace({
+      store,
+      kek: await rekey.importRawKey(kekRaw),
+      workspaceId: WORKSPACE,
+      secretNameRows: [],
+      legacyAgentId: "ag_1",
+    });
+    expect(report.leftover).toEqual(["sbxenv-env:env_a:UNRELATED"]);
+    expect(report.expectedLeftover).toEqual([]);
   });
 
   it("reports a leftover sbxenv-env: key", async () => {
@@ -379,5 +569,35 @@ describe("rekey-workbench-secrets: skill collisions", () => {
         leftAgentPrivate: [{ id: "sk_b", agentId: "ag_2" }],
       },
     ]);
+  });
+});
+
+// FIX 4. Migration 0067 inserts nothing for a workspace with workbenches and no
+// agent (the inner JOIN matches nothing), and step 10's foreign key then rejects
+// the WHOLE batch. Loud is right; learning it from a half-applied migration on
+// production D1 is not.
+describe("rekey-workbench-secrets: the migration precondition", () => {
+  const agents = [{ id: "ag_1", workspace_id: "ws_1", created_at: 1 }];
+
+  it("names every workspace that has workbenches but no agent", () => {
+    expect(
+      rekey.workspacesMissingAnAgent(agents, [
+        { id: "env_ok", workspace_id: "ws_1", created_at: 1, archived_at: null },
+        { id: "env_orphan_a", workspace_id: "ws_none", created_at: 1, archived_at: null },
+        { id: "env_orphan_b", workspace_id: "ws_none", created_at: 2, archived_at: null },
+      ]),
+    ).toEqual([{ workspaceId: "ws_none", workbenchIds: ["env_orphan_a", "env_orphan_b"] }]);
+  });
+
+  it("is silent when every workbench's workspace has an agent", () => {
+    expect(
+      rekey.workspacesMissingAnAgent(agents, [
+        { id: "env_ok", workspace_id: "ws_1", created_at: 1, archived_at: null },
+      ]),
+    ).toEqual([]);
+  });
+
+  it("ignores a workspace that has an agent and no workbenches", () => {
+    expect(rekey.workspacesMissingAnAgent(agents, [])).toEqual([]);
   });
 });

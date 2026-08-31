@@ -154,6 +154,42 @@ async function resolveWorkbenchId(
 }
 
 /**
+ * The agent an automaton's runs execute as, at the SAME precedence thread
+ * creation uses (`resolveThreadWorkbenchId` in `http/thread-routes.ts`):
+ *
+ *     explicit agent  ->  the project's default agent  ->  the workspace's agent
+ *
+ * The project default is the step that is easy to lose. `agent_id` is NOT NULL,
+ * so there is no stored value that can mean "inherit at fire time" any more and
+ * the inheritance has to happen HERE, once, when the automaton is written. Skip
+ * it and an automaton created under a project silently runs on the workspace's
+ * agent — a different set of repositories and secrets, with nothing to say so.
+ *
+ * A stale project default (archived after being set) degrades to the workspace
+ * agent rather than failing the write, matching thread creation exactly: the
+ * caller never asked for that default, so it must not 404 over it.
+ */
+async function resolveAutomatonAgentId(
+  db: Db,
+  workspaceId: string,
+  projectId: string | null,
+  explicit: { set: boolean; value: string | null },
+  fallbackAgentId: string,
+): Promise<string> {
+  if (explicit.set && explicit.value !== null) return explicit.value;
+  if (projectId === null) return fallbackAgentId;
+  const defaultAgentId =
+    (await new ProjectRepository(db).getById(projectId))?.defaultAgentId ?? null;
+  if (defaultAgentId === null) return fallbackAgentId;
+  try {
+    await new WorkbenchRepository(db).assertActiveWorkbenchInWorkspace(defaultAgentId, workspaceId);
+    return defaultAgentId;
+  } catch {
+    return fallbackAgentId;
+  }
+}
+
+/**
  * The model override, resolved the same way as projectId: absent = leave as-is,
  * explicit null = clear back to the agent's model, a value = validate and set.
  * Provider and model move as a unit — half an override would silently pair a
@@ -298,15 +334,24 @@ export class AutomatonService {
       input,
     );
 
+    const projectId = project.set ? project.value : null;
+    // The automaton's agent IS its environment, resolved at WRITE time because
+    // `agent_id` is NOT NULL and can no longer mean "inherit".
+    const agentId = await resolveAutomatonAgentId(
+      this.db,
+      this.ctx.workspaceId,
+      projectId,
+      workbench,
+      this.ctx.agentId,
+    );
+
     const now = Date.now();
     const row = {
       id: `auto_${crypto.randomUUID()}`,
       workspaceId: this.ctx.workspaceId,
       ownerUserId: this.ctx.ownerUserId,
-      // The automaton's agent IS its environment. An explicit `workbenchId`
-      // names it; with none given the run executes as the workspace's agent.
-      agentId: (workbench.set ? workbench.value : null) ?? this.ctx.agentId,
-      projectId: project.set ? project.value : null,
+      agentId,
+      projectId,
       name,
       prompt,
       modelProvider: model.value.modelProvider,
@@ -348,7 +393,19 @@ export class AutomatonService {
     if (project.set) patch.projectId = project.value;
 
     const workbench = await resolveWorkbenchId(this.db, automaton.workspaceId, input.workbenchId);
-    if (workbench.set) patch.agentId = workbench.value ?? this.ctx.agentId;
+    if (workbench.set) {
+      // Same precedence as create. The project to resolve against is the one
+      // this patch LEAVES BEHIND, not the one the row had: clearing the agent
+      // and moving the project in one PATCH must land on the new project's
+      // default, not the old one's.
+      patch.agentId = await resolveAutomatonAgentId(
+        this.db,
+        automaton.workspaceId,
+        project.set ? project.value : automaton.projectId,
+        workbench,
+        this.ctx.agentId,
+      );
+    }
 
     const model = await resolveModelSelection(
       this.ctx.env,
