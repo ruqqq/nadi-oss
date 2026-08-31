@@ -167,7 +167,7 @@ import {
 } from "./subagent-tools";
 import { SUBAGENT_DETACHED } from "./subagent-config";
 import { teardownThreadBeforeDestroy } from "./thread-destroy-teardown";
-import { WorkLedgerStore } from "./work-ledger-store";
+import { WorkLedgerStore, localWorkLedgerSink } from "./work-ledger-store";
 import { ToolCallTimingStore, type ToolCallTimingRow } from "./tool-call-timing-store";
 import { stampToolCallDurations, toolCallIdsIn, wrapToolsWithTiming } from "./tool-call-timing";
 import {
@@ -4584,6 +4584,158 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
   }
 
   /**
+   * {@link SandboxThreadHost} - the work ledger, one RPC per `WorkLedgerSink`
+   * operation. The ledger cannot move into `AgentSandbox`: it spans SUBAGENT
+   * rows too (an open subagent row IS the shared-machine lease) and the reaper
+   * that reads it - `runWorkLedgerSweep` - lives here. So the sandbox reports
+   * process liveness across the wire into the thread's ledger, exactly as it
+   * used to report it across a closure.
+   *
+   * Encoded, never thrown: the near side decides what a failure means per
+   * operation (see `createSandboxThreadHostDeps`).
+   */
+  async sandboxWorkLedgerRegister(input: { row: WorkRow }): Promise<SandboxCallResult<null>> {
+    return this.encodeLedgerCall("register", () => {
+      this.workLedger.register(input.row);
+      return null;
+    });
+  }
+
+  /** {@link SandboxThreadHost} - stamp a process row alive. */
+  async sandboxWorkLedgerStampAlive(input: {
+    id: string;
+    at: number;
+  }): Promise<SandboxCallResult<null>> {
+    return this.encodeLedgerCall("stampAlive", () => {
+      this.workLedger.stampAlive(input.id, input.at);
+      return null;
+    });
+  }
+
+  /** {@link SandboxThreadHost} - close a row; returns the exactly-once gate. */
+  async sandboxWorkLedgerTerminalize(input: {
+    id: string;
+    terminal: WorkTerminal;
+  }): Promise<SandboxCallResult<boolean>> {
+    return this.encodeLedgerCall("terminalize", () =>
+      this.workLedger.terminalize(input.id, input.terminal),
+    );
+  }
+
+  /** {@link SandboxThreadHost} - discharge a row's notification obligation. */
+  async sandboxWorkLedgerMarkDelivered(input: {
+    id: string;
+    at: number;
+  }): Promise<SandboxCallResult<boolean>> {
+    return this.encodeLedgerCall("markDelivered", () =>
+      this.workLedger.markDelivered(input.id, input.at),
+    );
+  }
+
+  /** {@link SandboxThreadHost} - has the model already been told about this row? */
+  async sandboxWorkLedgerIsDelivered(input: { id: string }): Promise<SandboxCallResult<boolean>> {
+    return this.encodeLedgerCall("isDelivered", () => this.workLedger.isDelivered(input.id));
+  }
+
+  /** {@link SandboxThreadHost} - drop a row without a terminal (`exec_unwatch`). */
+  async sandboxWorkLedgerDeleteRow(input: { id: string }): Promise<SandboxCallResult<null>> {
+    return this.encodeLedgerCall("deleteRow", () => {
+      this.workLedger.deleteRow(input.id);
+      return null;
+    });
+  }
+
+  /**
+   * {@link SandboxThreadHost} - the ledger's next sweep horizon, min-folded
+   * into the compute service's single alarm. Derived from the same rows
+   * {@link sandboxWorkLedgerRegister} writes, so it stays here with them.
+   */
+  async getSandboxWorkHorizon(): Promise<SandboxCallResult<number | null>> {
+    return this.encodeLedgerCall("workHorizon", () => this.workHorizon(Date.now()));
+  }
+
+  /** Shared encoder for the ledger back-calls: nothing throws across RPC. */
+  private encodeLedgerCall<T>(op: string, run: () => T): SandboxCallResult<T> {
+    try {
+      return { ok: true, value: run() };
+    } catch (error) {
+      log.warn("think_thread.sandbox_work_ledger_failed", {
+        threadId: this.name,
+        op,
+        error: String(error),
+      });
+      return { ok: false, error: { code: "work_ledger_failed", message: String(error) } };
+    }
+  }
+
+  /**
+   * {@link SandboxThreadHost} - is a CHILD SUBAGENT holding this machine?
+   *
+   * Stays here because the answer is derived from this thread's subagent runs
+   * (and their legacy backfill), which the sandbox DO cannot see. Identical
+   * body to the closure `sandboxHostDeps` wired; see the long comment there for
+   * why it is scoped to subagent rows and why the backfill is awaited in the
+   * reader itself.
+   */
+  async sandboxHasBlockingWork(): Promise<SandboxCallResult<boolean>> {
+    try {
+      await this.ensureLegacySubagentBackfill();
+      return { ok: true, value: this.openSubagentRunIds().length > 0 };
+    } catch (error) {
+      log.warn("think_thread.sandbox_has_blocking_work_failed", {
+        threadId: this.name,
+        error: String(error),
+      });
+      return { ok: false, error: { code: "has_blocking_work_failed", message: String(error) } };
+    }
+  }
+
+  /**
+   * {@link SandboxThreadHost} - the "workspace verified clean" bit.
+   *
+   * Stays on the thread DO because "the sandbox this agent writes to" and "this
+   * agent's own storage" are the same thing only for a top-level thread:
+   * {@link SubAgent} overrides `clearSandboxDeclaredClean` to invalidate the
+   * PARENT's bit as well, since an attached child writes to the parent's
+   * machine. Moving the bit into a thread-keyed `AgentSandbox` would put the
+   * child's bit in a different DO from the machine it dirties and silently drop
+   * that override.
+   *
+   * `clean: false` routes through `clearSandboxDeclaredClean` (the overridable
+   * one); `clean: true` is the `confirm_work_saved` write, which is never
+   * delegated upward.
+   */
+  async setSandboxDeclaredCleanFromSandbox(input: {
+    clean: boolean;
+  }): Promise<SandboxCallResult<null>> {
+    try {
+      if (input.clean) await this.setSandboxDeclaredClean(true);
+      else await this.clearSandboxDeclaredClean();
+      return { ok: true, value: null };
+    } catch (error) {
+      log.warn("think_thread.sandbox_set_declared_clean_failed", {
+        threadId: this.name,
+        clean: input.clean,
+        error: String(error),
+      });
+      return { ok: false, error: { code: "set_declared_clean_failed", message: String(error) } };
+    }
+  }
+
+  /** {@link SandboxThreadHost} - read side of the "workspace verified clean" bit. */
+  async isSandboxDeclaredCleanFromSandbox(): Promise<SandboxCallResult<boolean>> {
+    try {
+      return { ok: true, value: await this.getSandboxDeclaredClean() };
+    } catch (error) {
+      log.warn("think_thread.sandbox_is_declared_clean_failed", {
+        threadId: this.name,
+        error: String(error),
+      });
+      return { ok: false, error: { code: "is_declared_clean_failed", message: String(error) } };
+    }
+  }
+
+  /**
    * Wiring the thread DO passes to the native sandbox tools and the eviction
    * callback: DO SQLite storage, the runtime config resolver, the SDK-scheduler
    * bridge for idle eviction, and the deferred system-reminder delivery hook.
@@ -4657,7 +4809,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
           resolved.service.execRun({ command, timeoutMs, label: "workspace cleanliness" }),
         );
       },
-      workLedger: this.workLedger,
+      workLedger: localWorkLedgerSink(this.workLedger),
       // The reaper piggybacks the compute service's single alarm: this horizon
       // is min-folded into `nextWakeAt` alongside watcher polls and the release
       // time. It must never be a SECOND arm — `scheduleComputeEviction` is
@@ -4665,7 +4817,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
       // watcher poll rather than adding to it. The alarm callback's fallback
       // arm is not a second arm: it is gated on `alarmArmCount()` not moving,
       // i.e. it fires only when this min-fold never ran.
-      getWorkHorizon: () => this.workHorizon(Date.now()),
+      getWorkHorizon: async () => this.workHorizon(Date.now()),
       // Automatic preparation on a genuinely fresh sandbox (never a recovery
       // restore — see ThreadComputeService.readOrAcquireRuntime). It already
       // no-ops when the thread has no repository snapshots, so a

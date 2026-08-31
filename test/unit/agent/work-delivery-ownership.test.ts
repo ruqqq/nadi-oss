@@ -4,9 +4,12 @@ import { FakeComputeBackend } from "../../../src/compute/backends/fake";
 import { DEFAULT_COMPUTE_LIMITS } from "../../../src/compute/config";
 import { WATCH_ABSOLUTE_TIMEOUT_MS } from "../../../src/compute/watchers";
 import { ThreadComputeService } from "../../../src/compute/thread-service";
+import type { ThreadComputeServiceDeps } from "../../../src/compute/thread-service";
 import type { EffectiveComputeConfig } from "../../../src/compute/types";
-import { WorkLedgerStore } from "../../../src/agent/work-ledger-store";
+import { WorkLedgerStore, localWorkLedgerSink } from "../../../src/agent/work-ledger-store";
 import { createMemoryComputeStore } from "../compute/helpers/memory-store";
+import { createSandboxThreadHostDeps } from "../../../src/compute/sandbox-thread-host";
+import type { Env } from "../../../src/env";
 
 const CONFIG: EffectiveComputeConfig = {
   provider: "fake",
@@ -52,6 +55,10 @@ async function withRealWatcher(
     injected: string[];
     failReminder: (fail: boolean) => void;
   }) => Promise<void>,
+  options?: {
+    /** Substitute the reminder dep — used to drive the REAL sandbox back-call. */
+    deliverSystemReminder?: NonNullable<ThreadComputeServiceDeps["deliverSystemReminder"]>;
+  },
 ) {
   const id = env.THINK_THREAD_AGENT.idFromName(`ownership-${crypto.randomUUID()}`);
   const stub = env.THINK_THREAD_AGENT.get(id);
@@ -71,11 +78,13 @@ async function withRealWatcher(
       setAlarm: async () => {},
       now: () => now.value,
       supportsProcessMonitor: true,
-      workLedger: ledger,
-      deliverSystemReminder: async (body) => {
-        if (fail) throw new Error("injection buffer write failed");
-        reminders.push(body);
-      },
+      workLedger: localWorkLedgerSink(ledger),
+      deliverSystemReminder:
+        options?.deliverSystemReminder ??
+        (async (body) => {
+          if (fail) throw new Error("injection buffer write failed");
+          reminders.push(body);
+        }),
     });
     const agent = instance as unknown as SweepAgent;
     agent.deliverInjection = (entry) => void injected.push(entry.dedupeKey);
@@ -363,5 +372,77 @@ describe("delivery ownership is DECLARED, not inferred from the terminal's reaso
       expect(sweep.redelivered).toEqual([]);
       expect(injected).toEqual([]);
     });
+  });
+});
+
+/**
+ * The SANDBOX's reminder dep, not a hand-rolled stand-in: the real
+ * `createSandboxThreadHostDeps` closure over an env whose thread namespace does
+ * not exist, so every back-call fails the way an unreachable thread DO fails.
+ *
+ * This is the seam the relocation created. `AgentSandbox` no longer calls the
+ * thread's `raiseSystemReminder` directly — it calls it over RPC, and an RPC
+ * that cannot complete has to decide, per caller, whether that is fatal.
+ */
+function unreachableThreadReminder(threadId: string) {
+  return createSandboxThreadHostDeps({ THINK_THREAD_AGENT: undefined } as unknown as Env, threadId)
+    .deliverSystemReminder;
+}
+
+describe("a sandbox reminder back-call fails differently per path", () => {
+  /**
+   * The COMMAND path. `execShutdown` tore the environment down before it tried
+   * to say so; a notification that cannot be delivered may not turn a completed
+   * command into a failure. The whole point of the back-call being best-effort.
+   */
+  it("does not fault a command when the reminder back-call fails", async () => {
+    await withRealWatcher(
+      async ({ service, ledger }) => {
+        // A live sandbox with real work on it, so the shutdown actually reaches
+        // the reminder rather than short-circuiting on "nothing to tear down".
+        const processId = await watchedProcess(service);
+
+        const result = await service.execShutdown({ confirm: true });
+
+        // The command succeeded even though its notification could not be
+        // delivered, and every effect past the failed reminder still landed.
+        expect(result).toMatchObject({ ok: true, terminated: true });
+        expect(ledger.get(processId)?.terminal).toMatchObject({ reason: "process_stopped" });
+      },
+      { deliverSystemReminder: unreachableThreadReminder("thr_reminder_command") },
+    );
+  });
+
+  /**
+   * The WATCHER-POLL path, and the reason the dep needed a non-swallowing
+   * variant at all. `pollWatcher` calls `markDelivered` unconditionally and
+   * AFTER the await precisely so a throw leaves the row owed; swallow the
+   * failure and the row is stamped delivered for a reminder the model never
+   * saw, and the sweep — the only thing that could still say it — skips it
+   * forever. The closed-and-silent bug thread-service.ts:3020-3045 documents.
+   *
+   * `mustDeliver` is set at exactly these two call sites, so this is the one
+   * place the sandbox back-call is allowed to throw on the near side.
+   */
+  it("leaves the ledger row OWED when the watcher-poll back-call fails", async () => {
+    await withRealWatcher(
+      async ({ service, ledger, agent, now, injected }) => {
+        const processId = await watchedProcess(service);
+
+        now.value += WATCH_ABSOLUTE_TIMEOUT_MS + 1_000;
+        await service.runComputeTick();
+
+        // The terminal stands (it is what advances the alarm horizon) but the
+        // obligation is UNDISCHARGED: nothing reached the model.
+        expect(ledger.get(processId)?.terminal).toMatchObject({ reason: "watch_timeout" });
+        expect(ledger.get(processId)?.deliveredAt).toBeNull();
+
+        // ...so the sweep still owes it, and says it.
+        const sweep = await agent.runWorkLedgerSweep();
+        expect(sweep.redelivered).toEqual([processId]);
+        expect(injected).toEqual([`watcher:${processId}:timeout`]);
+      },
+      { deliverSystemReminder: unreachableThreadReminder("thr_reminder_watcher") },
+    );
   });
 });

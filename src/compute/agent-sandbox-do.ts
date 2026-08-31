@@ -5,6 +5,10 @@ import { ThreadRepository } from "../db/repositories/threads";
 import { resolveComputeService } from "../agent/compute-tools";
 import { ThreadComputeStore } from "./thread-store";
 import { createSandboxThreadHostDeps } from "./sandbox-thread-host";
+import { createRepositoryPreparation } from "../agent/repository-preparation";
+import { probeWorkspaceCleanliness } from "./workspace-cleanliness";
+import type { ThreadComputeService } from "./thread-service";
+import type { BackendReference } from "./backend";
 import { log } from "../log";
 
 /**
@@ -30,8 +34,10 @@ function failure(code: string, message: string): SandboxCallResult<never> {
  */
 export class AgentSandbox extends DurableObject<Env> {
   /**
-   * The capabilities that stayed on the thread DO — transcript reminders and
-   * the idle-eviction schedule — reached by RPC. Best-effort by construction:
+   * The capabilities that stayed on the thread DO — transcript reminders, the
+   * idle-eviction schedule, the work ledger, the child-subagent lease and the
+   * "workspace verified clean" bit — reached by RPC. Best-effort by
+   * construction, with ONE deliberate exception on the watcher-poll reminder:
    * see `createSandboxThreadHostDeps`.
    */
   private threadHostDeps(threadId: string) {
@@ -53,8 +59,36 @@ export class AgentSandbox extends DurableObject<Env> {
    * `ThinkThreadAgent.processMonitorEnabled()`, threaded through
    * `sandboxHostDeps()`.
    */
-  private async resolveService(threadId: string, options: { supportsProcessMonitor: boolean }) {
-    return resolveComputeService({
+  private async resolveService(
+    threadId: string,
+    options: { supportsProcessMonitor: boolean; attachedRuntime?: BackendReference },
+  ) {
+    // The two deps that must run against THIS DO's own service rather than
+    // round-tripping through `resolveComputeService` again.
+    //
+    // `onFreshRuntimeAcquired` is wired to `createRepositoryPreparation`, which
+    // takes a `resolveComputeService`. On the thread DO that closed over
+    // `sandboxHostDeps()`; here the same shape would re-enter this very DO —
+    // and it fires from INSIDE `readOrAcquireRuntime`, i.e. from inside a
+    // method of the service being resolved, so the re-entrant call would sit
+    // behind the same DO's input lock waiting for the acquire that is waiting
+    // for it. `probeWorkspaceCleanliness` has the identical shape (it exec-runs
+    // git against the sandbox) and the identical hazard.
+    //
+    // Both are broken by a holder rather than a second resolve: the local
+    // service is stamped in once `resolveComputeService` returns, and NEITHER
+    // dep can fire before then — `onFreshRuntimeAcquired` only from
+    // `readOrAcquireRuntime`, `probeWorkspaceCleanliness` only from
+    // `resolveIdleDisposition`, both service methods that cannot be called
+    // until the caller holds the service. A null holder is therefore
+    // unreachable, and both arms below say what they would mean if it were.
+    const local: { service: ThreadComputeService | null } = { service: null };
+    const prepareRepositories = createRepositoryPreparation({
+      env: this.env,
+      threadId,
+      resolveComputeService: async () => (local.service ? { service: local.service } : null),
+    });
+    const resolved = await resolveComputeService({
       env: this.env,
       threadId,
       storage: this.ctx.storage,
@@ -65,7 +99,42 @@ export class AgentSandbox extends DurableObject<Env> {
       },
       ...this.threadHostDeps(threadId),
       supportsProcessMonitor: options.supportsProcessMonitor,
+      // NOT on the plan's list of thread-bound deps, and it had to be: the
+      // thread DO supplies `processMonitorEnabled && !attachedRuntime`, while
+      // `resolveComputeService` defaults an omitted value to `!attachedRuntime`
+      // alone. Leaving it out would let a runtime that cannot deliver a
+      // completion reminder background a long-running exec anyway — background
+      // work turned back ON silently, the mirror image of the
+      // `supportsProcessMonitor` trap above. It is a pure function of the two
+      // values the caller already states, so it is derived here rather than
+      // added as a third input a caller could forget.
+      backgroundLongRunningExec: options.supportsProcessMonitor && !options.attachedRuntime,
+      // Plain serializable data, not a capability: an attached subagent's
+      // parent runtime reference travels as an RPC INPUT. Nothing to relocate.
+      ...(options.attachedRuntime ? { attachedRuntime: options.attachedRuntime } : {}),
+      probeWorkspaceCleanliness: async () => {
+        if (!local.service) return { state: "probe_failed", reason: "no_compute_service" };
+        return probeWorkspaceCleanliness((command, timeoutMs) =>
+          local.service!.execRun({ command, timeoutMs, label: "workspace cleanliness" }),
+        );
+      },
+      onFreshRuntimeAcquired: async () => {
+        const result = await prepareRepositories();
+        // A SKIP is not an error, so nothing throws and the `catch` around this
+        // call never fires — which is exactly how a provider-contract mismatch
+        // left every workbench sandbox with an empty /workspace while the logs
+        // stayed clean. Skips are the interesting outcome here; say so, or the
+        // next such break is invisible too.
+        if (result.skipped?.length) {
+          log.warn("compute.repository_preparation_skipped", {
+            threadId,
+            skipped: result.skipped.map((entry) => `${entry.name}: ${entry.reason}`),
+          });
+        }
+      },
     });
+    local.service = resolved?.service ?? null;
+    return resolved;
   }
 
   async runCommand(input: {
@@ -73,12 +142,15 @@ export class AgentSandbox extends DurableObject<Env> {
     command: string;
     /** Required — see {@link resolveService}. The caller states it; no default. */
     supportsProcessMonitor: boolean;
+    /** An attached subagent's parent runtime, when this thread shares a machine. */
+    attachedRuntime?: BackendReference;
     cwd?: string;
     timeoutMs?: number;
   }): Promise<SandboxCallResult<{ exitCode: number; stdout: string; stderr: string }>> {
     try {
       const resolved = await this.resolveService(input.threadId, {
         supportsProcessMonitor: input.supportsProcessMonitor,
+        ...(input.attachedRuntime ? { attachedRuntime: input.attachedRuntime } : {}),
       });
       if (!resolved) return failure("compute_disabled", "compute is not enabled for this thread");
       const result = await resolved.service.execRun({
@@ -107,10 +179,13 @@ export class AgentSandbox extends DurableObject<Env> {
     threadId: string;
     /** Required — see {@link resolveService}. The caller states it; no default. */
     supportsProcessMonitor: boolean;
+    /** An attached subagent's parent runtime, when this thread shares a machine. */
+    attachedRuntime?: BackendReference;
   }): Promise<SandboxCallResult<{ status: string; provider: string | null } | null>> {
     try {
       const resolved = await this.resolveService(input.threadId, {
         supportsProcessMonitor: input.supportsProcessMonitor,
+        ...(input.attachedRuntime ? { attachedRuntime: input.attachedRuntime } : {}),
       });
       if (!resolved) return failure("compute_disabled", "compute is not enabled for this thread");
       // `ThreadComputeService` exposes no public state getter — the store it

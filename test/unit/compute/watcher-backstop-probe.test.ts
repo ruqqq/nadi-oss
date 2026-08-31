@@ -48,23 +48,23 @@ function createLedgerSpy() {
   return {
     terminalized,
     sink: {
-      register: (row: WorkRow) => void rows.set(row.id, row),
-      stampAlive: () => {},
-      terminalize: (id: string, terminal: WorkTerminal) => {
+      register: async (row: WorkRow) => void rows.set(row.id, row),
+      stampAlive: async () => {},
+      terminalize: async (id: string, terminal: WorkTerminal) => {
         const row = rows.get(id);
         if (!row || row.terminal) return false;
         rows.set(id, { ...row, terminal });
         terminalized.push(id);
         return true;
       },
-      markDelivered: (id: string, at: number) => {
+      markDelivered: async (id: string, at: number) => {
         const row = rows.get(id);
         if (!row?.terminal || row.deliveredAt !== null) return false;
         rows.set(id, { ...row, deliveredAt: at });
         return true;
       },
-      isDelivered: (id: string) => rows.get(id)?.deliveredAt != null,
-      deleteRow: (id: string) => void rows.delete(id),
+      isDelivered: async (id: string) => rows.get(id)?.deliveredAt != null,
+      deleteRow: async (id: string) => void rows.delete(id),
     },
   };
 }

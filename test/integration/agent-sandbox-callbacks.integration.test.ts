@@ -12,6 +12,14 @@ const runInSandboxDo = runInDurableObject as any;
 
 const now = 1_800_000_000_000;
 
+const WATCHER = {
+  title: "build",
+  command: "sleep 1",
+  processId: "proc_cb_watch",
+  outcome: "exited" as const,
+  exitCode: 0,
+};
+
 const WORKSPACE_ID = "ws_sbx_cb";
 const AGENT_ID = "agent_sbx_cb";
 
@@ -99,6 +107,26 @@ async function backCalls(threadId: string) {
       runInSandboxDo(sandboxStub(threadId), async (instance: any) => {
         await instance.threadHostDeps(threadId).cancelEviction();
       }),
+    /** Run anything against the DO's own dep object, from inside the DO. */
+    with: <T>(fn: (deps: any) => Promise<T>): Promise<T> =>
+      runInSandboxDo(sandboxStub(threadId), async (instance: any) =>
+        fn(instance.threadHostDeps(threadId)),
+      ),
+  };
+}
+
+/** A ledger row shaped like the one the compute layer registers for a process. */
+function processRow(id: string) {
+  return {
+    id,
+    kind: "process" as const,
+    startedAt: now,
+    lastAliveAt: now,
+    staleAfterMs: 180_000,
+    deadlineAt: now + 600_000,
+    generation: "gen_test",
+    terminal: null,
+    deliveredAt: null,
   };
 }
 
@@ -141,6 +169,72 @@ describe("AgentSandbox back-calls into the owning thread DO", () => {
     expect(cleared).toBeUndefined();
   });
 
+  it("writes the sandbox's process rows into the THREAD DO's work ledger", async () => {
+    // The ledger cannot move with the machine — subagent rows live in it and
+    // the reaper reads it here — so the sandbox reports liveness across RPC.
+    // This drives the real sink against the real store and reads the row back
+    // through the thread DO's own accessor.
+    const threadId = "thr_cb_ledger";
+    await seedComputeEnabledThread(threadId, true);
+    const calls = await backCalls(threadId);
+    const id = "proc_cb_1";
+
+    const observed = await calls.with(async (deps: any) => {
+      await deps.workLedger.register(processRow(id));
+      await deps.workLedger.stampAlive(id, now + 5_000);
+      const closed = await deps.workLedger.terminalize(id, {
+        outcome: "exited",
+        reason: "process_exit",
+        at: now + 6_000,
+        detail: "process exited",
+        exitCode: 0,
+      });
+      const beforeStamp = await deps.workLedger.isDelivered(id);
+      const stamped = await deps.workLedger.markDelivered(id, now + 6_000);
+      const afterStamp = await deps.workLedger.isDelivered(id);
+      const horizon = await deps.getWorkHorizon();
+      return { closed, beforeStamp, stamped, afterStamp, horizon };
+    });
+
+    expect(observed.closed).toBe(true);
+    expect(observed.beforeStamp).toBe(false);
+    expect(observed.stamped).toBe(true);
+    expect(observed.afterStamp).toBe(true);
+    // The horizon is the thread's own `workHorizon`, not a number the sandbox
+    // invented: a terminal row that has been delivered owes no retry.
+    expect(observed.horizon).toBeNull();
+
+    const rows = await runInThinkDo(threadStub(threadId), async (instance: any) => {
+      await instance.__unsafe_ensureInitialized();
+      return (await instance.debugWorkLedger()).rows;
+    });
+    expect(rows.map((row: any) => row.id)).toContain(id);
+    expect(rows.find((row: any) => row.id === id).deliveredAt).not.toBeNull();
+  });
+
+  it("reads the blocking-work gate and the clean bit off the THREAD DO", async () => {
+    const threadId = "thr_cb_state";
+    await seedComputeEnabledThread(threadId, true);
+    const calls = await backCalls(threadId);
+
+    // No subagent rows on a fresh thread, so nothing holds the machine.
+    expect(await calls.with((deps: any) => deps.hasBlockingWork())).toBe(false);
+
+    expect(await calls.with((deps: any) => deps.isSandboxDeclaredClean())).toBe(false);
+    await calls.with((deps: any) => deps.setSandboxDeclaredClean(true));
+    expect(await calls.with((deps: any) => deps.isSandboxDeclaredClean())).toBe(true);
+    // The bit is on the THREAD's storage, which is the point of the back-call.
+    expect(
+      await runInThinkDo(threadStub(threadId), async (instance: any) => {
+        await instance.__unsafe_ensureInitialized();
+        return await instance.getSandboxDeclaredClean();
+      }),
+    ).toBe(true);
+
+    await calls.with((deps: any) => deps.markSandboxDirty());
+    expect(await calls.with((deps: any) => deps.isSandboxDeclaredClean())).toBe(false);
+  });
+
   it("swallows a back-call failure instead of faulting the compute path", async () => {
     // An unreachable thread namespace is the failure the compute path must
     // survive: the command already ran on the machine, so a notification that
@@ -152,5 +246,57 @@ describe("AgentSandbox back-calls into the owning thread DO", () => {
     await expect(deps.deliverSystemReminder("orphan-marker", "deferred")).resolves.toBeUndefined();
     await expect(deps.scheduleEviction(now + 1_000)).resolves.toBeUndefined();
     await expect(deps.cancelEviction()).resolves.toBeUndefined();
+    // A watcher-completion reminder is still a COMMAND result unless the caller
+    // says otherwise; only `mustDeliver` changes the semantics.
+    await expect(
+      deps.deliverSystemReminder("orphan-marker", "proactive", { watcher: WATCHER }),
+    ).resolves.toBeUndefined();
+  });
+
+  /**
+   * The one back-call that MUST NOT swallow. `pollWatcher` stamps
+   * `markDelivered` unconditionally, after this await, so that a throw leaves
+   * the ledger row owed and the sweep retries it. Swallowing here discharges an
+   * obligation the model never saw — thread-service.ts:3020-3045.
+   *
+   * The far side still ENCODES its failures; this throw is raised on the near
+   * side, inside the sandbox's own isolate, where the compute service can see
+   * it.
+   */
+  it("re-throws a failed reminder on the watcher-poll path", async () => {
+    const deps = createSandboxThreadHostDeps(
+      { THINK_THREAD_AGENT: undefined } as unknown as Env,
+      "thr_cb_unreachable_watch",
+    );
+    await expect(
+      deps.deliverSystemReminder("orphan-marker", "proactive", {
+        watcher: WATCHER,
+        mustDeliver: true,
+      }),
+    ).rejects.toThrow(/sandbox_reminder_undelivered/);
+  });
+
+  it("keeps a read back-call's fallback on the side that preserves work", async () => {
+    // An unreachable thread DO cannot answer, but these reads must still return
+    // something. Each fallback is the answer that cannot destroy work: assume a
+    // child holds the machine, assume the workspace is NOT verified clean, and
+    // assume nobody has told the model yet (a duplicate beats silence).
+    const deps = createSandboxThreadHostDeps(
+      { THINK_THREAD_AGENT: undefined } as unknown as Env,
+      "thr_cb_unreachable_reads",
+    );
+    expect(await deps.hasBlockingWork()).toBe(true);
+    expect(await deps.isSandboxDeclaredClean()).toBe(false);
+    expect(await deps.workLedger.isDelivered("p1")).toBe(false);
+    expect(
+      await deps.workLedger.terminalize("p1", {
+        outcome: "exited",
+        reason: "process_exit",
+        at: now,
+        detail: "",
+      }),
+    ).toBe(false);
+    expect(await deps.workLedger.markDelivered("p1", now)).toBe(false);
+    expect(await deps.getWorkHorizon()).toBeNull();
   });
 });

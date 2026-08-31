@@ -5,15 +5,26 @@ const WORK_LEDGER_SCHEMA_VERSION = 5;
 
 /**
  * The surface the compute layer is handed (see `WorkLedgerSink` in
- * thread-service.ts). Mostly writes — liveness, terminal, delivery — plus one
+ * thread-service.ts).
+ *
+ * ASYNC by contract even though {@link WorkLedgerStore} answers every one of
+ * these synchronously from DO SQLite. The compute service no longer runs in the
+ * DO that owns the ledger: `AgentSandbox` owns the machine while the ledger
+ * stays on the thread DO (subagent rows live there and the reaper reads them),
+ * so the sink the sandbox is handed is an RPC back-call. A synchronous sink
+ * cannot cross that boundary, and a sink the sandbox simply does not get is
+ * worse than either — every register/terminalize/markDelivered would silently
+ * no-op. Use {@link localWorkLedgerSink} for the in-process store.
+ *
+ * Mostly writes — liveness, terminal, delivery — plus one
  * read (`isDelivered`), needed so a terminal writer can ask whether someone
  * else already told the model before it speaks. Deliberately narrow either
  * way: compute reports and reads liveness about processes and never learns
  * that subagents share the ledger.
  */
 export interface WorkLedgerSink {
-  register(row: WorkRow): void;
-  stampAlive(id: string, at: number): void;
+  register(row: WorkRow): Promise<void>;
+  stampAlive(id: string, at: number): Promise<void>;
   /**
    * Close a row at the moment the work actually settles. The compute layer is
    * the only thing that ever observes a real process exit/stop, so without
@@ -22,7 +33,7 @@ export interface WorkLedgerSink {
    * later. Returns the
    * exactly-once gate (see {@link WorkLedgerStore.terminalize}).
    */
-  terminalize(id: string, terminal: WorkTerminal): boolean;
+  terminalize(id: string, terminal: WorkTerminal): Promise<boolean>;
   /**
    * Discharge this row's notification obligation — see
    * {@link WorkLedgerStore.markDelivered}. On the sink because the compute layer
@@ -36,7 +47,7 @@ export interface WorkLedgerSink {
    * Still subagent-agnostic: this is "the model has been told about this row",
    * a statement compute can make about its own processes.
    */
-  markDelivered(id: string, at: number): boolean;
+  markDelivered(id: string, at: number): Promise<boolean>;
   /**
    * Whether the model has ALREADY been told about this row — see
    * {@link WorkLedgerStore.isDelivered}. On the sink because `markDelivered` is
@@ -46,7 +57,7 @@ export interface WorkLedgerSink {
    * find out before it speaks, and it is why a `refreshProcessOutput` throw on
    * the watcher poll path can no longer cost the model a duplicate card.
    */
-  isDelivered(id: string): boolean;
+  isDelivered(id: string): Promise<boolean>;
   /**
    * Drop a row without a terminal. For work the model deliberately walked away
    * from (`exec_unwatch`), where no terminal is truthful: the process did not
@@ -54,7 +65,7 @@ export interface WorkLedgerSink {
    * would fault it as `no_liveness` once nothing stamps it, telling the model a
    * still-running process was "torn down".
    */
-  deleteRow(id: string): void;
+  deleteRow(id: string): Promise<void>;
 }
 
 interface WorkLedgerRow extends Record<string, string | number | null> {
@@ -133,7 +144,7 @@ function toWorkRow(row: WorkLedgerRow): WorkRow {
  * version — it is NOT part of `thread_compute_store`, because the ledger spans
  * subagent runs and the compute layer must stay subagent-agnostic.
  */
-export class WorkLedgerStore implements WorkLedgerSink {
+export class WorkLedgerStore implements SyncWorkLedgerSink {
   constructor(private readonly storage: DurableObjectStorage) {}
 
   migrate(): void {
@@ -510,4 +521,37 @@ export class WorkLedgerStore implements WorkLedgerSink {
       before,
     );
   }
+}
+
+/**
+ * The synchronous shape {@link WorkLedgerStore} answers in: the six sink
+ * operations straight off DO SQLite. Declared so the class still `implements`
+ * something — the sink contract itself is now async and cannot guard it — and
+ * so a test double can be adapted the same way the real store is.
+ */
+/**
+ * The in-process {@link WorkLedgerSink} over a {@link SyncWorkLedgerSink}: the
+ * same six operations, awaited. The store itself stays synchronous — the agent reads
+ * and writes it directly on dozens of paths — so the async contract lives only
+ * where the compute layer touches it, next to the RPC back-call that shares the
+ * contract (`createSandboxThreadHostDeps`).
+ */
+export interface SyncWorkLedgerSink {
+  register(row: WorkRow): void;
+  stampAlive(id: string, at: number): void;
+  terminalize(id: string, terminal: WorkTerminal): boolean;
+  markDelivered(id: string, at: number): boolean;
+  isDelivered(id: string): boolean;
+  deleteRow(id: string): void;
+}
+
+export function localWorkLedgerSink(store: SyncWorkLedgerSink): WorkLedgerSink {
+  return {
+    register: async (row) => store.register(row),
+    stampAlive: async (id, at) => store.stampAlive(id, at),
+    terminalize: async (id, terminal) => store.terminalize(id, terminal),
+    markDelivered: async (id, at) => store.markDelivered(id, at),
+    isDelivered: async (id) => store.isDelivered(id),
+    deleteRow: async (id) => store.deleteRow(id),
+  };
 }

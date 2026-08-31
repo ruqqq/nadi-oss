@@ -49,11 +49,11 @@ function createLedgerSpy() {
     stamps,
     terminalized,
     sink: {
-      register: (row: WorkRow) => void rows.set(row.id, row),
-      stampAlive: (id: string, at: number) => void stamps.push({ id, at }),
+      register: async (row: WorkRow) => void rows.set(row.id, row),
+      stampAlive: async (id: string, at: number) => void stamps.push({ id, at }),
       // Mirrors WorkLedgerStore.terminalize's exactly-once gate: only the
       // transition that actually closed an open row returns true.
-      terminalize: (id: string, terminal: WorkTerminal) => {
+      terminalize: async (id: string, terminal: WorkTerminal) => {
         const row = rows.get(id);
         if (!row || row.terminal) return false;
         rows.set(id, { ...row, terminal });
@@ -62,7 +62,7 @@ function createLedgerSpy() {
       },
       // Mirrors WorkLedgerStore.markDelivered: only a TERMINAL row that has not
       // already discharged its notification obligation can claim the gate.
-      markDelivered: (id: string, at: number) => {
+      markDelivered: async (id: string, at: number) => {
         const row = rows.get(id);
         if (!row?.terminal || row.deliveredAt !== null) return false;
         rows.set(id, { ...row, deliveredAt: at });
@@ -70,8 +70,8 @@ function createLedgerSpy() {
       },
       // Mirrors WorkLedgerStore.isDelivered: "has the model already been told",
       // read straight off the gate — an unknown row was never told.
-      isDelivered: (id: string) => rows.get(id)?.deliveredAt != null,
-      deleteRow: (id: string) => void rows.delete(id),
+      isDelivered: async (id: string) => rows.get(id)?.deliveredAt != null,
+      deleteRow: async (id: string) => void rows.delete(id),
     },
   };
 }
@@ -130,7 +130,7 @@ function createService(input: {
     // The agent supplies `nextSweepAt(workLedger.listOpen())`; mirror that over
     // the spy's rows so the fold is exercised against real horizons.
     ...(input.foldWorkHorizon
-      ? { getWorkHorizon: () => nextSweepAt([...ledger.rows.values()]) }
+      ? { getWorkHorizon: async () => nextSweepAt([...ledger.rows.values()]) }
       : {}),
   });
   return { service, ledger, alarms };
@@ -274,7 +274,7 @@ describe("settled work closes its own ledger row (I-1)", () => {
     // And the exactly-once gate is spent by the EXIT, not by the reaper: a
     // later terminalize (Task 6's delivery trigger) must not fire.
     expect(
-      ledger.sink.terminalize(started.processId, {
+      await ledger.sink.terminalize(started.processId, {
         outcome: "fault",
         reason: "no_liveness",
         at: later,
@@ -1509,7 +1509,7 @@ describe("stopAllRunningProcesses — turn cancel never blocks on a dead sandbox
   it("does not stamp a delivery the reaper already owed", async () => {
     const { ledger, canceller, a } = await watchedProcessesForCancel();
     // The reaper closed this row first and may still genuinely owe its card.
-    ledger.sink.terminalize(a, {
+    await ledger.sink.terminalize(a, {
       outcome: "fault",
       reason: "no_liveness",
       at: 900,

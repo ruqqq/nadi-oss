@@ -115,7 +115,16 @@ export interface ComputeToolHostDeps {
   deliverSystemReminder: (
     body: string,
     mode: "deferred" | "proactive",
-    options?: { watcher?: WatcherCompletionInfo },
+    options?: {
+      watcher?: WatcherCompletionInfo;
+      /**
+       * Set ONLY by the watcher-poll path, where a throw is load-bearing: it
+       * leaves the work-ledger row owed so the sweep retries the delivery.
+       * Command paths leave it unset and a failed delivery is swallowed. See
+       * the same field on `ThreadComputeServiceDeps.deliverSystemReminder`.
+       */
+      mustDeliver?: boolean;
+    },
   ) => Promise<void>;
   now?: () => number;
   /**
@@ -173,7 +182,7 @@ export interface ComputeToolHostDeps {
    * alarm min-fold so the reaper rides the thread's one alarm instead of
    * arming (and thereby cancelling) it.
    */
-  getWorkHorizon?: () => number | null;
+  getWorkHorizon?: () => Promise<number | null>;
   /**
    * Fired once, after `ThreadComputeService` acquires a genuinely fresh
    * runtime (not a recovery restore). Wired to `createRepositoryPreparation`

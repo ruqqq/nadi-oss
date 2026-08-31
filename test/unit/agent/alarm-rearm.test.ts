@@ -16,6 +16,7 @@ import type { ThreadComputeStoreLike } from "../../../src/compute/thread-service
 import type { EffectiveComputeConfig } from "../../../src/compute/types";
 import { DEFAULT_MONITOR_POLL_INTERVAL_MS } from "../../../src/compute/watchers";
 import { createMemoryComputeStore } from "../compute/helpers/memory-store";
+import { localWorkLedgerSink } from "../../../src/agent/work-ledger-store";
 
 /**
  * The ALARM RE-ARM WIRING of `ThinkThreadAgent.runSandboxEviction`.
@@ -153,7 +154,7 @@ function setup(input: {
   const backend = input.backend ?? new FakeComputeBackend();
   const store = input.store ?? createMemoryComputeStore();
   const scheduleEviction = vi.fn(async (_timestampMs: number) => undefined);
-  const getWorkHorizon = () => nextSweepAt(input.rows);
+  const getWorkHorizon = async () => nextSweepAt(input.rows);
   const service = new ThreadComputeService({
     backend,
     store,
@@ -166,7 +167,7 @@ function setup(input: {
     supportsProcessMonitor: input.supportsProcessMonitor ?? true,
     getWorkHorizon,
     ...(input.quota ? { quota: input.quota } : {}),
-    ...(input.ledger ? { workLedger: input.ledger } : {}),
+    ...(input.ledger ? { workLedger: localWorkLedgerSink(input.ledger) } : {}),
   });
   holder.resolved = { service };
 

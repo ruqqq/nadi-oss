@@ -1,7 +1,7 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { ThinkThreadAgent } from "../../../src/agent/think-thread-agent";
-import { WorkLedgerStore } from "../../../src/agent/work-ledger-store";
+import { WorkLedgerStore, localWorkLedgerSink } from "../../../src/agent/work-ledger-store";
 import { PROCESS_STALE_AFTER_MS, type WorkRow } from "../../../src/agent/work-ledger";
 import { FakeComputeBackend } from "../../../src/compute/backends/fake";
 import { DEFAULT_COMPUTE_LIMITS } from "../../../src/compute/config";
@@ -345,7 +345,7 @@ describe("ThinkThreadAgent.listBackgroundWork", () => {
         // The SAME storage `instance.listBackgroundWork()` reads — this is
         // what proves the poll path's write is visible to the RPC, not just
         // to a private test double.
-        workLedger: store,
+        workLedger: localWorkLedgerSink(store),
       });
 
       const started = await service.execStart({ command: "sleep 300", label: "build" });
