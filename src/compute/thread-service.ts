@@ -1875,7 +1875,23 @@ export class ThreadComputeService {
    * spoken for, and the watcher's own `nextPollAt` keeps the alarm armed for it.
    */
   async hasWatcher(processId: string): Promise<boolean> {
-    return this.deps.store.listWatchers().some((watcher) => watcher.processId === processId);
+    return (await this.watchedProcessIds()).includes(processId);
+  }
+
+  /**
+   * Every currently-watched process id, in ONE read.
+   *
+   * The sweep's retry pass asks the same question of every owed row, and the
+   * answer comes from a single local table. Asked per row it is one call per
+   * row — and once the service lives in `AgentSandbox` that is one RPC round
+   * trip per row, inside the reaper loop, against a component whose
+   * load-bearing property is that it never blocks on a dead sandbox. So the
+   * sweep reads the SET once, after the classification pass (which is what can
+   * delete watchers, via `reapProcess`) and before the retry pass (which
+   * delivers only and cannot change it).
+   */
+  async watchedProcessIds(): Promise<string[]> {
+    return this.deps.store.listWatchers().map((watcher) => watcher.processId);
   }
 
   /**

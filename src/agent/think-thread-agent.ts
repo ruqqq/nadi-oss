@@ -5606,6 +5606,18 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
     // `cancelSubagentRun`/`reapProcess` here would fire a second SDK terminal at
     // a run the reaper is done with.
     const redelivered: string[] = [];
+    // ONE read for the whole retry pass, not one per row. Per row this is a
+    // call into the compute service from inside the reaper's loop — and the
+    // reaper's load-bearing property is that it never blocks. Read here, i.e.
+    // AFTER the classification pass, because that pass's `reapProcess` is what
+    // deletes watchers; the retry pass below delivers only and never changes
+    // the set, so a snapshot taken here answers every row exactly as a per-row
+    // read would have. Degrades to "no watchers" when compute did not resolve,
+    // which is the same answer the per-row `resolved?.` optional chain gave:
+    // no `pollWatcher` can run then, so the sweep is the row's only voice.
+    const watchedProcessIds = new Set(
+      (await resolved?.service.watchedProcessIds().catch(() => [])) ?? [],
+    );
     for (const row of owed) {
       const terminal = row.terminal;
       if (!terminal) continue;
@@ -5637,7 +5649,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
       // delivery gate" reopens double delivery: this skip is what stops the
       // sweep from delivering out from under a watcher that still owes the
       // same row.
-      if (row.kind === "process" && (await resolved?.service.hasWatcher(row.id))) continue;
+      if (row.kind === "process" && watchedProcessIds.has(row.id)) continue;
       try {
         await this.deliverWorkTerminal({
           id: row.id,

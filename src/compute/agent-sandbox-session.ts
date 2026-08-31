@@ -219,6 +219,9 @@ export class SandboxSession extends RpcTarget {
   hasWatcher(processId: Arg<"hasWatcher", 0>): Call<"hasWatcher"> {
     return guard(() => this.service.hasWatcher(processId));
   }
+  watchedProcessIds(): Call<"watchedProcessIds"> {
+    return guard(() => this.service.watchedProcessIds());
+  }
   processReapView(processId: Arg<"processReapView", 0>): Call<"processReapView"> {
     return guard(() => this.service.processReapView(processId));
   }
