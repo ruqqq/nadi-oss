@@ -233,6 +233,15 @@ async function updateWorkspaceSandboxSettings(
       body.idleTimeoutMs === undefined
         ? (existing?.idleTimeoutMs ?? 900000)
         : clampPositiveInt(body.idleTimeoutMs, 900000, 86_400_000),
+    // ACCEPTED AND STORED, BUT INERT ON SPRITES — the provider this deployment
+    // runs. Since P3 a sprite's `release(recoverable)` makes no provider call
+    // and there is no TTL eviction left to read this, so whatever a workspace
+    // sets here changes nothing about how long its boxes survive: they persist
+    // until the agent is deleted. It is still honoured by the Cloudflare
+    // backend, which clamps it into its backup API (1-168h), which is why the
+    // field is kept rather than rejected. See `ReleaseOptions.recoveryTtlMs`.
+    // The SETTINGS UI still offers it without saying any of this — carried to
+    // P4 with the rest of the sandbox-settings surface.
     recoveryTtlMs:
       body.recoveryTtlMs === undefined
         ? (existing?.recoveryTtlMs ?? 86_400_000)

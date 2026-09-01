@@ -391,9 +391,18 @@ describe("AgentSandboxLedger (real D1)", () => {
     expect(await ledger().countActive("ws1")).toBe(0);
   });
 
-  // The tail of the same finding: a row that OUTLIVED its delete (a `remove()`
-  // that failed and only logged) must not hold a slot forever, be offered to a
-  // reclaim that can never succeed, or spare a sprite nothing can reach.
+  /**
+   * The tail of the same finding: a row that OUTLIVED its delete (a `remove()`
+   * that failed and only logged) must not hold a slot, be offered to a reclaim
+   * that can never succeed, or spare a sprite nothing can reach.
+   *
+   * ALL FOUR READERS ARE DRIVEN HERE, deliberately. Round 2 filtered three and
+   * missed `tryAdmit` — the statement where the insert IS the lease — and NO
+   * TEST NOTICED, because the other three agreed with each other. Three of four
+   * is worse than none: `tryAdmit` counting a row `countActive` does not gives
+   * a permanent `quota_exhausted` reading "All N-1 slots are busy (limit N)"
+   * with nothing to free.
+   */
   it("REGRESSION: an archived agent's surviving row holds no slot and protects no sprite", async () => {
     await ledger().tryAdmit({
       agentId: "ag_a",
@@ -408,7 +417,8 @@ describe("AgentSandboxLedger (real D1)", () => {
       externalId: "nadi-b1-stranded",
       now: 10,
     });
-    // Anti-vacuity: while the agent is LIVE, all three answers protect it.
+    // ANTI-VACUITY: while the agent is LIVE, all four answers protect it — the
+    // cap included, which is what `tryAdmit` at limit 1 measures.
     expect(await ledger().countActive("ws1")).toBe(1);
     expect(await ledger().listKnownSpriteNames()).toEqual(new Set(["nadi-b1-stranded"]));
     expect(
@@ -416,6 +426,16 @@ describe("AgentSandboxLedger (real D1)", () => {
         (c) => c.agentId,
       ),
     ).toEqual(["ag_a"]);
+    expect(
+      await ledger().tryAdmit({
+        agentId: "ag_b",
+        workspaceId: "ws1",
+        provider: "mock",
+        now: 20,
+        limit: 1,
+      }),
+    ).toBe(false);
+    await ledger().remove("ag_b");
 
     await env.REGISTRY_DB.prepare("UPDATE agents SET archived_at = 99 WHERE id = 'ag_a'").run();
 
@@ -424,10 +444,22 @@ describe("AgentSandboxLedger (real D1)", () => {
     expect(
       await ledger().listReclaimCandidates({ workspaceId: "ws1", excludeAgentId: "ag_b" }),
     ).toEqual([]);
+    // THE FOURTH READER. Without its own `archived_at` filter this stays
+    // `false` forever: a permanent `quota_exhausted` naming a slot count the
+    // other three answers say is free, with no candidate to reclaim.
+    expect(
+      await ledger().tryAdmit({
+        agentId: "ag_b",
+        workspaceId: "ws1",
+        provider: "mock",
+        now: 30,
+        limit: 1,
+      }),
+    ).toBe(true);
   });
 
   // DISABLE is not DELETE: it leaves `archived_at` null, so a paused agent's
-  // box stays protected by every one of the three answers above.
+  // box stays protected by every one of the four answers above.
   it("a DISABLED agent's box is still counted, offered and protected", async () => {
     await ledger().tryAdmit({
       agentId: "ag_a",
@@ -446,6 +478,21 @@ describe("AgentSandboxLedger (real D1)", () => {
 
     expect(await ledger().listKnownSpriteNames()).toEqual(new Set(["nadi-b1-paused"]));
     expect(await ledger().countActive("ws1")).toBe(1);
+    expect(
+      (await ledger().listReclaimCandidates({ workspaceId: "ws1", excludeAgentId: "ag_b" })).map(
+        (c) => c.agentId,
+      ),
+    ).toEqual(["ag_a"]);
+    // Still holds its slot: a paused box is real capacity, not a free one.
+    expect(
+      await ledger().tryAdmit({
+        agentId: "ag_b",
+        workspaceId: "ws1",
+        provider: "mock",
+        now: 20,
+        limit: 1,
+      }),
+    ).toBe(false);
   });
 
   // F2. A bare `UPDATE` matches zero rows and says nothing, leaving a live

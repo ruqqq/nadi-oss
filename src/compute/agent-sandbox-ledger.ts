@@ -26,6 +26,23 @@ export type { AgentSandboxLedgerRow, AgentSandboxStatus };
  * **There is no `workspace_id` column** — an agent already belongs to exactly
  * one workspace, and duplicating that here would create a second answer that
  * can disagree. Every workspace-scoped statement therefore JOINs `agents`.
+ *
+ * **AN ARCHIVED AGENT'S ROW IS INERT, AND ALL FOUR READERS MUST AGREE ON THAT.**
+ * `archived_at` is written by the delete route alone (disable writes only
+ * `enabled`), and that route destroys the box and removes the row before it
+ * stamps — so a surviving row means a `remove()` that failed and only logged.
+ * Nothing can ever reach that box again to release it, so the row must not hold
+ * a slot ({@link tryAdmit}, {@link countActive}), must not be offered to a
+ * reclaim that can only refuse ({@link listReclaimCandidates}), and must not
+ * protect a sprite from the reaper ({@link listKnownSpriteNames}).
+ *
+ * All four carry `AND a.archived_at IS NULL`. Getting three of the four is
+ * WORSE than getting none: `tryAdmit` alone counting an archived row while
+ * `countActive` does not produces a permanent `quota_exhausted` that reads
+ * "All 4 slots are busy (limit 5)" with no candidate to free — two answers that
+ * disagree, which is exactly what the no-`workspace_id` rule above exists to
+ * prevent. This is enforced by construction, not by a cron: nothing deletes
+ * such a row, and with these filters nothing needs to.
  */
 export class AgentSandboxLedger {
   constructor(private readonly db: D1Database) {}
@@ -65,6 +82,7 @@ export class AgentSandboxLedger {
            SELECT COUNT(*) FROM agent_sandboxes s
              JOIN agents a ON a.id = s.agent_id
            WHERE a.workspace_id = ?4
+             AND a.archived_at IS NULL
              AND s.status IN ('acquiring', 'active')
              AND s.agent_id <> ?1
          ) < ?5

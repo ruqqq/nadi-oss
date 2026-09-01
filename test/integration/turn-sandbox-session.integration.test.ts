@@ -286,9 +286,6 @@ describe("the turn's sandbox session", () => {
           // `confirm: true` is REQUIRED since P3 — an unconfirmed call is a
           // no-op, which would leave this helper's `shutdownAfter` inert and the
           // assertion below passing only because the fake's script was reset.
-          // `confirm: true` is REQUIRED since P3 — an unconfirmed call is a
-          // no-op, so without it `shutdownAfter` would be inert and this
-          // helper's name would be a lie.
           if (shutdownAfter) await session!.service.execShutdown({ confirm: true });
           return after - before;
         } finally {

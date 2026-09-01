@@ -87,6 +87,49 @@ describe("reconcileOrphanSprites", () => {
     expect(result).toMatchObject({ orphans: 0 });
   });
 
+  /**
+   * THE DESTRUCTIVE DIRECTION OF GUARD 2, tested at the level where the
+   * deletion actually happens.
+   *
+   * Round 2 narrowed guard 2 from "a row means keep, in EVERY status" to "a
+   * LIVE agent's row means keep" — a protective guard made weaker, on the
+   * reasoning that deleting an agent promises to delete its machine and only
+   * the delete route sets `archived_at`. That reasoning is only worth anything
+   * if the reap it enables actually happens: this is the case where a delete's
+   * own `remove()` failed and only logged, leaving a row that would otherwise
+   * spare the sprite forever with no route left that could reach it.
+   *
+   * Paired with the disabled-agent case above, which is the same query
+   * answering the opposite way. If a future change reverts the narrowing, this
+   * test fails; if it widens it, that one does.
+   */
+  it("REAPS the sprite of an ARCHIVED agent whose row outlived its delete", async () => {
+    const name = `${RECONCILABLE_SPRITE_PREFIX}deleted-agent`;
+    await seedRow({ agentId: "ag_deleted", status: "idle", spriteName: name });
+    await env.REGISTRY_DB.prepare(
+      "UPDATE agents SET archived_at = 1 WHERE id = 'ag_deleted'",
+    ).run();
+
+    const { client, deleted } = fakeClient([name]);
+    const result = await reconcileOrphanSprites(envWithKey(), { client, now: () => NOW });
+
+    expect(deleted).toEqual([name]);
+    expect(result).toMatchObject({ orphans: 1, deleted: 1 });
+  });
+
+  // The same row, one column different: DISABLE leaves `archived_at` null, so
+  // the box survives. This is the pair that makes the narrowing legible.
+  it("does NOT reap it when the agent is merely disabled, not deleted", async () => {
+    const name = `${RECONCILABLE_SPRITE_PREFIX}same-row-paused`;
+    await seedRow({ agentId: "ag_deleted", status: "idle", spriteName: name });
+    await env.REGISTRY_DB.prepare("UPDATE agents SET enabled = 0 WHERE id = 'ag_deleted'").run();
+
+    const { client, deleted } = fakeClient([name]);
+    await reconcileOrphanSprites(envWithKey(), { client, now: () => NOW });
+
+    expect(deleted).toEqual([]);
+  });
+
   it("NEVER reaps an active agent's sprite", async () => {
     const name = `${RECONCILABLE_SPRITE_PREFIX}busy`;
     await seedRow({ agentId: "ag_busy", status: "active", spriteName: name });
