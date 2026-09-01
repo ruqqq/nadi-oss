@@ -209,6 +209,35 @@ export class AgentSandbox extends DurableObject<Env> {
   }
 
   /**
+   * Cancel the idle-eviction schedule WITHOUT dropping a wake something still
+   * needs.
+   *
+   * A plain `deleteAlarm()` here was a strand, and the routing fix made it a
+   * worse one. `exec_shutdown` (and the recovery teardowns) stop every process
+   * on the box, terminalize each row on its OWNER's ledger, and deliberately
+   * withhold the delivery stamp for owners the caller never spoke to — on the
+   * promise that the owner's own sweep will report it. That sweep has exactly
+   * one trigger: `sweepSandboxWorkLedger`, called only from this DO's
+   * `alarm()`. Deleting the alarm one line later removed the only thing that
+   * could keep the promise, so the owner's row sat open and unread until some
+   * other thread of the agent happened to do compute and re-arm.
+   *
+   * So: cancel, then ask the ROSTER whether anything is still owed or open, and
+   * re-arm for that. The roster fold is affordable here for the same reason it
+   * is in {@link rosterHasBlockingWork} — this is a teardown, not a per-exec
+   * path. If nothing is owed the box is left with no alarm, exactly as before.
+   *
+   * The horizon is armed unclamped, matching the ledger component of
+   * `runSandboxComputeAlarm`'s fallback: an open row whose horizon is already
+   * past means the sweep is overdue, and the next alarm is what closes it.
+   */
+  private async cancelEvictionKeepingOwedWork(): Promise<void> {
+    await this.ctx.storage.deleteAlarm();
+    const horizon = await this.rosterWorkHorizon();
+    if (horizon !== null) await this.ctx.storage.setAlarm(horizon);
+  }
+
+  /**
    * Does ANY thread this box serves have a live child agent on the machine?
    *
    * OR-folded over the roster because the question is about the MACHINE, and
@@ -218,6 +247,21 @@ export class AgentSandbox extends DurableObject<Env> {
    * answers `true` (`createSandboxThreadHostDeps` picks the fallback that
    * cannot lose work), so this can only ever be MORE conservative than the
    * single-thread answer it replaces — never less.
+   *
+   * AND CONSERVATISM HAS A PRICE HERE, which the fan-out multiplies by N. That
+   * `true`-on-unreachable is what blocks `releaseIfIdle`, so ONE transiently
+   * unreachable rostered thread now keeps the WHOLE box alive rather than just
+   * its own; on a provider with no auto-destroy the sprite bills for as long as
+   * it lasts. Worse, a roster entry is only pruned by a sweep that REACHES its
+   * thread, so a permanently unreachable one pins the box awake indefinitely.
+   * That trade is deliberate — destroying a container out from under a live
+   * child loses work, and work outranks money in this codebase — but it is a
+   * trade, not a free win, and it is stated so nobody has to rediscover the
+   * bill. The bounded fix is a reachability-preserving probe (the shape
+   * `probeWorkHorizon` already uses for the roster prune) so a sibling's
+   * SILENCE and a sibling's YES can be priced differently; that needs its own
+   * task, because it decides when it is acceptable to reclaim a box whose
+   * child we cannot ask about.
    *
    * Affordable: every caller is a teardown or reclaim decision
    * (`releaseIfIdle`, `releaseIfReclaimable`, `execShutdown`), not a per-exec
@@ -451,7 +495,7 @@ export class AgentSandbox extends DurableObject<Env> {
       // writes THIS DO's store, and routing its wake through another DO only
       // added a hop that could fail.
       scheduleEviction: (timestampMs) => this.ctx.storage.setAlarm(timestampMs),
-      cancelEviction: () => this.ctx.storage.deleteAlarm(),
+      cancelEviction: () => this.cancelEvictionKeepingOwedWork(),
       supportsProcessMonitor: options.supportsProcessMonitor,
       // NOT on the plan's list of thread-bound deps, and it had to be: the
       // thread DO supplies `processMonitorEnabled && !attachedRuntime`, while

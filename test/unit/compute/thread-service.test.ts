@@ -57,6 +57,7 @@ function createService(input?: {
   config?: EffectiveComputeConfig;
   onFreshRuntimeAcquired?: () => Promise<void>;
   backgroundLongRunningExec?: boolean;
+  supportsProcessMonitor?: boolean;
   execForegroundTimeoutMs?: number;
   execForegroundPollIntervalMs?: number;
   sleep?: (ms: number) => Promise<void>;
@@ -87,6 +88,9 @@ function createService(input?: {
     ...(input?.backgroundLongRunningExec === undefined
       ? {}
       : { backgroundLongRunningExec: input.backgroundLongRunningExec }),
+    ...(input?.supportsProcessMonitor === undefined
+      ? {}
+      : { supportsProcessMonitor: input.supportsProcessMonitor }),
     ...(input?.execForegroundTimeoutMs === undefined
       ? {}
       : { execForegroundTimeoutMs: input.execForegroundTimeoutMs }),
@@ -1354,5 +1358,83 @@ describe("retention: preserve by default, discard only on proof", () => {
     await makeIdle(service);
     await service.releaseIfIdle();
     expect(backend.releaseCalls[0]?.options.disposition).toBe("recoverable");
+  });
+});
+
+/**
+ * FIX ROUND 2 — the reason a background command has no watcher must be one the
+ * model can ACT on.
+ *
+ * `createComputeTools` exposes `exec`, `exec_output`, `exec_output_grep`,
+ * `exec_output_read`, `exec_stop`, `exec_shutdown`, `exec_list`,
+ * `exec_upload_file`, `exec_download_file`, `exec_publish_artifact` — and no
+ * `exec_watch` or `exec_unwatch`. An earlier draft of this message told the
+ * model to "use exec_unwatch on one to free a slot", advice it cannot follow
+ * and would spend a turn discovering. Watchers are attached by the runtime, not
+ * by the model.
+ */
+describe("a watcher refusal explains itself in tools the model actually has", () => {
+  /** Every compute tool `createComputeTools` defines. Kept literal on purpose. */
+  const EXPOSED_TOOLS = [
+    "exec",
+    "exec_output",
+    "exec_output_grep",
+    "exec_output_read",
+    "exec_stop",
+    "exec_shutdown",
+    "exec_list",
+    "exec_upload_file",
+    "exec_download_file",
+    "exec_publish_artifact",
+  ];
+
+  function unknownToolsIn(text: string): string[] {
+    return [...text.matchAll(/\bexec(?:_[a-z_]+)?\b/g)]
+      .map((match) => match[0])
+      .filter((name) => !EXPOSED_TOOLS.includes(name));
+  }
+
+  async function backgroundedWithFullThreadQuota() {
+    // The clock is frozen unless a test moves it, and the foreground poll loop
+    // spins on `now() - startedAt < foregroundTimeoutMs`. A no-op `sleep` with
+    // a frozen clock is an infinite loop, so the fake sleep ADVANCES the clock
+    // by exactly what it was asked to wait — which is what a real sleep does.
+    const now = { value: 1_000 };
+    const { service } = createService({
+      now,
+      supportsProcessMonitor: true,
+      backgroundLongRunningExec: true,
+      execForegroundTimeoutMs: 5,
+      execForegroundPollIntervalMs: 5,
+      sleep: async (ms: number) => void (now.value += Math.max(ms, 1)),
+    });
+    // Fill this thread's own quota (MAX_WATCHERS_PER_THREAD = 8).
+    for (let index = 0; index < 8; index += 1) {
+      const started = await service.execStart({ command: `sleep ${100 + index}` });
+      await service.execWatch({ processId: started.processId });
+    }
+    const result = await service.exec({ command: "sleep 900" });
+    if (result.status !== "backgrounded")
+      throw new Error(`expected backgrounded: ${result.status}`);
+    return result;
+  }
+
+  it("names the limit that refused it", async () => {
+    const result = await backgroundedWithFullThreadQuota();
+    expect(result.watching).toBe(false);
+    expect(result.message).toContain("its limit");
+    expect(
+      result.message,
+      "the model has to learn WHY it will hear nothing, not just that it will",
+    ).toContain("will not announce itself");
+  });
+
+  it("suggests no tool that does not exist", async () => {
+    const result = await backgroundedWithFullThreadQuota();
+    const surface = [result.message, ...result.nextActions].join(" ");
+    expect(
+      unknownToolsIn(surface),
+      "advice naming a tool the model cannot call costs it a turn to discover",
+    ).toEqual([]);
   });
 });

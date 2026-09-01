@@ -1382,9 +1382,9 @@ export class ThreadComputeService {
   ): ExecBackgroundedResult {
     const reason =
       refusedBy === "thread_limit"
-        ? ` This thread is already watching ${MAX_WATCHERS_PER_THREAD} processes, its limit; use exec_unwatch on one to free a slot.`
+        ? ` This thread is already watching ${MAX_WATCHERS_PER_THREAD} processes, its limit, so this one will not announce itself when it finishes.`
         : refusedBy === "box_limit"
-          ? " This agent's sandbox is already watching as many processes as it can across all of its threads; another thread must finish or unwatch one first."
+          ? " This agent's sandbox is watching as many processes as it can across all of its threads, so this one will not announce itself when it finishes."
           : " Background monitoring is unavailable in this runtime.";
     return {
       ok: true,
@@ -1396,7 +1396,17 @@ export class ThreadComputeService {
       backgroundedAfterMs: timeoutMs,
       ...preview,
       message: `Command is still running in the background without a watcher.${reason}`,
-      nextActions: ["Use exec_output to inspect it.", "Use exec_stop to cancel."],
+      // Deliberately only `exec_output` and `exec_stop`: those are the ONLY
+      // watcher-adjacent tools `createComputeTools` exposes. An earlier draft
+      // of the message above told the model to "use exec_unwatch to free a
+      // slot" — there is no such tool, and no `exec_watch` either, so it could
+      // neither free a slot nor take one afterwards. Advice the model cannot
+      // act on is worse than no reason at all: it spends a turn discovering the
+      // tool does not exist.
+      nextActions: [
+        "Use exec_output to inspect it.",
+        "Use exec_stop to cancel it, or to free a watcher slot for later work.",
+      ],
     };
   }
 
@@ -2110,17 +2120,29 @@ export class ThreadComputeService {
       if (this.deps.store.wasProcessAutoWatched(process.id)) continue;
       if (this.deps.store.listWatchers().some((watcher) => watcher.processId === process.id))
         continue;
-      // Was a silent `break`. The backstop is the last thing that would have
-      // attached a watcher to this process, so a refusal here is the moment a
-      // completion card stops being possible — it may not be invisible.
+      // Was a silent `break` on ANY refusal. The backstop is the last thing
+      // that would have attached a watcher to this process, so a refusal here
+      // is the moment a completion card stops being possible — it may not be
+      // invisible, and it may not be contagious.
+      //
+      // CONTINUE vs BREAK is the whole point. This loop is box-wide (it walks
+      // every process of every thread of the agent) while admission is
+      // per-owner, so a `thread_limit` is a statement about ONE other thread
+      // and says nothing about the process two rows down. Breaking on it put
+      // finding 2's starvation back one layer up: thread A holding its eight
+      // meant thread B's own process never got a watcher, visible only in a log
+      // line. Only `box_limit` is a fact about the box, and only it stops the
+      // walk — nothing later in the loop can be admitted either.
       const admission = this.admitWatcherFor(this.threadOfProcess(process.id));
       if (admission !== "ok") {
         log.warn("compute.auto_watch_refused", {
           threadId: this.deps.threadId,
           processId: process.id,
+          ownerThreadId: this.threadOfProcess(process.id),
           refusedBy: admission,
         });
-        break;
+        if (admission === "box_limit") break;
+        continue;
       }
       await this.execWatch({ processId: process.id });
       this.deps.store.markProcessAutoWatched(process.id, this.deps.now());

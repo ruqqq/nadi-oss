@@ -334,6 +334,72 @@ describe("a teardown speaks only for the thread it is talking to", () => {
   });
 
   /**
+   * FIX ROUND 2 — the withheld claim needs a WAKE to redeem it.
+   *
+   * Withholding the stamp only helps if something later sweeps the row, and
+   * `runWorkLedgerSweep`'s sole trigger is `AgentSandbox.alarm()`. `execShutdown`
+   * calls `clearAlarm()` four lines after leaving the sibling's row owed, which
+   * deleted the box's only alarm — so "the owner's own sweep reports it" was a
+   * promise nothing kept until some other thread happened to do compute.
+   */
+  it("leaves an ALARM armed when a teardown leaves another thread's row owed", async () => {
+    const agentId = "agent_sbx_teardown_wake";
+    const owner = "thr_sbx_wake_owner";
+    const shutter = "thr_sbx_wake_shutter";
+    await seedAgent(agentId);
+    await seedThread(owner, agentId);
+    await seedThread(shutter, agentId);
+
+    await startUnwatchedProcess(agentId, owner);
+
+    const shutterSession = await openSession(agentId, shutter);
+    const result = await shutterSession.session.execShutdown({ confirm: true });
+    if (!result.ok) throw new Error(`execShutdown failed: ${result.error.code}`);
+
+    const armed = await runInSandboxDo(sandboxStub(agentId), async (instance: any) =>
+      instance.ctx.storage.getAlarm(),
+    );
+    expect(
+      armed,
+      "the owed row's only sweep trigger is this alarm; clearing it strands the row " +
+        "AND the notice the owner was promised",
+    ).not.toBeNull();
+  });
+
+  /**
+   * FIX ROUND 2 — the other direction of `toldThisOwner`, which nothing covered.
+   *
+   * Deleting the `markDelivered` call entirely left all six vitest projects
+   * green (4990 tests), because the only `deliveredAt` assertions go through
+   * `stopAllRunningProcesses`, a different funnel that stamps inline. Without
+   * the stamp, every `exec_shutdown` earns the model a duplicate per-process
+   * "stopped" card from the sweep, contradicting the reminder it just read.
+   */
+  it("DOES claim the delivery for its own thread's rows", async () => {
+    const agentId = "agent_sbx_teardown_self";
+    const owner = "thr_sbx_self_owner";
+    await seedAgent(agentId);
+    await seedThread(owner, agentId);
+
+    const processId = await startUnwatchedProcess(agentId, owner);
+
+    // The SAME thread tears the box down, so its own reminder genuinely covers
+    // this row and the sweep must not say it a second time.
+    const ownerSession = await openSession(agentId, owner);
+    const result = await ownerSession.session.execShutdown({ confirm: true });
+    if (!result.ok) throw new Error(`execShutdown failed: ${result.error.code}`);
+
+    const row = await ledgerRow(owner, processId);
+    expect(row?.terminal?.reason).toBe("process_stopped");
+    expect(
+      row?.deliveredAt,
+      "this thread WAS told, in the shutdown reminder — leaving the row owed makes " +
+        "the sweep inject a second, contradicting card for the same process",
+    ).not.toBeNull();
+    expect(await transcriptText(owner)).toContain("shut down on request");
+  });
+
+  /**
    * `hasBlockingWork` means "a CHILD AGENT is on this machine". The machine is
    * the agent's now, so the question is about the box, not about whichever
    * thread happens to be asking. Asking one thread lets a sibling destroy a
@@ -419,6 +485,65 @@ describe("one thread cannot spend the whole agent's watcher budget", () => {
     const refused = await hogSession.session.execWatch({ processId: ninth.value.processId });
     expect(refused.ok).toBe(false);
     if (!refused.ok) expect(refused.error.message).toContain("thread_limit");
+  });
+
+  /**
+   * FIX ROUND 2 — a sibling's full quota must not abort the whole backstop.
+   *
+   * `autoWatchRunningProcesses` walks every process in the BOX while admission
+   * is per-OWNER, so a `thread_limit` is a fact about one other thread and says
+   * nothing about the next process in the list. Breaking on it put finding 2's
+   * starvation back one layer up, visible only as a log line.
+   */
+  it("skips a process it may not watch instead of abandoning the whole sweep", async () => {
+    const agentId = "agent_sbx_backstop";
+    const hog = "thr_sbx_backstop_hog";
+    const other = "thr_sbx_backstop_other";
+    await seedAgent(agentId);
+    await seedThread(hog, agentId);
+    await seedThread(other, agentId);
+
+    const hogSession = await openSession(agentId, hog);
+    for (let index = 0; index < 8; index += 1) {
+      const started = await hogSession.session.execStart({ command: `sleep ${400 + index}` });
+      if (!started.ok) throw new Error(`execStart failed: ${started.error.code}`);
+      const watched = await hogSession.session.execWatch({ processId: started.value.processId });
+      if (!watched.ok) throw new Error(`execWatch failed: ${watched.error.code}`);
+    }
+
+    // OTHER's own unwatched process...
+    const otherSession = await openSession(agentId, other);
+    const mine = await otherSession.session.execStart({ command: "sleep 800" });
+    if (!mine.ok) throw new Error(`execStart failed: ${mine.error.code}`);
+    // ...and the hog's NINTH, which its own quota already refuses.
+    const ninth = await hogSession.session.execStart({ command: "sleep 999" });
+    if (!ninth.ok) throw new Error(`execStart failed: ${ninth.error.code}`);
+
+    // `listProcesses` is `ORDER BY started_at DESC`, and ms-resolution starts
+    // can tie. Stamp the order the defect needs — the refusable row FIRST —
+    // rather than depending on the clock. Both stay in the past so `minAgeMs`
+    // (0) still admits them.
+    await runInSandboxDo(sandboxStub(agentId), async (instance: any) => {
+      const now = Date.now();
+      instance.ctx.storage.sql.exec(
+        "UPDATE sandbox_processes SET started_at = ? WHERE id = ?",
+        now - 1_000,
+        ninth.value.processId,
+      );
+      instance.ctx.storage.sql.exec(
+        "UPDATE sandbox_processes SET started_at = ? WHERE id = ?",
+        now - 5_000,
+        mine.value.processId,
+      );
+    });
+
+    const attached = await otherSession.session.autoWatchRunningProcesses();
+    if (!attached.ok) throw new Error(`autoWatch failed: ${attached.error.code}`);
+    expect(
+      attached.value.attached,
+      "the hog's refused ninth must be skipped, not treated as the end of the walk",
+    ).toContain(mine.value.processId);
+    expect(attached.value.attached).not.toContain(ninth.value.processId);
   });
 
   /**
