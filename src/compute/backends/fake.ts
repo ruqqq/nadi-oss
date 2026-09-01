@@ -95,6 +95,23 @@ export class FakeComputeBackend implements ComputeBackend {
   private readonly blindInspectPaths = new Set<string>();
   private nextReleaseError: Error | undefined;
   private nextAcquireError: Error | undefined;
+  /**
+   * Test seam: a persistent per-command answer, matched on a substring of the
+   * command.
+   *
+   * `nextProcessResult` is single-shot and positional, which cannot express
+   * "this particular probe answers no, every time". The case that needs it is
+   * repository preparation's gate — a `sh -lc 'test ...'` that this fake would
+   * otherwise answer 0 for, i.e. "already prepared", turning every preparation
+   * test into a no-op that still passed its summary assertion. First match wins,
+   * so a test can push a later override in front of an earlier one.
+   */
+  readonly scriptedExits: Array<{ match: string; exitCode: number }> = [];
+
+  private scriptedExitFor(command: string): number | undefined {
+    return this.scriptedExits.find((entry) => command.includes(entry.match))?.exitCode;
+  }
+
   private nextProcessResult:
     | {
         status: "running" | "exited" | "failed";
@@ -218,7 +235,7 @@ export class FakeComputeBackend implements ComputeBackend {
     const configured = this.nextProcessResult;
     this.nextProcessResult = undefined;
     const isEcho = input.command.startsWith("echo ");
-    const exitCode = configured?.exitCode ?? 0;
+    const exitCode = configured?.exitCode ?? this.scriptedExitFor(input.command) ?? 0;
     return {
       status: exitCode === 0 ? "exited" : "failed",
       exitCode,
@@ -658,10 +675,11 @@ export class FakeComputeBackend implements ComputeBackend {
     this.nextProcessResult = undefined;
     const isSleep = /^\s*sleep\b/.test(input.command);
     const isEcho = input.command.startsWith("echo ");
+    const scriptedExit = this.scriptedExitFor(input.command);
     const state: FakeProcessState = {
       runtimeId,
       status: configured?.status ?? (isSleep ? "running" : "exited"),
-      exitCode: configured?.exitCode ?? (isSleep ? undefined : 0),
+      exitCode: configured?.exitCode ?? scriptedExit ?? (isSleep ? undefined : 0),
       stdout: configured?.stdout ?? (isEcho ? `${input.command.slice("echo ".length)}\n` : ""),
       stderr: configured?.stderr ?? "",
     };

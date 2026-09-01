@@ -16,11 +16,26 @@ import {
   threadWorktreePath,
 } from "../compute/workspace-layout";
 
+/**
+ * How one setup command went, as a VALUE rather than a sentence.
+ *
+ * It used to be the sentence alone — `"pnpm install failed with exit code 2"`
+ * — and that is why a failed setup was marked prepared: the only way to ask
+ * "did this fail" was to match a substring, so nothing did. A transient
+ * `npm ci` failure became a permanent state, never retried until the agent's
+ * configuration changed or the box was destroyed, and never logged. `detail`
+ * is still the sentence; `state` is the question the code needs to ask.
+ */
+export type PreparationStepOutcome =
+  | { state: "ok"; detail: string }
+  | { state: "skipped"; detail: string }
+  | { state: "failed"; detail: string };
+
 export interface RepositoryPreparationPrepared {
   name: string;
   checkoutPath: string;
   status: "cloned" | "already_cloned";
-  setup: string;
+  setup: PreparationStepOutcome;
 }
 
 export interface RepositoryPreparationSkipped {
@@ -32,7 +47,18 @@ export interface RepositoryPreparationResult {
   summary: string;
   prepared?: RepositoryPreparationPrepared[];
   skipped?: RepositoryPreparationSkipped[];
-  environmentSetup?: string;
+  environmentSetup?: PreparationStepOutcome;
+  /**
+   * EVERY reason this run was not clean — skipped repositories and failed setup
+   * commands alike, in one list.
+   *
+   * One list, because it has two consumers that must not be able to disagree:
+   * the sentinel is written if and only if this is empty, and the caller logs
+   * exactly this. Previously the mark was gated on `skipped` while the setup
+   * outcomes were only strings inside `prepared`, so a failed `setupCommand`
+   * was both marked prepared AND never logged.
+   */
+  failures?: string[];
 }
 
 // The layout is constructed in ONE place; see `compute/workspace-layout.ts`.
@@ -50,29 +76,6 @@ export function createRepositoryPreparation(input: {
   env: Env;
   threadId: string;
   resolveComputeService: () => Promise<{ service: RepositoryExecService } | null>;
-  /**
-   * Has this thread already been prepared, for THIS exact configuration?
-   *
-   * REQUIRED, both of them, and there is no default. Preparation runs on every
-   * turn's first `exec` now — that is the only trigger that reaches the second
-   * and third thread of a shared box, because the runtime is already active by
-   * the time they open a session. Without a gate that would re-run every
-   * repository's `setupCommand` and the agent's `setupScript` on every turn; a
-   * gate that defaulted to "already prepared" would restore the very bug this
-   * replaced. So the caller must state both halves.
-   *
-   * The signature covers everything preparation acts on — each repository's
-   * name, url, default branch, root directory and setup command, plus the
-   * agent's setup script — so ADDING a repository invalidates it and the new
-   * one is cloned on the next turn.
-   *
-   * The caller owns invalidation for the other direction, the one a signature
-   * cannot see: the box's filesystem being destroyed. See
-   * `AgentSandbox.onFreshRuntimeAcquired`.
-   */
-  isPrepared: (signature: string) => Promise<boolean>;
-  /** Record that this thread is prepared for `signature`. */
-  markPrepared: (signature: string) => Promise<void>;
 }): () => Promise<RepositoryPreparationResult> {
   return async () => {
     const db = registryDb(input.env);
@@ -107,16 +110,14 @@ export function createRepositoryPreparation(input: {
       return { summary: "No project repositories are configured for this thread." };
     }
 
-    // BEFORE compute is resolved, and before a single exec: the steady-state
-    // cost of preparing on every turn has to be the two D1 reads above and
-    // nothing else.
-    const signature = await preparationSignature(repositories, setupScript);
-    if (await input.isPrepared(signature)) {
-      return { summary: "Repositories were already prepared for this thread." };
-    }
-
     const resolved = await input.resolveComputeService();
     if (!resolved) throw new Error("sandbox execution is not enabled for this thread");
+
+    const signature = await preparationSignature(repositories, setupScript);
+    const layout = preparedLayout(input.threadId, repositories);
+    if (await isAlreadyPrepared(resolved.service, layout, signature)) {
+      return { summary: "Repositories were already prepared for this thread." };
+    }
 
     const rootPreparation = await runCommand(
       resolved.service,
@@ -178,14 +179,32 @@ export function createRepositoryPreparation(input: {
       threadWorkRoot(input.threadId),
     );
 
-    // ONLY on a clean run. A skip means something the agent declares is not in
-    // the box — an unreachable clone, a path that is not a checkout, a worktree
-    // that could not be added — and marking that prepared would freeze the
-    // thread in that state until the agent's configuration changed. Retrying
-    // every turn costs a clone attempt per turn for a genuinely broken
-    // repository, and that is the trade taken deliberately: the failure is
-    // logged on every one of those turns instead of exactly once.
-    if (skipped.length === 0) await input.markPrepared(signature);
+    // EVERY way this run fell short, in one list — skips AND failed setup
+    // commands. Built once and used twice, so the "is it clean enough to mark"
+    // question and the "what do we log" question cannot drift apart. They did:
+    // the mark was gated on `skipped` alone, so a repository that cloned fine
+    // and whose `pnpm install` exited 2 was marked prepared and never retried,
+    // while `agent-sandbox-do.ts` logged only skips and therefore said nothing.
+    const failures = [
+      ...skipped.map((entry) => `${entry.name}: ${entry.reason}`),
+      ...prepared
+        .filter((entry) => entry.setup.state === "failed")
+        .map((entry) => `${entry.name}: ${entry.setup.detail}`),
+      ...(environmentSetup?.state === "failed"
+        ? [`environment setup: ${environmentSetup.detail}`]
+        : []),
+    ];
+
+    // The sentinel is written ONLY on a clean run. Anything in `failures` means
+    // something the agent declares is not in the box or did not finish, and
+    // recording that as prepared would freeze the thread in that state until
+    // its configuration changed or the box was destroyed. Retrying costs a
+    // clone attempt (or a setup command) per turn for a genuinely broken
+    // configuration; the trade is deliberate, because the alternative is a
+    // failure that happens once, silently, and is permanent.
+    if (failures.length === 0) {
+      await writePreparedSentinel(resolved.service, input.threadId, signature);
+    }
 
     return {
       summary:
@@ -195,8 +214,100 @@ export function createRepositoryPreparation(input: {
       ...(prepared.length > 0 ? { prepared } : {}),
       ...(skipped.length > 0 ? { skipped } : {}),
       ...(environmentSetup !== null ? { environmentSetup } : {}),
+      ...(failures.length > 0 ? { failures } : {}),
     };
   };
+}
+
+/**
+ * The file that records "this thread is prepared for this configuration", and
+ * WHERE it lives is the whole design.
+ *
+ * It sits inside the thread's own working directory, so every event that
+ * destroys the preparation destroys the record of it, with nobody having to
+ * remember: Task 4's reclaim (`rm -rf /workspace/threads/<id>` plus a prune)
+ * takes it, a fresh acquire's empty `/workspace` has never had it, and a
+ * restore that brings `repos/` back without `threads/` leaves it gone.
+ *
+ * The alternative — a row in the sandbox DO's storage — was tried and is what
+ * this replaces. It survives everything except a fresh acquire, so a reclaimed
+ * thread reopened on the SAME box read as prepared, `ensureWorkspaceRootOnce`
+ * recreated its directory empty, and it worked with no code in it: H1's exact
+ * failure, re-entered through the bookkeeping, needing no container reset. It
+ * also created a cross-task obligation (Task 4 must delete the row) whose
+ * omission fails nothing.
+ */
+const PREPARED_SENTINEL_NAME = ".nadi-prepared";
+
+/** Every path a prepared thread must still have, plus its sentinel. */
+function preparedLayout(
+  threadId: string,
+  repositories: Array<{ checkoutPathName: string }>,
+): { sentinel: string; required: string[] } {
+  return {
+    sentinel: path.join(threadWorkRoot(threadId), PREPARED_SENTINEL_NAME),
+    required: repositories.flatMap((repository) => [
+      agentClonePath(repository.checkoutPathName),
+      threadWorktreePath(threadId, repository.checkoutPathName),
+    ]),
+  };
+}
+
+/**
+ * Is this thread ALREADY prepared for `signature` — asked of the box itself?
+ *
+ * ONE `exec`, and it checks two things that a stored answer conflates: that the
+ * sentinel records this exact configuration, AND that every clone and worktree
+ * it stands for is still on disk. The paths matter because the sentinel and the
+ * checkouts can be destroyed independently — a restore of `threads/` without
+ * `repos/` leaves a sentinel whose worktrees have no repository behind them, and
+ * that direction has no other detector.
+ *
+ * Positive evidence, in the sense this codebase already uses: the answer "yes"
+ * is only reachable when the container answered and every path was found. Any
+ * other outcome — a non-zero exit, a probe that never reached a terminal state,
+ * a container that could not run it — resolves to "not prepared", which costs an
+ * idempotent re-run and never costs an empty working directory.
+ *
+ * All interpolated values are safe: the paths come from `workspace-layout`'s
+ * `assertSafeSegment`, and the signature is a hex digest.
+ */
+async function isAlreadyPrepared(
+  service: RepositoryExecService,
+  layout: { sentinel: string; required: string[] },
+  signature: string,
+): Promise<boolean> {
+  const tests = [
+    `test "$(cat ${shellQuote(layout.sentinel)} 2>/dev/null)" = ${shellQuote(signature)}`,
+    ...layout.required.map((target) => `test -e ${shellQuote(target)}`),
+  ].join(" && ");
+  const result = await service.exec({
+    command: `sh -lc ${shellQuote(tests)}`,
+    timeoutMs: REPOSITORY_SETUP_TIMEOUT_MS,
+    label: "check thread preparation",
+  });
+  return terminalExitCode(result) === 0;
+}
+
+/**
+ * Record that this thread is prepared for `signature`.
+ *
+ * Failure is swallowed on purpose and is the SAFE direction: an unwritten
+ * sentinel costs one idempotent re-preparation next turn, while refusing the
+ * turn over a bookkeeping write would fail work that actually succeeded.
+ */
+async function writePreparedSentinel(
+  service: RepositoryExecService,
+  threadId: string,
+  signature: string,
+): Promise<void> {
+  const sentinel = path.join(threadWorkRoot(threadId), PREPARED_SENTINEL_NAME);
+  await runCommand(
+    service,
+    `sh -lc ${shellQuote(`printf %s ${shellQuote(signature)} > ${shellQuote(sentinel)}`)}`,
+    undefined,
+    "record thread preparation",
+  );
 }
 
 /**
@@ -401,7 +512,7 @@ async function runEnvironmentSetup(
   script: string,
   service: RepositoryExecService,
   threadWorkingDirectory: string,
-): Promise<string | null> {
+): Promise<PreparationStepOutcome | null> {
   if (script === "") return null;
 
   // Runs in THIS thread's working directory, not `/workspace`: that is the cwd
@@ -414,8 +525,11 @@ async function runEnvironmentSetup(
     "environment setup",
   );
   return result.ok
-    ? "environment setup completed"
-    : `environment setup failed${formatExitCodeSuffix(result.exitCode)}`;
+    ? { state: "ok", detail: "environment setup completed" }
+    : {
+        state: "failed",
+        detail: `environment setup failed${formatExitCodeSuffix(result.exitCode)}`,
+      };
 }
 
 async function prepareRepositoryCheckout(input: {
@@ -444,9 +558,9 @@ async function runSetupCommand(
   repositoryRoot: string,
   setupCommand: string,
   repositoryName: string,
-): Promise<string> {
+): Promise<PreparationStepOutcome> {
   const command = setupCommand.trim();
-  if (command === "") return "no setup command configured";
+  if (command === "") return { state: "skipped", detail: "no setup command configured" };
   const result = await runCommand(
     service,
     bashScriptCommand(command),
@@ -454,8 +568,11 @@ async function runSetupCommand(
     `setup ${repositoryName}`,
   );
   return result.ok
-    ? `${command} completed`
-    : `${command} failed${formatExitCodeSuffix(result.exitCode)}`;
+    ? { state: "ok", detail: `${command} completed` }
+    : {
+        state: "failed",
+        detail: `${command} failed${formatExitCodeSuffix(result.exitCode)}`,
+      };
 }
 
 // Runs an arbitrary multi-line bash script safely: base64 avoids all quoting

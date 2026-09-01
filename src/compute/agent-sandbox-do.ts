@@ -59,27 +59,6 @@ const ALARM_PARAMS_KEY = "sandbox:alarm-params";
 const SWEEP_ROSTER_PREFIX = "sb:sw:";
 
 /**
- * Prefix for the PREPARATION MARKERS: one row per thread whose working
- * directory has been prepared, valued with the configuration signature it was
- * prepared for (see `createRepositoryPreparation`).
- *
- * Two things invalidate a marker, and they are invalidated in different places
- * because they are different questions:
- *
- *  - the agent's repositories or setup script CHANGED — the signature no longer
- *    matches, handled by the comparison itself;
- *  - the box's filesystem is GONE — no signature can see that, so
- *    {@link AgentSandbox.resolveService}'s `onFreshRuntimeAcquired` clears every
- *    marker on the one event that means it: a genuinely fresh acquire, i.e. an
- *    empty `/workspace`. A RESTORE deliberately does not clear, because a
- *    restore brings `/workspace` back from backup — clearing there would re-run
- *    every repository's setup command on every wake.
- *
- * Same six-byte budget reasoning as the roster prefix above.
- */
-const PREP_MARKER_PREFIX = "sb:pr:";
-
-/**
  * The session inputs the alarm replays for its TICK. Written on every
  * `session()` open, so they track the owning agent's current answers rather
  * than the first ones.
@@ -253,15 +232,19 @@ export class AgentSandbox extends DurableObject<Env> {
     if (inFlight) return inFlight;
     const run = (async () => {
       const result = await prepare();
-      // A SKIP is not an error, so nothing throws and no `catch` anywhere fires
-      // — which is exactly how a provider-contract mismatch left every fresh
-      // agent sandbox with an empty /workspace while the logs stayed clean.
-      // Skips are the interesting outcome here; say so, or the next such break
-      // is invisible too.
-      if (result.skipped?.length) {
-        log.warn("compute.repository_preparation_skipped", {
+      // `failures`, not `skipped`. Nothing here throws — a skipped repository
+      // and a setup command that exited non-zero are both ordinary return
+      // values — which is exactly how a provider-contract mismatch left every
+      // fresh agent sandbox with an empty /workspace while the logs stayed
+      // clean. This log was once gated on `skipped` alone, so a repository that
+      // cloned fine and whose `pnpm install` exited 2 said nothing at all.
+      // `failures` is preparation's single list of everything that fell short,
+      // and it is the same list that decides whether the run is recorded as
+      // prepared — so what is retried and what is logged cannot diverge.
+      if (result.failures?.length) {
+        log.warn("compute.repository_preparation_incomplete", {
           threadId,
-          skipped: result.skipped.map((entry) => `${entry.name}: ${entry.reason}`),
+          failures: result.failures,
         });
       }
     })();
@@ -271,26 +254,6 @@ export class AgentSandbox extends DurableObject<Env> {
     } finally {
       this.preparationInFlight.delete(threadId);
     }
-  }
-
-  /**
-   * Forget that any thread of this box was prepared.
-   *
-   * Called on one event only: a genuinely fresh acquire, where `/workspace` is
-   * empty by construction. Every marker describes a directory that no longer
-   * exists, so keeping one would let the thread that owns it skip preparation
-   * and work in an empty directory — the failure this whole path exists to
-   * remove, reintroduced through the back door.
-   *
-   * A `list` of a six-byte prefix, not a single map value: an agent with a few
-   * hundred threads would exceed the 128KB per-value cap, and celld compiles a
-   * prefix scan into a SQL LIKE pattern with a 49-byte budget.
-   */
-  private async clearPreparationMarkers(): Promise<void> {
-    const markers = await this.ctx.storage.list<string>({ prefix: PREP_MARKER_PREFIX });
-    if (markers.size === 0) return;
-    await this.ctx.storage.delete([...markers.keys()]);
-    log.info("compute.preparation_markers_cleared", { count: markers.size });
   }
 
   /**
@@ -465,6 +428,30 @@ export class AgentSandbox extends DurableObject<Env> {
        * `threadId` — see `ComputeServiceHostDeps.workspaceThreadId`.
        */
       workspaceThreadId: string;
+      /**
+       * Whether this service may PREPARE the thread's working directory —
+       * clone, add worktrees, run setup commands — on its first command.
+       *
+       * REQUIRED, stated at both call sites, because the wrong answer changes
+       * behaviour without failing anything. `true` for a turn's session: that
+       * is the whole point of the per-thread trigger. `false` for the ALARM.
+       *
+       * The alarm reaches `exec` through `probeWorkspaceCleanliness`, on a
+       * service whose latch is fresh, so it would otherwise run a full
+       * preparation inside an alarm handler whenever the agent's configuration
+       * had changed since the last turn — a `git clone` plus a setup script,
+       * for a box nobody is using, on the very path that is deciding whether to
+       * RELEASE it. And not merely wasteful: the probe's verdict is read
+       * afterwards, so a setup script that writes an untracked file would turn
+       * a discardable idle box into a preserved one, and a preserved sprite
+       * bills until something deletes it.
+       *
+       * Withholding it does not leave the alarm without a working directory:
+       * `ensureWorkspaceRootOnce` still creates `/workspace` and the thread's
+       * own directory. Only the repository work is withheld, and the next turn
+       * does it.
+       */
+      prepareWorkspace: boolean;
       supportsProcessMonitor: boolean;
       /** See {@link ComputeResolvePurpose}. Only the deletion teardown sets it. */
       purpose?: ComputeResolvePurpose;
@@ -504,43 +491,30 @@ export class AgentSandbox extends DurableObject<Env> {
     // stamped by then and re-resolving would only pay the D1 reads twice. A
     // null holder is unreachable; the arm below says what it would mean.
     const local: { service: ThreadComputeService | null } = { service: null };
-    // `onFreshRuntimeAcquired` gets a SECOND service, and that is not an
-    // oversight — a holder here DEADLOCKS.
+    // Preparation runs on a SECOND service, and that is not an oversight — the
+    // caller's own service DEADLOCKS.
     //
-    // It fires from inside `readOrAcquireRuntime`, i.e. while that service's
-    // `acquisitionInFlight` still holds the very acquisition that is awaiting
-    // this callback. `prepareRepositories` runs `exec`, `exec` calls
-    // `ensureRuntime`, and `ensureRuntime` goes through `boundedAcquisition` —
-    // which returns the in-flight promise rather than reading the (already
-    // `active`) store. The acquire waits on preparation; preparation waits on
-    // the acquire; the only exit is `ACQUIRE_DEADLINE_MS`, 25 seconds later,
-    // with a `sandbox_acquire_deadline` and no repositories cloned.
+    // `ensureThreadWorkspace` fires from `ensureWorkspaceRootOnce`, which every
+    // `exec` goes through and which now AWAITS the provisioning promise it is
+    // itself settling (see `ThreadComputeService.workspaceReady`; a second
+    // concurrent exec must wait for the clone rather than race it). Preparation
+    // runs `exec`. On the caller's service that exec would await the promise
+    // that is waiting on the exec, and nothing would ever settle it.
     //
-    // The thread-local path this replaced was accidentally immune: its
-    // `onFreshRuntimeAcquired` called `resolveComputeService` again, and the
-    // FRESH service's `acquisitionInFlight` is undefined, so its
-    // `readOrAcquireRuntime` sees `status: "active"` (set before this callback
-    // runs) and returns at once. Restoring that is the fix.
+    // The second service is built with EMPTY hooks — `buildService(..., {})` —
+    // so it carries no `ensureThreadWorkspace` at all and the shape cannot
+    // close. That omission is the mechanism, not a tidiness choice.
     //
-    // And it is not the re-entrancy the plan feared: `resolveComputeService` is
-    // a plain function call in this same isolate. There is no RPC, so there is
-    // no second trip through this DO's input lock. `onFreshRuntimeAcquired` is
-    // omitted from the second service so the shape cannot recurse even if a
-    // future change made it acquire.
+    // It is not the re-entrancy the plan feared, either: `resolveComputeService`
+    // is a plain function call in this same isolate. There is no RPC, so there
+    // is no second trip through this DO's input lock. And its
+    // `acquisitionInFlight` is undefined while the store already says `active`,
+    // so its `readOrAcquireRuntime` returns at once rather than acquiring
+    // anything of its own.
     const prepareRepositories = createRepositoryPreparation({
       env: this.env,
       threadId,
-      isPrepared: async (signature) =>
-        (await this.ctx.storage.get<string>(`${PREP_MARKER_PREFIX}${threadId}`)) === signature,
-      markPrepared: async (signature) => {
-        await this.ctx.storage.put(`${PREP_MARKER_PREFIX}${threadId}`, signature);
-      },
       resolveComputeService: async () => {
-        // A SECOND service, still — and now for a second reason as well. It is
-        // built with EMPTY hooks, so it carries no `ensureThreadWorkspace`:
-        // preparation's own `exec` therefore cannot re-enter the preparation it
-        // is running from. (The first reason, the acquisition deadlock, is
-        // documented at length above and still applies on the cold path.)
         const prepared = await this.buildService(threadId, options, {});
         return prepared ? { service: prepared.service } : null;
       },
@@ -552,24 +526,28 @@ export class AgentSandbox extends DurableObject<Env> {
           local.service!.execRun({ command, timeoutMs, label: "workspace cleanliness" }),
         );
       },
-      // NOT "prepare this thread's repositories" any more. That was the whole
-      // of H1: this hook fires only on `absent -> active`, and the compute store
-      // is the AGENT's, so it fires once per BOX. Thread A woke the sprite and
-      // got its worktree; every later thread of the same agent reached an
-      // already-active runtime, ran no preparation at all, and got a working
-      // directory that existed and was empty.
+      // NO `onFreshRuntimeAcquired`. It used to carry repository preparation,
+      // and that was the whole of H1: it fires only on `absent -> active`, and
+      // the compute store is the AGENT's, so it fires once per BOX. Thread A
+      // woke the sprite and got its worktree; every later thread of the same
+      // agent reached an already-active runtime, ran no preparation at all, and
+      // got a working directory that existed and was empty.
       //
-      // What this event honestly knows is narrower and is exactly what a
-      // signature cannot: `/workspace` is empty right now, so nothing anyone
-      // prepared is still there. Preparation itself moved to
-      // `ensureThreadWorkspace`, which every thread reaches on its own first
-      // command.
-      onFreshRuntimeAcquired: async () => {
-        await this.clearPreparationMarkers();
-      },
-      ensureThreadWorkspace: async () => {
-        await this.ensureThreadWorkspacePrepared(threadId, prepareRepositories);
-      },
+      // It then briefly carried the invalidation of a DO-storage "prepared"
+      // marker, and that was H1 again by another route: the marker survived a
+      // reclaim of the thread's directory, so a reopened thread read as prepared
+      // and worked in the empty directory `ensureWorkspaceRootOnce` had just
+      // recreated. The record now lives INSIDE the thread's directory
+      // (`createRepositoryPreparation`), where every event that destroys the
+      // preparation destroys the record with it — so there is nothing left for
+      // a fresh-acquire hook to invalidate.
+      ...(options.prepareWorkspace
+        ? {
+            ensureThreadWorkspace: async () => {
+              await this.ensureThreadWorkspacePrepared(threadId, prepareRepositories);
+            },
+          }
+        : {}),
     });
     local.service = resolved?.service ?? null;
     return resolved;
@@ -596,7 +574,6 @@ export class AgentSandbox extends DurableObject<Env> {
     },
     hooks: {
       probeWorkspaceCleanliness?: ComputeServiceHostDeps["probeWorkspaceCleanliness"];
-      onFreshRuntimeAcquired?: ComputeServiceHostDeps["onFreshRuntimeAcquired"];
       /**
        * Omitted for the service repository preparation runs ON — see
        * {@link resolveService}. Its absence is what makes preparation's own
@@ -651,9 +628,6 @@ export class AgentSandbox extends DurableObject<Env> {
       ...(options.attachedRuntime ? { attachedRuntime: options.attachedRuntime } : {}),
       ...(hooks.probeWorkspaceCleanliness
         ? { probeWorkspaceCleanliness: hooks.probeWorkspaceCleanliness }
-        : {}),
-      ...(hooks.onFreshRuntimeAcquired
-        ? { onFreshRuntimeAcquired: hooks.onFreshRuntimeAcquired }
         : {}),
       // Required on `ComputeServiceHostDeps`, so the no-op has to be spelled
       // out here rather than omitted — and spelling it out is the point: a
@@ -743,6 +717,8 @@ export class AgentSandbox extends DurableObject<Env> {
       await this.touchSweepRoster(input.threadId);
       const resolved = await this.resolveService(input.threadId, {
         workspaceThreadId: input.workspaceThreadId,
+        // A turn. This is the trigger every thread of the box reaches.
+        prepareWorkspace: true,
         supportsProcessMonitor: input.supportsProcessMonitor,
         runtimeConfig: input.runtimeConfig,
         // A turn arms ~25 times; the roster fold is one cross-DO RPC per
@@ -831,6 +807,10 @@ export class AgentSandbox extends DurableObject<Env> {
         if (!params) return null;
         return this.resolveService(params.threadId, {
           workspaceThreadId: params.workspaceThreadId ?? params.threadId,
+          // NOT the alarm's job — see the option's doc. The tick issues no
+          // model commands; its only `exec` is the cleanliness probe, whose
+          // verdict a setup script could flip from discard to preserve.
+          prepareWorkspace: false,
           supportsProcessMonitor: params.supportsProcessMonitor,
           runtimeConfig: params.runtimeConfig,
           // FINDING 1. The fallback `workHorizon` below only runs when the

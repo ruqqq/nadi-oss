@@ -54,6 +54,12 @@ describe("repository preparation against real D1", () => {
         // `failed`, never `exited`.
         return { status: "failed" as const, processId: "probe", exitCode: 1 };
       }
+      if (input.command.includes(".nadi-prepared")) {
+        // The gate: this box has never been prepared for this thread. Without
+        // this the probe exits 0 and preparation short-circuits, turning every
+        // case in this file into a no-op that still matches its summary.
+        return { status: "failed" as const, processId: "gate", exitCode: 1 };
+      }
       if (input.command.includes("show-ref")) {
         // A freshly cloned repository has no `nadi/thread-*` branch — same
         // Cloudflare shape for the negative answer.
@@ -177,7 +183,7 @@ describe("repository preparation against real D1", () => {
 
     await expect(prepareRepositories()).resolves.toEqual({
       summary: "No repositories are configured for this thread; the agent's setup script ran.",
-      environmentSetup: "environment setup completed",
+      environmentSetup: { state: "ok", detail: "environment setup completed" },
     });
     // base64 of "set -e\necho hello-from-setup" — the script really reached the
     // shell, rather than the call merely being counted.

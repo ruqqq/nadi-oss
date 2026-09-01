@@ -56,7 +56,7 @@ function createService(input?: {
   isSandboxDeclaredClean?: () => Promise<boolean>;
   probeWorkspaceCleanliness?: () => Promise<WorkspaceCleanliness>;
   config?: EffectiveComputeConfig;
-  onFreshRuntimeAcquired?: () => Promise<void>;
+  ensureThreadWorkspace?: () => Promise<void>;
   backgroundLongRunningExec?: boolean;
   supportsProcessMonitor?: boolean;
   execForegroundTimeoutMs?: number;
@@ -83,9 +83,7 @@ function createService(input?: {
     ...(input?.probeWorkspaceCleanliness
       ? { probeWorkspaceCleanliness: input.probeWorkspaceCleanliness }
       : {}),
-    ...(input?.onFreshRuntimeAcquired
-      ? { onFreshRuntimeAcquired: input.onFreshRuntimeAcquired }
-      : {}),
+    ...(input?.ensureThreadWorkspace ? { ensureThreadWorkspace: input.ensureThreadWorkspace } : {}),
     ...(input?.backgroundLongRunningExec === undefined
       ? {}
       : { backgroundLongRunningExec: input.backgroundLongRunningExec }),
@@ -214,39 +212,51 @@ describe("ThreadComputeService lifecycle", () => {
     expect(store.getComputeState()?.status).toBe("recoverable");
   });
 
-  it("prepares repositories on a genuinely fresh runtime", async () => {
-    const onFreshRuntimeAcquired = vi.fn().mockResolvedValue(undefined);
-    const { service } = createService({ onFreshRuntimeAcquired });
+  it("prepares the workspace once per service, on its first command", async () => {
+    const ensureThreadWorkspace = vi.fn().mockResolvedValue(undefined);
+    const { service } = createService({ ensureThreadWorkspace });
     await service.exec({ command: "true" });
-    expect(onFreshRuntimeAcquired).toHaveBeenCalledOnce();
+    await service.exec({ command: "true" });
+    expect(ensureThreadWorkspace).toHaveBeenCalledOnce();
   });
 
-  it("does NOT prepare repositories when resuming from recovery", async () => {
-    // A recovery restore returns /workspace from backup. Re-cloning would
-    // clobber restored work. Seed recoverable state the same way the
-    // "restores recoverable compute" test does — a real exec + runComputeTick
-    // — rather than hand-crafting a store row, so the fake backend's own
-    // suspended-runtime bookkeeping is exercised too.
-    const onFreshRuntimeAcquired = vi.fn().mockResolvedValue(undefined);
+  /**
+   * DELIBERATELY the opposite of what this used to assert.
+   *
+   * Preparation used to be skipped on a recovery restore, because `/workspace`
+   * comes back from backup and re-cloning would clobber it. That coupling is
+   * what made it fire once per BOX and leave every thread but the first with an
+   * empty directory (H1). Preparation now runs for every service that reaches a
+   * runtime, restore included — and what stops the re-clone is the sentinel
+   * INSIDE the restored `/workspace`, which comes back with it. The service
+   * asks; preparation answers cheaply.
+   */
+  it("prepares the workspace again on a NEW service after a restore", async () => {
+    const ensureThreadWorkspace = vi.fn().mockResolvedValue(undefined);
     const { service, now } = createService({
-      onFreshRuntimeAcquired,
+      ensureThreadWorkspace,
       probeWorkspaceCleanliness: dirtyProbe(),
     });
     await service.exec({ command: "pwd" });
     now.value = 2_000;
     await service.runComputeTick();
-    onFreshRuntimeAcquired.mockClear();
+    ensureThreadWorkspace.mockClear();
 
     now.value = 2_500;
     await service.exec({ command: "true" });
-    expect(onFreshRuntimeAcquired).not.toHaveBeenCalled();
+    // Same service instance: its latch already holds, so nothing re-runs.
+    expect(ensureThreadWorkspace).not.toHaveBeenCalled();
   });
 
-  it("does not fail acquisition when repository preparation throws", async () => {
-    const onFreshRuntimeAcquired = vi.fn().mockRejectedValue(new Error("clone failed"));
-    const { service, store } = createService({ onFreshRuntimeAcquired });
+  it("does not fail the command when workspace preparation throws", async () => {
+    const ensureThreadWorkspace = vi.fn().mockRejectedValue(new Error("clone failed"));
+    const { service, store } = createService({ ensureThreadWorkspace });
     await expect(service.exec({ command: "true" })).resolves.toMatchObject({ status: "exited" });
     expect(store.getComputeState()?.status).toBe("active");
+    // And the latch is NOT released by a swallowed preparation failure: a
+    // preparation that keeps failing must not re-run once per command.
+    await service.exec({ command: "true" });
+    expect(ensureThreadWorkspace).toHaveBeenCalledOnce();
   });
 
   it("keeps the runtime active when recoverable release fails", async () => {
@@ -1245,6 +1255,76 @@ describe("ThreadComputeService workspace root provisioning", () => {
     const [first, second] = backend.startProcessCalls.slice(-2);
     expect(first?.cwd).toBe(threadWorkRoot("thr_aaaaaaaa"));
     expect(second?.cwd).toBe(threadWorkRoot("thr_bbbbbbbb"));
+  });
+
+  /**
+   * NEW-1. Two parallel tool calls in one step, one service, one working
+   * directory that is still being cloned into.
+   *
+   * The latch used to be a boolean set BEFORE preparation was awaited, so the
+   * second `exec` returned from `ensureWorkspaceRootOnce` immediately and ran
+   * its command in a half-populated worktree — or, through `write_file`, wrote
+   * into a directory `git worktree add` was about to fill. The sandbox DO's
+   * in-flight map cannot catch this: it only ever saw ONE call, because the
+   * second never reached it.
+   *
+   * Round 0 was accidentally immune — preparation ran inside
+   * `readOrAcquireRuntime`, which both execs awaited through
+   * `boundedAcquisition` — so moving the trigger out of the acquisition is what
+   * exposed it, and the serialization has to be stated rather than inherited.
+   */
+  it("makes a second concurrent exec wait for preparation, not race it", async () => {
+    const backend = new FakeComputeBackend();
+    const events: string[] = [];
+    const startProcess = backend.startProcess.bind(backend);
+    backend.startProcess = (async (runtime: never, input: { command: string }) => {
+      events.push(`exec:${input.command}`);
+      return startProcess(runtime, input as never);
+    }) as typeof backend.startProcess;
+
+    const { service } = createService({
+      backend,
+      ensureThreadWorkspace: async () => {
+        events.push("prepare:start");
+        // A REAL delay, not a hand-counted number of microtask turns: the
+        // second `exec` has a whole chain of awaits of its own to get through
+        // before it starts a process, and a fixed tick count is exactly the
+        // kind of accidental ordering that let this bug look fixed.
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        events.push("prepare:end");
+      },
+    });
+
+    const first = service.exec({ command: "A" });
+    const second = service.exec({ command: "B" });
+    await Promise.all([first, second]);
+
+    // NEITHER command may appear before preparation finished.
+    expect(events.slice(0, 2)).toEqual(["prepare:start", "prepare:end"]);
+    expect(events.slice(2).sort()).toEqual(["exec:A", "exec:B"]);
+    // And preparation ran exactly once for the service.
+    expect(events.filter((entry) => entry === "prepare:start")).toHaveLength(1);
+  });
+
+  /**
+   * A failure to CREATE the directories must not poison the service: the next
+   * command retries. (A preparation failure is caught and logged instead, so it
+   * deliberately does not reach this path — retrying a failing preparation once
+   * per command is what the in-box sentinel exists to avoid.)
+   */
+  it("retries provisioning after a directory-creation failure", async () => {
+    const backend = new FakeComputeBackend();
+    let calls = 0;
+    const original = backend.createDirectory.bind(backend);
+    backend.createDirectory = async (runtime, path) => {
+      calls += 1;
+      if (calls === 1) throw new Error("mkdir refused");
+      return original(runtime, path);
+    };
+    const { service } = createService({ backend });
+
+    await expect(service.exec({ command: "A" })).rejects.toThrow("mkdir refused");
+    await expect(service.exec({ command: "B" })).resolves.toMatchObject({ status: "exited" });
   });
 
   /**

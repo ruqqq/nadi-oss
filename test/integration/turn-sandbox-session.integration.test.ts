@@ -19,7 +19,7 @@
  *    noticed.
  */
 import { env, runInDurableObject } from "cloudflare:test";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { ThinkThreadAgent } from "../../src/agent/think-thread-agent";
 import type { SandboxSessionResolution } from "../../src/compute/agent-sandbox-client";
 import { FakeComputeBackend } from "../../src/compute/backends/fake";
@@ -28,6 +28,7 @@ import {
   setComputeHostTestOverrides,
 } from "../../src/compute/host-test-overrides";
 import { applyRegistryTestSchema, seedRegistryThread } from "./helpers/registry";
+import { log } from "../../src/log";
 import { agentClonePath, threadWorktreePath } from "../../src/compute/workspace-layout";
 
 const NOW = 1_800_000_000_000;
@@ -174,6 +175,10 @@ describe("the turn's sandbox session", () => {
     // ONE backend for both threads — one agent, one box. This is what makes the
     // second thread's runtime already-active by the time it opens.
     const backend = new FakeComputeBackend();
+    // Neither thread is prepared yet. The fake answers every command 0, which
+    // preparation's gate would read as "already prepared" and skip on — so the
+    // box's state has to be stated rather than inherited from the fake.
+    backend.scriptedExits.push({ match: ".nadi-prepared", exitCode: 1 });
     const commandsFor = async (threadId: string) => {
       const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
       return runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
@@ -229,18 +234,20 @@ describe("the turn's sandbox session", () => {
   });
 
   /**
-   * The gate that makes "prepare on every turn" affordable, and the one event
-   * that must defeat it.
+   * The gate that makes "prepare on the first command of every turn"
+   * affordable, and the event that must defeat it.
    *
-   * Preparation now runs from the first `exec` of every session, so without a
-   * marker every turn would re-run each repository's `setupCommand` and the
-   * agent's `setupScript`. With a marker that never cleared, a box that was
-   * DESTROYED (fresh `/workspace`, nothing in it) would be read as prepared and
-   * the thread would work in an empty directory — the same failure, arrived at
-   * from the other side. Both halves are asserted here because each one alone
-   * looks correct.
+   * WHAT IS SIMULATED, and what is not. The gate is a real `sh -lc 'test ...'`
+   * against the box, and `FakeComputeBackend` answers every command 0 — which
+   * would mean "already prepared" for every run and would turn this whole test
+   * into a no-op. So the box's state is stated explicitly through
+   * `scriptedExits`: present means "the sentinel does not match", absent means
+   * it does. The sentinel's content and placement are asserted in
+   * `test/unit/agent/repository-preparation.test.ts`; what only this test can
+   * see is that the service HONOURS the answer — nothing runs when the box says
+   * prepared, and everything runs when it does not.
    */
-  it("prepares once per box, and again after the box is destroyed", async () => {
+  it("runs nothing when the box says prepared, and everything when it does not", async () => {
     const threadId = "thr_turn_prep_gate";
     // Explicit workspace AND agent ids: `integration-fast` runs `isolate: false`
     // and `seedRegistryThread` defaults every thread onto `agent-workspace-test`
@@ -256,17 +263,16 @@ describe("the turn's sandbox session", () => {
       runtime: "think",
     });
     await seedComputeEnabledWorkspace(workspaceId);
-    // A SETUP SCRIPT rather than a repository, and that choice is the test's
-    // one compromise. `FakeComputeBackend` answers every command with exit 0 and
-    // empty stdout, so a repository's `remote get-url origin` comes back blank
-    // and preparation SKIPS it — and a skipped run is deliberately never marked
-    // prepared, so a repository fixture could never reach the gate at all. The
-    // setup-script path completes cleanly and marks, which is what the gate is.
+    // A SETUP SCRIPT rather than a repository: the fake's blank stdout makes a
+    // repository's `remote get-url origin` come back empty, so preparation
+    // would skip it — and a skipped run is deliberately never recorded. The
+    // setup-script path completes cleanly.
     await env.REGISTRY_DB.prepare("UPDATE agents SET setup_script = ? WHERE id = ?")
       .bind("echo prepared", agentId)
       .run();
 
     const backend = new FakeComputeBackend();
+    const NOT_PREPARED = { match: ".nadi-prepared", exitCode: 1 };
     const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
     const openAndCount = async (shutdownAfter = false) =>
       runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
@@ -285,14 +291,170 @@ describe("the turn's sandbox session", () => {
         }
       });
 
-    // First session on a fresh box: preparation runs.
-    expect(await openAndCount()).toBeGreaterThan(0);
-    // Second session, same box, same configuration: not one command. This is
-    // what a per-turn trigger costs without the marker.
-    expect(await openAndCount(true)).toBe(0);
-    // The box is gone — `/workspace` is empty on the next acquire, so every
-    // marker describes a directory that no longer exists.
-    expect(await openAndCount()).toBeGreaterThan(0);
+    // A box with no sentinel: preparation runs.
+    backend.scriptedExits.push(NOT_PREPARED);
+    expect(await openAndCount()).toBeGreaterThan(1);
+
+    // The sentinel now matches: the gate probe, and nothing else. That is what a
+    // per-turn trigger would otherwise cost on every turn.
+    backend.scriptedExits.length = 0;
+    expect(await openAndCount(true)).toBe(1);
+
+    // The box was destroyed, so `/workspace` — and the sentinel inside the
+    // thread's own directory — went with it.
+    backend.scriptedExits.push(NOT_PREPARED);
+    expect(await openAndCount()).toBeGreaterThan(1);
+  });
+
+  /**
+   * NEW-3, at the seam that discards it.
+   *
+   * A failed setup command is not a skip: the repository cloned, the worktree
+   * was added, and the failure is a value inside a `prepared` entry. The caller
+   * logged `result.skipped` and threw the rest away, so a `pnpm install` that
+   * exited non-zero produced no error, no log line, and — because the run was
+   * still recorded as prepared — no retry either. Preparation returns ONE
+   * `failures` list now, and the same list decides both questions.
+   *
+   * Asserted on the LOG because that is the only place the outcome surfaces:
+   * nothing throws, and `onFreshRuntimeAcquired`'s successor swallows by design.
+   */
+  it("logs a failed setup command instead of discarding it", async () => {
+    const threadId = "thr_turn_prep_failure";
+    const workspaceId = "ws_turn_prep_failure";
+    const agentId = "agent_turn_prep_failure";
+    await seedRegistryThread(env.REGISTRY_DB, {
+      threadId,
+      workspaceId,
+      agentId,
+      runtime: "think",
+    });
+    await seedComputeEnabledWorkspace(workspaceId);
+    await env.REGISTRY_DB.prepare("UPDATE agents SET setup_script = ? WHERE id = ?")
+      .bind("exit 3", agentId)
+      .run();
+
+    const backend = new FakeComputeBackend();
+    // Not prepared, and the setup script itself exits non-zero. Every setup
+    // command is base64-wrapped, so that substring is the script's own shape.
+    backend.scriptedExits.push({ match: ".nadi-prepared", exitCode: 1 });
+    backend.scriptedExits.push({ match: "base64 -d | bash", exitCode: 3 });
+
+    const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
+    try {
+      const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
+      await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
+        const agent = instance as unknown as TestableAgent;
+        await agent.__unsafe_ensureInitialized();
+        setComputeHostTestOverrides(threadId, { buildBackend: async () => backend });
+        try {
+          const session = await agent.resolveComputeServiceForTest();
+          await session!.service.ensureRuntimeReference();
+        } finally {
+          clearComputeHostTestOverrides(threadId);
+        }
+      });
+
+      const logged = warn.mock.calls.filter(
+        (call) => call[0] === "compute.repository_preparation_incomplete",
+      );
+      expect(
+        logged,
+        `expected the failed setup script to be logged; warns were ${JSON.stringify(
+          warn.mock.calls.map((call) => call[0]),
+        )}`,
+      ).toHaveLength(1);
+      expect(JSON.stringify(logged[0]?.[1])).toContain("environment setup failed");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  /**
+   * The ALARM must not clone.
+   *
+   * Its tick reaches `exec` through the workspace-cleanliness probe, on a
+   * service whose preparation latch is fresh — so once preparation moved onto
+   * the per-service path, a signature change since the last turn would start a
+   * `git clone` and a setup script inside an alarm handler, for a box nobody is
+   * using, on the very path deciding whether to RELEASE it. The probe's verdict
+   * is read afterwards: a setup script that writes an untracked file turns a
+   * discardable idle box into a preserved one, and a preserved sprite bills
+   * until something deletes it.
+   *
+   * The directories are still created — only the repository work is withheld.
+   */
+  it("does not prepare repositories from the alarm's tick", async () => {
+    const threadId = "thr_turn_alarm_no_prep";
+    const workspaceId = "ws_turn_alarm_no_prep";
+    const agentId = "agent_turn_alarm_no_prep";
+    await seedRegistryThread(env.REGISTRY_DB, {
+      threadId,
+      workspaceId,
+      agentId,
+      runtime: "think",
+    });
+    await seedComputeEnabledWorkspace(workspaceId);
+    await env.REGISTRY_DB.prepare(
+      `INSERT INTO agent_repositories
+        (id, agent_id, source, name, url, default_branch, checkout_path_name, created_at)
+       VALUES (?, ?, 'url', 'nadi', 'https://example.test/nadi.git', 'main', 'nadi', ?)`,
+    )
+      .bind(`agr_${threadId}`, agentId, NOW)
+      .run();
+
+    const backend = new FakeComputeBackend();
+    backend.scriptedExits.push({ match: ".nadi-prepared", exitCode: 1 });
+
+    // Open a session first, so the box has an alarm record to replay. Its own
+    // preparation is expected and is not what this asserts.
+    const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
+    await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
+      const agent = instance as unknown as TestableAgent;
+      await agent.__unsafe_ensureInitialized();
+      setComputeHostTestOverrides(threadId, { buildBackend: async () => backend });
+      try {
+        const session = await agent.resolveComputeServiceForTest();
+        await session!.service.ensureRuntimeReference();
+      } finally {
+        clearComputeHostTestOverrides(threadId);
+      }
+    });
+
+    // The alarm must actually REACH an `exec` for this to test anything: the
+    // cleanliness probe only runs once the box is past its idle timeout (the
+    // seeded settings say 15 minutes), and that probe is the path preparation
+    // would ride in on.
+    const sandbox = env.AGENT_SANDBOX.get(env.AGENT_SANDBOX.idFromName(agentId));
+    setComputeHostTestOverrides(threadId, {
+      buildBackend: async () => backend,
+      now: () => NOW + 30 * 60_000,
+    });
+    const before = backend.startProcessCalls.length + backend.runCommandCalls.length;
+    try {
+      await runInDurableObject(sandbox, async (instance) => {
+        await (instance as unknown as { alarm(): Promise<void> }).alarm();
+      });
+    } finally {
+      clearComputeHostTestOverrides(threadId);
+    }
+
+    const duringAlarm = [
+      ...backend.startProcessCalls.map((call) => call.command),
+      ...backend.runCommandCalls.map((call) => call.command),
+    ].slice(before);
+    // ANTI-VACUITY: the alarm really did reach the sandbox. Without this the
+    // assertions below hold for an alarm that ran no commands at all.
+    expect(
+      duringAlarm.some((command) => command.includes("PROBE")),
+      `the alarm must have run the cleanliness probe; commands were ${JSON.stringify(duringAlarm)}`,
+    ).toBe(true);
+    // The gate probe itself must not run either — preparation is not entered.
+    expect(
+      duringAlarm.filter((command) => command.includes(".nadi-prepared")),
+      `the alarm must not enter preparation; commands were ${JSON.stringify(duringAlarm)}`,
+    ).toEqual([]);
+    expect(duringAlarm.filter((command) => command.includes("git clone"))).toEqual([]);
   });
 
   it("acquiring a fresh runtime through AgentSandbox runs repository preparation", async () => {
@@ -319,6 +481,9 @@ describe("the turn's sandbox session", () => {
       .run();
 
     const backend = new FakeComputeBackend();
+    // See the gate test above: the fake answers every command 0, which the gate
+    // would read as "already prepared".
+    backend.scriptedExits.push({ match: ".nadi-prepared", exitCode: 1 });
     const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
     const commands = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
       const agent = instance as unknown as TestableAgent;

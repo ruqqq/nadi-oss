@@ -71,48 +71,58 @@ function makeRepository(overrides: Partial<AgentRepositoryRow> = {}): AgentRepos
   };
 }
 
-function makeService(execResults: ExecResult[], execOutputResults: ExecResult[] = []) {
-  const exec = vi.fn();
-  for (const result of execResults) {
-    exec.mockResolvedValueOnce(result);
-  }
+/**
+ * A sandbox whose `exec` answers the two BOOKKEEPING commands by label and
+ * everything else from a script.
+ *
+ * Preparation brackets its work with a gate probe and a sentinel write, both
+ * inside the box (see `isAlreadyPrepared` / `writePreparedSentinel`). Answering
+ * those by label rather than by position keeps every scripted sequence below
+ * about the thing it is testing, and makes "was this run recorded as prepared"
+ * a direct observation instead of an off-by-one in a queue.
+ */
+function makeService(
+  execResults: ExecResult[],
+  execOutputResults: ExecResult[] = [],
+  options?: { alreadyPrepared?: boolean },
+) {
+  const queue = [...execResults];
+  /** The sentinel-write commands issued — empty means the run was NOT recorded. */
+  const sentinelWrites: string[] = [];
+  /** The gate probes issued, so a test can assert what was actually checked. */
+  const gateProbes: string[] = [];
+
+  const exec = vi.fn(async (input: { command: string; label?: string }) => {
+    if (input.label === "check thread preparation") {
+      gateProbes.push(input.command);
+      return {
+        status: "exited" as const,
+        processId: "gate",
+        exitCode: options?.alreadyPrepared ? 0 : 1,
+      };
+    }
+    if (input.label === "record thread preparation") {
+      sentinelWrites.push(input.command);
+      return { status: "exited" as const, processId: "sentinel", exitCode: 0 };
+    }
+    const next = queue.shift();
+    if (!next) throw new Error(`unscripted exec: ${input.command}`);
+    return next;
+  });
 
   const execOutput = vi.fn();
   for (const result of execOutputResults) {
     execOutput.mockResolvedValueOnce(result);
   }
 
-  return { exec, execOutput };
+  return { exec, execOutput, sentinelWrites, gateProbes };
 }
 
-/**
- * The preparation gate, as the sandbox DO implements it: one marker per thread
- * holding the configuration signature it was last prepared for. Returned so a
- * test can inspect what was written and replay it into a second preparation.
- */
-function markerStore(initial?: string) {
-  const state: { signature: string | undefined; marks: string[] } = {
-    signature: initial,
-    marks: [],
-  };
-  return {
-    state,
-    gate: {
-      isPrepared: async (signature: string) => state.signature === signature,
-      markPrepared: async (signature: string) => {
-        state.signature = signature;
-        state.marks.push(signature);
-      },
-    },
-  };
-}
-
-function prepare(service: { exec: unknown; execOutput: unknown }, gate = markerStore().gate) {
+function prepare(service: { exec: unknown; execOutput: unknown }) {
   return createRepositoryPreparation({
     env: {} as never,
     threadId: THREAD_ID,
     resolveComputeService: async () => ({ service }) as never,
-    ...gate,
   });
 }
 
@@ -155,7 +165,7 @@ describe("createRepositoryPreparation", () => {
           name: "nadi",
           checkoutPath: WORKTREE_PATH,
           status: "cloned",
-          setup: "no setup command configured",
+          setup: { state: "skipped", detail: "no setup command configured" },
         },
       ],
     });
@@ -474,64 +484,79 @@ describe("createRepositoryPreparation", () => {
   });
 
   /**
-   * The gate that makes preparing on every turn affordable. It is the reason
-   * H1's fix could move the trigger onto the per-turn path at all — without it
-   * every turn would re-run each repository's setup command and the agent's
-   * setup script.
+   * The gate that makes preparing on every turn affordable — and the reason it
+   * lives INSIDE the box rather than in the sandbox DO's storage.
+   *
+   * A stored row survives everything except a fresh acquire. Task 4's reclaim
+   * (`rm -rf /workspace/threads/<id>` plus a prune) and a restore that brings
+   * `repos/` back without `threads/` both leave it matching, so a reopened
+   * thread would read as prepared, get the empty directory
+   * `ensureWorkspaceRootOnce` had just recreated, and work with no code in it —
+   * H1's failure, re-entered through the bookkeeping and needing no container
+   * reset. A sentinel in the thread's own directory is destroyed by every one
+   * of those events, with nobody having to remember.
    */
   describe("the preparation gate", () => {
-    it("marks the thread prepared, and a second run then does nothing at all", async () => {
+    const CLEAN_RUN: ExecResult[] = [
+      { status: "exited", processId: "mkdir", exitCode: 0 },
+      { status: "exited", processId: "clone-exists", exitCode: 1 },
+      { status: "exited", processId: "clone", exitCode: 0 },
+      { status: "exited", processId: "worktree-exists", exitCode: 1 },
+      { status: "exited", processId: "branch-probe", exitCode: 1 },
+      { status: "exited", processId: "worktree", exitCode: 0 },
+    ];
+
+    it("asks the BOX, checking the sentinel and every path it stands for", async () => {
       listRepositoriesMock.mockResolvedValue([makeRepository()]);
-      const marker = markerStore();
-      const first = makeService([
-        { status: "exited", processId: "mkdir", exitCode: 0 },
-        { status: "exited", processId: "clone-exists", exitCode: 1 },
-        { status: "exited", processId: "clone", exitCode: 0 },
-        { status: "exited", processId: "worktree-exists", exitCode: 1 },
-        { status: "exited", processId: "branch-probe", exitCode: 1 },
-        { status: "exited", processId: "worktree", exitCode: 0 },
-      ]);
-      await expect(prepare(first, marker.gate)()).resolves.toMatchObject({
+      const service = makeService(CLEAN_RUN);
+
+      await prepare(service)();
+
+      expect(service.gateProbes).toHaveLength(1);
+      const probe = service.gateProbes[0] as string;
+      // The sentinel lives in the thread's own directory, so a reclaim of that
+      // directory takes it.
+      expect(probe).toContain(`${threadWorkRoot(THREAD_ID)}/.nadi-prepared`);
+      // And the paths are checked too: a sentinel can outlive the checkouts it
+      // stands for when a restore brings one directory back without the other.
+      // The whole test is nested inside `sh -lc '...'`, so the inner quoting is
+      // escaped — match the paths and the operator, not a literal spelling.
+      expect(probe).toContain("test -e");
+      expect(probe).toContain(CLONE_PATH);
+      expect(probe).toContain(WORKTREE_PATH);
+    });
+
+    it("records the thread as prepared, and a prepared box does nothing at all", async () => {
+      listRepositoriesMock.mockResolvedValue([makeRepository()]);
+      const first = makeService(CLEAN_RUN);
+      await expect(prepare(first)()).resolves.toMatchObject({
         prepared: [{ name: "nadi", status: "cloned" }],
       });
-      expect(marker.state.marks).toHaveLength(1);
+      expect(first.sentinelWrites).toHaveLength(1);
+      // The written value is the signature the gate will compare against.
+      const written = first.sentinelWrites[0] as string;
+      expect(written).toMatch(/[0-9a-f]{64}/);
 
-      // Second turn, same configuration: not one exec, and compute is never
-      // even resolved.
-      const second = makeService([]);
-      const resolveComputeService = vi.fn();
-      await expect(
-        createRepositoryPreparation({
-          env: {} as never,
-          threadId: THREAD_ID,
-          resolveComputeService,
-          ...marker.gate,
-        })(),
-      ).resolves.toEqual({ summary: "Repositories were already prepared for this thread." });
-      expect(resolveComputeService).not.toHaveBeenCalled();
-      expect(second.exec).not.toHaveBeenCalled();
+      // Second turn, box already prepared: the gate answers yes and nothing
+      // else runs — no root preparation, no probe, no setup command.
+      const second = makeService([], [], { alreadyPrepared: true });
+      await expect(prepare(second)()).resolves.toEqual({
+        summary: "Repositories were already prepared for this thread.",
+      });
+      expect(second.exec).toHaveBeenCalledTimes(1);
+      expect(second.sentinelWrites).toEqual([]);
     });
 
     /**
      * The signature covers the agent's declared configuration, so ADDING a
-     * repository re-opens preparation. Without this a repository added after the
-     * box came up would never be cloned for a thread already marked prepared —
-     * the same invisible-empty-directory shape, one config edit away.
+     * repository re-opens preparation. The gate's exec is what carries it: the
+     * sentinel holds the OLD signature, so the comparison fails even though the
+     * file and every old path are still there.
      */
     it("re-prepares when the agent's repository list changes", async () => {
       listRepositoriesMock.mockResolvedValue([makeRepository()]);
-      const marker = markerStore();
-      await prepare(
-        makeService([
-          { status: "exited", processId: "mkdir", exitCode: 0 },
-          { status: "exited", processId: "clone-exists", exitCode: 1 },
-          { status: "exited", processId: "clone", exitCode: 0 },
-          { status: "exited", processId: "worktree-exists", exitCode: 1 },
-          { status: "exited", processId: "branch-probe", exitCode: 1 },
-          { status: "exited", processId: "worktree", exitCode: 0 },
-        ]),
-        marker.gate,
-      )();
+      const first = makeService(CLEAN_RUN);
+      await prepare(first)();
 
       listRepositoriesMock.mockResolvedValue([
         makeRepository(),
@@ -559,36 +584,98 @@ describe("createRepositoryPreparation", () => {
           },
         ],
       );
-      await expect(prepare(second, marker.gate)()).resolves.toMatchObject({
+      await expect(prepare(second)()).resolves.toMatchObject({
         prepared: [
           { name: "nadi", status: "already_cloned" },
           { name: "other", status: "cloned" },
         ],
       });
-      expect(marker.state.marks).toHaveLength(2);
-      expect(marker.state.marks[0]).not.toBe(marker.state.marks[1]);
+      // A different configuration, so a different signature is recorded.
+      expect(second.sentinelWrites[0]).not.toBe(first.sentinelWrites[0]);
     });
 
     /**
-     * A skip means something the agent declares is NOT in the box. Marking that
-     * prepared freezes the thread in that state until its configuration
-     * changes — the permanent-empty-directory failure, self-inflicted.
+     * A skip means something the agent declares is NOT in the box. Recording
+     * that as prepared freezes the thread in that state until its configuration
+     * changes or the box is destroyed.
      */
-    it("does NOT mark prepared when anything was skipped", async () => {
+    it("does NOT record a run that skipped a repository", async () => {
       listRepositoriesMock.mockResolvedValue([makeRepository()]);
-      const marker = markerStore();
-      await expect(
-        prepare(
-          makeService([
-            { status: "exited", processId: "mkdir", exitCode: 0 },
-            { status: "exited", processId: "clone-exists", exitCode: 1 },
-            { status: "exited", processId: "clone", exitCode: 128 },
-          ]),
-          marker.gate,
-        )(),
-      ).resolves.toMatchObject({ skipped: [{ name: "nadi" }] });
-      expect(marker.state.marks).toEqual([]);
-      expect(marker.state.signature).toBeUndefined();
+      const service = makeService([
+        { status: "exited", processId: "mkdir", exitCode: 0 },
+        { status: "exited", processId: "clone-exists", exitCode: 1 },
+        { status: "exited", processId: "clone", exitCode: 128 },
+      ]);
+
+      await expect(prepare(service)()).resolves.toMatchObject({
+        skipped: [{ name: "nadi" }],
+        failures: ["nadi: clone failed with exit code 128"],
+      });
+      expect(service.sentinelWrites).toEqual([]);
+    });
+
+    /**
+     * NEW-3. A failed setup command is NOT a skip: the repository cloned, the
+     * worktree was added, and the failure is a string inside a `prepared` entry.
+     * Gating the record on `skipped` alone therefore marked a transient
+     * `npm ci` failure as prepared — never retried until the configuration
+     * changed or the box was destroyed — and the caller, which logged only
+     * `skipped`, said nothing about it either. `failures` is the one list both
+     * questions are answered from.
+     */
+    it("does NOT record a run whose per-repo setup command failed", async () => {
+      listRepositoriesMock.mockResolvedValue([makeRepository({ setupCommand: "pnpm install" })]);
+      const service = makeService([
+        ...CLEAN_RUN,
+        { status: "exited", processId: "setup", exitCode: 2 },
+      ]);
+
+      await expect(prepare(service)()).resolves.toMatchObject({
+        prepared: [
+          {
+            name: "nadi",
+            setup: { state: "failed", detail: "pnpm install failed with exit code 2" },
+          },
+        ],
+        failures: ["nadi: pnpm install failed with exit code 2"],
+      });
+      // No `skipped` at all — this is exactly the run the old gate marked.
+      expect(service.sentinelWrites).toEqual([]);
+    });
+
+    it("does NOT record a run whose agent setup script failed", async () => {
+      listRepositoriesMock.mockResolvedValue([]);
+      getAgentMock.mockResolvedValue({
+        id: "env-1",
+        workspaceId: "workspace-1",
+        name: "env",
+        setupScript: "echo hi",
+      });
+      const service = makeService([
+        { status: "exited", processId: "mkdir", exitCode: 0 },
+        { status: "exited", processId: "env-setup", exitCode: 3 },
+      ]);
+
+      await expect(prepare(service)()).resolves.toMatchObject({
+        environmentSetup: {
+          state: "failed",
+          detail: "environment setup failed with exit code 3",
+        },
+        failures: ["environment setup: environment setup failed with exit code 3"],
+      });
+      expect(service.sentinelWrites).toEqual([]);
+    });
+
+    it("records a clean run and reports no failures", async () => {
+      listRepositoriesMock.mockResolvedValue([makeRepository({ setupCommand: "pnpm install" })]);
+      const service = makeService([
+        ...CLEAN_RUN,
+        { status: "exited", processId: "setup", exitCode: 0 },
+      ]);
+
+      const result = await prepare(service)();
+      expect(result.failures).toBeUndefined();
+      expect(service.sentinelWrites).toHaveLength(1);
     });
   });
 
@@ -604,7 +691,8 @@ describe("createRepositoryPreparation", () => {
       skipped: [{ name: "nadi", reason: "repository path probe failed (status: failed)" }],
     });
 
-    expect(service.exec).toHaveBeenCalledTimes(2);
+    // 3, not 2: the gate probe, the root preparation, then the failing probe.
+    expect(service.exec).toHaveBeenCalledTimes(3);
     expect(service.exec).not.toHaveBeenCalledWith(
       expect.objectContaining({ command: expect.stringContaining("git clone") }),
     );
@@ -658,7 +746,7 @@ describe("createRepositoryPreparation", () => {
         {
           name: "nadi",
           status: "already_cloned",
-          setup: "pnpm install failed with exit code 2",
+          setup: { state: "failed", detail: "pnpm install failed with exit code 2" },
         },
       ],
     });
@@ -722,7 +810,10 @@ describe("createRepositoryPreparation", () => {
 
     await prepare(service)();
 
-    const rootPrepCommand = commandsOf(service)[0] as string;
+    // NOT index 0 — the gate probe runs first now.
+    const rootPrepCommand = commandsOf(service).find((command) =>
+      command.includes("mkdir -p"),
+    ) as string;
     expect(rootPrepCommand).toContain(`mkdir -p /workspace/repos ${threadWorkRoot(THREAD_ID)}`);
     // Legacy pre-/workspace root, into the agent's repo root.
     expect(rootPrepCommand).toContain("/home/exedev/work");
@@ -787,12 +878,18 @@ describe("createRepositoryPreparation", () => {
 
     const result = await prepare(service)();
 
-    expect(result).toMatchObject({ environmentSetup: "environment setup completed" });
+    expect(result).toMatchObject({
+      environmentSetup: { state: "ok", detail: "environment setup completed" },
+    });
 
     const calls = commandsOf(service);
-    const setupACallIndex = calls.findIndex(
-      (command) => command.includes("| base64 -d | bash") && command !== calls[calls.length - 1],
-    );
+    // By LABEL, not by position: preparation now brackets its work with a gate
+    // probe and a sentinel write, so neither end of the list is the setup.
+    const labels = service.exec.mock.calls.map((call) => (call[0] as { label?: string })?.label);
+    const envSetupIndex = labels.indexOf("environment setup");
+    const setupACallIndex = labels.indexOf("setup repo-a");
+    expect(setupACallIndex).toBeGreaterThan(-1);
+    expect(envSetupIndex).toBeGreaterThan(-1);
 
     // Each per-repo setup is a single bash-wrapped invocation (base64 | bash),
     // never two separate exec calls and never the raw multi-line command.
@@ -805,16 +902,17 @@ describe("createRepositoryPreparation", () => {
     expect(getAgentMock).toHaveBeenCalledTimes(1);
 
     // It runs after both repos' clone + setup (by call index).
-    const envSetupIndex = calls.length - 1;
     expect(envSetupIndex).toBeGreaterThan(setupACallIndex);
     expect(calls[envSetupIndex]).toContain("| base64 -d | bash");
-    expect(service.exec).toHaveBeenCalledTimes(14);
+    expect(service.exec).toHaveBeenCalledTimes(16);
 
     // And it runs in the THREAD's working directory — the cwd every later exec
     // defaults to — not `/workspace`.
-    expect(service.exec).toHaveBeenLastCalledWith(
+    expect(service.exec).toHaveBeenCalledWith(
       expect.objectContaining({ cwd: threadWorkRoot(THREAD_ID), label: "environment setup" }),
     );
+    // The sentinel is written LAST, after everything it vouches for.
+    expect(labels.at(-1)).toBe("record thread preparation");
   });
 
   it("skips when the git probe fails indeterminately", async () => {
@@ -830,7 +928,8 @@ describe("createRepositoryPreparation", () => {
       skipped: [{ name: "nadi", reason: "git checkout probe failed (status: failed)" }],
     });
 
-    expect(service.exec).toHaveBeenCalledTimes(3);
+    // 4, not 3: the gate probe runs before the root preparation.
+    expect(service.exec).toHaveBeenCalledTimes(4);
     expect(service.exec).not.toHaveBeenCalledWith(
       expect.objectContaining({ command: expect.stringContaining("remote get-url origin") }),
     );
@@ -881,7 +980,6 @@ describe("createRepositoryPreparation", () => {
       env: {} as never,
       threadId: THREAD_ID,
       resolveComputeService,
-      ...markerStore().gate,
     });
 
     await expect(prepareRepositories()).resolves.toEqual({
@@ -899,7 +997,6 @@ describe("createRepositoryPreparation", () => {
       env: {} as never,
       threadId: THREAD_ID,
       resolveComputeService,
-      ...markerStore().gate,
     });
 
     await expect(prepareRepositories()).resolves.toEqual({
@@ -917,7 +1014,6 @@ describe("createRepositoryPreparation", () => {
       env: {} as never,
       threadId: THREAD_ID,
       resolveComputeService,
-      ...markerStore().gate,
     });
 
     await expect(prepareRepositories()).resolves.toEqual({
@@ -967,8 +1063,8 @@ describe("rootPreparationCommand against a real shell", () => {
     // after issuing the ONE command this test is about. That is fine and is
     // asserted rather than swallowed.
     await prepare(service)().catch(() => undefined);
-    const command = commandsOf(service)[0] as string;
-    expect(command).toContain("mkdir -p");
+    const command = commandsOf(service).find((entry) => entry.includes("mkdir -p")) as string;
+    expect(command, "the root preparation command must have been issued").toBeTruthy();
 
     const base = mkdtempSync(join(tmpdir(), "nadi-rootprep-"));
     const workspace = join(base, "workspace");

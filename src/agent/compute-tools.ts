@@ -118,7 +118,7 @@ export interface ComputeServiceHostDeps {
   /**
    * Prepare this thread's working directory before its first command. REQUIRED
    * — see the dep of the same name on `ThreadComputeServiceDeps` for why the
-   * trigger cannot be `onFreshRuntimeAcquired`, and why omission here would be
+   * trigger cannot be a fresh-acquire hook, and why omission here would be
    * invisible rather than loud.
    */
   ensureThreadWorkspace: () => Promise<void>;
@@ -250,7 +250,6 @@ export interface ComputeServiceHostDeps {
    * so a thread's environment repos are cloned automatically; a
    * environment-less thread is a cheap no-op (no repositories to prepare).
    */
-  onFreshRuntimeAcquired?: () => Promise<void>;
 }
 
 /**
@@ -537,7 +536,6 @@ export async function resolveComputeService(hostDeps: ComputeServiceHostDeps): P
     ...(deps.sleep ? { sleep: deps.sleep } : {}),
     ...(deps.workLedgerFor ? { workLedgerFor: deps.workLedgerFor } : {}),
     ...(deps.getWorkHorizon ? { getWorkHorizon: deps.getWorkHorizon } : {}),
-    ...(deps.onFreshRuntimeAcquired ? { onFreshRuntimeAcquired: deps.onFreshRuntimeAcquired } : {}),
     ensureThreadWorkspace: deps.ensureThreadWorkspace,
     workspaceThreadId: deps.workspaceThreadId,
   });

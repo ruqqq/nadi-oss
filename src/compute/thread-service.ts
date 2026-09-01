@@ -446,26 +446,19 @@ export interface ThreadComputeServiceDeps {
    */
   probeWorkspaceCleanliness?: () => Promise<WorkspaceCleanliness>;
   /**
-   * Fired once, after a genuinely FRESH acquire (`recovery === null` — the
-   * same condition that gates `markAcquiring`) — never on a recovery restore,
-   * where `/workspace` comes back populated from backup and re-cloning would
-   * clobber it. A failure here must not fail the acquisition: caught and
-   * logged, the sandbox is still usable and the model can prepare it itself.
-   */
-  onFreshRuntimeAcquired?: () => Promise<void>;
-  /**
    * Ensure THIS thread's working directory holds what the agent declares —
    * clones, worktrees, setup — before the service's first command runs.
    *
    * Called from {@link ensureWorkspaceRootOnce}, i.e. once per service instance
    * on EVERY path that reaches a runtime: a fresh acquire, a restore, an
    * already-active box, an attached subagent. That breadth is the whole point.
-   * `onFreshRuntimeAcquired` fires only on `absent -> active`, and the compute
-   * store belongs to the AGENT's sandbox DO, so "active" is BOX-wide: the first
-   * thread to wake the box got its worktree and every later thread of the same
-   * agent got a working directory that existed and was empty — no clone, no
-   * skip entry, no log line. Exactly the silent-zero-repository shape this
-   * whole path is written to make impossible.
+   * The hook it replaced (`onFreshRuntimeAcquired`, now deleted) fired only on
+   * `absent -> active`, and the compute store belongs to the AGENT's sandbox
+   * DO, so "active" is BOX-wide: the first thread to wake the box got its
+   * worktree and every later thread of the same agent got a working directory
+   * that existed and was empty — no clone, no skip entry, no log line. Exactly
+   * the silent-zero-repository shape this whole path is written to make
+   * impossible.
    *
    * Optional here and REQUIRED on `ComputeServiceHostDeps`, the one entry point
    * production constructs a service through. A unit test that builds a service
@@ -480,7 +473,29 @@ export interface ThreadComputeServiceDeps {
 
 export class ThreadComputeService {
   private acquisitionInFlight: Promise<BackendReference> | undefined;
-  private workspaceRootEnsured = false;
+  /**
+   * The one provisioning of this service's working directory, held as a
+   * PROMISE rather than a boolean.
+   *
+   * A boolean set before the awaits let a second concurrent `exec` sail past it
+   * while the first was still cloning: two parallel tool calls in one step, and
+   * the second ran its command — or wrote a file — in a directory
+   * `git worktree add` had not populated yet. The sandbox DO's own in-flight map
+   * cannot help, because it only ever sees ONE call from this service; the
+   * second never reached it.
+   *
+   * Round 0 was accidentally immune: preparation ran inside
+   * `readOrAcquireRuntime`, which both execs awaited through
+   * `boundedAcquisition`. Moving the trigger out of the acquisition is what
+   * exposed this, so the serialization has to be stated here instead of
+   * inherited.
+   *
+   * Nulled again if provisioning REJECTS, so the next command retries rather
+   * than inheriting a dead promise for the life of the service. (A preparation
+   * failure does not reject — it is caught and logged; only a failure to create
+   * the directories does.)
+   */
+  private workspaceReady: Promise<void> | null = null;
   private fileServiceInstance: ComputeFileService | undefined;
   private armCount = 0;
   /**
@@ -2776,7 +2791,38 @@ export class ThreadComputeService {
    * not exist. Ensure it once per service instance; `createDirectory` is idempotent.
    */
   private async ensureWorkspaceRootOnce(runtime: BackendReference): Promise<BackendReference> {
-    if (this.workspaceRootEnsured) return runtime;
+    // EVERY caller awaits, including the second one. See `workspaceReady`: an
+    // early `return` here for a caller that arrives while provisioning is still
+    // in flight is a command running in a directory that is not ready yet.
+    const inFlight = this.workspaceReady;
+    if (inFlight) {
+      await inFlight;
+      return runtime;
+    }
+    const attempt = this.provisionThreadWorkspace(runtime);
+    this.workspaceReady = attempt;
+    try {
+      await attempt;
+    } catch (error) {
+      if (this.workspaceReady === attempt) this.workspaceReady = null;
+      throw error;
+    }
+    return runtime;
+  }
+
+  /**
+   * MUST NOT be re-entered from this service.
+   *
+   * `ensureThreadWorkspace` runs `exec`, and every `exec` comes back through
+   * `ensureWorkspaceRootOnce` — which now AWAITS the promise this function is
+   * settling. If preparation ran on this same service that would deadlock, not
+   * merely recurse. It does not: the sandbox DO builds preparation's service
+   * with empty hooks, so that service carries no `ensureThreadWorkspace` at all
+   * (`AgentSandbox.resolveService`). That omission is load-bearing, and its
+   * detector is the end-to-end preparation test — a deadlock there is a timeout,
+   * not a silent pass.
+   */
+  private async provisionThreadWorkspace(runtime: BackendReference): Promise<void> {
     // Deliberately NOT dirty-tracked: this is our own write, on every
     // acquisition. Marking it would clear the declared-clean bit on every
     // sandbox wake, so a declaration could never survive to release.
@@ -2788,13 +2834,11 @@ export class ThreadComputeService {
     // (`workspace_root_missing`). `createDirectory` creates parents, so this
     // also covers `/workspace/threads` on a box whose first thread this is.
     await this.deps.backend.createDirectory(runtime, this.threadWorkRoot());
-    this.workspaceRootEnsured = true;
-    // AFTER the latch, and inside it: preparation runs `exec`, every `exec`
-    // comes back through here, and the latch is what stops that from recursing.
-    //
     // A failure must not fail the turn — the sandbox is still usable and the
     // model can still work — but it must not be silent either. The result's own
-    // skips are logged by the implementation; this catches the throw.
+    // shortfalls are logged by the implementation; this catches the throw. It is
+    // caught rather than propagated deliberately: propagating would null the
+    // latch above and re-run a preparation that is failing, once per command.
     try {
       await this.deps.ensureThreadWorkspace?.();
     } catch (error) {
@@ -2803,7 +2847,6 @@ export class ThreadComputeService {
         error: String(error),
       });
     }
-    return runtime;
   }
 
   /**
@@ -2999,16 +3042,6 @@ export class ThreadComputeService {
           "success",
           this.deps.now() - startedAt,
         );
-        // Genuinely fresh (recovery === null, same condition markAcquiring
-        // used above): an empty /workspace, so repos can be prepared without
-        // clobbering anything. Never on the recovery branch — that /workspace
-        // is restored from backup. A prep failure must not fail the
-        // acquisition; the sandbox is still usable.
-        try {
-          await this.deps.onFreshRuntimeAcquired?.();
-        } catch (error) {
-          log.warn("compute.fresh_runtime_preparation_failed", { error: String(error) });
-        }
       }
       return runtime;
     } catch (error) {
