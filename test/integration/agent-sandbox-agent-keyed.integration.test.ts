@@ -357,4 +357,53 @@ describe("the sandbox DO is keyed by agent", () => {
         "REPLACES the nearer wake they needed",
     ).toBeLessThanOrEqual(soon + 5_000);
   });
+
+  /**
+   * FIX ROUND 1 — the roster fold must honour the clock it is handed.
+   *
+   * `rosterWorkHorizon` took no `now` and dropped the one `foldWorkHorizon`
+   * passes, so the ARMED path (which folds the roster through the compute
+   * service) and the FALLBACK path (which passes the tick's clock) already
+   * disagreed in signature. Harmless while nothing passed one — which is
+   * exactly how this codebase's most expensive bugs start.
+   *
+   * An OWED row is what makes the clock observable: its horizon is
+   * `now + WORK_DELIVERY_RETRY_MS`, computed from the caller's `now`, not from
+   * a stored deadline.
+   */
+  it("folds the roster against the clock it is given, not its own", async () => {
+    const agentId = "agent_sbx_clock";
+    const threadId = "thr_sbx_clock";
+    await seedAgent(agentId);
+    await seedThread(threadId, agentId);
+
+    // A CLOSED row nobody has been told about: `countUndelivered() > 0`, so the
+    // horizon is purely the retry component and therefore purely a function of
+    // the clock.
+    await runInSandboxDo(sandboxStub(agentId), async (instance: any) => {
+      const host = instance.threadHostDeps(threadId);
+      await host.workLedger.register({
+        ...staleRow("proc_clock"),
+        startedAt: Date.now(),
+        lastAliveAt: Date.now(),
+        deadlineAt: Date.now() + 3_600_000,
+      });
+      await host.workLedger.terminalize("proc_clock", {
+        outcome: "exited",
+        reason: "process_exit",
+        at: Date.now(),
+        detail: "process exited",
+        exitCode: 0,
+      });
+    });
+
+    const stated = 5_000_000_000_000;
+    const horizon = await runInSandboxDo(sandboxStub(agentId), async (instance: any) =>
+      instance.rosterWorkHorizon(stated),
+    );
+    expect(
+      horizon,
+      "an owed row's horizon is retry-from-NOW; a dropped clock reads as ~today",
+    ).toBeGreaterThan(stated);
+  });
 });

@@ -209,6 +209,31 @@ export class AgentSandbox extends DurableObject<Env> {
   }
 
   /**
+   * Does ANY thread this box serves have a live child agent on the machine?
+   *
+   * OR-folded over the roster because the question is about the MACHINE, and
+   * since P3 the machine is the agent's. Asking only the resolving thread lets
+   * a sibling tear down a container another thread's subagent is running on.
+   * Short-circuits on the first `true`, and an unreachable thread already
+   * answers `true` (`createSandboxThreadHostDeps` picks the fallback that
+   * cannot lose work), so this can only ever be MORE conservative than the
+   * single-thread answer it replaces — never less.
+   *
+   * Affordable: every caller is a teardown or reclaim decision
+   * (`releaseIfIdle`, `releaseIfReclaimable`, `execShutdown`), not a per-exec
+   * one. The resolving thread is asked FIRST so the common "this thread has a
+   * child" case still costs one call.
+   */
+  private async rosterHasBlockingWork(threadId: string): Promise<boolean> {
+    if (await this.threadHostDeps(threadId).hasBlockingWork()) return true;
+    for (const entry of await this.readSweepRoster()) {
+      if (entry.threadId === threadId) continue;
+      if (await this.threadHostDeps(entry.threadId).hasBlockingWork()) return true;
+    }
+    return false;
+  }
+
+  /**
    * {@link foldWorkHorizon} over the CURRENT roster — the `getWorkHorizon` the
    * alarm's compute service arms with, so its `armAlarm` covers every thread
    * this box serves rather than only the one whose session it replayed.
@@ -216,8 +241,8 @@ export class AgentSandbox extends DurableObject<Env> {
    * Reads the roster fresh because it is called from inside the tick, before
    * the sweep has decided what to prune.
    */
-  private async rosterWorkHorizon(): Promise<number | null> {
-    return this.foldWorkHorizon(await this.readSweepRoster());
+  private async rosterWorkHorizon(now?: number): Promise<number | null> {
+    return this.foldWorkHorizon(await this.readSweepRoster(), now);
   }
 
   /** Every thread this box must sweep, with the stamp the prune compares against. */
@@ -410,7 +435,14 @@ export class AgentSandbox extends DurableObject<Env> {
       // — see `options.workHorizon`. AFTER the spread deliberately: the roster
       // fold has to win, and a reader has to be able to see that it does.
       getWorkHorizon:
-        options.workHorizon === "roster" ? () => this.rosterWorkHorizon() : host.getWorkHorizon,
+        options.workHorizon === "roster"
+          ? (now?: number) => this.rosterWorkHorizon(now)
+          : host.getWorkHorizon,
+      // Also an override of the spread above, and unconditional — unlike the
+      // horizon there is no cheap-vs-correct trade here. It is asked only on
+      // teardown/reclaim paths, and the wrong answer destroys a running child's
+      // container.
+      hasBlockingWork: () => this.rosterHasBlockingWork(threadId),
       // THIS DO's own alarm, not a back-call. A Durable Object has exactly one
       // alarm, which is the same single-outstanding-wake shape the thread DO's
       // cancel-then-set schedule id used to give `armAlarm` — so `armAlarm`

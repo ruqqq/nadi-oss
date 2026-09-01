@@ -263,3 +263,194 @@ describe("compute back-calls route to the thread that owns the work", () => {
     expect(await ledgerRow(adopter, processId)).toBeUndefined();
   });
 });
+
+/**
+ * FIX ROUND 1 — the teardown paths, where routing the LEDGER without routing the
+ * NOTICE turned a late message into no message at all.
+ *
+ * `stopRunningProcesses({deliver:true})` stamps the delivery gate because its
+ * caller "already told the model". Once the terminal is routed to the process's
+ * OWNER, that sentence is only true for the one thread the caller is talking to.
+ * Every other owner gets its row closed AND marked told, which is precisely the
+ * state the reaper is built to skip — so nobody ever says the work was killed.
+ */
+describe("a teardown speaks only for the thread it is talking to", () => {
+  beforeAll(async () => {
+    await applyRegistryTestSchema(env.REGISTRY_DB);
+  });
+
+  /**
+   * A background process with NO watcher: `runComputeTick` returns early while
+   * `countWatchers() > 0`, so a watched process already defers eviction. The
+   * unwatched one is what actually reaches a teardown owned by another thread.
+   */
+  async function startUnwatchedProcess(agentId: string, threadId: string): Promise<string> {
+    const opened = await openSession(agentId, threadId);
+    const started = await opened.session.execStart({ command: "sleep 300", label: "long build" });
+    if (!started.ok) throw new Error(`execStart failed: ${started.error.code}`);
+    const processId: string = started.value.processId;
+    // Register the ledger row the way the watcher path does, then drop the
+    // watcher — the state a process is in once its watch has timed out while it
+    // keeps running.
+    const watched = await opened.session.execWatch({ processId });
+    if (!watched.ok) throw new Error(`execWatch failed: ${watched.error.code}`);
+    await runInSandboxDo(sandboxStub(agentId), async (instance: any) => {
+      instance.ctx.storage.sql.exec("DELETE FROM sandbox_process_watchers");
+    });
+    return processId;
+  }
+
+  it("leaves another thread's row OWED when the shutdown notice went elsewhere", async () => {
+    const agentId = "agent_sbx_teardown";
+    const owner = "thr_sbx_teardown_owner";
+    const shutter = "thr_sbx_teardown_shutter";
+    await seedAgent(agentId);
+    await seedThread(owner, agentId);
+    await seedThread(shutter, agentId);
+
+    const processId = await startUnwatchedProcess(agentId, owner);
+
+    // SHUTTER tears the box down. Its own reminder tells SHUTTER, and only
+    // SHUTTER, that everything running is gone.
+    const shutterSession = await openSession(agentId, shutter);
+    const result = await shutterSession.session.execShutdown({ confirm: true });
+    if (!result.ok) throw new Error(`execShutdown failed: ${result.error.code}`);
+
+    const row = await ledgerRow(owner, processId);
+    // The terminal is correct and stays: the process really was stopped, and
+    // routing it to the owner is what this task fixed.
+    expect(row?.terminal?.reason).toBe("process_stopped");
+    // The DELIVERY is the half that must not be claimed. Nothing has told the
+    // owner, so the row stays owed and the owner's own sweep reports it.
+    expect(
+      row?.deliveredAt,
+      "the owner was never told, so the row must stay OWED — stamping it delivered " +
+        "is what makes the reaper skip it and the owner hear nothing, ever",
+    ).toBeNull();
+
+    // And the notice itself went where the caller was talking.
+    expect(await transcriptText(shutter)).toContain("shut down on request");
+    expect(await transcriptText(owner)).not.toContain("shut down on request");
+  });
+
+  /**
+   * `hasBlockingWork` means "a CHILD AGENT is on this machine". The machine is
+   * the agent's now, so the question is about the box, not about whichever
+   * thread happens to be asking. Asking one thread lets a sibling destroy a
+   * container out from under a live child — the loss the unreachable-fallback
+   * (`true`) exists to prevent, reintroduced by scope.
+   */
+  it("refuses to shut down while ANOTHER thread of the agent has a live child", async () => {
+    const agentId = "agent_sbx_children";
+    const parent = "thr_sbx_children_parent";
+    const sibling = "thr_sbx_children_sibling";
+    await seedAgent(agentId);
+    await seedThread(parent, agentId);
+    await seedThread(sibling, agentId);
+
+    // An open SUBAGENT row on the parent: a child holding this box.
+    await runInSandboxDo(sandboxStub(agentId), async (instance: any) => {
+      await instance.threadHostDeps(parent).workLedger.register({
+        id: "run_child_1",
+        kind: "subagent" as const,
+        startedAt: Date.now(),
+        lastAliveAt: Date.now(),
+        staleAfterMs: 180_000,
+        deadlineAt: Date.now() + 3_600_000,
+        generation: "gen_children",
+        terminal: null,
+        deliveredAt: null,
+      });
+    });
+
+    const siblingSession = await openSession(agentId, sibling);
+    const result = await siblingSession.session.execShutdown({ confirm: true });
+    expect(
+      result.ok ? "no error" : result.error.message,
+      "the sibling must not be able to destroy the box the parent's child is running on",
+    ).toContain("compute_children_active");
+  });
+});
+
+/**
+ * FIX ROUND 1 — the watcher cap, which P3 turned from a per-conversation
+ * fairness rule into a per-BOX one without renaming or re-scoping it.
+ */
+describe("one thread cannot spend the whole agent's watcher budget", () => {
+  beforeAll(async () => {
+    await applyRegistryTestSchema(env.REGISTRY_DB);
+  });
+
+  it("still watches a sibling's process after one thread has filled its own quota", async () => {
+    const agentId = "agent_sbx_cap";
+    const hog = "thr_sbx_cap_hog";
+    const sibling = "thr_sbx_cap_sibling";
+    await seedAgent(agentId);
+    await seedThread(hog, agentId);
+    await seedThread(sibling, agentId);
+
+    // MAX_WATCHERS_PER_THREAD is 8. The hog takes every one of them.
+    const hogSession = await openSession(agentId, hog);
+    for (let index = 0; index < 8; index += 1) {
+      const started = await hogSession.session.execStart({ command: `sleep ${300 + index}` });
+      if (!started.ok) throw new Error(`execStart failed: ${started.error.code}`);
+      const watched = await hogSession.session.execWatch({ processId: started.value.processId });
+      if (!watched.ok) throw new Error(`execWatch failed: ${watched.error.code}`);
+      expect(watched.value.watching).toBe(true);
+    }
+
+    // The sibling's own first background command must still get a watcher. It
+    // shares the box, not the quota — before this, `countWatchers()` counted the
+    // BOX and the sibling was silently handed a watcher-less process.
+    const siblingSession = await openSession(agentId, sibling);
+    const started = await siblingSession.session.execStart({ command: "sleep 900" });
+    if (!started.ok) throw new Error(`execStart failed: ${started.error.code}`);
+    const watched = await siblingSession.session.execWatch({
+      processId: started.value.processId,
+    });
+    expect(
+      watched.ok ? watched.value.watching : `refused: ${watched.error.message}`,
+      "a busy sibling must not be able to deny this thread its completion cards",
+    ).toBe(true);
+
+    // And the hog is still held to ITS limit, with a reason it can act on.
+    const ninth = await hogSession.session.execStart({ command: "sleep 999" });
+    if (!ninth.ok) throw new Error(`execStart failed: ${ninth.error.code}`);
+    const refused = await hogSession.session.execWatch({ processId: ninth.value.processId });
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.error.message).toContain("thread_limit");
+  });
+
+  /**
+   * FIX ROUND 1 — an explicit `exec_watch` on a sibling's process. Routing the
+   * card to the owner is right; letting the caller believe it will hear back is
+   * not.
+   */
+  it("tells a thread when the watch it asked for reports somewhere else", async () => {
+    const agentId = "agent_sbx_routed_notice";
+    const owner = "thr_sbx_routed_owner";
+    const onlooker = "thr_sbx_routed_onlooker";
+    await seedAgent(agentId);
+    await seedThread(owner, agentId);
+    await seedThread(onlooker, agentId);
+
+    const ownerSession = await openSession(agentId, owner);
+    const started = await ownerSession.session.execStart({ command: "sleep 300" });
+    if (!started.ok) throw new Error(`execStart failed: ${started.error.code}`);
+    const processId: string = started.value.processId;
+
+    const onlookerSession = await openSession(agentId, onlooker);
+    const watched = await onlookerSession.session.execWatch({ processId });
+    if (!watched.ok) throw new Error(`execWatch failed: ${watched.error.code}`);
+    if (!watched.value.watching) throw new Error(`not watching: ${watched.value.status}`);
+    expect(watched.value.routedTo, "the caller must be told where the card will go").toBe(owner);
+    expect(watched.value.note).toContain("another thread");
+
+    // The owner's own watch says nothing of the sort — the field is a warning
+    // about a mismatch, not decoration on every result.
+    const ownWatch = await ownerSession.session.execWatch({ processId });
+    if (!ownWatch.ok) throw new Error(`execWatch failed: ${ownWatch.error.code}`);
+    if (!ownWatch.value.watching) throw new Error(`not watching: ${ownWatch.value.status}`);
+    expect(ownWatch.value.routedTo).toBeUndefined();
+  });
+});

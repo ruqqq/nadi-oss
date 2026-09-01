@@ -18,7 +18,14 @@ import {
   tailOutputChunks,
   type OutputChunkView,
 } from "./output";
-import { canAddWatcher, classifyWatcher, nextWakeAt, type WatcherRow } from "./watchers";
+import {
+  admitWatcher,
+  classifyWatcher,
+  MAX_WATCHERS_PER_THREAD,
+  nextWakeAt,
+  type WatcherAdmission,
+  type WatcherRow,
+} from "./watchers";
 import { recordComputeEvent, type ComputeEvent } from "./observability";
 import { deriveCompletionSecret, signCompletionToken } from "./completion-token";
 import { ComputeFileService } from "./file-service";
@@ -338,6 +345,19 @@ export interface ThreadComputeServiceDeps {
   /** Test seam; defaults to {@link ACQUIRE_DEADLINE_MS}. */
   acquireDeadlineMs?: number;
   attachedRuntime?: BackendReference;
+  /**
+   * "A CHILD AGENT is on this machine." Asked before every path that would
+   * destroy the container.
+   *
+   * The MACHINE is the question, not the conversation, and since P3 the machine
+   * belongs to the agent — so this must answer for every thread the box serves,
+   * not just the one that happens to be asking. A sibling that asked only
+   * itself would destroy a container out from under another thread's live
+   * child, which is the loss the unreachable fallback (`true`) exists to
+   * prevent, reintroduced by scope. The sandbox DO OR-folds it over the sweep
+   * roster; the fold is affordable because every caller is a teardown or
+   * reclaim decision, never a per-exec one.
+   */
   hasBlockingWork?: () => Promise<boolean>;
   supportsProcessMonitor?: boolean;
   backgroundLongRunningExec?: boolean;
@@ -374,7 +394,7 @@ export interface ThreadComputeServiceDeps {
    * alarm. It must never arm its own: the scheduler is cancel-then-set on a
    * single id, so a second arm point overwrites this one.
    */
-  getWorkHorizon?: () => Promise<number | null>;
+  getWorkHorizon?: (now?: number) => Promise<number | null>;
   /**
    * Clears the "workspace verified clean" bit. Called from EVERY entry point
    * that can mutate the sandbox filesystem. Err broad: a command passed to
@@ -438,6 +458,26 @@ export class ThreadComputeService {
   /** The work ledger of the thread that owns `processId` — see {@link threadOfProcess}. */
   private ledgerOf(processId: string): WorkLedgerSink | undefined {
     return this.deps.workLedgerFor?.(this.threadOfProcess(processId));
+  }
+
+  /**
+   * May `ownerThreadId` take one more watcher on this box, and if not, why not?
+   *
+   * The thread count is FILTERED, which is the fix: the watcher registry is
+   * per-box since P3, so an unfiltered `countWatchers()` let one thread holding
+   * its eight starve every sibling of the same agent — `backgroundResult`
+   * degraded to "without a watcher", the turn-end backstop just `break`ed, and
+   * neither said why. An unstamped row counts against the thread resolving the
+   * service, matching how `threadOfProcess` reads it.
+   */
+  private admitWatcherFor(ownerThreadId: string): WatcherAdmission {
+    const watchers = this.deps.store.listWatchers();
+    return admitWatcher({
+      threadCount: watchers.filter(
+        (watcher) => (watcher.threadId ?? this.deps.threadId) === ownerThreadId,
+      ).length,
+      boxCount: watchers.length,
+    });
   }
 
   /**
@@ -1279,10 +1319,18 @@ export class ThreadComputeService {
   ): Promise<ExecBackgroundedResult> {
     const preview = this.buildPreview(processId);
     if (this.deps.backgroundLongRunningExec === false || !this.supportsProcessMonitor()) {
-      return this.backgroundWithoutWatcher(processId, command, label, timeoutMs, preview);
+      return this.backgroundWithoutWatcher(processId, command, label, timeoutMs, preview, null);
     }
-    if (!canAddWatcher(this.deps.store.countWatchers())) {
-      return this.backgroundWithoutWatcher(processId, command, label, timeoutMs, preview);
+    const admission = this.admitWatcherFor(this.threadOfProcess(processId));
+    if (admission !== "ok") {
+      return this.backgroundWithoutWatcher(
+        processId,
+        command,
+        label,
+        timeoutMs,
+        preview,
+        admission,
+      );
     }
     // Before `now`, so the row's window opens no earlier than what the probe
     // observed — a restore's `observedAt` must not land after this row started.
@@ -1317,13 +1365,27 @@ export class ThreadComputeService {
     };
   }
 
+  /**
+   * `refusedBy` is the WHY, and it is required rather than optional: without it
+   * this message said only "without a watcher", so a model whose sibling thread
+   * had filled the box's watcher table could not tell that from a deployment
+   * where background monitoring is off, and neither could anyone reading the
+   * transcript. `null` means the runtime admits no watchers at all.
+   */
   private backgroundWithoutWatcher(
     processId: string,
     command: string,
     label: string | null,
     timeoutMs: number,
     preview: ReturnType<ThreadComputeService["buildPreview"]>,
+    refusedBy: Exclude<WatcherAdmission, "ok"> | null,
   ): ExecBackgroundedResult {
+    const reason =
+      refusedBy === "thread_limit"
+        ? ` This thread is already watching ${MAX_WATCHERS_PER_THREAD} processes, its limit; use exec_unwatch on one to free a slot.`
+        : refusedBy === "box_limit"
+          ? " This agent's sandbox is already watching as many processes as it can across all of its threads; another thread must finish or unwatch one first."
+          : " Background monitoring is unavailable in this runtime.";
     return {
       ok: true,
       status: "backgrounded",
@@ -1333,7 +1395,7 @@ export class ThreadComputeService {
       watching: false,
       backgroundedAfterMs: timeoutMs,
       ...preview,
-      message: "Command is still running in the background without a watcher.",
+      message: `Command is still running in the background without a watcher.${reason}`,
       nextActions: ["Use exec_output to inspect it.", "Use exec_stop to cancel."],
     };
   }
@@ -1749,14 +1811,33 @@ export class ThreadComputeService {
     }
   }
 
-  async execWatch(input: { processId: string; timeoutMs?: number }) {
+  async execWatch(input: { processId: string; timeoutMs?: number }): Promise<
+    | { ok: true; watching: false; status: ComputeProcessRecord["status"] }
+    | {
+        ok: true;
+        watching: true;
+        processId: string;
+        deadlineAt: number;
+        pollIntervalMs: number;
+        nextPollAt: number;
+        label: string | null;
+        createdAt: number;
+        /**
+         * Present ONLY when this watch reports to a different thread — see the
+         * return statement. Optional rather than always-present so its
+         * appearance is itself the signal.
+         */
+        routedTo?: string;
+        note?: string;
+      }
+  > {
     if (!this.supportsProcessMonitor()) throw new Error("compute_process_monitor_unavailable");
     await this.refreshProcessStatus(input.processId);
     const process = this.requireProcess(input.processId);
     if (process.status !== "running")
       return { ok: true as const, watching: false, status: process.status };
-    if (!canAddWatcher(this.deps.store.countWatchers()))
-      throw new Error("compute_watcher_limit_reached");
+    const admission = this.admitWatcherFor(this.threadOfProcess(input.processId));
+    if (admission !== "ok") throw new Error(`compute_watcher_limit_reached: ${admission}`);
     // Before `now`, for the same reason as `backgroundResult`. This path already
     // awaits `refreshProcessStatus`, so one more listing is in keeping.
     await this.refreshGeneration();
@@ -1778,11 +1859,24 @@ export class ThreadComputeService {
     this.deps.store.upsertWatcher(watcher);
     await this.ledgerOf(input.processId)?.register(this.buildProcessWorkRow(input.processId, now));
     await this.armAlarm(this.computeReleaseAt());
-    // `threadId` is deliberately NOT spread out: this result reaches the model
-    // as the `exec_watch` tool's return, and the routing stamp is bookkeeping
-    // it has no use for.
-    const { threadId: _routedTo, ...view } = watcher;
-    return { ok: true as const, watching: true, ...view };
+    // The raw `threadId` stamp is not spread out — as a field on every result
+    // it is bookkeeping the model has no use for. But when it does NOT name the
+    // caller, it is the only thing that explains where the completion card went:
+    // a model watching a process it can see in the shared box would otherwise
+    // get `{watching:true}` and then never hear again, because the card and the
+    // ledger row belong to the thread that STARTED the process. Say so.
+    const { threadId: routedTo, ...view } = watcher;
+    return {
+      ok: true as const,
+      watching: true,
+      ...view,
+      ...(routedTo !== null && routedTo !== this.deps.threadId
+        ? {
+            routedTo,
+            note: "This process was started by another thread of this agent, which shares this sandbox. Its completion will be reported there, not here.",
+          }
+        : {}),
+    };
   }
 
   async execUnwatch(input: { processId: string }) {
@@ -2016,7 +2110,18 @@ export class ThreadComputeService {
       if (this.deps.store.wasProcessAutoWatched(process.id)) continue;
       if (this.deps.store.listWatchers().some((watcher) => watcher.processId === process.id))
         continue;
-      if (!canAddWatcher(this.deps.store.countWatchers())) break;
+      // Was a silent `break`. The backstop is the last thing that would have
+      // attached a watcher to this process, so a refusal here is the moment a
+      // completion card stops being possible — it may not be invisible.
+      const admission = this.admitWatcherFor(this.threadOfProcess(process.id));
+      if (admission !== "ok") {
+        log.warn("compute.auto_watch_refused", {
+          threadId: this.deps.threadId,
+          processId: process.id,
+          refusedBy: admission,
+        });
+        break;
+      }
       await this.execWatch({ processId: process.id });
       this.deps.store.markProcessAutoWatched(process.id, this.deps.now());
       attached.push(process.id);
@@ -3408,6 +3513,16 @@ export class ThreadComputeService {
    * expired recovery, lost compute). The preserving release delivers no such
    * reminder, so it passes `false` and lets the reaper say the work was stopped
    * before it finished — the alternative there is silence.
+   *
+   * AND IT APPLIES PER ROW, not per call. Since P3 the box is the agent's, so a
+   * teardown run by thread B can stop thread A's processes — but every one of
+   * these callers' reminders is addressed to the thread this service was
+   * resolved for. "The caller already told the model" is therefore true only
+   * for that thread's own rows. Stamping A's row delivered on B's word closes
+   * it AND marks it told, which is exactly the state the sweep skips: A's model
+   * is never told its build was killed. The terminal still lands on A (that is
+   * this task's whole point); only the CLAIM is withheld, leaving the row owed
+   * so A's own sweep reports it. A late notice beats none.
    */
   private async stopRunningProcesses(
     now: number,
@@ -3422,9 +3537,12 @@ export class ThreadComputeService {
         at: now,
         detail: options.detail,
       });
-      // Only when this call actually closed the row: a false return means the
-      // reaper got there first and may still genuinely owe its delivery.
-      if (closed && options.deliver)
+      // Only when this call actually closed the row (a false return means the
+      // reaper got there first and may still genuinely owe its delivery) AND
+      // only for a row the caller's own reminder actually covers — see the
+      // `deliver` param's doc.
+      const toldThisOwner = this.threadOfProcess(process.id) === this.deps.threadId;
+      if (closed && options.deliver && toldThisOwner)
         await this.ledgerOf(process.id)?.markDelivered(process.id, now);
     }
   }
@@ -3464,7 +3582,11 @@ export class ThreadComputeService {
     const wakeAt = nextWakeAt(
       this.deps.store.listWatchers(),
       releaseAt,
-      (await this.deps.getWorkHorizon?.()) ?? null,
+      // `now` is STATED, not omitted. The sandbox DO folds this over its whole
+      // roster, and the alarm's fallback fold passes a clock — a signature that
+      // silently swallowed one would let the two folds classify the same rows
+      // against different `now`s with nothing failing.
+      (await this.deps.getWorkHorizon?.(this.deps.now())) ?? null,
     );
     if (wakeAt === null) return;
     await this.deps.setAlarm(wakeAt);

@@ -222,7 +222,7 @@ export interface ComputeServiceHostDeps {
    * alarm min-fold so the reaper rides the thread's one alarm instead of
    * arming (and thereby cancelling) it.
    */
-  getWorkHorizon?: () => Promise<number | null>;
+  getWorkHorizon?: (now?: number) => Promise<number | null>;
   /**
    * Fired once, after `ThreadComputeService` acquires a genuinely fresh
    * runtime (not a recovery restore). Wired to `createRepositoryPreparation`

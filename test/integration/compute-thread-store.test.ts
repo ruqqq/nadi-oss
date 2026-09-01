@@ -521,3 +521,73 @@ describe("ThreadComputeStore (DO SQLite)", () => {
     });
   });
 });
+
+/**
+ * FIX ROUND 1 — the real store and the unit-test fake must agree about the
+ * ONE field that decides where a completion is delivered.
+ *
+ * `ThreadComputeStore.updateProcess` deliberately skips `threadId` (a process
+ * that changed owners would report to a thread that never started it). The
+ * in-memory fake spread the whole patch, so a future caller that patched it
+ * would pass in unit tests and be silently dropped in production. Asserted
+ * against BOTH implementations from one table, so they cannot drift apart
+ * again.
+ */
+describe("updateProcess never reassigns a process's owner", () => {
+  beforeAll(async () => {
+    await applyRegistryTestSchema(env.REGISTRY_DB);
+  });
+
+  function seedRecord(threadId: string) {
+    return {
+      id: "proc_owner",
+      threadId,
+      backendProcessRef: null,
+      command: "sleep 1",
+      cwd: null,
+      status: "running" as const,
+      exitCode: null,
+      startedAt: 1_000,
+      finishedAt: null,
+      stdoutBytes: 0,
+      stderrBytes: 0,
+      stdoutLines: 0,
+      stderrLines: 0,
+      outputTruncated: false,
+      label: null,
+    };
+  }
+
+  it("is dropped by the real Durable Object store", async () => {
+    const { threadId } = await seedRegistryThread(env.REGISTRY_DB, {
+      threadId: "thr_store_owner",
+      runtime: "think",
+    });
+    const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
+    await (runInDurableObject as any)(stub, async (instance: ThinkThreadAgent) => {
+      const store = new ThreadComputeStore(storageOf(instance));
+      store.migrate();
+      store.createProcess(seedRecord("thr_real_owner"));
+      store.updateProcess("proc_owner", {
+        status: "exited",
+        threadId: "thr_thief",
+      });
+      const row = store.getProcess("proc_owner");
+      expect(row?.status).toBe("exited");
+      expect(row?.threadId, "the owner may not be reassigned by a patch").toBe("thr_real_owner");
+    });
+  });
+
+  it("is dropped by the in-memory fake the unit tests run against", async () => {
+    const { createMemoryComputeStore } = await import("../unit/compute/helpers/memory-store");
+    const store = createMemoryComputeStore();
+    store.createProcess(seedRecord("thr_fake_owner"));
+    store.updateProcess("proc_owner", { status: "exited", threadId: "thr_thief" });
+    const row = store.getProcess("proc_owner");
+    expect(row?.status).toBe("exited");
+    expect(
+      row?.threadId,
+      "the fake must refuse what the real store refuses, or unit tests bless a no-op",
+    ).toBe("thr_fake_owner");
+  });
+});

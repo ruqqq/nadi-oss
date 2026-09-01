@@ -135,7 +135,16 @@ export function createMemoryComputeStore(): ThreadComputeStoreLike {
     createProcess: (process) => void processes.set(process.id, process),
     updateProcess: (id, patch) => {
       const current = processes.get(id);
-      if (current) processes.set(id, { ...current, ...patch });
+      // `id` and `threadId` are dropped, mirroring `ThreadComputeStore`'s own
+      // column map: a process's OWNER is the routing stamp for its completion
+      // reminder and its ledger row, and a row that changed hands would report
+      // to a thread that never started it. A spread of the whole patch made
+      // this fake ACCEPT a change the real store silently discards, so a future
+      // caller would pass in unit tests and be dropped in production — the
+      // exact divergence a fake is supposed to make impossible.
+      if (!current) return;
+      const { id: _id, threadId: _threadId, ...applicable } = patch;
+      processes.set(id, { ...current, ...applicable });
     },
     listProcesses: (limit) => [...processes.values()].slice(0, limit),
     getProcess: (id) => processes.get(id) ?? null,

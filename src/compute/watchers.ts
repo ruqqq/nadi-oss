@@ -10,6 +10,28 @@
 export const MAX_WATCHERS_PER_THREAD = 8;
 
 /**
+ * Hard cap on the watchers ONE BOX polls, across every thread of the agent.
+ *
+ * The per-thread cap alone stopped bounding the tick when P3 made the box
+ * agent-scoped: N threads at 8 each is 8N backend polls every
+ * {@link DEFAULT_MONITOR_POLL_INTERVAL_MS}. The per-thread cap is now about
+ * FAIRNESS (one conversation cannot starve its siblings) and this one is about
+ * LOAD. Both are needed; neither substitutes for the other.
+ */
+export const MAX_WATCHERS_PER_BOX = 32;
+
+/**
+ * Why a watcher was refused, or `"ok"`.
+ *
+ * A reason, not a boolean, because the caller has to SAY it: the old
+ * `canAddWatcher` returned false and `backgroundResult` silently degraded to
+ * "running in the background without a watcher" with no explanation, so one
+ * busy thread could deny every sibling its completion cards and the only trace
+ * was a missing sentence.
+ */
+export type WatcherAdmission = "ok" | "thread_limit" | "box_limit";
+
+/**
  * Poll cadence for watched processes, in milliseconds.
  *
  * Was 7s when the poll WAS the delivery mechanism for a background process's
@@ -121,7 +143,20 @@ export function nextWakeAt(
   return min;
 }
 
-/** Whether another watcher can be registered given the current count. */
-export function canAddWatcher(currentCount: number): boolean {
-  return currentCount < MAX_WATCHERS_PER_THREAD;
+/**
+ * Whether another watcher may be registered, and if not, WHICH cap refused it.
+ *
+ * BOTH counts are required — the box-wide one cannot be derived from the
+ * thread's, and a caller that passed only what it had to hand would silently
+ * restore the pre-P3 behaviour.
+ */
+export function admitWatcher(input: {
+  /** Watchers already held by the thread that will OWN the new one. */
+  threadCount: number;
+  /** Watchers already held by every thread of this box, the new owner included. */
+  boxCount: number;
+}): WatcherAdmission {
+  if (input.threadCount >= MAX_WATCHERS_PER_THREAD) return "thread_limit";
+  if (input.boxCount >= MAX_WATCHERS_PER_BOX) return "box_limit";
+  return "ok";
 }

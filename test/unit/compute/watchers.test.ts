@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_MONITOR_POLL_INTERVAL_MS,
+  MAX_WATCHERS_PER_BOX,
   MAX_WATCHERS_PER_THREAD,
   WATCH_ABSOLUTE_TIMEOUT_MS,
-  canAddWatcher,
+  admitWatcher,
   classifyWatcher,
   nextWakeAt,
   type WatcherRow,
@@ -143,13 +144,35 @@ describe("nextWakeAt", () => {
   });
 });
 
-describe("canAddWatcher", () => {
-  it("allows adding when under the cap", () => {
-    expect(canAddWatcher(7)).toBe(true);
+describe("admitWatcher", () => {
+  it("allows adding when under both caps", () => {
+    expect(admitWatcher({ threadCount: 7, boxCount: 7 })).toBe("ok");
   });
 
-  it("blocks adding at the cap", () => {
-    expect(canAddWatcher(MAX_WATCHERS_PER_THREAD)).toBe(false);
-    expect(canAddWatcher(8)).toBe(false);
+  it("blocks adding at the per-thread cap", () => {
+    expect(admitWatcher({ threadCount: MAX_WATCHERS_PER_THREAD, boxCount: 8 })).toBe(
+      "thread_limit",
+    );
+    expect(admitWatcher({ threadCount: 8, boxCount: 8 })).toBe("thread_limit");
+  });
+
+  /**
+   * The cap the agent-scoped box needed. Without it, N threads at 8 watchers
+   * each is 8N backend polls per interval — the per-thread cap stopped bounding
+   * the tick the moment one box started serving many threads.
+   */
+  it("blocks adding at the box-wide cap even when the thread is well under its own", () => {
+    expect(admitWatcher({ threadCount: 1, boxCount: MAX_WATCHERS_PER_BOX })).toBe("box_limit");
+  });
+
+  /**
+   * Order matters for the MESSAGE, not just the decision: a thread that has
+   * filled its own eight should be told to unwatch one of ITS processes, not
+   * told to wait for a sibling.
+   */
+  it("names the thread's own limit first when both are reached", () => {
+    expect(
+      admitWatcher({ threadCount: MAX_WATCHERS_PER_THREAD, boxCount: MAX_WATCHERS_PER_BOX }),
+    ).toBe("thread_limit");
   });
 });

@@ -4724,10 +4724,15 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
    */
   async getSandboxWorkHorizon(input?: {
     /**
-     * The clock to fold the owed-retry component against. Supplied by the
-     * sandbox alarm's fallback, which reads the compute service's `now()` so its
-     * arm is computed against the same clock the tick used; omitted by
-     * `armAlarm`, which has no reason to prefer either side's.
+     * The clock to fold the owed-retry component against. Supplied by BOTH
+     * arm sites now — the sandbox alarm's fallback, and `armAlarm` itself —
+     * each reading the compute service's `now()`, so the two folds classify the
+     * same rows against the same clock. `armAlarm` used to omit it on the
+     * grounds that it had no reason to prefer either side's; that was true
+     * while the fold was one thread's, and stopped being true when the sandbox
+     * DO started folding a whole roster through both paths. A signature that
+     * accepted a clock on one path and dropped it on the other is a value whose
+     * wrong setting changes the arm and fails nothing.
      */
     now?: number;
   }): Promise<SandboxCallResult<number | null>> {
