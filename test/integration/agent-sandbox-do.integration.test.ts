@@ -265,4 +265,116 @@ describe("AgentSandbox durable object", () => {
       expect(result.backgroundLongRunningExec).toBe(false);
     });
   });
+
+  /**
+   * THE IN-FLIGHT LATCH: nothing between `preparationInFlight.get` and its
+   * `.set` may await.
+   *
+   * `ensureThreadWorkspacePrepared` dedupes concurrent preparations with a
+   * plain Map. That works only because the window between the `get` that asks
+   * "is anyone preparing this" and the `set` that says "I am" contains no
+   * suspension point — the `run` IIFE executes synchronously up to its first
+   * `await`, and the `.set` follows in the same tick. Hoist any await out of
+   * `run` and into that window and two `exec`s in one turn both miss the latch,
+   * both `git clone` into the same worktree, and Task 2's round-1 finding is
+   * back with a green suite.
+   *
+   * That invariant was protected only by a comment, and the signature read this
+   * task added is exactly the kind of await someone hoists for readability — it
+   * was nearly shipped there. So it is pinned here.
+   *
+   * Reached the way this file already reaches DO internals: `runInDurableObject`
+   * plus a cast to the private member. The latch lives on the DO and is keyed by
+   * thread, so calling the method twice on ONE instance is the real concurrency
+   * rather than a simulation of it — no second `ThreadComputeService` and no
+   * session memoization is involved.
+   */
+  describe("concurrent preparations are deduped by the in-flight latch", () => {
+    type PreparationInternals = {
+      ensureThreadWorkspacePrepared: (
+        threadId: string,
+        prepare: () => Promise<{ summary: string; signature: string | null }>,
+      ) => Promise<void>;
+      preparationFailures: Map<string, { key: string; count: number; signature: string | null }>;
+    };
+
+    /**
+     * Two concurrent calls against one DO instance, with a `prepare` that does
+     * not settle until the test says so — so the second call cannot arrive
+     * "after" the first by an accident of timing.
+     *
+     * `seedFailures` optionally installs a suspension record first; see the two
+     * cases below for why that is a different test and not a variation.
+     */
+    async function concurrentPreparations(
+      threadId: string,
+      seedFailures?: { key: string; count: number; signature: string | null },
+    ) {
+      await seedComputeEnabledThread(threadId);
+      return await runInDurableObject(stub(threadId), async (instance) => {
+        const internals = instance as unknown as PreparationInternals;
+        if (seedFailures) internals.preparationFailures.set(threadId, seedFailures);
+
+        let release: (() => void) | undefined;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let calls = 0;
+        const prepare = async () => {
+          calls += 1;
+          await gate;
+          return { summary: "prepared", signature: "sig-after" };
+        };
+
+        // Issued in ONE synchronous tick: the second call happens before the
+        // first has had any chance to settle, which is what a turn's two
+        // `exec`s do.
+        const first = internals.ensureThreadWorkspacePrepared(threadId, prepare);
+        const second = internals.ensureThreadWorkspacePrepared(threadId, prepare);
+        // Let both reach their first suspension point before releasing, so a
+        // missing latch has actually had the opportunity to double-run.
+        for (let tick = 0; tick < 8; tick += 1) await Promise.resolve();
+        release?.();
+        await Promise.all([first, second]);
+        return calls;
+      });
+    }
+
+    /**
+     * The general case: no suspension record, so `run` reaches `await prepare()`
+     * as its first suspension point. One preparation, and the second caller
+     * AWAITS it rather than skipping it — "someone is preparing this" is not the
+     * same claim as "someone prepared this".
+     */
+    it("runs ONE preparation for two concurrent callers", async () => {
+      expect(await concurrentPreparations("thr_sbx_prep_concurrent")).toBe(1);
+    });
+
+    /**
+     * The specific case, and the one that kills the hoisted-await mutation.
+     *
+     * With a suspension record whose signature no longer matches the agent's
+     * configuration, the cap check has to READ D1 before it can decide — the
+     * only await on this path other than `prepare` itself. Inside `run` that is
+     * harmless. Hoisted above the `.set` it is the regression: both callers pass
+     * the `get`, both await the read, both prepare.
+     *
+     * The general case above cannot see that mutation at all, because with no
+     * record the hoisted branch never awaits. Two tests, not one parameterised
+     * one.
+     */
+    it("runs ONE preparation when a stale suspension must be invalidated first", async () => {
+      const calls = await concurrentPreparations("thr_sbx_prep_concurrent_stale", {
+        key: "environment setup failed with exit code 7",
+        // Comfortably past MAX_PREPARATION_ATTEMPTS, so the cap branch is taken
+        // whatever that constant becomes.
+        count: 99,
+        // Not the agent's current signature, so the suspension is invalidated
+        // and preparation is attempted — which is the point: the D1 read that
+        // decides this is the await in question.
+        signature: "stale-signature-that-cannot-match",
+      });
+      expect(calls).toBe(1);
+    });
+  });
 });
