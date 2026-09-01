@@ -1022,6 +1022,20 @@ export type ReclaimExecService = Pick<ThreadComputeService, "execRun">;
  * Generous, and for one reason: `rm -rf` of a prepared checkout is
  * `node_modules`-sized. Shorter than the setup timeout because nothing here
  * builds anything.
+ *
+ * IT IS ALSO A STALL BUDGET, and worth naming as one. The reclaim runs from
+ * `ensureThreadWorkspace`, i.e. BEFORE preparation on the first `exec` of a
+ * turn, so a pass that takes this long delays a user's first tool call by that
+ * long. `MAX_RECLAIM_ATTEMPTS` bounds repeated FAILURE, not slowness — three
+ * slow-but-successful passes are three separate stalls.
+ *
+ * Left at five minutes rather than tightened, deliberately: nothing here knows
+ * how long `rm -rf` of several checkouts actually takes on a sprite's disk, and
+ * picking a smaller number from imagination is precisely the "value whose wrong
+ * setting changes behaviour without failing anything" defect this phase keeps
+ * hitting — too short and every pass times out, keeps its rows, and the
+ * directories are never reclaimed at all. The live smoke measures it; see the
+ * task report's live-smoke list, which names this specific number.
  */
 const RECLAIM_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -1067,13 +1081,32 @@ export type ReclaimOutcome =
  *
  * THE BRANCH IS DELIBERATELY LEFT. `prune` clears the registration and never
  * the branch, and neither `branch -D` nor `add -B` is used here, because both
- * discard commits the thread made and never pushed — permanently, with nothing
+ * discard commits the thread made and never pushed IMMEDIATELY and with nothing
  * to restore from. The unconditional-removal ruling is about the WORKTREE, and
  * a checkout can be recreated from its branch; the branch is the only copy of
  * those commits. `ensureThreadWorktree` re-attaches an orphaned branch rather
  * than failing on it, so the cost of keeping one is a ref per archived thread
- * in the clone, and the benefit is that reclaiming a thread whose work was
- * committed-but-not-pushed stays recoverable at all.
+ * in the clone.
+ *
+ * WHAT KEEPING IT DOES *NOT* BUY, because a comment that over-claims here is
+ * worse than none: the branch is not preserved forever, and this reclaim
+ * SHORTENS the window it survives. `PROBE_SCRIPT` measures each repo's own
+ * `HEAD` against its own upstream and nothing else, so commits sitting on a
+ * kept, not-checked-out `nadi/thread-<id>` ref are INVISIBLE to it. Remove the
+ * dirty worktree that was the box's only evidence of work and the agent's clone
+ * probes `clean`, so on any provider WITHOUT `nativeIdleSuspend` the next idle
+ * wake DISCARDS the box — clone, branch and commits together. The honest claim
+ * is therefore: keeping the branch is strictly better than deleting it (which
+ * loses the commits now, on every provider), and it buys a recovery window
+ * bounded by the box's idle timeout, not an indefinite one.
+ *
+ * The probe is deliberately NOT widened to count refs unmerged into any remote.
+ * It would be the safe DIRECTION (more preserve, less discard), but a thread
+ * that commits without pushing is the normal shape of a coding turn, so after
+ * the first such thread every agent's box would probe dirty forever and be
+ * preserved forever — and a preserved sprite bills until something deletes it,
+ * with no auto-destroy. The bounded fix is retiring branches whose commits a
+ * remote already has, which needs its own task and its own ruling.
  *
  * The repo root is swept by GLOB rather than from the agent's configured
  * repository list, and that is load-bearing twice over: a DELETED thread has no

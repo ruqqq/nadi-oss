@@ -215,10 +215,15 @@ describe("lazy reclaim of an ended thread's worktree", () => {
   });
 
   /**
-   * The guard against deleting the cwd out from under a live turn. Unreachable
-   * in production today (an archived thread cannot open a socket and a deleted
-   * one has no DO), which is exactly why it needs a test: nothing else would
-   * ever exercise it, and the failure it prevents is silent data loss.
+   * The guard against deleting the cwd out from under a live turn — narrow by
+   * design. It covers ONLY the session doing the deleting, never "any thread
+   * with open work": widening it would reintroduce the conditional the
+   * unconditional-removal ruling removed, and a leaked ledger row would then pin
+   * a directory in the box forever. A thread with a live BACKGROUND process is
+   * deliberately not covered — `hasActiveTurn()` is `_activeRequestId != null`,
+   * so such a thread can be auto-archived and have its cwd removed under the
+   * running process. That is consistent with the ruling; see
+   * `reclaimPendingWorkspaces`.
    */
   it("never reclaims the working directory the resolving session is using", async () => {
     const agentId = agentIdFor("self");

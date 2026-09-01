@@ -460,9 +460,25 @@ export class AgentSandbox extends DurableObject<Env> {
    *
    * `skipWorkspaceThreadId` is the directory the CALLING session is about to
    * work in. Removing it mid-turn would delete the cwd out from under a live
-   * turn; it is unreachable today (an archived thread cannot open a socket and a
-   * deleted thread has no DO) but the guard is one comparison and the failure it
-   * prevents is silent data loss.
+   * turn, so it is skipped and its debt is KEPT for a sibling turn to pay.
+   *
+   * THE SKIP IS NARROW ON PURPOSE, AND IT DOES NOT COVER BACKGROUND WORK.
+   * `ThinkThreadAgent.hasActiveTurn()` is `_activeRequestId != null` and nothing
+   * more, so a detached `exec_watch` or a background process is NOT a turn and
+   * does not block auto-archive. A thread can therefore be archived while a
+   * process of its own is still running, and the next sibling turn will
+   * `rm -rf` that process's cwd out from under it while its work-ledger row is
+   * still open — the row's fault reminder then being delivered to a destroyed
+   * DO. That outcome is CONSISTENT with the ruling, not an oversight: the
+   * removal is unconditional, so work in an archived thread is forfeit whether
+   * a process is still touching it or not.
+   *
+   * Widening the skip to "any thread with open work" was considered and
+   * REJECTED. It would reintroduce exactly the conditional the ruling removed,
+   * and a leaked ledger row — the failure this whole project exists to fix —
+   * would then pin a directory in the box permanently, with nothing left to
+   * reclaim it. The skip covers one thing: never delete the directory the
+   * session doing the deleting is standing in.
    */
   private async reclaimPendingWorkspaces(
     resolveReclaimService: () => Promise<{ service: ReclaimExecService } | null>,
