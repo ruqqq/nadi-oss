@@ -1,7 +1,11 @@
 import type { Env } from "../env";
 import { validateRequestSession, type ValidatedSession } from "../auth/session";
 import { registryDb } from "../db/client";
-import { AgentSkillDuplicateError, AgentSkillRepository } from "../db/repositories/agent-skills";
+import {
+  AgentSkillDuplicateError,
+  AgentSkillRepository,
+  type LibrarySkillForAgent,
+} from "../db/repositories/agent-skills";
 import type { Skill } from "../db/schema";
 import { resolveAgentScope, resolveAgentScopeById } from "./agent-scope";
 
@@ -57,6 +61,73 @@ async function resolveSkillScope(
   if (agentId) return resolveAgentScopeById(env, session, agentId);
   const scope = await resolveAgentScope(env, session);
   return scope ? { workspaceId: scope.workspaceId, agentId: null } : null;
+}
+
+/**
+ * The workspace library as it applies to ONE agent, plus that agent's own.
+ *
+ * Two groups, not one merged list: the library rows are shared and are edited
+ * on the Skills tab (this agent can only opt out of them), while `own` is
+ * this agent's private set. Merging them would make "delete" mean two
+ * different things in one list.
+ */
+export async function listAgentSkills(req: Request, env: Env, agentId: string): Promise<Response> {
+  const session = await validateRequestSession(env, req);
+  if (!session) return new Response("Unauthorized", { status: 401 });
+  const scope = await resolveAgentScopeById(env, session, agentId);
+  if (!scope) return new Response("Not found", { status: 404 });
+  const repo = new AgentSkillRepository(registryDb(env));
+  const [library, own] = await Promise.all([
+    repo.listLibraryForAgent(scope),
+    repo.listActive(scope, { includeDisabled: true }),
+  ]);
+  return Response.json({
+    library: library.map(serializeLibraryForAgent),
+    own: own.map(serialize),
+  });
+}
+
+/**
+ * Opt one agent in or out of one workspace-library skill.
+ *
+ * Both ids come off the URL and BOTH are checked against the session's
+ * workspace: `resolveAgentScopeById` answers for the agent, and
+ * `getLibrarySkillById` answers for the skill. Checking only the agent would
+ * let a guessed skill id write an `agent_skill_exclusions` row pointing at
+ * another workspace's skill; checking only the skill would let a member
+ * silently reconfigure someone else's agent.
+ */
+export async function setSkillExclusion(
+  req: Request,
+  env: Env,
+  agentId: string,
+  skillId: string,
+): Promise<Response> {
+  const session = await validateRequestSession(env, req);
+  if (!session) return new Response("Unauthorized", { status: 401 });
+  const body = (await req.json().catch(() => null)) as { excluded?: unknown } | null;
+  if (typeof body?.excluded !== "boolean")
+    return new Response("excluded must be a boolean", { status: 400 });
+  const scope = await resolveAgentScopeById(env, session, agentId);
+  if (!scope) return new Response("Not found", { status: 404 });
+  const repo = new AgentSkillRepository(registryDb(env));
+  // Only a LIVE LIBRARY skill in this workspace can be excluded. An
+  // agent-private skill is archived, not excluded, so an exclusion row on one
+  // would be a row `listEffective` never reads - a toggle that appears to work
+  // and changes nothing.
+  const skill = await repo.getLibrarySkillById({ workspaceId: scope.workspaceId, skillId });
+  if (!skill) return new Response("Not found", { status: 404 });
+  if (body.excluded) await repo.excludeLibrarySkill({ agentId: scope.agentId, skillId: skill.id });
+  else await repo.includeLibrarySkill({ agentId: scope.agentId, skillId: skill.id });
+  return new Response(null, { status: 204 });
+}
+
+function serializeLibraryForAgent(s: LibrarySkillForAgent) {
+  return {
+    ...serialize(s),
+    excluded: s.excluded,
+    shadowedByOwnSkillId: s.shadowedByOwnSkillId,
+  };
 }
 
 function serialize(s: Skill) {

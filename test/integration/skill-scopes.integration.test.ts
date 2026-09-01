@@ -270,6 +270,109 @@ describe("skills have two scopes", () => {
     ).resolves.toBe(true);
   });
 
+  it("annotates a library skill excluded for this agent", async () => {
+    await insertSkill({ id: "lib-deploy", agentId: null, name: "deploy" });
+    await repo().excludeLibrarySkill({ agentId: AGENT, skillId: "lib-deploy" });
+
+    const forA = await repo().listLibraryForAgent({ workspaceId: WORKSPACE, agentId: AGENT });
+    const forB = await repo().listLibraryForAgent({ workspaceId: WORKSPACE, agentId: OTHER_AGENT });
+
+    // The excluded skill is still LISTED — the UI needs something to toggle
+    // back on, which `listEffective` (from which it has vanished) cannot give.
+    expect(forA.map((s) => [s.name, s.excluded])).toEqual([["deploy", true]]);
+    expect(forB.map((s) => [s.name, s.excluded])).toEqual([["deploy", false]]);
+    expect(forA[0]?.shadowedByOwnSkillId).toBeNull();
+  });
+
+  it("marks a library skill shadowed by the agent's own skill of the same name", async () => {
+    await insertSkill({ id: "lib-deploy", agentId: null, name: "deploy" });
+    await insertSkill({ id: "own-deploy", agentId: AGENT, name: "deploy" });
+
+    const [row] = await repo().listLibraryForAgent({ workspaceId: WORKSPACE, agentId: AGENT });
+    expect(row?.shadowedByOwnSkillId).toBe("own-deploy");
+    // Shadowing is not exclusion — they are different states, and the UI has to
+    // say which one is why the library row is not live here.
+    expect(row?.excluded).toBe(false);
+
+    const [other] = await repo().listLibraryForAgent({
+      workspaceId: WORKSPACE,
+      agentId: OTHER_AGENT,
+    });
+    expect(other?.shadowedByOwnSkillId).toBeNull();
+  });
+
+  it("still marks shadowed when the agent's own skill is disabled", async () => {
+    await insertSkill({ id: "lib-deploy", agentId: null, name: "deploy" });
+    await insertSkill({ id: "own-deploy", agentId: AGENT, name: "deploy", enabled: false });
+
+    // `listEffective` drops the library row for a DISABLED own skill too (the
+    // agent owns the name). If the shadow join filtered on `enabled` the UI
+    // would show the library skill as live while the model never loads it.
+    await expect(repo().listEffective({ workspaceId: WORKSPACE, agentId: AGENT })).resolves.toEqual(
+      [],
+    );
+    const [row] = await repo().listLibraryForAgent({ workspaceId: WORKSPACE, agentId: AGENT });
+    expect(row?.shadowedByOwnSkillId).toBe("own-deploy");
+  });
+
+  it("does not treat an archived own skill as shadowing", async () => {
+    await insertSkill({ id: "lib-deploy", agentId: null, name: "deploy" });
+    await insertSkill({ id: "own-deploy", agentId: AGENT, name: "deploy", archivedAt: 7 });
+
+    const [row] = await repo().listLibraryForAgent({ workspaceId: WORKSPACE, agentId: AGENT });
+    expect(row?.shadowedByOwnSkillId).toBeNull();
+    await expect(
+      repo().listEffective({ workspaceId: WORKSPACE, agentId: AGENT }),
+    ).resolves.toMatchObject([{ id: "lib-deploy" }]);
+  });
+
+  it("lists only the workspace library: not the agent's own, not archived, not another workspace's", async () => {
+    await insertSkill({ id: "lib-review", agentId: null, name: "review" });
+    await insertSkill({ id: "lib-gone", agentId: null, name: "gone", archivedAt: 9 });
+    await insertSkill({ id: "own-notes", agentId: AGENT, name: "notes" });
+    await seedRegistryThread(env.REGISTRY_DB, {
+      workspaceId: "workspace-elsewhere",
+      agentId: "agent-elsewhere",
+      threadId: "thread-elsewhere-lib",
+    });
+    await drizzle(env.REGISTRY_DB, { schema }).insert(schema.skills).values({
+      id: "elsewhere-review",
+      workspaceId: "workspace-elsewhere",
+      agentId: null,
+      name: "review",
+      description: "d",
+      body: "b",
+      networkDomains: null,
+      enabled: true,
+      createdAt: 1,
+      updatedAt: 1,
+      archivedAt: null,
+    });
+
+    const rows = await repo().listLibraryForAgent({ workspaceId: WORKSPACE, agentId: AGENT });
+    expect(rows.map((s) => s.id)).toEqual(["lib-review"]);
+  });
+
+  it("lists a DISABLED library skill, so the agent view can say why it is off", async () => {
+    await insertSkill({ id: "lib-off", agentId: null, name: "off", enabled: false });
+    const rows = await repo().listLibraryForAgent({ workspaceId: WORKSPACE, agentId: AGENT });
+    expect(rows).toMatchObject([{ id: "lib-off", enabled: false, excluded: false }]);
+  });
+
+  it("returns one row per library skill even with an exclusion and a shadow both present", async () => {
+    await insertSkill({ id: "lib-deploy", agentId: null, name: "deploy" });
+    await insertSkill({ id: "own-deploy", agentId: AGENT, name: "deploy" });
+    await repo().excludeLibrarySkill({ agentId: AGENT, skillId: "lib-deploy" });
+
+    const rows = await repo().listLibraryForAgent({ workspaceId: WORKSPACE, agentId: AGENT });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: "lib-deploy",
+      excluded: true,
+      shadowedByOwnSkillId: "own-deploy",
+    });
+  });
+
   it("does not leak a library skill across workspaces", async () => {
     await insertSkill({ id: "lib-review", agentId: null, name: "review" });
     await seedRegistryThread(env.REGISTRY_DB, {

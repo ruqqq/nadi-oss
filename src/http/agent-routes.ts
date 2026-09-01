@@ -15,6 +15,7 @@ import { createWorkspaceSecretsServices } from "../secrets";
 import { type AgentConfig, type AgentRepositoryRow } from "../db/schema";
 import { log } from "../log";
 import { resolveAgentScope } from "./agent-scope";
+import { listAgentSkills, setSkillExclusion } from "./skill-routes";
 import { AgentSettingsRepository } from "../db/repositories/agent-settings";
 import { parseAgentBehaviourPatch } from "./settings-routes";
 import {
@@ -113,6 +114,30 @@ export async function routeAgents(req: Request, env: Env): Promise<Response | nu
     const name = decodeURIComponent(secretMatch[2]);
     if (req.method === "PUT") return setSecret(req, env, agentId, name);
     if (req.method === "DELETE") return deleteSecret(req, env, agentId, name);
+    return new Response("Method not allowed", { status: 405 });
+  }
+
+  // The two skill surfaces live under /api/agents/ because they are addressed
+  // by AGENT, like /api/agents/:id/repositories. They must be matched HERE:
+  // `routeAgents` runs before `routeSkills` (router.ts) and ends with a
+  // catch-all 404 for /api/agents/, so registering them in skill-routes.ts
+  // alone would 404 before `routeSkills` ever saw them. The handlers themselves
+  // stay in skill-routes.ts, beside the rest of the skill surface.
+  const agentSkillsId = matchId(url.pathname, /^\/api\/agents\/([^/]+)\/skills$/);
+  if (agentSkillsId !== null) {
+    if (req.method === "GET") return listAgentSkills(req, env, agentSkillsId);
+    return new Response("Method not allowed", { status: 405 });
+  }
+
+  const exclusionMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/skills\/([^/]+)\/exclusion$/);
+  if (exclusionMatch?.[1] && exclusionMatch[2]) {
+    if (req.method === "POST")
+      return setSkillExclusion(
+        req,
+        env,
+        decodeURIComponent(exclusionMatch[1]),
+        decodeURIComponent(exclusionMatch[2]),
+      );
     return new Response("Method not allowed", { status: 405 });
   }
 

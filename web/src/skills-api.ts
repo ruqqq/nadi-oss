@@ -11,6 +11,26 @@ export interface Skill {
   archivedAt: number | null;
 }
 
+/**
+ * A workspace-library skill as it applies to ONE agent: the row itself, plus
+ * why it is or is not live there. Distinct from the effective set the model
+ * loads — an excluded skill is absent from that, so a view built on it would
+ * have nothing to offer the toggle.
+ */
+export interface LibrarySkillForAgent extends Skill {
+  /** This agent opted out of it. */
+  excluded: boolean;
+  /** The agent's own skill of the same name that hides this one, if any. */
+  shadowedByOwnSkillId: string | null;
+}
+
+export interface AgentSkills {
+  /** The shared workspace library, annotated for this agent. */
+  library: LibrarySkillForAgent[];
+  /** This agent's private skills. */
+  own: Skill[];
+}
+
 type FetchLike = typeof fetch;
 const JSON_HEADERS = { "Content-Type": "application/json" } as const;
 
@@ -80,4 +100,35 @@ export async function restoreSkill(
   });
   if (!res.ok) throw await errorFromResponse(res, "restore skill");
   return ((await res.json()) as { skill: Skill }).skill;
+}
+
+/** The library (annotated for this agent) and the agent's own skills. */
+export async function listAgentSkills(
+  agentId: string,
+  fetchImpl: FetchLike = appFetch,
+): Promise<AgentSkills> {
+  const res = await fetchImpl(`/api/agents/${encodeURIComponent(agentId)}/skills`, {
+    credentials: "include",
+  });
+  if (!res.ok) throw await errorFromResponse(res, "list skills");
+  return (await res.json()) as AgentSkills;
+}
+
+/** Opt one agent in or out of one library skill. Returns nothing (204). */
+export async function setLibrarySkillExcluded(
+  agentId: string,
+  skillId: string,
+  excluded: boolean,
+  fetchImpl: FetchLike = appFetch,
+): Promise<void> {
+  const res = await fetchImpl(
+    `/api/agents/${encodeURIComponent(agentId)}/skills/${encodeURIComponent(skillId)}/exclusion`,
+    {
+      method: "POST",
+      credentials: "include",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ excluded }),
+    },
+  );
+  if (!res.ok) throw await errorFromResponse(res, "update skill");
 }

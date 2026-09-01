@@ -463,6 +463,8 @@ function baseExtras(): Pick<
 function richExtras(): Pick<
   MockStore,
   | "skills"
+  | "agentSkills"
+  | "skillExclusions"
   | "memories"
   | "mcpServers"
   | "mcpTools"
@@ -512,6 +514,25 @@ function richExtras(): Pick<
         archivedAt: NOW - 40 * DAY,
       },
     ],
+    // `wb_nadi` has taken over the `software_engineering` NAME with its own
+    // copy, which shadows the library's; `wb_docs` has simply opted out of it.
+    // Two different reasons a library skill is not live on an agent, and the
+    // agent Skills view has to tell them apart.
+    agentSkills: {
+      wb_nadi: [
+        {
+          id: "skl_nadi_swe",
+          name: "software_engineering",
+          description: "This repo's version: pnpm, oxfmt, and the six vitest projects.",
+          body: "# Software engineering\n\nRun `pnpm run check` before you push.",
+          enabled: true,
+          createdAt: NOW - 9 * DAY,
+          updatedAt: NOW - DAY,
+          archivedAt: null,
+        },
+      ],
+    },
+    skillExclusions: { wb_docs: ["skl_swe"] },
     memories: [
       {
         id: "mem_1",
@@ -653,6 +674,8 @@ function emptyStore(): MockStore {
     agents: [],
     automata: [],
     skills: [],
+    agentSkills: {},
+    skillExclusions: {},
     memories: [],
     mcpServers: [],
     mcpTools: {},

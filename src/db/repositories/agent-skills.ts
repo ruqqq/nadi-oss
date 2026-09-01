@@ -8,6 +8,14 @@ import { assertValidSkillScriptPath } from "../../agent/skills/script-path";
 const MAX_SKILL_NAME_LENGTH = 80;
 const VALID_SKILL_NAME = /^[a-z0-9_-]+$/;
 
+/** A library skill plus why it is, or is not, live on one agent. */
+export type LibrarySkillForAgent = Skill & {
+  /** This agent opted out of it (`agent_skill_exclusions`). */
+  excluded: boolean;
+  /** The agent's own skill of the same name that hides this one, if any. */
+  shadowedByOwnSkillId: string | null;
+};
+
 export interface CreateAgentSkillInput {
   workspaceId: string;
   agentId: string | null;
@@ -408,6 +416,91 @@ export class AgentSkillRepository {
     // Shadowing already drops the library row when the agent owns the name;
     // preferring the agent-owned row here keeps that true even if it did not.
     return (rows.find((row) => row.skills.agentId !== null) ?? rows[0])?.skills;
+  }
+
+  /**
+   * Every workspace-library skill, annotated with why it is or is not live on
+   * this agent.
+   *
+   * The mirror image of {@link listEffective}, which returns the post-exclusion,
+   * post-shadow set the model actually loads. A settings view rendered from
+   * that would be missing exactly the rows it has to offer a toggle for — an
+   * excluded skill has already vanished from it, so nothing could turn it back
+   * on. So this lists the library WHOLE and hangs the two reasons off each row.
+   *
+   * Disabled library skills are included (they carry `enabled: false`): the
+   * workspace switched them off for everyone, which is a third, distinct
+   * reason the agent is not running them, and the view has to say so rather
+   * than silently drop the row. Archived ones are not — they are gone.
+   *
+   * The shadow join deliberately does NOT filter on `shadowing.enabled`,
+   * matching `listEffective`: an agent that defined its own `deploy` owns that
+   * name, and disabling its own copy means "off here", not "fall back to the
+   * library's". Filtering on it here would paint the library row as live while
+   * the model never loads it.
+   */
+  async listLibraryForAgent(scope: {
+    workspaceId: string;
+    agentId: string;
+  }): Promise<LibrarySkillForAgent[]> {
+    const rows = await this.db
+      .select({
+        skill: skills,
+        excludedAgentId: exclusion.agentId,
+        shadowedByOwnSkillId: shadowing.id,
+      })
+      .from(skills)
+      .leftJoin(exclusion, exclusionJoin(scope.agentId))
+      .leftJoin(
+        shadowing,
+        and(
+          eq(shadowing.workspaceId, skills.workspaceId),
+          eq(shadowing.agentId, scope.agentId),
+          eq(shadowing.name, skills.name),
+          isNull(shadowing.archivedAt),
+        ),
+      )
+      .where(
+        and(
+          eq(skills.workspaceId, scope.workspaceId),
+          isNull(skills.agentId),
+          isNull(skills.archivedAt),
+        ),
+      )
+      .orderBy(asc(skills.name))
+      .all();
+    return rows.map((row) => ({
+      ...row.skill,
+      excluded: row.excludedAgentId !== null,
+      shadowedByOwnSkillId: row.shadowedByOwnSkillId,
+    }));
+  }
+
+  /**
+   * One live workspace-library skill by id, or undefined.
+   *
+   * The exclusion routes take a skill id straight from the URL, so this is
+   * where "is that id even a library skill in YOUR workspace" is answered —
+   * without it a guessed id writes an `agent_skill_exclusions` row across a
+   * workspace boundary, and an agent-private id would take an exclusion row
+   * that resolution never reads (private skills are archived, not excluded).
+   */
+  async getLibrarySkillById(input: {
+    workspaceId: string;
+    skillId: string;
+  }): Promise<Skill | undefined> {
+    return this.db
+      .select()
+      .from(skills)
+      .where(
+        and(
+          eq(skills.id, input.skillId),
+          eq(skills.workspaceId, input.workspaceId),
+          isNull(skills.agentId),
+          isNull(skills.archivedAt),
+        ),
+      )
+      .get();
   }
 
   /** Opt this agent OUT of one workspace-library skill. */

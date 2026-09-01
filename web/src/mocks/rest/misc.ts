@@ -82,6 +82,43 @@ const skillHandlers = [
     skill.archivedAt = null;
     return HttpResponse.json({ skill });
   }),
+
+  // The agent-scoped view: the WHOLE library annotated for this agent, plus
+  // the agent's own. Deliberately not the post-exclusion set the model loads —
+  // an excluded row has to stay listed or the toggle has nothing to turn on.
+  http.get("/api/agents/:agentId/skills", ({ params }) => {
+    const store = getStore();
+    const agentId = pathParam(params, "agentId");
+    if (!store.agents.some((a) => a.id === agentId)) return notFound("That agent");
+    const own = store.agentSkills[agentId] ?? [];
+    const excluded = store.skillExclusions[agentId] ?? [];
+    const library = store.skills
+      .filter((s) => !s.archivedAt)
+      .map((s) => ({
+        ...s,
+        excluded: excluded.includes(s.id),
+        shadowedByOwnSkillId:
+          own.find((o) => o.name === s.name && !o.archivedAt)?.id ?? null,
+      }));
+    return HttpResponse.json({ library, own: own.filter((s) => !s.archivedAt) });
+  }),
+  http.post("/api/agents/:agentId/skills/:skillId/exclusion", async ({ params, request }) => {
+    const store = getStore();
+    const agentId = pathParam(params, "agentId");
+    const skillId = pathParam(params, "skillId");
+    if (!store.agents.some((a) => a.id === agentId)) return notFound("That agent");
+    // Only a live LIBRARY skill can be excluded, exactly as the server rules —
+    // an agent's private skill is archived, not excluded.
+    if (!store.skills.some((s) => s.id === skillId && !s.archivedAt)) return notFound("That skill");
+    const input = (await request.json().catch(() => ({}))) as { excluded?: boolean };
+    const current = store.skillExclusions[agentId] ?? [];
+    store.skillExclusions[agentId] = input.excluded
+      ? current.includes(skillId)
+        ? current
+        : [...current, skillId]
+      : current.filter((id) => id !== skillId);
+    return new HttpResponse(null, { status: 204 });
+  }),
 ];
 
 const memoryHandlers = [

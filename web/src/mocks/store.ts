@@ -90,7 +90,12 @@ export interface MockStore {
   projects: ProjectSummary[];
   agents: AgentSummary[];
   automata: AutomatonSummary[];
+  /** The workspace LIBRARY (`agent_id IS NULL` on the server). */
   skills: Skill[];
+  /** Agent-private skills, keyed by agent id. Absent = that agent has none. */
+  agentSkills: Record<string, Skill[]>;
+  /** Library skill ids each agent has opted OUT of, keyed by agent id. */
+  skillExclusions: Record<string, string[]>;
   memories: Memory[];
   mcpServers: McpServer[];
   /** Keyed by MCP server id. Absent = the server exposes no tools. */
