@@ -175,14 +175,22 @@ describe("resolveEffectiveComputeConfig (resource profile)", () => {
     expect(result.enabled).toBe(true);
   });
 
-  // NOT lifted for reclaim: an archived agent's box is being destroyed, its row
-  // is already excluded from reclaim candidates, and ticking against a
-  // destroyed sprite would only produce errors.
+  /**
+   * The other two switches are lifted for reclaim TOO, and the first version of
+   * this test asserted the opposite — encoding the bug as intent with a
+   * rationale that only ever applied to `archived_at`.
+   *
+   * `updateAgentSandboxSettings` writes the column and nothing else: no
+   * teardown, no release. So unticking Settings → Sandbox on an agent with a
+   * live box left a machine nothing could reach, its row frozen at `active`
+   * with a stale `last_used_at` — and since reclaim candidates are ordered
+   * `last_used_at ASC`, that agent was offered FIRST on every cap-pressure
+   * reclaim and refused every time. The workspace master toggle is identical.
+   */
   it.each([
-    ["the agent is deleted", { agent: { archivedAt: 1_800_000_000_000 } }],
     ["the agent works without a machine", { agent: { sandboxEnabled: false } }],
     ["the workspace has compute off", { workspace: { enabled: false } }],
-  ])("still refuses reclaim when %s", (_label, patch) => {
+  ])("resolves for reclaim when %s", (_label, patch) => {
     const result = resolveEffectiveComputeConfig({
       ...baseInput,
       ...("agent" in patch ? { agent: { ...baseInput.agent, ...patch.agent } } : {}),
@@ -192,8 +200,24 @@ describe("resolveEffectiveComputeConfig (resource profile)", () => {
       agentResourceProfile: "small",
       purpose: "reclaim",
     });
-    expect(result).toEqual({ enabled: false, reason: "disabled" });
+    expect(result.enabled).toBe(true);
   });
+
+  // The ONE gate reclaim does not lift: an archived agent's box is being
+  // destroyed, its row is already excluded from reclaim candidates, and ticking
+  // against a destroyed sprite would only produce errors.
+  it.each([["the agent is deleted", { agent: { archivedAt: 1_800_000_000_000 } }]])(
+    "still refuses reclaim when %s",
+    (_label, patch) => {
+      const result = resolveEffectiveComputeConfig({
+        ...baseInput,
+        ...("agent" in patch ? { agent: { ...baseInput.agent, ...patch.agent } } : {}),
+        agentResourceProfile: "small",
+        purpose: "reclaim",
+      });
+      expect(result).toEqual({ enabled: false, reason: "disabled" });
+    },
+  );
 
   it("still gives compute to an enabled, undeleted agent with sandbox on", () => {
     const result = resolveEffectiveComputeConfig({

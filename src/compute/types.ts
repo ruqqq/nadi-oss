@@ -100,13 +100,18 @@ export interface AgentComputeSettings {
  *   whether the agent is ALLOWED a machine, because neither says anything about
  *   whether one already exists.
  * - `"reclaim"` — the caller is RELEASING the machine: putting it to sleep, or
- *   ticking the alarm that decides to. It lifts `agents.enabled` and nothing
- *   else. A disabled agent's box is live and intentional, and if nothing can
- *   resolve for it, nothing can ever mark its ledger row `idle` — so it holds a
- *   workspace concurrency slot until the agent is deleted. `archived_at` is
- *   deliberately NOT lifted: an archived agent's box is being destroyed, its
- *   row is already excluded from reclaim candidates, and ticking against a
- *   destroyed sprite would only produce errors.
+ *   ticking the alarm that decides to. It lifts everything `teardown` lifts
+ *   EXCEPT `archived_at`. If nothing can resolve for a box, nothing can ever
+ *   mark its ledger row `idle`, so it holds a workspace concurrency slot until
+ *   the agent is deleted — and because reclaim candidates are ordered by
+ *   `last_used_at ASC`, a frozen row is handed out FIRST every time and refused
+ *   every time. That applies to a disabled agent, to one whose sandbox setting
+ *   was unticked, and to a workspace whose master toggle went off: none of
+ *   those tears a live box down, so all three leave a machine that must still
+ *   be reachable to be put to sleep. `archived_at` is deliberately NOT lifted:
+ *   an archived agent's box is being destroyed, its row is already excluded
+ *   from reclaim candidates, and ticking against a destroyed sprite would only
+ *   produce errors.
  *
  * A reclaim can never destroy — `releaseIfReclaimable` takes the recoverable
  * disposition unconditionally — which is what makes lifting a gate for it safe.

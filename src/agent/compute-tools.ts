@@ -196,10 +196,12 @@ export interface ComputeServiceHostDeps {
    */
   backgroundLongRunningExec: boolean;
   /**
-   * Why this service is being resolved. Omitted (i.e. `"work"`) everywhere
-   * except the agent-deletion teardown, which must be able to reach a machine
-   * belonging to an agent that is disabled or already archived — see
-   * {@link ComputeResolvePurpose} and `resolveEffectiveComputeConfig`.
+   * Why this service is being resolved. Omitted (i.e. `"work"`) except on the
+   * paths that must reach a machine whose agent may no longer be allowed to
+   * WORK: the agent-deletion teardown (`"teardown"`), and the two release paths
+   * on the sandbox DO — the alarm's tick and `releaseIfReclaimableForAgent`
+   * (`"reclaim"`). See {@link ComputeResolvePurpose} and
+   * `resolveEffectiveComputeConfig`.
    */
   purpose?: ComputeResolvePurpose;
   /**

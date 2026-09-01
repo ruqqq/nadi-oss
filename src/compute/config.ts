@@ -176,10 +176,35 @@ export function resolveEffectiveComputeConfig(input: {
   // The four are collapsed to one `reason` deliberately: the wire type is
   // consumed by the settings UI, and a disabled agent's user-facing explanation
   // comes from the send-path refusal (`assertThreadWritable`), not from here.
+  // THE THREE PURPOSES, STATED AS WHAT EACH LIFTS, because the temptation is to
+  // lift one gate at a time and the gates do not divide that way:
+  //
+  //   work      lifts nothing.
+  //   reclaim   lifts everything EXCEPT `archived_at`.
+  //   teardown  lifts everything.
+  //
+  // `reclaim` differs from `teardown` in exactly one place, and the asymmetry is
+  // the point: an archived agent's box is being DESTROYED, its row is already
+  // excluded from reclaim candidates, and ticking against a destroyed sprite
+  // would only produce errors — whereas every other switch is a statement about
+  // PERMISSION that says nothing about whether a machine exists.
+  //
+  // Grouping `sandbox_enabled` and the workspace toggle with the other two was
+  // the fix's own second miss. They were lifted for teardown precisely because
+  // "there has never been a machine to destroy" is FALSE for a box that predates
+  // the toggle — and that premise is no more true for a release than for a
+  // destroy. `updateAgentSandboxSettings` writes the column and nothing else: no
+  // teardown, no release. So unticking Settings → Sandbox on an agent with a
+  // live box froze its row at `active` with a stale `last_used_at`, and since
+  // `listReclaimCandidates` orders by `last_used_at ASC` that agent was handed
+  // out FIRST on every cap-pressure reclaim and refused every time. One slot
+  // lost per such agent, until it was deleted.
   const teardown = input.purpose === "teardown";
-  const agentEnabledGate = teardown || input.purpose === "reclaim" || agent?.agentEnabled !== false;
+  const reclaim = input.purpose === "reclaim";
+  const mayReachMachine = teardown || reclaim;
+  const agentEnabledGate = mayReachMachine || agent?.agentEnabled !== false;
+  const sandboxAllowed = mayReachMachine || (workspace.enabled && agent?.sandboxEnabled !== false);
   const notArchived = teardown || agent == null || agent.archivedAt === null;
-  const sandboxAllowed = teardown || (workspace.enabled && agent?.sandboxEnabled !== false);
   if (!sandboxAllowed || !agentEnabledGate || !notArchived) {
     return { enabled: false, reason: "disabled" };
   }

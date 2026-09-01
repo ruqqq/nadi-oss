@@ -238,6 +238,32 @@ describe("reconcileOrphanSprites", () => {
   });
 
   /**
+   * THE OTHER HALF OF THE SAME WINDOW, which re-counting `acquiring` does not
+   * close. An acquire that writes its row after the FIRST count and settles to
+   * `active` before the second is invisible to both counts — its sprite is in
+   * `names`, absent from the `known` read taken before the listing, and nothing
+   * gives it an age to be judged by. Only re-reading `known` sees it.
+   */
+  it("REGRESSION: a sprite recorded DURING the pass is not an orphan", async () => {
+    const born = `${RECONCILABLE_SPRITE_PREFIX}born-mid-pass`;
+    const client = {
+      // The acquire completes here: after `known` was read, and fully settled
+      // (`active`, named) so no `acquiring` row exists for either count to see.
+      listSprites: async () => {
+        await seedRow({ agentId: "ag_settled", status: "active", spriteName: born });
+        return { names: [born] };
+      },
+      deleteSprite: async () => {
+        throw new Error("must not reap a machine recorded during the pass");
+      },
+    } as unknown as SpritesClient;
+
+    const result = await reconcileOrphanSprites(envWithKey(), { client, now: () => NOW });
+    expect(result).toMatchObject({ scanned: 1, orphans: 0, deleted: 0 });
+    expect(result.skipped).toBeUndefined();
+  });
+
+  /**
    * THE DRY RUN. Guard 1 assumes no pre-existing sprite carries
    * `RECONCILABLE_SPRITE_PREFIX`, which is asserted against this repo's code and
    * never against the real fleet — and the first cron after deploy DELETES on

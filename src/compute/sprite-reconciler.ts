@@ -33,9 +33,10 @@ export interface SpriteReconcileResult {
 /**
  * Opt-in log-only mode, read from `env.SPRITE_RECONCILER_DRY_RUN`.
  *
- * Exactly the string `"true"` enables it. Anything else — absent, empty,
- * `"1"`, `"yes"` — reaps for real, which is the deliberate direction: a
- * mistyped flag must not silently disable the only collector this phase has.
+ * `"true"` enables it, matched case-insensitively after trimming. Anything
+ * else — absent, empty, `"1"`, `"yes"` — reaps for real, which is the
+ * deliberate direction: a mistyped flag must not silently disable the only
+ * collector this phase has.
  */
 export function parseSpriteReconcilerDryRun(value: unknown): boolean {
   return typeof value === "string" && value.trim().toLowerCase() === "true";
@@ -134,6 +135,12 @@ export async function reconcileOrphanSprites(
   // window: any acquire that touched the ledger at any point during this pass
   // aborts it. Deferring costs a day; reaping a machine mid-provision costs a
   // user's filesystem, and the whole pass is discretionary.
+  //
+  // AND THE COUNT ALONE IS NOT ENOUGH, which is why `known` is re-read below.
+  // An acquire that wrote its `acquiring` row after the FIRST count and settled
+  // to `active` before this one is invisible to both: its sprite is in `names`,
+  // absent from the stale `known`, and nothing here has an age to judge it by.
+  // One extra D1 read closes it; the union is what gets classified.
   const inFlightAfter = await ledger.countAcquiringSince(now - ACQUIRE_GRACE_MS);
   if (inFlightAfter > 0) {
     log.info("compute.sprite_reconcile_deferred", {
@@ -149,6 +156,14 @@ export async function reconcileOrphanSprites(
       skipped: "acquire_in_flight",
     };
   }
+
+  // THE UNION, not the second read alone: `known` was a superset-safe answer at
+  // the time it was taken, and a row deleted between the two reads (an agent
+  // deleted mid-pass) is one whose sprite the delete route already handled.
+  // Keeping both readings can only ever SPARE more, which is the safe
+  // direction — the unsafe one is classifying against a name set older than the
+  // provider's answer.
+  for (const name of await ledger.listKnownSpriteNames()) known.add(name);
 
   const orphans = names.filter(
     (name) => name.startsWith(RECONCILABLE_SPRITE_PREFIX) && !known.has(name),

@@ -4854,7 +4854,11 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
    */
   private async openSandbox(
     backgroundWorkAdmission?: boolean,
-    /** See {@link ComputeResolvePurpose}. Only the deletion teardown sets it. */
+    /**
+     * See {@link ComputeResolvePurpose}. On THIS path only the deletion
+     * teardown sets it; the `"reclaim"` callers live on the sandbox DO, which
+     * resolves its own service rather than going through here.
+     */
     purpose?: ComputeResolvePurpose,
   ): Promise<SandboxSessionResolution | null> {
     const attachedRuntime = this.attachedRuntimeForThisAgent();

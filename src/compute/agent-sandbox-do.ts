@@ -765,7 +765,12 @@ export class AgentSandbox extends DurableObject<Env> {
        */
       prepareWorkspace: boolean;
       supportsProcessMonitor: boolean;
-      /** See {@link ComputeResolvePurpose}. Only the deletion teardown sets it. */
+      /**
+       * See {@link ComputeResolvePurpose}. Set by the deletion teardown AND by
+       * the two release paths (`"reclaim"`: the alarm's tick and
+       * `releaseIfReclaimableForAgent`), which must reach a machine whose agent
+       * may no longer be allowed to WORK.
+       */
       purpose?: ComputeResolvePurpose;
       attachedRuntime?: BackendReference;
       /**

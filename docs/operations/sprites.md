@@ -65,7 +65,7 @@ Cloudflare's vault and bound to the Worker at deploy time.
   a sprite that genuinely has no owner, then unset it. The reaper's first guard
   assumes no pre-existing sprite carries the `nadi-b1-` prefix; that assumption
   has only ever been checked against this repo's code, and the first real pass
-  deletes on it. Exactly the string `"true"` enables the dry run — any other
+  deletes on it. `"true"` (case-insensitive, trimmed) enables the dry run — any other
   value reaps for real, so a mistyped flag cannot silently disable the collector,
   and a forgotten one shows up as a steady `would_reap` line rather than silence.
 
