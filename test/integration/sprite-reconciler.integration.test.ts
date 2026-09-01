@@ -1,10 +1,6 @@
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  ACQUIRE_GRACE_MS,
-  LIST_SPRITES_MAX_RESULTS,
-  reconcileOrphanSprites,
-} from "../../src/compute/sprite-reconciler";
+import { ACQUIRE_GRACE_MS, reconcileOrphanSprites } from "../../src/compute/sprite-reconciler";
 import { log } from "../../src/log";
 import { RECONCILABLE_SPRITE_PREFIX } from "../../src/compute/backends/sprites";
 import type { SpritesClient } from "../../src/compute/backends/sprites-client";
@@ -135,48 +131,29 @@ describe("reconcileOrphanSprites", () => {
     expect(result.skipped).toBe("no_system_key");
   });
 
-  // F4. The client has no cursor handling, so a short page hides strands from
-  // the ONLY thing that collects them. Truncation can only under-reap — `known`
-  // comes from D1 unpaginated, so every name we did see is still classified
-  // correctly — but a silent under-reap bills forever with no line to show it.
-  it("asks for an explicit page size and says so when the answer fills it", async () => {
+  // ROUND 2. The listing takes NO explicit bound: `listSprites(1)` is the only
+  // value this provider has ever been observed to accept, and an out-of-range
+  // one is a plausible 400 that the daily cron swallows as a WARN — stopping
+  // the only collector while still reporting success. `returned` is logged on
+  // every pass instead, so an operator can see it plateau at whatever the
+  // provider's real cap turns out to be.
+  it("asks the provider for its own page size and reports what came back", async () => {
     const asked: Array<number | undefined> = [];
-    const names = Array.from(
-      { length: LIST_SPRITES_MAX_RESULTS },
-      (_, i) => `${RECONCILABLE_SPRITE_PREFIX}${i}`,
-    );
-    const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
+    const logged = vi.spyOn(log, "info").mockImplementation(() => {});
     const client = {
       listSprites: async (maxResults?: number) => {
         asked.push(maxResults);
-        return { names };
+        return { names: [`${RECONCILABLE_SPRITE_PREFIX}a`, `${RECONCILABLE_SPRITE_PREFIX}b`] };
       },
       deleteSprite: async () => {},
     } as unknown as SpritesClient;
 
     try {
       await reconcileOrphanSprites(envWithKey(), { client, now: () => NOW });
-      expect(asked).toEqual([LIST_SPRITES_MAX_RESULTS]);
-      expect(warn).toHaveBeenCalledWith("compute.sprite_reconcile_truncated", {
-        returned: LIST_SPRITES_MAX_RESULTS,
-        maxResults: LIST_SPRITES_MAX_RESULTS,
-      });
+      expect(asked).toEqual([undefined]);
+      expect(logged).toHaveBeenCalledWith("compute.sprite_reconcile_listed", { returned: 2 });
     } finally {
-      warn.mockRestore();
-    }
-  });
-
-  it("does not cry truncation on a short page", async () => {
-    const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
-    const { client } = fakeClient([`${RECONCILABLE_SPRITE_PREFIX}one`]);
-    try {
-      await reconcileOrphanSprites(envWithKey(), { client, now: () => NOW });
-      expect(warn).not.toHaveBeenCalledWith(
-        "compute.sprite_reconcile_truncated",
-        expect.anything(),
-      );
-    } finally {
-      warn.mockRestore();
+      logged.mockRestore();
     }
   });
 

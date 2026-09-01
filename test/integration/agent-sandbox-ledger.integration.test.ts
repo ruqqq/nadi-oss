@@ -347,6 +347,107 @@ describe("AgentSandboxLedger (real D1)", () => {
     expect(after).toBeNull();
   });
 
+  /**
+   * ROUND-2 FINDING 1 — the same race `markIdle` refuses to create, which round
+   * 1 introduced into `recordSprite` by making it an unguarded upsert.
+   *
+   * `archiveAgent` tears the box down and `remove()`s the row BEFORE stamping
+   * `archived_at`. An acquire still in flight then returns and calls
+   * `recordSprite`. Unguarded, that INSERTs a fresh `active` row naming a
+   * brand-new sprite for an agent nothing can reach: the reconciler spares it
+   * (a row exists), `countActive` counts it forever, and the reclaim RPC can
+   * never succeed on an archived agent so the slot is never freed. Before round
+   * 1 the bare UPDATE matched zero rows and the reconciler collected the
+   * sprite, which was the correct outcome.
+   */
+  it("REGRESSION: recordSprite for an ARCHIVED agent writes nothing, so the reaper collects the sprite", async () => {
+    await ledger().tryAdmit({
+      agentId: "ag_a",
+      workspaceId: "ws1",
+      provider: "mock",
+      now: 10,
+      limit: 9,
+    });
+    // The delete: teardown drops the row, then the archive stamp lands.
+    await ledger().remove("ag_a");
+    await env.REGISTRY_DB.prepare("UPDATE agents SET archived_at = 99 WHERE id = 'ag_a'").run();
+
+    // The in-flight acquire returns AFTER both.
+    await ledger().recordSprite({
+      agentId: "ag_a",
+      provider: "mock",
+      externalId: "nadi-b1-raced",
+      now: 100,
+    });
+
+    const row = await env.REGISTRY_DB.prepare(
+      "SELECT agent_id FROM agent_sandboxes WHERE agent_id = 'ag_a'",
+    ).first();
+    expect(row).toBeNull();
+    // Nameless to the reconciler, which is what makes it destroy the sprite —
+    // the intended outcome for an agent the user deleted.
+    expect(await ledger().listKnownSpriteNames()).toEqual(new Set());
+    // And no phantom slot is lost.
+    expect(await ledger().countActive("ws1")).toBe(0);
+  });
+
+  // The tail of the same finding: a row that OUTLIVED its delete (a `remove()`
+  // that failed and only logged) must not hold a slot forever, be offered to a
+  // reclaim that can never succeed, or spare a sprite nothing can reach.
+  it("REGRESSION: an archived agent's surviving row holds no slot and protects no sprite", async () => {
+    await ledger().tryAdmit({
+      agentId: "ag_a",
+      workspaceId: "ws1",
+      provider: "mock",
+      now: 10,
+      limit: 9,
+    });
+    await ledger().recordSprite({
+      agentId: "ag_a",
+      provider: "mock",
+      externalId: "nadi-b1-stranded",
+      now: 10,
+    });
+    // Anti-vacuity: while the agent is LIVE, all three answers protect it.
+    expect(await ledger().countActive("ws1")).toBe(1);
+    expect(await ledger().listKnownSpriteNames()).toEqual(new Set(["nadi-b1-stranded"]));
+    expect(
+      (await ledger().listReclaimCandidates({ workspaceId: "ws1", excludeAgentId: "ag_b" })).map(
+        (c) => c.agentId,
+      ),
+    ).toEqual(["ag_a"]);
+
+    await env.REGISTRY_DB.prepare("UPDATE agents SET archived_at = 99 WHERE id = 'ag_a'").run();
+
+    expect(await ledger().countActive("ws1")).toBe(0);
+    expect(await ledger().listKnownSpriteNames()).toEqual(new Set());
+    expect(
+      await ledger().listReclaimCandidates({ workspaceId: "ws1", excludeAgentId: "ag_b" }),
+    ).toEqual([]);
+  });
+
+  // DISABLE is not DELETE: it leaves `archived_at` null, so a paused agent's
+  // box stays protected by every one of the three answers above.
+  it("a DISABLED agent's box is still counted, offered and protected", async () => {
+    await ledger().tryAdmit({
+      agentId: "ag_a",
+      workspaceId: "ws1",
+      provider: "mock",
+      now: 10,
+      limit: 9,
+    });
+    await ledger().recordSprite({
+      agentId: "ag_a",
+      provider: "mock",
+      externalId: "nadi-b1-paused",
+      now: 10,
+    });
+    await env.REGISTRY_DB.prepare("UPDATE agents SET enabled = 0 WHERE id = 'ag_a'").run();
+
+    expect(await ledger().listKnownSpriteNames()).toEqual(new Set(["nadi-b1-paused"]));
+    expect(await ledger().countActive("ws1")).toBe(1);
+  });
+
   // F2. A bare `UPDATE` matches zero rows and says nothing, leaving a live
   // sprite with no row for the reaper to spare.
   it("recordSprite re-creates a row that was cleared under it", async () => {

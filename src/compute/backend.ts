@@ -154,6 +154,22 @@ export interface WriteFileOptions {
 
 export interface ReleaseOptions {
   disposition: ReleaseDisposition;
+  /**
+   * How long the provider should keep a recoverable snapshot.
+   *
+   * READ BY THE CLOUDFLARE BACKEND ONLY, and since P3 that makes it INERT on
+   * the provider this deployment actually runs: sprites' `release(recoverable)`
+   * makes no provider call at all (the box just hibernates), and the service's
+   * own TTL eviction — the other thing that once read it — was deleted with the
+   * idle destroy. A workspace can set `recovery_ttl_ms` to any value and, on
+   * sprites, nothing observes it.
+   *
+   * Left plumbed rather than removed because Cloudflare genuinely clamps it
+   * into its backup API (1-168h). It is documented as inert instead of quietly
+   * carrying a number nobody reads — the defect class this phase kept hitting.
+   * If the sprites path ever needs a retention knob, it needs a NEW one whose
+   * name is not already spoken for.
+   */
   recoveryTtlMs?: number;
 }
 

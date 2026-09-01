@@ -108,12 +108,31 @@ export class AgentSandboxLedger {
    *
    * AN UPSERT, NOT A BARE `UPDATE`. A bare update matches zero rows whenever
    * the row is not where the caller assumed — cleared by the stale-acquire
-   * settle, or by a concurrent agent delete — and says nothing, leaving a LIVE
-   * sprite with no row at all for the reaper to spare. That is the defect class
-   * this phase keeps hitting: a write whose failure changes behaviour and fails
-   * nothing. The insert arm re-creates the row rather than losing the machine;
-   * `created_at` falls back to `now` because the original is unrecoverable and
-   * nothing reads it for correctness.
+   * settle — and says nothing, leaving a LIVE sprite with no row at all for the
+   * reaper to spare. That is the defect class this phase keeps hitting: a write
+   * whose failure changes behaviour and fails nothing. The insert arm
+   * re-creates the row rather than losing the machine; `created_at` falls back
+   * to `now` because the original is unrecoverable and nothing reads it for
+   * correctness.
+   *
+   * BUT THE INSERT IS GATED ON THE AGENT BEING LIVE, and that guard is the
+   * whole difference between a backstop and a leak. `archiveAgent` tears the
+   * box down and `remove()`s the row BEFORE it stamps `archived_at`, and its
+   * own comment claims the window that leaves "closes permanently the moment
+   * the row lands". An ungated insert falsifies exactly that claim: a
+   * `backend.acquire` still in flight when the user deletes the agent returns
+   * afterwards and re-creates an `active` row naming a brand-new sprite. The
+   * agent is archived, so `resolveEffectiveComputeConfig` refuses every route
+   * to that box; the reconciler spares it because a row exists; `countActive`
+   * counts it against the workspace cap forever; and `listReclaimCandidates`
+   * offers it to a reclaim RPC that can never succeed on an archived agent, so
+   * `markIdle` never runs and the slot is never freed. A sprite billing
+   * forever AND a permanently lost slot.
+   *
+   * With the guard, that insert changes zero rows, the new sprite stays
+   * nameless, and the reconciler destroys it — which is the intended outcome
+   * for an agent the user deleted. This is the same race `markIdle` refuses to
+   * create, and it is refused here for the same reason.
    */
   async recordSprite(input: {
     agentId: string;
@@ -124,7 +143,8 @@ export class AgentSandboxLedger {
     await this.db
       .prepare(
         `INSERT INTO agent_sandboxes (agent_id, provider, sprite_name, status, created_at, last_used_at)
-         VALUES (?1, ?4, ?2, 'active', ?3, ?3)
+         SELECT ?1, ?4, ?2, 'active', ?3, ?3
+         WHERE EXISTS (SELECT 1 FROM agents WHERE id = ?1 AND archived_at IS NULL)
          ON CONFLICT(agent_id) DO UPDATE SET
            status       = 'active',
            sprite_name  = excluded.sprite_name,
@@ -175,13 +195,23 @@ export class AgentSandboxLedger {
     await this.db.prepare("DELETE FROM agent_sandboxes WHERE agent_id = ?1").bind(agentId).run();
   }
 
-  /** How many agents in this workspace hold a concurrency slot right now. */
+  /**
+   * How many agents in this workspace hold a concurrency slot right now.
+   *
+   * `archived_at IS NULL` because a DELETED agent's row can never give its slot
+   * back: nothing can reach its box to release it, so a row that survived the
+   * delete (a failed `remove()`, say) would hold a slot for the life of the
+   * workspace. Counting only live agents makes that leak bounded by the
+   * reconciler instead of permanent.
+   */
   async countActive(workspaceId: string): Promise<number> {
     const row = await this.db
       .prepare(
         `SELECT COUNT(*) AS n FROM agent_sandboxes s
            JOIN agents a ON a.id = s.agent_id
-          WHERE a.workspace_id = ?1 AND s.status IN ('acquiring', 'active')`,
+          WHERE a.workspace_id = ?1
+            AND a.archived_at IS NULL
+            AND s.status IN ('acquiring', 'active')`,
       )
       .bind(workspaceId)
       .first<{ n: number }>();
@@ -192,6 +222,11 @@ export class AgentSandboxLedger {
    * Slot-holding rows for this workspace, least-recently-used first, excluding
    * self. `acquiring` rows are excluded: there is nothing to release yet, and
    * asking is a wasted cross-DO RPC against a DO that is mid-acquire.
+   *
+   * An ARCHIVED agent is excluded for a stronger reason than waste: the reclaim
+   * RPC resolves compute for the target, and an archived agent resolves to
+   * nothing, so the call can only ever refuse. Offering it burns one of the
+   * caller's three attempts on a candidate that is guaranteed to fail.
    */
   async listReclaimCandidates(input: {
     workspaceId: string;
@@ -202,7 +237,10 @@ export class AgentSandboxLedger {
         `SELECT s.agent_id, a.workspace_id, s.provider, s.sprite_name, s.status, s.last_used_at
            FROM agent_sandboxes s
            JOIN agents a ON a.id = s.agent_id
-          WHERE a.workspace_id = ?1 AND s.agent_id <> ?2 AND s.status = 'active'
+          WHERE a.workspace_id = ?1
+            AND a.archived_at IS NULL
+            AND s.agent_id <> ?2
+            AND s.status = 'active'
           ORDER BY s.last_used_at ASC`,
       )
       .bind(input.workspaceId, input.excludeAgentId)
@@ -229,14 +267,26 @@ export class AgentSandboxLedger {
    * Every provider-side machine name this deployment believes exists, across
    * ALL workspaces and every status.
    *
-   * Deliberately unscoped. The reconciler subtracts this set from the
-   * provider's own list, so a name missing from it is DELETED — scoping the
+   * Deliberately unscoped BY WORKSPACE. The reconciler subtracts this set from
+   * the provider's own list, so a name missing from it is DELETED — scoping the
    * query narrower than the provider's answer would reap another workspace's
    * live box. A superset is safe; a subset destroys a filesystem.
+   *
+   * The ONE narrowing that is correct is `archived_at IS NULL`, and it is not a
+   * scope but a statement about intent: deleting an agent promises to delete
+   * its machine ("Delete this agent and its machine. Its files are destroyed"),
+   * and `archived_at` is set by that route alone — DISABLE leaves it null, so a
+   * paused agent's box is still protected. Without this, a row that outlived
+   * its delete (a `remove()` that failed and only logged) would spare the
+   * sprite forever, and nothing else can collect a box no route can reach.
    */
   async listKnownSpriteNames(): Promise<Set<string>> {
     const { results } = await this.db
-      .prepare("SELECT sprite_name FROM agent_sandboxes WHERE sprite_name IS NOT NULL")
+      .prepare(
+        `SELECT s.sprite_name FROM agent_sandboxes s
+           JOIN agents a ON a.id = s.agent_id
+          WHERE s.sprite_name IS NOT NULL AND a.archived_at IS NULL`,
+      )
       .all<{ sprite_name: string }>();
     return new Set(results.map((r) => r.sprite_name));
   }

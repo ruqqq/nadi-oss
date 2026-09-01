@@ -283,7 +283,13 @@ describe("the turn's sandbox session", () => {
           const session = await agent.resolveComputeServiceForTest();
           await session!.service.ensureRuntimeReference();
           const after = backend.runCommandCalls.length + backend.startProcessCalls.length;
-          if (shutdownAfter) await session!.service.execShutdown();
+          // `confirm: true` is REQUIRED since P3 — an unconfirmed call is a
+          // no-op, which would leave this helper's `shutdownAfter` inert and the
+          // assertion below passing only because the fake's script was reset.
+          // `confirm: true` is REQUIRED since P3 — an unconfirmed call is a
+          // no-op, so without it `shutdownAfter` would be inert and this
+          // helper's name would be a lie.
+          if (shutdownAfter) await session!.service.execShutdown({ confirm: true });
           return after - before;
         } finally {
           clearComputeHostTestOverrides(threadId);
@@ -300,6 +306,14 @@ describe("the turn's sandbox session", () => {
 
     // The box was destroyed, so `/workspace` — and the sentinel inside the
     // thread's own directory — went with it.
+    //
+    // HONEST BOUND: the fake models the sentinel as a scripted exit queue, not
+    // as filesystem state, so what actually drives the assertion below is the
+    // empty script — not the destroy. Clearing it is belt-and-braces (the probe
+    // above already consumed the entry). This case is therefore evidence that
+    // preparation re-runs against a box with no sentinel, NOT evidence that
+    // `execShutdown` removed one. Proving the latter needs a fake whose
+    // filesystem survives across opens.
     backend.scriptedExits.length = 0;
     expect(await openAndCount()).toBeGreaterThan(1);
   });

@@ -20,22 +20,6 @@ import { log } from "../log";
  */
 export const ACQUIRE_GRACE_MS = 30 * 60 * 1000;
 
-/**
- * Explicit page size for the provider listing, because the DEFAULT is unknown.
- *
- * `listSprites()` with no `max_results` leaves the page size to the provider,
- * and the client has no cursor handling at all — so a default smaller than the
- * account's sprite count silently hides strands from the only thing that
- * collects them, and the WARN line that would report them never appears. An
- * explicit bound at least makes truncation DETECTABLE (a full page is
- * suspicious), which is what {@link reconcileOrphanSprites} logs on.
- *
- * NOT a cursor implementation. Adding one means knowing the real response's
- * pagination shape, which this environment cannot observe — see the live-smoke
- * list. Raise it, or paginate properly, once the API's behaviour is known.
- */
-export const LIST_SPRITES_MAX_RESULTS = 1000;
-
 export interface SpriteReconcileResult {
   scanned: number;
   orphans: number;
@@ -61,9 +45,13 @@ export interface SpriteReconcileResult {
  *    and nothing will ever backfill one — a hibernated box is not woken — so
  *    reaping every unknown `nadi-*` would delete every existing user's
  *    filesystem on this deploy's first cron.
- * 2. **A row means keep, in EVERY status.** `idle` is a hibernated box with its
- *    disk intact; a DISABLED agent's box is `idle` and is live and intentional,
- *    not an orphan. Only the absence of a row is evidence.
+ * 2. **A LIVE agent's row means keep, in EVERY status.** `idle` is a hibernated
+ *    box with its disk intact; a DISABLED agent's box is `idle` and is live and
+ *    intentional, not an orphan. The only narrowing is `archived_at IS NULL`
+ *    (see `listKnownSpriteNames`), and it is a statement about intent rather
+ *    than a scope: deleting an agent promises to delete its machine, and only
+ *    the delete route sets that column — disable leaves it null. That is also
+ *    what makes this the backstop for a delete whose own `remove()` failed.
  * 3. **No reap beside an in-flight acquire.** A row in `acquiring` may already
  *    own a sprite whose name was never recorded, and no query can say which
  *    one, so the whole pass stands down rather than guess. Stale `acquiring`
@@ -98,20 +86,31 @@ export async function reconcileOrphanSprites(
   }
 
   const known = await ledger.listKnownSpriteNames();
-  const { names } = await client.listSprites(LIST_SPRITES_MAX_RESULTS);
-  // A TRUNCATED LISTING UNDER-REAPS; IT CANNOT OVER-REAP. `known` comes from
-  // D1 unpaginated, so every name we DID see is still classified correctly —
-  // the guards do not weaken. What a short page costs is strands we never look
-  // at, and since this is now the only collector those bill forever with
-  // nothing to show for it. So reap what we saw, and say plainly that the
-  // answer was incomplete rather than reporting a clean pass.
-  const truncated = names.length >= LIST_SPRITES_MAX_RESULTS;
-  if (truncated) {
-    log.warn("compute.sprite_reconcile_truncated", {
-      returned: names.length,
-      maxResults: LIST_SPRITES_MAX_RESULTS,
-    });
-  }
+  // NO `max_results`, DELIBERATELY — and this is the SECOND answer to the same
+  // question, because the first one was worse than the problem.
+  //
+  // A truncated listing UNDER-reaps and cannot over-reap: `known` comes from an
+  // unpaginated D1 read, so every name we DID see is still classified
+  // correctly and no guard weakens. What a short page costs is strands we never
+  // look at, which — since this is now the only collector — bill forever with
+  // nothing in the log to show it.
+  //
+  // Passing an explicit bound to make truncation DETECTABLE does not fix that,
+  // and can make it worse. The check would be `names.length >= bound`, which
+  // only fires if the provider HONOURS the bound; if its own page cap is lower,
+  // the pass under-reaps in silence exactly as before and the warning the bound
+  // exists to produce never appears. And an out-of-range value is a plausible
+  // 400: `listSprites` throws, the daily cron catches it as a WARN, and THE
+  // ONLY COLLECTOR STOPS RUNNING while the cron still reports success. The
+  // no-argument call cannot do that. `listSprites(1)` is the only value this
+  // provider has ever been observed to accept (`sprites-smoke.ts`), so a
+  // 1000 here was an invention dressed as a safeguard.
+  //
+  // What is honest within this environment's limits: report `returned` on EVERY
+  // pass, so an operator sees it plateau at whatever the real cap turns out to
+  // be. The live smoke settles the pagination shape; see the report.
+  const { names } = await client.listSprites();
+  log.info("compute.sprite_reconcile_listed", { returned: names.length });
   const orphans = names.filter(
     (name) => name.startsWith(RECONCILABLE_SPRITE_PREFIX) && !known.has(name),
   );

@@ -482,8 +482,10 @@ export class SpritesComputeBackend implements ComputeBackend {
       await this.client.deleteSprite(spriteName);
       return null;
     }
-    // Recoverable: NO provider call. Hibernation is automatic after ~30s idle,
-    // and there is no archive to take. NOTHING EXPIRES THIS REFERENCE — the
+    // Recoverable: NO provider call, and `options.recoveryTtlMs` is IGNORED —
+    // there is no archive to attach a TTL to. Whatever a workspace configures
+    // as `recovery_ttl_ms` has no effect here; see `ReleaseOptions`.
+    // Hibernation is automatic after ~30s idle. NOTHING EXPIRES THIS REFERENCE — the
     // service layer's TTL eviction was deleted in P3, because it was also the
     // only thing that ever destroyed the agent's persistent filesystem. The
     // sprite (and its storage bill) now lasts until agent deletion,
