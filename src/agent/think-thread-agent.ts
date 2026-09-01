@@ -260,6 +260,7 @@ import {
   type ThreadSearchDocument,
   type TranscriptSource,
 } from "../thread-knowledge/types";
+import { threadWorkRoot } from "../compute/workspace-layout";
 
 /**
  * Think auto-merges a DO-SQLite-backed virtual filesystem toolset into every
@@ -2928,7 +2929,8 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
    * (the whole path-escape guard rests on it), and that `movePath(overwrite)`
    * replaces an existing destination (every in-place `apply_patch` update). Each
    * step reports its own outcome instead of throwing, so one failure does not
-   * hide the rest. Writes only under `/workspace/.nadi-debug-file-tools/`.
+   * hide the rest. Writes only under this thread's own working directory
+   * (`/workspace/threads/<threadId>/.nadi-debug-file-tools/`).
    */
   async debugFileTools(): Promise<{ steps: Array<{ step: string; ok: boolean; detail: string }> }> {
     const resolved = await this.openSandbox();
@@ -3028,7 +3030,14 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
     // that always printed FAIL would train the reader to ignore this whole gate.
     // They go red only if the provider's behavior CHANGES, in either direction.
     await run("symlink guard status", async () => {
-      const probe = (await resolved.service.debugInspectPath(`/workspace/${dir}/link`)) as {
+      // ABSOLUTE, and it has to agree with the relative paths every other step
+      // here uses: the file tools resolve against this thread's working
+      // directory, not `/workspace`. A stale `/workspace/...` spelling would
+      // probe a path nothing created and report `type: "null"` — read as
+      // "unexpected type", i.e. a red step blaming the provider.
+      const probe = (await resolved.service.debugInspectPath(
+        `${threadWorkRoot(this.name)}/${dir}/link`,
+      )) as {
         info?: { type?: string } | null;
         raw?: unknown;
       };

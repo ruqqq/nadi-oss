@@ -5,6 +5,7 @@ import { ComputePartialWriteError } from "../../../src/compute/errors";
 import { ComputeFileService } from "../../../src/compute/file-service";
 import type { ComputeEvent } from "../../../src/compute/observability";
 import { sha256Hex } from "../../../src/compute/files/hash";
+import { threadWorkRoot } from "../../../src/compute/workspace-layout";
 
 function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
@@ -62,6 +63,11 @@ function makeService(
     maxUploadBytes: overrides?.maxUploadBytes ?? 25_000_000,
     provider: backend.id,
     profile: "small",
+    // These suites seed and read absolute /workspace paths, so the root under
+    // test is /workspace itself. That the root is honoured at all is proved in
+    // `file-service.test.ts` ("resolves relative paths against the root it is
+    // given") and in `files/path.test.ts`.
+    workspaceRoot: "/workspace",
     resolveRuntime: async () => runtime,
     refreshLease: async () => void (lease.count += 1),
     now: () => clock.value,
@@ -601,5 +607,42 @@ describe("applyPatch does not clobber when inspectPath fails open", () => {
     expect(backend.movePathCalls).toHaveLength(0);
     expect(backend.deletePathCalls).toHaveLength(0);
     expect(await readBackendText(backend, runtime, "src/keep.ts")).toBe("original content\n");
+  });
+});
+
+/**
+ * The `workspaceRoot` dep is what makes each thread's `src/app.ts` its OWN
+ * file. Nothing else in this suite would notice if it were ignored: every other
+ * case seeds and reads under `/workspace`, which is also what the old hardcoded
+ * root was. Mutating `workspaceRoot` back to `/workspace` in `file-service.ts`
+ * turns this one red and leaves the rest green.
+ */
+describe("ComputeFileService workspaceRoot", () => {
+  it("resolves relative paths against the root it is given", async () => {
+    const backend = new FakeComputeBackend();
+    const runtime = await acquireRuntime(backend);
+    const root = threadWorkRoot("thr_00000000-0000-4000-8000-0000000000aa");
+    await backend.createDirectory(runtime, root);
+    const service = new ComputeFileService({
+      backend,
+      readMaxBytes: 64_000,
+      readMaxLines: 500,
+      maxDownloadBytes: 25_000_000,
+      maxUploadBytes: 25_000_000,
+      provider: backend.id,
+      profile: "small",
+      workspaceRoot: root,
+      resolveRuntime: async () => runtime,
+      refreshLease: async () => {},
+      now: () => 1_000,
+    });
+
+    const written = await service.writeFile({ path: "notes.md", content: "hello" });
+    expect(written.path).toBe("notes.md");
+
+    // The bytes landed under the THREAD's root, not `/workspace`.
+    const { bytes } = await backend.readFile(runtime, `${root}/notes.md`, 1_000_000);
+    expect(new TextDecoder().decode(bytes)).toBe("hello");
+    await expect(backend.readFile(runtime, "/workspace/notes.md", 1_000_000)).rejects.toThrow();
   });
 });

@@ -173,6 +173,39 @@ describe("composeSystemPrompt", () => {
     }
   });
 
+  /**
+   * The model's default cwd MOVED in P3: it is the thread's own worktree
+   * directory, not `/workspace`. Nothing fails if the prompt still describes the
+   * old layout — the model simply `cd`s into a path that no longer exists and
+   * spends turns rediscovering the tree, which is invisible to every test and to
+   * every log. So the layout is asserted here, in the exact terms
+   * `compute/workspace-layout.ts` builds it.
+   */
+  it("describes the per-thread worktree layout when the sandbox is available", () => {
+    const out = composeSystemPrompt({
+      systemPrompt: "You are Nadi.",
+      sandboxAvailable: true,
+    });
+    expect(out).toContain("Sandbox layout");
+    expect(out).toContain("/workspace/threads/<this thread's id>");
+    expect(out).toContain("/workspace/repos/<repository name>");
+    expect(out).toContain("nadi/thread-");
+    expect(out).toContain("never edit, check out, or delete anything under it");
+    // The old layout must not survive anywhere in the prompt: a single
+    // `/workspace/<repo>` left behind is the instruction the model follows.
+    expect(out).not.toContain("cd /workspace/");
+  });
+
+  it("omits the sandbox layout when the sandbox is unavailable", () => {
+    for (const input of [
+      { systemPrompt: "You are Nadi." },
+      { systemPrompt: "You are Nadi.", sandboxAvailable: false },
+    ]) {
+      const out = composeSystemPrompt(input);
+      expect(out).not.toContain("Sandbox layout");
+    }
+  });
+
   it("appends GitHub auth guidance when the sandbox is available", () => {
     const out = composeSystemPrompt({
       systemPrompt: "You are Nadi.",

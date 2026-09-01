@@ -2,6 +2,12 @@ import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createRepositoryPreparation } from "../../src/agent/repository-preparation";
 import { applyRegistryTestSchema, seedRegistryThread } from "./helpers/registry";
+import {
+  agentClonePath,
+  threadWorkRoot,
+  threadWorktreeBranch,
+  threadWorktreePath,
+} from "../../src/compute/workspace-layout";
 
 /**
  * The live gate on the workbench -> agent data migration (Task 4).
@@ -65,13 +71,32 @@ describe("repository preparation against real D1", () => {
       resolveComputeService: async () => ({ service: service as never }),
     });
 
+    // The AGENT gets the clone; the THREAD gets a worktree of it, and the
+    // worktree is what is reported back as the checkout. Both halves are
+    // asserted: a preparation that cloned but never added the worktree would
+    // leave this thread's working directory empty with nothing failing.
     await expect(prepareRepositories()).resolves.toMatchObject({
       summary: "Repositories are ready for coding work.",
-      prepared: [{ name: "nadi", checkoutPath: "/workspace/nadi", status: "cloned" }],
+      prepared: [
+        {
+          name: "nadi",
+          checkoutPath: threadWorktreePath(threadId, "nadi"),
+          status: "cloned",
+        },
+      ],
     });
     expect(service.exec).toHaveBeenCalledWith(
       expect.objectContaining({
-        command: expect.stringContaining("git clone"),
+        command: expect.stringContaining(
+          `git clone 'https://example.test/nadi.git' '${agentClonePath("nadi")}'`,
+        ),
+      }),
+    );
+    expect(service.exec).toHaveBeenCalledWith(
+      expect.objectContaining({
+        command: expect.stringContaining(
+          `worktree add -b '${threadWorktreeBranch(threadId)}' '${threadWorktreePath(threadId, "nadi")}' 'origin/main'`,
+        ),
       }),
     );
   });
@@ -139,7 +164,7 @@ describe("repository preparation against real D1", () => {
     expect(service.exec).toHaveBeenCalledWith(
       expect.objectContaining({
         command: expect.stringContaining(encoded),
-        cwd: "/workspace",
+        cwd: threadWorkRoot(threadId),
         label: "environment setup",
       }),
     );

@@ -1,4 +1,4 @@
-import { WORKSPACE_ROOT } from "./thread-service";
+import { WORKSPACE_GIT_SCAN_DEPTH, WORKSPACE_ROOT } from "./workspace-layout";
 
 const PROBE_TIMEOUT_MS = 30_000;
 
@@ -41,6 +41,14 @@ export type DirtyRepo = { path: string; changes: string[]; unpushed: number };
  * / `NOREPO\tEMPTY` when no repo is found under the workspace root. The
  * literal word PROBE appears only as a marker comment so callers/tests can
  * identify this exec's command string.
+ *
+ * The `find` depth is `WORKSPACE_GIT_SCAN_DEPTH`, DERIVED from the layout
+ * rather than written here: a thread's worktree sits at
+ * `/workspace/threads/<threadId>/<name>/.git`, one level deeper than the
+ * pre-P3 `/workspace/<name>/.git`. A bound one level short of where the
+ * repositories actually live reports `no_repo`, which is the "nothing to lose"
+ * verdict that lets an idle sandbox holding uncommitted work be discarded — so
+ * this is load-bearing, not a tuning knob.
  */
 export const PROBE_SCRIPT = `# PROBE workspace cleanliness (marker word load-bearing: unit tests stub exec by matching "PROBE" in the command string — don't remove)
 set -u
@@ -58,7 +66,7 @@ while IFS= read -r gitdir; do
   fi
   printf '%s\\t%s\\t%s\\n' "$repo" "$status" "$unpushed"
 done <<EOF
-$(find "$root" -maxdepth 4 \\( -type d -o -type f \\) -name .git 2>/dev/null)
+$(find "$root" -maxdepth ${WORKSPACE_GIT_SCAN_DEPTH} \\( -type d -o -type f \\) -name .git 2>/dev/null)
 EOF
 if [ "$found" = "0" ]; then
   if [ -n "$(ls -A "$root" 2>/dev/null)" ]; then

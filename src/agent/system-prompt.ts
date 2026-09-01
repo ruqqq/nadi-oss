@@ -20,6 +20,16 @@ export const FILE_TOOLS_GUIDANCE =
 // software-engineering skill body is loaded.
 const FILE_TOOLS_POLICY = `\n\nWorkspace file tools policy: ${FILE_TOOLS_GUIDANCE}`;
 
+// Only appended when the sandbox is enabled, and REQUIRED there: since P3 one
+// sandbox is shared by every thread of the agent, and each thread works in its
+// own git worktree. Without this the model reaches for the paths the old layout
+// had — `/workspace/<repo>`, or a `cd` into a checkout that is now one directory
+// deeper — and burns turns discovering they are gone. `WORKSPACE_LAYOUT_POLICY`
+// describes the layout in the same terms `compute/workspace-layout.ts` builds
+// it; the two must be changed together.
+const WORKSPACE_LAYOUT_POLICY =
+  "\n\nSandbox layout: this sandbox belongs to the AGENT and is shared with its other conversations, so this conversation gets its own working directory and its own git worktree of each configured repository. Your working directory — the default cwd for `exec`, and what every relative path in `read_file`, `write_file`, and `apply_patch` resolves against — is `/workspace/threads/<this thread's id>`, and each repository is checked out at `<that directory>/<repository name>`. Prefer relative paths; if you need the absolute one, run `pwd` rather than guessing. Your worktree is already on its own branch (`nadi/thread-...`) created from the repository's default branch — do not create another branch to work on, and do not check out a branch that another conversation may be using. `/workspace/repos/<repository name>` is the agent's shared clone that backs every conversation's worktree: never edit, check out, or delete anything under it. Ordinary `git` works normally inside your worktree — commit and push from there.";
+
 // Only appended when the sandbox is enabled: GH_TOKEN is a per-session sandbox
 // env var, so the guidance is meaningless outside a sandbox. git does not read
 // GH_TOKEN on its own (only `gh` does), so without this the model tends to run a
@@ -96,6 +106,7 @@ export function composeSystemPrompt(input: {
     input.systemPrompt +
     MEMORY_POLICY +
     ARABIC_OUTPUT_POLICY +
+    (input.sandboxAvailable ? WORKSPACE_LAYOUT_POLICY : "") +
     (input.sandboxAvailable ? FILE_TOOLS_POLICY : "") +
     (input.sandboxAvailable ? GITHUB_AUTH_POLICY : "") +
     (input.subagentsAvailable ? SUBAGENT_POLICY : "") +

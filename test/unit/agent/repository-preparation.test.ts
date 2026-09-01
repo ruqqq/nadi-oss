@@ -26,6 +26,19 @@ vi.mock("../../../src/db/repositories/agents", () => ({
 }));
 
 import { createRepositoryPreparation } from "../../../src/agent/repository-preparation";
+import {
+  agentClonePath,
+  threadWorkRoot,
+  threadWorktreeBranch,
+  threadWorktreePath,
+} from "../../../src/compute/workspace-layout";
+
+// A realistic id: the layout and the branch name are both derived from it, and
+// `thr_<uuid>` is what every production caller mints.
+const THREAD_ID = "thr_9e0b60c1-0000-4000-8000-000000000001";
+const CLONE_PATH = agentClonePath("nadi");
+const WORKTREE_PATH = threadWorktreePath(THREAD_ID, "nadi");
+const BRANCH = threadWorktreeBranch(THREAD_ID);
 
 type ExecResult = {
   status: "exited" | "backgrounded" | "failed" | "stopped";
@@ -68,47 +81,171 @@ function makeService(execResults: ExecResult[], execOutputResults: ExecResult[] 
   return { exec, execOutput };
 }
 
+function prepare(service: { exec: unknown; execOutput: unknown }) {
+  return createRepositoryPreparation({
+    env: {} as never,
+    threadId: THREAD_ID,
+    resolveComputeService: async () => ({ service }) as never,
+  });
+}
+
+function commandsOf(service: { exec: { mock: { calls: unknown[][] } } }): string[] {
+  return service.exec.mock.calls.map((call) => (call[0] as { command: string })?.command);
+}
+
 describe("createRepositoryPreparation", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     registryDbMock.mockReturnValue({ db: "mock" });
     // Every case runs against a thread whose AGENT is `env-1` — the agent IS
     // the environment, and `agent_repositories.agent_id` is keyed on it.
-    getThreadMock.mockResolvedValue({ id: "thread-1", agentId: "env-1" });
+    getThreadMock.mockResolvedValue({ id: THREAD_ID, agentId: "env-1" });
     getAgentMock.mockResolvedValue(undefined);
   });
 
-  it("clones when the checkout path test exits non-zero for a missing path", async () => {
+  /**
+   * The whole shape of P3 in one case: ONE clone for the agent, at
+   * `/workspace/repos/<name>`, and a worktree per thread hanging off it at
+   * `/workspace/threads/<threadId>/<name>`. The reported `checkoutPath` is the
+   * WORKTREE — that is the thread's cwd and the only path the model should ever
+   * be handed.
+   */
+  it("clones into the agent's repo root and adds a worktree for the thread", async () => {
     listRepositoriesMock.mockResolvedValue([makeRepository()]);
     const service = makeService([
       { status: "exited", processId: "mkdir", exitCode: 0 },
-      { status: "exited", processId: "exists", exitCode: 1 },
+      { status: "exited", processId: "clone-exists", exitCode: 1 },
       { status: "exited", processId: "clone", exitCode: 0 },
+      { status: "exited", processId: "worktree-exists", exitCode: 1 },
+      { status: "exited", processId: "worktree", exitCode: 0 },
     ]);
 
-    const prepareRepositories = createRepositoryPreparation({
-      env: {} as never,
-      threadId: "thread-1",
-      resolveComputeService: async () => ({ service }),
-    });
-
-    await expect(prepareRepositories()).resolves.toMatchObject({
+    await expect(prepare(service)()).resolves.toMatchObject({
       summary: "Repositories are ready for coding work.",
       prepared: [
         {
           name: "nadi",
-          checkoutPath: "/workspace/nadi",
+          checkoutPath: WORKTREE_PATH,
           status: "cloned",
           setup: "no setup command configured",
         },
       ],
     });
 
+    expect(CLONE_PATH).toBe("/workspace/repos/nadi");
+    expect(WORKTREE_PATH).toBe(`/workspace/threads/${THREAD_ID}/nadi`);
+    expect(service.exec).toHaveBeenCalledWith(
+      expect.objectContaining({
+        command: `git clone https://x-access-token:\${GH_TOKEN}@github.com/acme/nadi.git '${CLONE_PATH}'`,
+      }),
+    );
     expect(service.exec).toHaveBeenCalledWith(
       expect.objectContaining({
         command:
-          "git clone https://x-access-token:${GH_TOKEN}@github.com/acme/nadi.git '/workspace/nadi'",
+          `git -C '${CLONE_PATH}' worktree prune && ` +
+          `git -C '${CLONE_PATH}' worktree add -b '${BRANCH}' '${WORKTREE_PATH}' 'HEAD'`,
       }),
+    );
+  });
+
+  /**
+   * A branch per thread, and never a detached HEAD: `worktree add` REFUSES a
+   * branch that is already checked out elsewhere, so two threads both wanting
+   * `main` would collide on the second one. `-b` with a per-thread name is the
+   * only shape that survives a second thread.
+   */
+  it("checks the worktree out on a per-thread branch, from origin/<defaultBranch>", async () => {
+    listRepositoriesMock.mockResolvedValue([makeRepository({ defaultBranch: "main" })]);
+    const service = makeService([
+      { status: "exited", processId: "mkdir", exitCode: 0 },
+      { status: "exited", processId: "clone-exists", exitCode: 1 },
+      { status: "exited", processId: "clone", exitCode: 0 },
+      { status: "exited", processId: "checkout", exitCode: 0 },
+      { status: "exited", processId: "worktree-exists", exitCode: 1 },
+      { status: "exited", processId: "worktree", exitCode: 0 },
+    ]);
+
+    await prepare(service)();
+
+    const worktreeCommand = commandsOf(service).find((command) =>
+      command.includes("worktree add"),
+    ) as string;
+    expect(worktreeCommand).toContain(`-b '${BRANCH}'`);
+    expect(worktreeCommand).toContain("'origin/main'");
+    expect(worktreeCommand).not.toContain("--detach");
+    // Two different threads of the same agent must not ask for one branch.
+    expect(threadWorktreeBranch("thr_00000000-0000-4000-8000-000000000002")).not.toBe(BRANCH);
+  });
+
+  /**
+   * Idempotence, the property that keeps a returning thread's uncommitted work
+   * alive: a present clone is not re-cloned and a present worktree is not
+   * re-added. `worktree add` on an existing path fails, so getting this wrong
+   * would degrade a returning thread into a permanent skip.
+   */
+  it("reuses an existing clone and an existing worktree", async () => {
+    listRepositoriesMock.mockResolvedValue([makeRepository()]);
+    const service = makeService(
+      [
+        { status: "exited", processId: "mkdir", exitCode: 0 },
+        { status: "exited", processId: "clone-exists", exitCode: 0 },
+        { status: "exited", processId: "rev-parse", exitCode: 0 },
+        { status: "exited", processId: "remote", exitCode: 0 },
+        { status: "exited", processId: "worktree-exists", exitCode: 0 },
+      ],
+      [
+        {
+          status: "exited",
+          processId: "remote",
+          exitCode: 0,
+          text: "https://x-access-token:tok@github.com/acme/nadi.git",
+        },
+      ],
+    );
+
+    await expect(prepare(service)()).resolves.toMatchObject({
+      prepared: [{ name: "nadi", checkoutPath: WORKTREE_PATH, status: "already_cloned" }],
+    });
+
+    expect(service.exec).not.toHaveBeenCalledWith(
+      expect.objectContaining({ command: expect.stringContaining("git clone") }),
+    );
+    expect(service.exec).not.toHaveBeenCalledWith(
+      expect.objectContaining({ command: expect.stringContaining("worktree add") }),
+    );
+  });
+
+  /**
+   * The clone is shared by every thread of the agent, so a thread arriving at a
+   * box that already has one adds only its own worktree. The clone probe still
+   * runs (the clone has to be VALIDATED, not assumed), but nothing re-clones.
+   */
+  it("adds only a worktree when the agent's clone already exists", async () => {
+    listRepositoriesMock.mockResolvedValue([makeRepository()]);
+    const service = makeService(
+      [
+        { status: "exited", processId: "mkdir", exitCode: 0 },
+        { status: "exited", processId: "clone-exists", exitCode: 0 },
+        { status: "exited", processId: "rev-parse", exitCode: 0 },
+        { status: "exited", processId: "remote", exitCode: 0 },
+        { status: "exited", processId: "worktree-exists", exitCode: 1 },
+        { status: "exited", processId: "worktree", exitCode: 0 },
+      ],
+      [
+        {
+          status: "exited",
+          processId: "remote",
+          exitCode: 0,
+          text: "https://github.com/acme/nadi.git",
+        },
+      ],
+    );
+
+    await expect(prepare(service)()).resolves.toMatchObject({
+      prepared: [{ name: "nadi", status: "cloned", checkoutPath: WORKTREE_PATH }],
+    });
+    expect(service.exec).not.toHaveBeenCalledWith(
+      expect.objectContaining({ command: expect.stringContaining("git clone") }),
     );
   });
 
@@ -124,22 +261,21 @@ describe("createRepositoryPreparation", () => {
    * and the model had to improvise a clone by hand. The skip was invisible —
    * `onFreshRuntimeAcquired` discards the returned summary. Observed live on
    * thr_92e0b60c: `test -e /workspace/nadi` returned status `failed`, exitCode 1.
+   *
+   * BOTH probes are on this path now (clone, then worktree), so both are driven
+   * with the Cloudflare shape here.
    */
-  it("clones when a MISSING path is reported as failed/1 (the Cloudflare shape)", async () => {
+  it("clones and adds a worktree when MISSING is reported as failed/1 (the Cloudflare shape)", async () => {
     listRepositoriesMock.mockResolvedValue([makeRepository()]);
     const service = makeService([
       { status: "exited", processId: "mkdir", exitCode: 0 },
-      { status: "failed", processId: "exists", exitCode: 1 },
+      { status: "failed", processId: "clone-exists", exitCode: 1 },
       { status: "exited", processId: "clone", exitCode: 0 },
+      { status: "failed", processId: "worktree-exists", exitCode: 1 },
+      { status: "exited", processId: "worktree", exitCode: 0 },
     ]);
 
-    const prepareRepositories = createRepositoryPreparation({
-      env: {} as never,
-      threadId: "thread-1",
-      resolveComputeService: async () => ({ service }),
-    });
-
-    await expect(prepareRepositories()).resolves.toMatchObject({
+    await expect(prepare(service)()).resolves.toMatchObject({
       prepared: [{ name: "nadi", status: "cloned" }],
     });
   });
@@ -148,41 +284,24 @@ describe("createRepositoryPreparation", () => {
     listRepositoriesMock.mockResolvedValue([makeRepository()]);
     const service = makeService([
       { status: "exited", processId: "mkdir", exitCode: 0 },
-      { status: "exited", processId: "exists", exitCode: 0 },
+      { status: "exited", processId: "clone-exists", exitCode: 0 },
       { status: "failed", processId: "rev-parse", exitCode: 1 },
     ]);
 
-    const prepareRepositories = createRepositoryPreparation({
-      env: {} as never,
-      threadId: "thread-1",
-      resolveComputeService: async () => ({ service }),
-    });
-
-    await expect(prepareRepositories()).resolves.toMatchObject({
-      skipped: [
-        {
-          name: "nadi",
-          reason: "path exists but is not a git checkout",
-        },
-      ],
+    await expect(prepare(service)()).resolves.toMatchObject({
+      skipped: [{ name: "nadi", reason: "path exists but is not a git checkout" }],
     });
   });
 
-  it("skips an existing non-git path when rev-parse exits non-zero", async () => {
+  it("skips an existing non-git clone path when rev-parse exits non-zero", async () => {
     listRepositoriesMock.mockResolvedValue([makeRepository()]);
     const service = makeService([
       { status: "exited", processId: "mkdir", exitCode: 0 },
-      { status: "exited", processId: "exists", exitCode: 0 },
+      { status: "exited", processId: "clone-exists", exitCode: 0 },
       { status: "exited", processId: "rev-parse", exitCode: 1 },
     ]);
 
-    const prepareRepositories = createRepositoryPreparation({
-      env: {} as never,
-      threadId: "thread-1",
-      resolveComputeService: async () => ({ service }),
-    });
-
-    await expect(prepareRepositories()).resolves.toMatchObject({
+    await expect(prepare(service)()).resolves.toMatchObject({
       summary: "Repositories are ready for coding work.",
       skipped: [{ name: "nadi", reason: "path exists but is not a git checkout" }],
     });
@@ -193,49 +312,58 @@ describe("createRepositoryPreparation", () => {
     expect(service.exec).not.toHaveBeenCalledWith(
       expect.objectContaining({ command: expect.stringContaining("git clone") }),
     );
+    // And no worktree is added off a directory that is not a repository.
+    expect(service.exec).not.toHaveBeenCalledWith(
+      expect.objectContaining({ command: expect.stringContaining("worktree add") }),
+    );
   });
 
   it("reports clone failure as skipped when clone exits non-zero", async () => {
     listRepositoriesMock.mockResolvedValue([makeRepository()]);
     const service = makeService([
       { status: "exited", processId: "mkdir", exitCode: 0 },
-      { status: "exited", processId: "exists", exitCode: 1 },
+      { status: "exited", processId: "clone-exists", exitCode: 1 },
       { status: "exited", processId: "clone", exitCode: 128 },
     ]);
 
-    const prepareRepositories = createRepositoryPreparation({
-      env: {} as never,
-      threadId: "thread-1",
-      resolveComputeService: async () => ({ service }),
-    });
-
-    await expect(prepareRepositories()).resolves.toMatchObject({
+    await expect(prepare(service)()).resolves.toMatchObject({
       summary: "Repositories are ready for coding work.",
       skipped: [{ name: "nadi", reason: "clone failed with exit code 128" }],
     });
 
     expect(service.exec).not.toHaveBeenCalledWith(
-      expect.objectContaining({ command: expect.stringContaining("git reset") }),
-    );
-    expect(service.exec).not.toHaveBeenCalledWith(
-      expect.objectContaining({ command: expect.stringContaining("git pull") }),
+      expect.objectContaining({ command: expect.stringContaining("worktree add") }),
     );
   });
 
-  it("skips when the repository path probe fails indeterminately", async () => {
+  /**
+   * The failure this task most needs to be LOUD about. A worktree that cannot be
+   * added leaves the thread with a working directory containing no code, and the
+   * caller only logs `skipped` — so the reason has to name the operation.
+   */
+  it("reports worktree-add failure as a skip naming the operation", async () => {
     listRepositoriesMock.mockResolvedValue([makeRepository()]);
     const service = makeService([
       { status: "exited", processId: "mkdir", exitCode: 0 },
-      { status: "failed", processId: "exists" },
+      { status: "exited", processId: "clone-exists", exitCode: 1 },
+      { status: "exited", processId: "clone", exitCode: 0 },
+      { status: "exited", processId: "worktree-exists", exitCode: 1 },
+      { status: "exited", processId: "worktree", exitCode: 128 },
     ]);
 
-    const prepareRepositories = createRepositoryPreparation({
-      env: {} as never,
-      threadId: "thread-1",
-      resolveComputeService: async () => ({ service }),
+    await expect(prepare(service)()).resolves.toMatchObject({
+      skipped: [{ name: "nadi", reason: "worktree add failed with exit code 128" }],
     });
+  });
 
-    await expect(prepareRepositories()).resolves.toMatchObject({
+  it("skips when the clone path probe fails indeterminately", async () => {
+    listRepositoriesMock.mockResolvedValue([makeRepository()]);
+    const service = makeService([
+      { status: "exited", processId: "mkdir", exitCode: 0 },
+      { status: "failed", processId: "clone-exists" },
+    ]);
+
+    await expect(prepare(service)()).resolves.toMatchObject({
       summary: "Repositories are ready for coding work.",
       skipped: [{ name: "nadi", reason: "repository path probe failed (status: failed)" }],
     });
@@ -244,8 +372,22 @@ describe("createRepositoryPreparation", () => {
     expect(service.exec).not.toHaveBeenCalledWith(
       expect.objectContaining({ command: expect.stringContaining("git clone") }),
     );
+  });
+
+  it("skips when the worktree path probe fails indeterminately", async () => {
+    listRepositoriesMock.mockResolvedValue([makeRepository()]);
+    const service = makeService([
+      { status: "exited", processId: "mkdir", exitCode: 0 },
+      { status: "exited", processId: "clone-exists", exitCode: 1 },
+      { status: "exited", processId: "clone", exitCode: 0 },
+      { status: "failed", processId: "worktree-exists" },
+    ]);
+
+    await expect(prepare(service)()).resolves.toMatchObject({
+      skipped: [{ name: "nadi", reason: "repository path probe failed (status: failed)" }],
+    });
     expect(service.exec).not.toHaveBeenCalledWith(
-      expect.objectContaining({ command: expect.stringContaining("pnpm install") }),
+      expect.objectContaining({ command: expect.stringContaining("worktree add") }),
     );
   });
 
@@ -258,9 +400,10 @@ describe("createRepositoryPreparation", () => {
     const service = makeService(
       [
         { status: "exited", processId: "mkdir", exitCode: 0 },
-        { status: "exited", processId: "exists", exitCode: 0 },
+        { status: "exited", processId: "clone-exists", exitCode: 0 },
         { status: "exited", processId: "rev-parse", exitCode: 0 },
         { status: "exited", processId: "remote", exitCode: 0 },
+        { status: "exited", processId: "worktree-exists", exitCode: 0 },
         { status: "exited", processId: "setup", exitCode: 2 },
       ],
       [
@@ -273,13 +416,7 @@ describe("createRepositoryPreparation", () => {
       ],
     );
 
-    const prepareRepositories = createRepositoryPreparation({
-      env: {} as never,
-      threadId: "thread-1",
-      resolveComputeService: async () => ({ service }),
-    });
-
-    await expect(prepareRepositories()).resolves.toMatchObject({
+    await expect(prepare(service)()).resolves.toMatchObject({
       summary: "Repositories are ready for coding work.",
       prepared: [
         {
@@ -291,73 +428,72 @@ describe("createRepositoryPreparation", () => {
     });
   });
 
-  it("reuses an existing checkout when the authenticated origin remote matches", async () => {
-    listRepositoriesMock.mockResolvedValue([makeRepository()]);
+  /**
+   * Per-repo setup runs in the THREAD's worktree, not the agent's shared clone.
+   * Running it in the clone would install into the directory `git worktree`
+   * owns, where the thread's own build never looks — and would race every other
+   * thread of the agent doing the same.
+   */
+  it("runs per-repo setup inside the thread's worktree", async () => {
+    listRepositoriesMock.mockResolvedValue([
+      makeRepository({ setupCommand: "pnpm install", rootDirectory: "packages/api" }),
+    ]);
     const service = makeService(
       [
         { status: "exited", processId: "mkdir", exitCode: 0 },
-        { status: "exited", processId: "exists", exitCode: 0 },
+        { status: "exited", processId: "clone-exists", exitCode: 0 },
         { status: "exited", processId: "rev-parse", exitCode: 0 },
         { status: "exited", processId: "remote", exitCode: 0 },
+        { status: "exited", processId: "worktree-exists", exitCode: 0 },
+        { status: "exited", processId: "setup", exitCode: 0 },
       ],
       [
         {
           status: "exited",
           processId: "remote",
           exitCode: 0,
-          text: "https://x-access-token:tok@github.com/acme/nadi.git",
+          text: "https://github.com/acme/nadi.git",
         },
       ],
     );
 
-    const prepareRepositories = createRepositoryPreparation({
-      env: {} as never,
-      threadId: "thread-1",
-      resolveComputeService: async () => ({ service }),
-    });
+    await prepare(service)();
 
-    await expect(prepareRepositories()).resolves.toMatchObject({
-      summary: "Repositories are ready for coding work.",
-      prepared: [
-        {
-          name: "nadi",
-          checkoutPath: "/workspace/nadi",
-          status: "already_cloned",
-          setup: "no setup command configured",
-        },
-      ],
-    });
-
-    expect(service.exec).not.toHaveBeenCalledWith(
-      expect.objectContaining({ command: expect.stringContaining("git clone") }),
-    );
-    expect(service.exec).not.toHaveBeenCalledWith(
-      expect.objectContaining({ command: expect.stringContaining("checkout") }),
+    expect(service.exec).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cwd: `${WORKTREE_PATH}/packages/api`,
+        label: "setup nadi",
+      }),
     );
   });
 
-  it("migrates legacy checkouts from the pre-/workspace root while preparing the root", async () => {
+  /**
+   * Two migrations, and the second is the one this task adds: pre-P3 boxes hold
+   * a clone at `/workspace/<name>` which may carry uncommitted work. Leaving it
+   * where it is would strand it — this preparation would clone a SECOND copy
+   * under `repos/` and hand the thread the empty one, with nothing failing.
+   */
+  it("prepares the layout and migrates both earlier checkout roots into it", async () => {
     listRepositoriesMock.mockResolvedValue([makeRepository()]);
     const service = makeService([
       { status: "exited", processId: "mkdir", exitCode: 0 },
-      { status: "exited", processId: "exists", exitCode: 1 },
+      { status: "exited", processId: "clone-exists", exitCode: 1 },
       { status: "exited", processId: "clone", exitCode: 0 },
+      { status: "exited", processId: "worktree-exists", exitCode: 1 },
+      { status: "exited", processId: "worktree", exitCode: 0 },
     ]);
 
-    const prepareRepositories = createRepositoryPreparation({
-      env: {} as never,
-      threadId: "thread-1",
-      resolveComputeService: async () => ({ service }),
-    });
+    await prepare(service)();
 
-    await prepareRepositories();
-
-    const rootPrepCommand = service.exec.mock.calls[0]?.[0]?.command as string;
-    // New root is created, and any checkout under the old root is moved over only
-    // when the destination is absent (never clobbering a fresh checkout).
-    expect(rootPrepCommand).toContain("mkdir -p /workspace");
+    const rootPrepCommand = commandsOf(service)[0] as string;
+    expect(rootPrepCommand).toContain(`mkdir -p /workspace/repos ${threadWorkRoot(THREAD_ID)}`);
+    // Legacy pre-/workspace root, into the agent's repo root.
     expect(rootPrepCommand).toContain("/home/exedev/work");
-    expect(rootPrepCommand).toMatch(/mv .*\/workspace/);
+    expect(rootPrepCommand).toContain('mv "$d" "/workspace/repos/$name"');
+    // Pre-P3 top-level checkouts, into the agent's repo root — but never the two
+    // directories that ARE the new layout.
+    expect(rootPrepCommand).toContain("for d in /workspace/*/");
+    expect(rootPrepCommand).toContain('case "$name" in repos|threads) continue;; esac');
   });
 
   it("runs multi-line per-repo setup as a single bash-wrapped call and the environment script once, after all repos", async () => {
@@ -383,31 +519,27 @@ describe("createRepositoryPreparation", () => {
     });
     const service = makeService([
       { status: "exited", processId: "mkdir", exitCode: 0 },
-      // repo-a: exists probe (missing) -> clone -> setup
-      { status: "exited", processId: "exists-a", exitCode: 1 },
+      // repo-a: clone probe (missing) -> clone -> worktree probe (missing) -> worktree -> setup
+      { status: "exited", processId: "clone-exists-a", exitCode: 1 },
       { status: "exited", processId: "clone-a", exitCode: 0 },
+      { status: "exited", processId: "wt-exists-a", exitCode: 1 },
+      { status: "exited", processId: "wt-a", exitCode: 0 },
       { status: "exited", processId: "setup-a", exitCode: 0 },
-      // repo-b: exists probe (missing) -> clone -> setup
-      { status: "exited", processId: "exists-b", exitCode: 1 },
+      // repo-b: same
+      { status: "exited", processId: "clone-exists-b", exitCode: 1 },
       { status: "exited", processId: "clone-b", exitCode: 0 },
+      { status: "exited", processId: "wt-exists-b", exitCode: 1 },
+      { status: "exited", processId: "wt-b", exitCode: 0 },
       { status: "exited", processId: "setup-b", exitCode: 0 },
       // environment setup script
       { status: "exited", processId: "env-setup", exitCode: 0 },
     ]);
 
-    const prepareRepositories = createRepositoryPreparation({
-      env: {} as never,
-      threadId: "thread-1",
-      resolveComputeService: async () => ({ service }),
-    });
+    const result = await prepare(service)();
 
-    const result = await prepareRepositories();
+    expect(result).toMatchObject({ environmentSetup: "environment setup completed" });
 
-    expect(result).toMatchObject({
-      environmentSetup: "environment setup completed",
-    });
-
-    const calls = service.exec.mock.calls.map((call) => call[0]?.command as string);
+    const calls = commandsOf(service);
     const setupACallIndex = calls.findIndex(
       (command) => command.includes("| base64 -d | bash") && command !== calls[calls.length - 1],
     );
@@ -426,24 +558,24 @@ describe("createRepositoryPreparation", () => {
     const envSetupIndex = calls.length - 1;
     expect(envSetupIndex).toBeGreaterThan(setupACallIndex);
     expect(calls[envSetupIndex]).toContain("| base64 -d | bash");
-    expect(service.exec).toHaveBeenCalledTimes(8);
+    expect(service.exec).toHaveBeenCalledTimes(12);
+
+    // And it runs in the THREAD's working directory — the cwd every later exec
+    // defaults to — not `/workspace`.
+    expect(service.exec).toHaveBeenLastCalledWith(
+      expect.objectContaining({ cwd: threadWorkRoot(THREAD_ID), label: "environment setup" }),
+    );
   });
 
   it("skips when the git probe fails indeterminately", async () => {
     listRepositoriesMock.mockResolvedValue([makeRepository()]);
     const service = makeService([
       { status: "exited", processId: "mkdir", exitCode: 0 },
-      { status: "exited", processId: "exists", exitCode: 0 },
+      { status: "exited", processId: "clone-exists", exitCode: 0 },
       { status: "failed", processId: "rev-parse" },
     ]);
 
-    const prepareRepositories = createRepositoryPreparation({
-      env: {} as never,
-      threadId: "thread-1",
-      resolveComputeService: async () => ({ service }),
-    });
-
-    await expect(prepareRepositories()).resolves.toMatchObject({
+    await expect(prepare(service)()).resolves.toMatchObject({
       summary: "Repositories are ready for coding work.",
       skipped: [{ name: "nadi", reason: "git checkout probe failed (status: failed)" }],
     });
@@ -452,8 +584,34 @@ describe("createRepositoryPreparation", () => {
     expect(service.exec).not.toHaveBeenCalledWith(
       expect.objectContaining({ command: expect.stringContaining("remote get-url origin") }),
     );
+  });
+
+  it("skips a clone whose origin remote does not match, without touching the worktree", async () => {
+    listRepositoriesMock.mockResolvedValue([makeRepository()]);
+    const service = makeService(
+      [
+        { status: "exited", processId: "mkdir", exitCode: 0 },
+        { status: "exited", processId: "clone-exists", exitCode: 0 },
+        { status: "exited", processId: "rev-parse", exitCode: 0 },
+        { status: "exited", processId: "remote", exitCode: 0 },
+      ],
+      [
+        {
+          status: "exited",
+          processId: "remote",
+          exitCode: 0,
+          text: "https://github.com/other/repo.git",
+        },
+      ],
+    );
+
+    await expect(prepare(service)()).resolves.toMatchObject({
+      skipped: [
+        { name: "nadi", reason: "path exists but remote does not match configured repository" },
+      ],
+    });
     expect(service.exec).not.toHaveBeenCalledWith(
-      expect.objectContaining({ command: expect.stringContaining("pnpm install") }),
+      expect.objectContaining({ command: expect.stringContaining("worktree add") }),
     );
   });
 
@@ -466,12 +624,12 @@ describe("createRepositoryPreparation", () => {
   // toMatchObject) is the point — the summary string alone cannot tell the two
   // apart. The key the lookup is made with is asserted for the same reason.
   it("returns the no-repositories summary WITHOUT resolving compute when the thread has no agent", async () => {
-    getThreadMock.mockResolvedValue({ id: "thread-1", agentId: null });
+    getThreadMock.mockResolvedValue({ id: THREAD_ID, agentId: null });
     const resolveComputeService = vi.fn();
 
     const prepareRepositories = createRepositoryPreparation({
       env: {} as never,
-      threadId: "thread-1",
+      threadId: THREAD_ID,
       resolveComputeService,
     });
 
@@ -488,7 +646,7 @@ describe("createRepositoryPreparation", () => {
 
     const prepareRepositories = createRepositoryPreparation({
       env: {} as never,
-      threadId: "thread-1",
+      threadId: THREAD_ID,
       resolveComputeService,
     });
 
@@ -505,7 +663,7 @@ describe("createRepositoryPreparation", () => {
 
     const prepareRepositories = createRepositoryPreparation({
       env: {} as never,
-      threadId: "thread-1",
+      threadId: THREAD_ID,
       resolveComputeService,
     });
 

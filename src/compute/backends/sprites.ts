@@ -21,6 +21,7 @@ import type {
 import { DEFAULT_COMPUTE_LIMITS } from "../config";
 import { ComputeError } from "../errors";
 import type { SpritesClient, SpritesSignal } from "./sprites-client";
+import { WORKSPACE_ROOT } from "../workspace-layout";
 
 /**
  * sprites.dev implementation of the provider-neutral compute contract.
@@ -45,8 +46,6 @@ export const SPRITES_PROFILE_MEMORY_MB: Record<ComputeResourceProfile, number> =
   small: 2048,
   medium: 4096,
 };
-
-const WORKSPACE_ROOT = "/workspace";
 
 /** Settle-quickly poll after launching a process: 10 attempts, 200ms apart. */
 const SETTLE_POLL_ATTEMPTS = 10;

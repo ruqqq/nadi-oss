@@ -7,6 +7,7 @@ import {
   PROBE_SCRIPT,
   probeWorkspaceCleanliness,
 } from "../../../src/compute/workspace-cleanliness";
+import { threadWorktreeBranch } from "../../../src/compute/workspace-layout";
 
 /**
  * The probe's verdict is decided in the shell, and the parser cannot see it: a
@@ -203,5 +204,114 @@ describe("PROBE_SCRIPT against real git repositories", () => {
     const result = await runProbe(root);
     expect(result.state).toBe("dirty");
     expect(result.state === "dirty" && result.repos[0]?.changes).toEqual([" M f1.txt"]);
+  });
+});
+
+/**
+ * The P3 layout, against a REAL git: one clone for the agent under `repos/`,
+ * one `git worktree` per thread under `threads/<threadId>/`, each on its own
+ * branch. Two things here can only be proved against git itself.
+ *
+ * 1. `worktree add` REFUSES a branch that is already checked out in another
+ *    worktree. That is the whole reason `repository-preparation` creates
+ *    `nadi/thread-<id>` per thread instead of checking out the default branch:
+ *    a mocked exec would happily accept either.
+ * 2. The probe has to FIND those worktrees. A thread's `.git` now sits at
+ *    `<root>/threads/<threadId>/<name>/.git` — one level deeper than the old
+ *    layout — and a `find -maxdepth` that stops short reports `no_repo`, the
+ *    "nothing to lose" verdict that lets an idle box holding uncommitted work
+ *    be discarded. Nothing else in the system would notice.
+ */
+describe("PROBE_SCRIPT against the P3 per-thread worktree layout", () => {
+  const THREAD_A = "thr_00000000-0000-4000-8000-00000000000a";
+  const THREAD_B = "thr_00000000-0000-4000-8000-00000000000b";
+
+  /** `repos/nadi` cloned from origin, plus a worktree per listed thread. */
+  function layout(threadIds: string[]) {
+    return workspace((root, origin) => {
+      seedOrigin(root, origin);
+      const clone = join(root, "repos", "nadi");
+      sh(`mkdir -p "${join(root, "repos")}"`, root);
+      git(root, "clone", "-q", origin, clone);
+      for (const threadId of threadIds) {
+        const worktree = join(root, "threads", threadId, "nadi");
+        git(
+          clone,
+          "worktree",
+          "add",
+          "-q",
+          "-b",
+          threadWorktreeBranch(threadId),
+          worktree,
+          "origin/main",
+        );
+      }
+    });
+  }
+
+  it("gives two threads their own worktrees off one clone", async () => {
+    const root = layout([THREAD_A, THREAD_B]);
+
+    const worktreeA = join(root, "threads", THREAD_A, "nadi");
+    const worktreeB = join(root, "threads", THREAD_B, "nadi");
+    const branchOf = (cwd: string) =>
+      spawnSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+        cwd,
+        encoding: "utf8",
+      }).stdout.trim();
+
+    // Its own branch each, and neither is detached.
+    expect(branchOf(worktreeA)).toBe(threadWorktreeBranch(THREAD_A));
+    expect(branchOf(worktreeB)).toBe(threadWorktreeBranch(THREAD_B));
+    expect(branchOf(worktreeA)).not.toBe("HEAD");
+
+    // Clean out of the box: three commits, all already on origin.
+    expect((await runProbe(root)).state).toBe("clean");
+  });
+
+  /**
+   * The mutation this whole design exists to prevent. Point both threads at the
+   * SAME branch — what checking out `main` per thread would amount to — and git
+   * refuses the second `worktree add` outright.
+   */
+  it("refuses a second worktree on a branch another worktree already holds", () => {
+    const root = layout([THREAD_A]);
+    const clone = join(root, "repos", "nadi");
+    const collision = spawnSync(
+      "git",
+      [
+        "worktree",
+        "add",
+        "-b",
+        threadWorktreeBranch(THREAD_A),
+        join(root, "threads", THREAD_B, "nadi"),
+        "origin/main",
+      ],
+      { cwd: clone, encoding: "utf8" },
+    );
+    expect(collision.status).not.toBe(0);
+  });
+
+  it("sees uncommitted work in a thread's worktree at the layout's depth", async () => {
+    const root = layout([THREAD_A]);
+    sh("echo edited >> f1.txt", join(root, "threads", THREAD_A, "nadi"));
+
+    const result = await runProbe(root);
+    expect(result.state).toBe("dirty");
+    expect(result.state === "dirty" && result.repos.map((repo) => repo.path)).toEqual([
+      join(root, "threads", THREAD_A, "nadi"),
+    ]);
+  });
+
+  it("sees a commit that exists only in a thread's worktree", async () => {
+    const root = layout([THREAD_A]);
+    const worktree = join(root, "threads", THREAD_A, "nadi");
+    sh("echo work > new.txt", worktree);
+    git(worktree, "add", "-A");
+    git(worktree, "commit", "-qm", "local-work");
+
+    const result = await runProbe(root);
+    expect(result.state).toBe("dirty");
+    expect(result.state === "dirty" && result.repos[0]?.unpushed).toBe(1);
   });
 });

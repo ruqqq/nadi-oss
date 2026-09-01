@@ -2,14 +2,25 @@ import { posix } from "node:path";
 import type { BackendReference, ComputeBackend } from "../backend";
 import { ComputeError } from "../errors";
 
-const WORKSPACE_ROOT = "/workspace";
+/**
+ * The root a relative path resolves against.
+ *
+ * REQUIRED at every call site, and not for taste. Since P3 the sandbox is shared
+ * by every thread of an agent and each thread works in its own
+ * `/workspace/threads/<threadId>` worktree, so `src/app.ts` names a DIFFERENT
+ * file per thread. A default here would have compiled everywhere and silently
+ * resolved every thread's file tools into the agent's shared clone — the same
+ * directory `git worktree` owns — which corrupts the checkout backing every
+ * OTHER thread. There is no safe default, so there is no default.
+ */
+export type WorkspacePathRoot = string;
 
 /**
- * Normalizes a workspace-relative path into an absolute `/workspace/...` path.
+ * Normalizes a root-relative path into an absolute path under `root`.
  * Rejects absolute input, empty input, NUL bytes, and traversal that would
- * escape the workspace root.
+ * escape the root.
  */
-export function normalizeWorkspacePath(path: string): string {
+export function normalizeWorkspacePath(path: string, root: WorkspacePathRoot): string {
   if (typeof path !== "string" || path.length === 0) {
     throw new ComputeError("compute_invalid_path");
   }
@@ -20,10 +31,10 @@ export function normalizeWorkspacePath(path: string): string {
     throw new ComputeError("compute_invalid_path");
   }
 
-  const joined = posix.normalize(posix.join(WORKSPACE_ROOT, path));
+  const joined = posix.normalize(posix.join(root, path));
   // `posix.normalize` keeps a trailing slash, so "src/" and "src" would diverge.
   const normalized = joined.length > 1 ? joined.replace(/\/+$/, "") : joined;
-  if (normalized !== WORKSPACE_ROOT && !normalized.startsWith(`${WORKSPACE_ROOT}/`)) {
+  if (normalized !== root && !normalized.startsWith(`${root}/`)) {
     throw new ComputeError("compute_invalid_path");
   }
 
@@ -31,7 +42,7 @@ export function normalizeWorkspacePath(path: string): string {
 }
 
 /**
- * Validates that a normalized workspace path stays inside `/workspace` by
+ * Validates that a normalized workspace path stays inside `root` by
  * walking every component from the root down to the target.
  *
  * A symlink at any inspected component is rejected outright: providers are not
@@ -52,15 +63,16 @@ export async function assertPathContained(
   backend: ComputeBackend,
   runtime: BackendReference,
   path: string,
+  root: WorkspacePathRoot,
 ): Promise<string> {
-  const normalized = normalizeWorkspacePath(path);
+  const normalized = normalizeWorkspacePath(path, root);
 
-  for (const prefix of workspacePrefixes(normalized)) {
+  for (const prefix of workspacePrefixes(normalized, root)) {
     const info = await backend.inspectPath(runtime, prefix);
     if (!info) {
       // Nothing deeper can exist; remaining components are new (create case).
-      // But `/workspace` itself must exist — a missing root is a fail-closed.
-      if (prefix === WORKSPACE_ROOT) {
+      // But the root itself must exist — a missing root is a fail-closed.
+      if (prefix === root) {
         throw new ComputeError("compute_unavailable", "workspace_root_missing");
       }
       return normalized;
@@ -68,26 +80,26 @@ export async function assertPathContained(
     if (info.type === "symlink") {
       throw new ComputeError("compute_path_escape");
     }
-    assertResolvedPathContained(info.resolvedPath);
+    assertResolvedPathContained(info.resolvedPath, root);
   }
 
   return normalized;
 }
 
-/** Every path prefix from `/workspace` down to `normalized`, inclusive. */
-function workspacePrefixes(normalized: string): string[] {
-  const prefixes = [WORKSPACE_ROOT];
-  if (normalized === WORKSPACE_ROOT) return prefixes;
-  let current = WORKSPACE_ROOT;
-  for (const segment of normalized.slice(WORKSPACE_ROOT.length + 1).split("/")) {
+/** Every path prefix from `root` down to `normalized`, inclusive. */
+function workspacePrefixes(normalized: string, root: WorkspacePathRoot): string[] {
+  const prefixes = [root];
+  if (normalized === root) return prefixes;
+  let current = root;
+  for (const segment of normalized.slice(root.length + 1).split("/")) {
     current = `${current}/${segment}`;
     prefixes.push(current);
   }
   return prefixes;
 }
 
-function assertResolvedPathContained(resolvedPath: string): void {
-  if (resolvedPath !== WORKSPACE_ROOT && !resolvedPath.startsWith(`${WORKSPACE_ROOT}/`)) {
+function assertResolvedPathContained(resolvedPath: string, root: WorkspacePathRoot): void {
+  if (resolvedPath !== root && !resolvedPath.startsWith(`${root}/`)) {
     throw new ComputeError("compute_path_escape");
   }
 }

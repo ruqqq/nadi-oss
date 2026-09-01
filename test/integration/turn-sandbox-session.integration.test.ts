@@ -28,6 +28,7 @@ import {
   setComputeHostTestOverrides,
 } from "../../src/compute/host-test-overrides";
 import { applyRegistryTestSchema, seedRegistryThread } from "./helpers/registry";
+import { agentClonePath } from "../../src/compute/workspace-layout";
 
 const NOW = 1_800_000_000_000;
 
@@ -187,9 +188,10 @@ describe("the turn's sandbox session", () => {
       commands.some((command) => command.includes("mkdir -p /workspace")),
       `expected the work-root preparation; commands were ${JSON.stringify(commands)}`,
     ).toBe(true);
+    // The AGENT's clone is what gets probed — one per box, under `repos/`.
     expect(
-      commands.some((command) => command.includes("/workspace/nadi")),
-      `expected the snapshot's checkout to be probed; commands were ${JSON.stringify(commands)}`,
+      commands.some((command) => command.includes(agentClonePath("nadi"))),
+      `expected the agent's checkout to be probed; commands were ${JSON.stringify(commands)}`,
     ).toBe(true);
   });
 });

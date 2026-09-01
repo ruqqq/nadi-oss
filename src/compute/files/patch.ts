@@ -1,5 +1,6 @@
 import { ComputeError } from "../errors";
 import { normalizeWorkspacePath } from "./path";
+import { WORKSPACE_ROOT } from "../workspace-layout";
 
 /**
  * One line inside a hunk, tagged by how it participates in matching:
@@ -194,8 +195,15 @@ export function parsePatch(text: string): PatchOperation[] {
  * deleted would silently destroy the write.
  */
 function assertNoDuplicatePaths(operations: PatchOperation[]): void {
-  // Compare canonical `/workspace/...` forms, not raw patch spellings. The file
-  // service keys every operation on `normalizeWorkspacePath(op.path)`, so
+  // ROOT-INDEPENDENT on purpose. This normalizes only to COMPARE two spellings
+  // of one relative path, so any single consistent root gives the same verdict;
+  // `WORKSPACE_ROOT` is the arbitrary one. It deliberately does not take the
+  // caller's per-thread root — `parsePatch` is a pure parse with no thread in
+  // scope, and threading one through would imply a per-thread answer this check
+  // does not have.
+  //
+  // Compare canonical rooted forms, not raw patch spellings. The file
+  // service keys every operation on the same normalization, so
   // "src/a.ts", "./src/a.ts", "src//a.ts", and "src/./a.ts" all name one file
   // on disk. Deduping on raw text would let two spellings slip through as
   // distinct — a write and a delete of the same file — and the commit's
@@ -206,9 +214,9 @@ function assertNoDuplicatePaths(operations: PatchOperation[]): void {
   const deletedPaths = new Set<string>();
   for (const op of operations) {
     if (op.kind === "delete") {
-      deletedPaths.add(normalizeWorkspacePath(op.path));
+      deletedPaths.add(normalizeWorkspacePath(op.path, WORKSPACE_ROOT));
     } else if (op.kind === "update" && op.moveTo !== undefined) {
-      deletedPaths.add(normalizeWorkspacePath(op.path));
+      deletedPaths.add(normalizeWorkspacePath(op.path, WORKSPACE_ROOT));
     }
   }
 
@@ -216,7 +224,7 @@ function assertNoDuplicatePaths(operations: PatchOperation[]): void {
   const destinations = new Set<string>();
 
   for (const op of operations) {
-    const source = normalizeWorkspacePath(op.path);
+    const source = normalizeWorkspacePath(op.path, WORKSPACE_ROOT);
     if (sources.has(source)) {
       throw new ComputeError("compute_patch_duplicate_path");
     }
@@ -224,7 +232,9 @@ function assertNoDuplicatePaths(operations: PatchOperation[]): void {
 
     if (op.kind === "delete") continue;
     const destination =
-      op.kind === "update" && op.moveTo !== undefined ? normalizeWorkspacePath(op.moveTo) : source;
+      op.kind === "update" && op.moveTo !== undefined
+        ? normalizeWorkspacePath(op.moveTo, WORKSPACE_ROOT)
+        : source;
     if (destinations.has(destination) || deletedPaths.has(destination)) {
       throw new ComputeError("compute_patch_duplicate_path");
     }

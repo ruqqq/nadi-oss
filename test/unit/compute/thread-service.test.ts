@@ -11,6 +11,7 @@ import type { EffectiveComputeConfig } from "../../../src/compute/types";
 import type { ComputeProcessRecord, ThreadComputeStore } from "../../../src/compute/thread-store";
 import type { WorkspaceCleanliness } from "../../../src/compute/workspace-cleanliness";
 import { createMemoryComputeStore } from "./helpers/memory-store";
+import { threadWorkRoot } from "../../../src/compute/workspace-layout";
 
 const CONFIG: EffectiveComputeConfig = {
   provider: "fake",
@@ -142,13 +143,19 @@ describe("ThreadComputeService lifecycle", () => {
     expect(store.getComputeState()?.status).toBe("absent");
   });
 
-  it("defaults exec to the workspace root, and an explicit cwd still wins", async () => {
+  it("defaults exec to THIS thread's working directory, and an explicit cwd still wins", async () => {
     const { service, backend } = createService();
 
     // No cwd: a relative path must resolve under the same root the file tools
-    // guard, so exec must land in /workspace, not the sandbox's boot dir (/root).
+    // guard, and since P3 that root is the thread's own directory inside the
+    // AGENT's shared box — not `/workspace`, which every thread shares, and not
+    // the sandbox's boot dir (/root).
     await service.exec({ command: "pwd" });
-    expect(backend.startProcessCalls.at(-1)).toMatchObject({ command: "pwd", cwd: "/workspace" });
+    expect(backend.startProcessCalls.at(-1)).toMatchObject({
+      command: "pwd",
+      cwd: threadWorkRoot("thread_test"),
+    });
+    expect(backend.startProcessCalls.at(-1)?.cwd).not.toBe("/workspace");
 
     // An explicit cwd is honored unchanged.
     await service.exec({ command: "pwd", cwd: "/workspace/nadi" });
@@ -1130,7 +1137,7 @@ describe("ThreadComputeService workspace root provisioning", () => {
     return { backend, createdDirs };
   }
 
-  it("creates the workspace root on a reused active runtime, once", async () => {
+  it("creates the workspace root and the thread's own directory on a reused active runtime, once", async () => {
     const { backend, createdDirs } = recordingBackend();
     const { service } = createService({ backend });
 
@@ -1138,6 +1145,11 @@ describe("ThreadComputeService workspace root provisioning", () => {
     await service.exec({ command: "true" });
 
     expect(createdDirs.filter((path) => path === "/workspace")).toHaveLength(1);
+    // The thread's directory is the cwd exec defaults to AND the root the file
+    // tools fail closed on (`workspace_root_missing`), so `/workspace` alone is
+    // not enough: a box whose first exec came from a thread that never got its
+    // directory would exec into nothing.
+    expect(createdDirs.filter((path) => path === threadWorkRoot("thread_test"))).toHaveLength(1);
   });
 
   it("creates the workspace root on an attached runtime that never acquires", async () => {
@@ -1167,13 +1179,67 @@ describe("ThreadComputeService workspace root provisioning", () => {
     await service.exec({ command: "true" });
 
     expect(createdDirs).toContain("/workspace");
+    expect(createdDirs).toContain(threadWorkRoot("thr_thread_service"));
   });
 
-  it("defaults exec cwd to the workspace root but honors an explicit cwd", async () => {
+  it("defaults exec cwd to the thread's working directory but honors an explicit cwd", async () => {
     const { service, backend } = createService();
     await service.exec({ command: "true" });
     await service.exec({ command: "true", cwd: "/tmp" });
-    expect(backend.startProcessCalls.map((call) => call.cwd)).toEqual(["/workspace", "/tmp"]);
+    expect(backend.startProcessCalls.map((call) => call.cwd)).toEqual([
+      threadWorkRoot("thread_test"),
+      "/tmp",
+    ]);
+  });
+
+  /**
+   * The point of the whole task: two threads of ONE agent, one box, two working
+   * directories. A service that fell back to a shared root would pass every
+   * other test in this file.
+   */
+  it("gives two threads of one box different working directories", async () => {
+    const backend = new FakeComputeBackend();
+    const store = createMemoryComputeStore();
+    const build = (threadId: string) =>
+      new ThreadComputeService({
+        backend,
+        store,
+        config: CONFIG,
+        environmentId: "agent_shared_box",
+        threadId,
+        env: {},
+        setAlarm: async () => {},
+        now: () => 1_000,
+      });
+
+    await build("thr_aaaaaaaa").exec({ command: "pwd" });
+    await build("thr_bbbbbbbb").exec({ command: "pwd" });
+
+    const [first, second] = backend.startProcessCalls.slice(-2);
+    expect(first?.cwd).toBe(threadWorkRoot("thr_aaaaaaaa"));
+    expect(second?.cwd).toBe(threadWorkRoot("thr_bbbbbbbb"));
+  });
+
+  /**
+   * `threadId` is a required dep, but the type cannot exclude `""` — and `""`
+   * would resolve to `/workspace/threads`, the parent EVERY other thread's
+   * directory lives under. An exec there, or a `write_file` relative to it,
+   * lands in a directory that is not this thread's and is not empty. Loud, not
+   * defaulted.
+   */
+  it("refuses to run for a service with an empty threadId", async () => {
+    const service = new ThreadComputeService({
+      backend: new FakeComputeBackend(),
+      store: createMemoryComputeStore(),
+      config: CONFIG,
+      environmentId: "thread_degenerate",
+      threadId: "",
+      env: {},
+      setAlarm: async () => {},
+      now: () => 1_000,
+    });
+
+    await expect(service.exec({ command: "true" })).rejects.toThrow("unsafe thread id");
   });
 });
 

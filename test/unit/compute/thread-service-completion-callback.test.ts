@@ -268,7 +268,15 @@ describe("ThreadComputeService completion callback", () => {
   // scenario, and it still matters: the token is scoped to
   // `(threadId, processId)`, so one minted for `""` would aim the sandbox's
   // push at a thread DO named `""`.
-  it("omits the callback when the service's threadId is empty", async () => {
+  //
+  // Since each thread got its own working directory, `""` no longer reaches
+  // that guard: the cwd every exec defaults to is `threadWorkRoot(threadId)`,
+  // and `""` would resolve to `/workspace/threads` — the parent every OTHER
+  // thread's directory lives under. The layout refuses it, so the degenerate
+  // service now fails EARLIER and louder than "no callback minted". The
+  // `no_thread_id` branch stays in `completionCallbackUnavailableReason` as a
+  // claim about the token's scope, not as a reachable degradation.
+  it("refuses to run at all when the service's threadId is empty", async () => {
     const backend = new FakeComputeBackend();
     const store = createMemoryComputeStore();
     const service = new ThreadComputeService({
@@ -284,8 +292,8 @@ describe("ThreadComputeService completion callback", () => {
       now: () => 1_000,
     });
 
-    await service.exec({ command: "true" });
-    expect(backend.startProcessCalls[0]?.completionCallback).toBeUndefined();
+    await expect(service.exec({ command: "true" })).rejects.toThrow("unsafe thread id");
+    expect(backend.startProcessCalls).toEqual([]);
   });
 
   it("does NOT refuse to background a mock/fake backend even with no callback available", async () => {

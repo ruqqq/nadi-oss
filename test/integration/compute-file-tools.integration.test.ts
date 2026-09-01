@@ -20,6 +20,9 @@ import { GENERATION_PATH } from "../../src/compute/generation";
 import { ThreadComputeService } from "../../src/compute/thread-service";
 import { DEFAULT_MONITOR_POLL_INTERVAL_MS } from "../../src/compute/watchers";
 import { createMemoryComputeStore } from "../unit/compute/helpers/memory-store";
+import { threadWorkRoot } from "../../src/compute/workspace-layout";
+
+const THREAD_ID = "thr_compute_file_tools_integration";
 
 type ToolResult = Record<string, unknown> & { ok: boolean };
 
@@ -43,7 +46,7 @@ function buildFileTools(backend: FakeComputeBackend) {
       secretEnvNames: [],
     },
     environmentId: "fake-env",
-    threadId: "thr_compute_file_tools_integration",
+    threadId: THREAD_ID,
     env: {},
     setAlarm: async () => {},
     now: () => 1000,
@@ -228,7 +231,10 @@ describe("compute file tools end to end", () => {
     // Seed a symlinked ancestor, then target a path underneath it. The path
     // guard rejects the symlink component with compute_path_escape.
     await runTool(tools.write_file, { path: "safe.txt", content: "ok\n", createParents: true });
-    backend.seedSymlink(activeRuntime(backend), "/workspace/link", "/outside");
+    // Seeded in THIS thread's working directory: the file tools resolve
+    // relative paths there, not at /workspace, so a symlink planted at the old
+    // root is simply never walked.
+    backend.seedSymlink(activeRuntime(backend), `${threadWorkRoot(THREAD_ID)}/link`, "/outside");
     const before = mutationCounts(backend);
 
     const writeUnderLink = await runTool(tools.write_file, {

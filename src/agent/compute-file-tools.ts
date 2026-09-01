@@ -74,7 +74,7 @@ export function buildComputeFileToolDefs(getFiles: () => Promise<ComputeFileTool
   return {
     read_file: tool({
       description:
-        "Read a focused, line-numbered window of a text file under /workspace. Returns the content with a content hash to use as expectedHash for later edits.",
+        "Read a focused, line-numbered window of a text file under your working directory. Returns the content with a content hash to use as expectedHash for later edits.",
       inputSchema: z.object({
         path: z.string().describe("Workspace-relative path to a text file."),
         startLine: z
@@ -108,7 +108,7 @@ export function buildComputeFileToolDefs(getFiles: () => Promise<ComputeFileTool
     }),
     write_file: tool({
       description:
-        "Create a new file or completely replace an existing one under /workspace. To replace an existing file, pass its current hash as expectedHash (from a prior read_file); omit expectedHash for a new file. compute_file_too_large is permanent — do not retry it.",
+        "Create a new file or completely replace an existing one under your working directory. To replace an existing file, pass its current hash as expectedHash (from a prior read_file); omit expectedHash for a new file. compute_file_too_large is permanent — do not retry it.",
       inputSchema: z.object({
         path: z.string().describe("Workspace-relative destination path."),
         content: z.string().describe("Full file contents to write."),

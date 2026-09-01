@@ -26,6 +26,17 @@ export interface ComputeFileServiceDeps {
   maxUploadBytes: number;
   provider: ComputeProviderId;
   profile: ComputeResourceProfile;
+  /**
+   * The root every relative file-tool path resolves against — the THREAD's
+   * working directory (`/workspace/threads/<threadId>`), not `/workspace`.
+   *
+   * Required, with no default. The agent's sandbox is shared by all of its
+   * threads since P3, and the agent's canonical clones under `/workspace/repos`
+   * are owned by `git worktree`: a file service that fell back to `/workspace`
+   * would let one thread's `write_file` land in the checkout backing every other
+   * thread's worktree, with nothing failing.
+   */
+  workspaceRoot: string;
   /** Acquire/restore compute and return the active runtime reference. */
   resolveRuntime: () => Promise<BackendReference>;
   /** Refresh the environment lease (touch last-used + re-arm release). */
@@ -106,7 +117,12 @@ export class ComputeFileService {
 
   async readFile(input: ReadFileInput): Promise<ReadFileResult> {
     const runtime = await this.deps.resolveRuntime();
-    const normalized = await assertPathContained(this.deps.backend, runtime, input.path);
+    const normalized = await assertPathContained(
+      this.deps.backend,
+      runtime,
+      input.path,
+      this.deps.workspaceRoot,
+    );
     const { bytes } = await this.deps.backend.readFile(runtime, normalized, this.deps.readMaxBytes);
     const content = decodeTextFile(bytes);
     const hash = await sha256Hex(bytes);
@@ -147,7 +163,12 @@ export class ComputeFileService {
     }
     try {
       const runtime = await this.deps.resolveRuntime();
-      const normalized = await assertPathContained(this.deps.backend, runtime, input.path);
+      const normalized = await assertPathContained(
+        this.deps.backend,
+        runtime,
+        input.path,
+        this.deps.workspaceRoot,
+      );
       const current = await this.readCurrent(runtime, normalized);
       // Optimistic concurrency: an existing file requires a matching hash; a
       // fresh path must not carry an expected hash (its target is gone/absent).
@@ -192,7 +213,12 @@ export class ComputeFileService {
       const resolve = async (rel: string): Promise<ResolvedPath> => {
         const cached = resolved.get(rel);
         if (cached) return cached;
-        const normalized = await assertPathContained(this.deps.backend, runtime, rel);
+        const normalized = await assertPathContained(
+          this.deps.backend,
+          runtime,
+          rel,
+          this.deps.workspaceRoot,
+        );
         const leaf = await this.deps.backend.inspectPath(runtime, normalized);
         const entry: ResolvedPath = { normalized, leaf };
         resolved.set(rel, entry);

@@ -56,6 +56,11 @@ async function setup(overrides?: Partial<{ maxUploadBytes: number }>) {
     maxUploadBytes: overrides?.maxUploadBytes ?? 25_000_000,
     provider: backend.id,
     profile: "small",
+    // These suites seed and read absolute /workspace paths, so the root under
+    // test is /workspace itself. That the root is honoured at all is proved in
+    // `file-service.test.ts` ("resolves relative paths against the root it is
+    // given") and in `files/path.test.ts`.
+    workspaceRoot: "/workspace",
     resolveRuntime: async () => runtime,
     refreshLease: async () => {},
     now: () => 1_000,

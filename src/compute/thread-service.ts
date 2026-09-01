@@ -40,10 +40,12 @@ import {
   type WorkRow,
 } from "../agent/work-ledger";
 import { mimeFromFilename } from "../artifacts/mime";
+import { threadWorkRoot, WORKSPACE_ROOT } from "./workspace-layout";
 
-// The root every runtime is provisioned with; a relative-path exec must resolve
-// here (same root the file tools guard), not the sandbox's boot dir (/root).
-export const WORKSPACE_ROOT = "/workspace" as const;
+// The root every runtime is PROVISIONED with. Re-exported from the layout
+// module so the constant has exactly one definition; see `workspace-layout.ts`
+// for why a thread's cwd is no longer this path.
+export { WORKSPACE_ROOT } from "./workspace-layout";
 
 export const DEFAULT_WATCH_TIMEOUT_MS = 300_000;
 export const EXEC_FOREGROUND_TIMEOUT_MS = 10_000;
@@ -691,6 +693,7 @@ export class ThreadComputeService {
         maxUploadBytes: this.deps.config.limits.maxUploadBytes,
         provider: this.deps.backend.id,
         profile: this.deps.config.resourceProfile,
+        workspaceRoot: this.threadWorkRoot(),
         resolveRuntime: () => this.ensureRuntime(),
         refreshLease: async () => {
           this.deps.store.touchLastUsed(this.deps.now());
@@ -865,7 +868,7 @@ export class ThreadComputeService {
     }
 
     const runtime = await this.ensureRuntime();
-    const cwd = input.cwd ?? WORKSPACE_ROOT;
+    const cwd = input.cwd ?? this.threadWorkRoot();
     const timeoutMs = Math.min(
       input.timeoutMs ?? this.deps.config.maxProcessRuntimeMs,
       this.deps.config.maxProcessRuntimeMs,
@@ -1055,7 +1058,8 @@ export class ThreadComputeService {
     // string now — a degenerate value the type cannot exclude. It still has to
     // be caught: the completion token is SCOPED to `(threadId, processId)`, and
     // one minted for `""` would route the sandbox's push to a thread DO named
-    // `""`. Kept as a guard, narrowed as a claim.
+    // `""`. Kept as a guard, narrowed as a claim — and in practice unreachable
+    // now that `threadWorkRoot` refuses `""` before any exec starts.
     if (!this.deps.threadId) return "no_thread_id";
     if (!this.consumesCompletionCallback()) return null;
     if (!isParseableUrl(this.deps.appBaseUrl)) {
@@ -1165,7 +1169,7 @@ export class ThreadComputeService {
     const processId = `proc_${crypto.randomUUID()}`;
     // Default to the workspace root so a relative path means the same thing to
     // exec and to read_file; an explicitly-passed cwd is never overridden.
-    const cwd = input.cwd ?? WORKSPACE_ROOT;
+    const cwd = input.cwd ?? this.threadWorkRoot();
     const timeoutMs = Math.min(
       input.timeoutMs ?? this.deps.config.maxProcessRuntimeMs,
       this.deps.config.maxProcessRuntimeMs,
@@ -2711,6 +2715,20 @@ export class ThreadComputeService {
   }
 
   /**
+   * This thread's working directory inside the AGENT's shared box.
+   *
+   * Not cached and not defaulted. `threadId` is a required dep but the type
+   * cannot exclude the empty string, and `""` would resolve to
+   * `/workspace/threads` — the parent every OTHER thread's directory lives
+   * under, which an `exec` would then happily run in and a `write_file` would
+   * happily write into. `threadWorkRoot` rejects it, loudly, at the one place
+   * the path is built.
+   */
+  private threadWorkRoot(): string {
+    return threadWorkRoot(this.deps.threadId);
+  }
+
+  /**
    * `backend.acquire` provisions the workspace root, but an already-active runtime
    * (and an attached subagent runtime) never re-acquires. A sandbox that was
    * running before the root existed would then get `exec` with a `cwd` that does
@@ -2722,6 +2740,13 @@ export class ThreadComputeService {
     // acquisition. Marking it would clear the declared-clean bit on every
     // sandbox wake, so a declaration could never survive to release.
     await this.deps.backend.createDirectory(runtime, WORKSPACE_ROOT);
+    // And THIS thread's working directory. It is the cwd every `exec` defaults
+    // to and the root every relative file-tool path resolves against, so a
+    // missing one is not cosmetic: `exec` would run with a cwd that does not
+    // exist, and `assertPathContained` fails closed on an absent root
+    // (`workspace_root_missing`). `createDirectory` creates parents, so this
+    // also covers `/workspace/threads` on a box whose first thread this is.
+    await this.deps.backend.createDirectory(runtime, this.threadWorkRoot());
     this.workspaceRootEnsured = true;
     return runtime;
   }

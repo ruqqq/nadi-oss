@@ -35,6 +35,7 @@ import type { SandboxSessionResolution } from "../../src/compute/agent-sandbox-c
 import { DEFAULT_MONITOR_POLL_INTERVAL_MS } from "../../src/compute/watchers";
 import { applyRegistryTestSchema, seedRegistryThread } from "./helpers/registry";
 import { FEEDBACK_MODEL_ID, FEEDBACK_MODEL_PROVIDER } from "../../src/agent/feedback-mode";
+import { threadWorkRoot } from "../../src/compute/workspace-layout";
 
 const featureEnv = env as typeof env & { BACKGROUND_WORK_ENABLED?: string | undefined };
 
@@ -1088,7 +1089,11 @@ describe("ThinkThreadAgent spike", () => {
       });
       expect(result.backgroundLongRunningExec).toBe(false);
       expect(result.activeWatchers).toEqual([]);
-      expect(result.runCommandCalls).toEqual([{ command: "sleep 300", cwd: "/workspace" }]);
+      // The thread's own working directory inside the agent's shared box — the
+      // default cwd since P3, not the shared /workspace root.
+      expect(result.runCommandCalls).toEqual([
+        { command: "sleep 300", cwd: threadWorkRoot(threadId) },
+      ]);
       expect(result.startProcessCalls).toEqual([]);
     } finally {
       featureEnv.BACKGROUND_WORK_ENABLED = previous;

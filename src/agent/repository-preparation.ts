@@ -4,6 +4,16 @@ import { ThreadRepository } from "../db/repositories/threads";
 import { AgentRepository } from "../db/repositories/agents";
 import type { Env } from "../env";
 import type { ThreadComputeService } from "../compute/thread-service";
+import {
+  AGENT_REPOS_ROOT,
+  LEGACY_WORKSPACE_ROOT,
+  RESERVED_WORKSPACE_DIR_NAMES,
+  WORKSPACE_ROOT,
+  agentClonePath,
+  threadWorkRoot,
+  threadWorktreeBranch,
+  threadWorktreePath,
+} from "../compute/workspace-layout";
 
 export interface RepositoryPreparationPrepared {
   name: string;
@@ -24,12 +34,9 @@ export interface RepositoryPreparationResult {
   environmentSetup?: string;
 }
 
-// Repository checkouts land under the same root the file tools guard, so a
-// relative path resolves identically for exec, read_file, and the model.
-const SANDBOX_WORK_ROOT = "/workspace";
-// Checkouts made before the /workspace move lived here; migrate them in place so
-// a suspended sandbox is not re-cloned (which would strand uncommitted work).
-const LEGACY_SANDBOX_WORK_ROOT = "/home/exedev/work";
+// The layout is constructed in ONE place; see `compute/workspace-layout.ts`.
+// Every checkout lands under the same root the file tools guard, so a relative
+// path resolves identically for exec, read_file, and the model.
 const REPOSITORY_SETUP_TIMEOUT_MS = 15 * 60 * 1000;
 const REPOSITORY_SETUP_POLL_MS = 1_000;
 
@@ -81,7 +88,7 @@ export function createRepositoryPreparation(input: {
 
     const rootPreparation = await runCommand(
       resolved.service,
-      rootPreparationCommand(),
+      rootPreparationCommand(input.threadId),
       undefined,
       "prepare sandbox work root",
     );
@@ -94,80 +101,30 @@ export function createRepositoryPreparation(input: {
     const prepared: RepositoryPreparationPrepared[] = [];
     const skipped: RepositoryPreparationSkipped[] = [];
     for (const repository of repositories) {
-      const checkoutPath = path.join(SANDBOX_WORK_ROOT, repository.checkoutPathName);
-      const repositoryRoot = resolveRepositoryRoot(checkoutPath, repository.rootDirectory);
-      const pathProbe = await pathExists(resolved.service, checkoutPath);
-      if (pathProbe.kind === "error") {
-        skipped.push({
-          name: repository.name,
-          reason: pathProbe.reason,
-        });
-        continue;
-      }
-      if (pathProbe.kind === "missing") {
-        const cloneResult = await runCommand(
-          resolved.service,
-          `git clone ${formatCloneUrlForShell(repository.url)} ${shellQuote(checkoutPath)}`,
-          undefined,
-          `clone ${repository.name}`,
-        );
-        if (!cloneResult.ok) {
-          skipped.push({
-            name: repository.name,
-            reason: formatFailedCommandReason("clone", cloneResult),
-          });
-          continue;
-        }
-        if (repository.defaultBranch.trim() !== "") {
-          const checkoutResult = await runCommand(
-            resolved.service,
-            `git -C ${shellQuote(checkoutPath)} checkout ${shellQuote(repository.defaultBranch)}`,
-            undefined,
-            `checkout ${repository.name}`,
-          );
-          if (!checkoutResult.ok) {
-            skipped.push({
-              name: repository.name,
-              reason: formatFailedCommandReason("checkout", checkoutResult),
-            });
-            continue;
-          }
-        }
-        prepared.push(
-          await prepareRepositoryCheckout({
-            service: resolved.service,
-            name: repository.name,
-            checkoutPath,
-            repositoryRoot,
-            status: "cloned",
-            setupCommand: repository.setupCommand,
-          }),
-        );
+      // TWO paths per repository since P3, and they are not interchangeable.
+      // `clonePath` is the AGENT's canonical clone — one per repository for the
+      // whole box, owned by git, never the model's cwd. `worktreePath` is THIS
+      // thread's `git worktree` of it, and is the only one reported back or
+      // used as a working directory.
+      const clonePath = agentClonePath(repository.checkoutPathName);
+      const worktreePath = threadWorktreePath(input.threadId, repository.checkoutPathName);
+      const repositoryRoot = resolveRepositoryRoot(worktreePath, repository.rootDirectory);
+
+      const clone = await ensureAgentClone(resolved.service, repository, clonePath);
+      if (clone.kind === "skip") {
+        skipped.push({ name: repository.name, reason: clone.reason });
         continue;
       }
 
-      const gitProbe = await isGitRepository(resolved.service, checkoutPath);
-      if (gitProbe.kind === "error") {
-        skipped.push({
-          name: repository.name,
-          reason: gitProbe.reason,
-        });
-        continue;
-      }
-      if (gitProbe.kind === "not_git") {
-        skipped.push({
-          name: repository.name,
-          reason: "path exists but is not a git checkout",
-        });
-        continue;
-      }
-
-      const remoteUrl = await readOriginRemoteUrl(resolved.service, checkoutPath);
-      if (!remoteUrl || normalizeGitUrl(remoteUrl) !== normalizeGitUrl(repository.url)) {
-        skipped.push({
-          name: repository.name,
-          reason: "path exists but remote does not match configured repository",
-        });
+      const worktree = await ensureThreadWorktree({
+        service: resolved.service,
+        clonePath,
+        worktreePath,
+        branch: threadWorktreeBranch(input.threadId),
+        defaultBranch: repository.defaultBranch,
+      });
+      if (worktree.kind === "skip") {
+        skipped.push({ name: repository.name, reason: worktree.reason });
         continue;
       }
 
@@ -175,15 +132,19 @@ export function createRepositoryPreparation(input: {
         await prepareRepositoryCheckout({
           service: resolved.service,
           name: repository.name,
-          checkoutPath,
+          checkoutPath: worktreePath,
           repositoryRoot,
-          status: "already_cloned",
+          status: worktree.status,
           setupCommand: repository.setupCommand,
         }),
       );
     }
 
-    const environmentSetup = await runEnvironmentSetup(setupScript, resolved.service);
+    const environmentSetup = await runEnvironmentSetup(
+      setupScript,
+      resolved.service,
+      threadWorkRoot(input.threadId),
+    );
 
     return {
       summary:
@@ -197,6 +158,112 @@ export function createRepositoryPreparation(input: {
   };
 }
 
+type EnsureResult<T> = ({ kind: "ok" } & T) | { kind: "skip"; reason: string };
+
+/**
+ * Ensures the AGENT's canonical clone exists at `clonePath` and points at the
+ * configured repository. Idempotent: a present, matching clone is left alone.
+ *
+ * This is the only clone in the box. Every thread's worktree is created FROM
+ * it, which is exactly why the "exists but is not a git checkout" and "remote
+ * does not match" verdicts stay skips rather than a re-clone: a re-clone here
+ * would take every other thread's worktree with it.
+ */
+async function ensureAgentClone(
+  service: RepositoryExecService,
+  repository: { name: string; url: string; defaultBranch: string },
+  clonePath: string,
+): Promise<{ kind: "ok" } | { kind: "skip"; reason: string }> {
+  const pathProbe = await pathExists(service, clonePath);
+  if (pathProbe.kind === "error") return { kind: "skip", reason: pathProbe.reason };
+
+  if (pathProbe.kind === "missing") {
+    const cloneResult = await runCommand(
+      service,
+      `git clone ${formatCloneUrlForShell(repository.url)} ${shellQuote(clonePath)}`,
+      undefined,
+      `clone ${repository.name}`,
+    );
+    if (!cloneResult.ok) {
+      return { kind: "skip", reason: formatFailedCommandReason("clone", cloneResult) };
+    }
+    if (repository.defaultBranch.trim() !== "") {
+      const checkoutResult = await runCommand(
+        service,
+        `git -C ${shellQuote(clonePath)} checkout ${shellQuote(repository.defaultBranch)}`,
+        undefined,
+        `checkout ${repository.name}`,
+      );
+      if (!checkoutResult.ok) {
+        return { kind: "skip", reason: formatFailedCommandReason("checkout", checkoutResult) };
+      }
+    }
+    return { kind: "ok" };
+  }
+
+  const gitProbe = await isGitRepository(service, clonePath);
+  if (gitProbe.kind === "error") return { kind: "skip", reason: gitProbe.reason };
+  if (gitProbe.kind === "not_git") {
+    return { kind: "skip", reason: "path exists but is not a git checkout" };
+  }
+
+  const remoteUrl = await readOriginRemoteUrl(service, clonePath);
+  if (!remoteUrl || normalizeGitUrl(remoteUrl) !== normalizeGitUrl(repository.url)) {
+    return {
+      kind: "skip",
+      reason: "path exists but remote does not match configured repository",
+    };
+  }
+  return { kind: "ok" };
+}
+
+/**
+ * Ensures THIS thread has its own worktree of the agent's clone.
+ *
+ * A BRANCH PER THREAD, never a detached HEAD. `worktree add` refuses a branch
+ * that is already checked out in another worktree, so every thread that wanted
+ * the repository's default branch would collide from the second thread onwards;
+ * `-b <branch>` sidesteps that. Detaching would sidestep it too and is rejected
+ * deliberately — a detached HEAD is the classic way to lose work, and a later
+ * task reclaims these worktrees unconditionally.
+ *
+ * `worktree prune` first: git keeps an administrative record per worktree, and a
+ * directory removed out from under it (a half-finished reclaim, a restore from a
+ * backup that predates it) leaves `add` failing with "already registered" for a
+ * path that is not there. Pruning is a no-op when the records are consistent.
+ *
+ * Start point: `origin/<defaultBranch>` when the agent declares one, else the
+ * clone's `HEAD` — which a fresh clone leaves on the remote's default branch.
+ * NOT a bare `-b` with no start point: that would branch from whatever the
+ * clone's main worktree happens to be sitting on.
+ */
+async function ensureThreadWorktree(input: {
+  service: RepositoryExecService;
+  clonePath: string;
+  worktreePath: string;
+  branch: string;
+  defaultBranch: string;
+}): Promise<EnsureResult<{ status: "cloned" | "already_cloned" }>> {
+  const pathProbe = await pathExists(input.service, input.worktreePath);
+  if (pathProbe.kind === "error") return { kind: "skip", reason: pathProbe.reason };
+  if (pathProbe.kind === "exists") return { kind: "ok", status: "already_cloned" };
+
+  const declared = input.defaultBranch.trim();
+  const startPoint = declared === "" ? "HEAD" : `origin/${declared}`;
+  const result = await runCommand(
+    input.service,
+    `git -C ${shellQuote(input.clonePath)} worktree prune && ` +
+      `git -C ${shellQuote(input.clonePath)} worktree add -b ${shellQuote(input.branch)} ` +
+      `${shellQuote(input.worktreePath)} ${shellQuote(startPoint)}`,
+    undefined,
+    "add thread worktree",
+  );
+  if (!result.ok) {
+    return { kind: "skip", reason: formatFailedCommandReason("worktree add", result) };
+  }
+  return { kind: "ok", status: "cloned" };
+}
+
 // Runs the agent's setup script exactly once, after every repo has been cloned
 // and had its own per-repo setup run — so agent-level setup (e.g. cross-repo
 // tooling) can assume all checkouts already exist. Returns `null` (skipped
@@ -206,13 +273,17 @@ export function createRepositoryPreparation(input: {
 async function runEnvironmentSetup(
   script: string,
   service: RepositoryExecService,
+  threadWorkingDirectory: string,
 ): Promise<string | null> {
   if (script === "") return null;
 
+  // Runs in THIS thread's working directory, not `/workspace`: that is the cwd
+  // every later `exec` defaults to, so a setup script that drops a file or a
+  // tool beside the checkouts must put it where the model will look for it.
   const result = await runCommand(
     service,
     bashScriptCommand(script),
-    SANDBOX_WORK_ROOT,
+    threadWorkingDirectory,
     "environment setup",
   );
   return result.ok
@@ -457,18 +528,39 @@ function parseGithubHttpsUrl(value: string): URL | null {
   }
 }
 
-// Create the work root and migrate any pre-/workspace checkouts into it, moving
-// each only when the destination is absent so a fresh checkout is never
-// clobbered. Both roots are fixed, metacharacter-free constants, so they embed
-// safely; the body uses only double quotes and runs under `sh -lc '…'`.
-function rootPreparationCommand(): string {
+/**
+ * Creates the layout this thread needs and migrates every earlier layout into it.
+ *
+ * Two migrations, both "move only when the destination is absent" so a fresh
+ * checkout is never clobbered:
+ *
+ * 1. `/home/exedev/work/<name>` (pre-/workspace) into the agent's repo root.
+ * 2. `/workspace/<name>` (pre-P3, one clone per box at the top level) into the
+ *    agent's repo root. Skipped for the two names that ARE the new layout.
+ *
+ * The second is not cosmetic. Those checkouts can hold uncommitted work, and
+ * this preparation would otherwise clone a second copy alongside them and hand
+ * the thread the empty one, leaving the user's work in a directory nothing ever
+ * looks at again.
+ *
+ * Every interpolated path is a fixed constant or has been through
+ * `assertSafeSegment`, so none can carry a metacharacter; the body uses only
+ * double quotes and runs under `sh -lc '...'`.
+ */
+function rootPreparationCommand(threadId: string): string {
+  const workRoot = threadWorkRoot(threadId);
   return (
-    `sh -lc 'mkdir -p ${SANDBOX_WORK_ROOT} && ` +
-    `if [ -d ${LEGACY_SANDBOX_WORK_ROOT} ]; then ` +
-    `for d in ${LEGACY_SANDBOX_WORK_ROOT}/*/; do ` +
+    `sh -lc 'mkdir -p ${AGENT_REPOS_ROOT} ${workRoot} && ` +
+    `if [ -d ${LEGACY_WORKSPACE_ROOT} ]; then ` +
+    `for d in ${LEGACY_WORKSPACE_ROOT}/*/; do ` +
     `[ -d "$d" ] || continue; name="$(basename "$d")"; ` +
-    `[ -e "${SANDBOX_WORK_ROOT}/$name" ] || mv "$d" "${SANDBOX_WORK_ROOT}/$name"; ` +
-    `done; fi'`
+    `[ -e "${AGENT_REPOS_ROOT}/$name" ] || mv "$d" "${AGENT_REPOS_ROOT}/$name"; ` +
+    `done; fi; ` +
+    `for d in ${WORKSPACE_ROOT}/*/; do ` +
+    `[ -d "$d" ] || continue; name="$(basename "$d")"; ` +
+    `case "$name" in ${RESERVED_WORKSPACE_DIR_NAMES.join("|")}) continue;; esac; ` +
+    `[ -e "${AGENT_REPOS_ROOT}/$name" ] || mv "$d" "${AGENT_REPOS_ROOT}/$name"; ` +
+    `done'`
   );
 }
 
