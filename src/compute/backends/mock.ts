@@ -104,6 +104,15 @@ export class MockComputeBackend implements ComputeBackend {
     return recoveryReference(sandboxId);
   }
 
+  /** {@link ComputeBackend.externalRuntimeId} — the in-memory sandbox id. */
+  externalRuntimeId(reference: BackendReference): string | null {
+    try {
+      return referenceSandboxId(reference);
+    } catch {
+      return null;
+    }
+  }
+
   async destroy(reference: BackendReference): Promise<void> {
     SANDBOXES.delete(referenceSandboxId(reference));
   }

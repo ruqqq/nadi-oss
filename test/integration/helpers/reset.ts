@@ -4,7 +4,6 @@ import { applyRegistryTestSchema } from "./registry";
 // Children before parents: every DELETE runs with foreign keys enforced.
 const registryTables = [
   "automaton_runs",
-  "active_containers",
   "archived_compaction",
   "automata",
   "agent_sandboxes",

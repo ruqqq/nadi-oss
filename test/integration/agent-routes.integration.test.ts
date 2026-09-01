@@ -7,7 +7,7 @@ import * as schema from "../../src/db/schema";
 import { ComputeEnvSecretsStore } from "../../src/compute/env-secrets";
 import { createWorkspaceSecretsServices } from "../../src/secrets";
 import { applyRegistryTestSchema } from "./helpers/registry";
-import { ThinkThreadAgent } from "../../src/agent/think-thread-agent";
+import { AgentSandbox } from "../../src/compute/agent-sandbox-do";
 
 const now = 1_800_000_000_000;
 
@@ -669,7 +669,12 @@ describe("agent routes", () => {
       );
     });
 
-    it("shuts down the machine of every LIVE thread it ran, and no others", async () => {
+    // P3: ONE call to ONE DO, addressed by AGENT id. The route used to walk
+    // the agent's non-archived threads and shut each one's sandbox down — N
+    // attempts at the same shared machine, and NOTHING AT ALL for an agent
+    // whose threads had all been archived, whose sprite was then left billing
+    // with nothing able to reach it.
+    it("destroys the AGENT's box once, even with no live threads at all", async () => {
       const seeded = await seedUserWorkspace({
         userId: "user-agent-delete-machines",
         token: "agent-delete-machines-token",
@@ -677,13 +682,12 @@ describe("agent routes", () => {
       });
       const doomed = await seedSecondAgent(seeded.workspaceId, "agent-doomed-machines");
       const db = drizzle(env.REGISTRY_DB, { schema });
+      // EVERY thread of the doomed agent is archived. Under the old thread walk
+      // this returned early and destroyed nothing.
       await db.insert(schema.threadIndex).values(
         [
-          { id: "thr-live-a", agentId: doomed, archivedAt: null },
-          { id: "thr-live-b", agentId: doomed, archivedAt: null },
-          // Archiving a thread already destroyed its DO, which shut its sandbox
-          // down — there is nothing of its left to reap.
-          { id: "thr-archived", agentId: doomed, archivedAt: now },
+          { id: "thr-archived-a", agentId: doomed, archivedAt: now },
+          { id: "thr-archived-b", agentId: doomed, archivedAt: now },
           // Another agent's thread. Deleting THIS agent must not touch it.
           { id: "thr-other-agent", agentId: seeded.agentId, archivedAt: null },
         ].map((thread) => ({
@@ -699,14 +703,21 @@ describe("agent routes", () => {
           updatedAt: now,
         })),
       );
+      // A ledger row, so the delete's unconditional row drop is observable.
+      await env.REGISTRY_DB.prepare(
+        `INSERT INTO agent_sandboxes (agent_id, provider, sprite_name, status, created_at, last_used_at)
+         VALUES (?1, 'sprites', 'nadi-b1-doomed', 'idle', 1, 1)`,
+      )
+        .bind(doomed)
+        .run();
 
-      const shutdown = vi
-        .spyOn(ThinkThreadAgent.prototype, "shutdownComputeForAgentDeletion")
-        .mockImplementation(async function (this: ThinkThreadAgent) {
-          reaped.push(this.name);
-          return { shutdown: true };
+      const destroyed: Array<{ workspaceId: string; agentId: string }> = [];
+      const destroy = vi
+        .spyOn(AgentSandbox.prototype, "destroyForAgentDeletion")
+        .mockImplementation(async (input) => {
+          destroyed.push(input);
+          return { destroyed: true };
         });
-      const reaped: string[] = [];
       try {
         const res = await SELF.fetch(`https://nadi.test/api/agents/${doomed}/archive`, {
           method: "POST",
@@ -714,10 +725,18 @@ describe("agent routes", () => {
         });
         expect(res.status).toBe(200);
       } finally {
-        shutdown.mockRestore();
+        destroy.mockRestore();
       }
 
-      expect(reaped.sort()).toEqual(["thr-live-a", "thr-live-b"]);
+      expect(destroyed).toEqual([{ workspaceId: seeded.workspaceId, agentId: doomed }]);
+      // The row goes unconditionally. Keeping it would leave the sprite
+      // accounted-for and therefore never reaped, forever.
+      const row = await env.REGISTRY_DB.prepare(
+        "SELECT agent_id FROM agent_sandboxes WHERE agent_id = ?1",
+      )
+        .bind(doomed)
+        .first();
+      expect(row).toBeNull();
     });
 
     it("still deletes the agent when a thread's machine cannot be reached", async () => {
@@ -741,7 +760,7 @@ describe("agent routes", () => {
       });
 
       const shutdown = vi
-        .spyOn(ThinkThreadAgent.prototype, "shutdownComputeForAgentDeletion")
+        .spyOn(AgentSandbox.prototype, "destroyForAgentDeletion")
         // `mockImplementation`, not `mockRejectedValue`: the latter builds the
         // rejected promise eagerly and workerd reports it as an uncaught
         // rejection before the RPC ever hands it back.

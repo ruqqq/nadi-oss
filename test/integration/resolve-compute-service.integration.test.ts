@@ -89,6 +89,11 @@ async function seedComputeEnabledWorkspace(workspaceId: string) {
 class ProviderCheckingBackend implements ComputeBackend {
   readonly destroyCalls: BackendReference[] = [];
 
+  externalRuntimeId(reference: BackendReference): string | null {
+    const payload = reference.payload as { sandboxId?: string } | null;
+    return payload?.sandboxId ?? null;
+  }
+
   constructor(readonly id: "daytona" | "cloudflare") {}
 
   async acquire(spec: ComputeSpec, recovery?: BackendReference): Promise<BackendReference> {
@@ -613,7 +618,6 @@ describe("resolveComputeService (real D1 + real DO storage)", () => {
           version: 1,
           payload: { kind: "recovery", sandboxId: "daytona-recovery" },
         },
-        NOW - 1,
         NOW - 1,
       );
 

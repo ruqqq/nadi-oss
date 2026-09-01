@@ -272,6 +272,19 @@ export class CloudflareComputeBackend implements ComputeBackend {
     return Math.round(clamped / 1_000);
   }
 
+  /**
+   * {@link ComputeBackend.externalRuntimeId}. Cloudflare containers cannot be
+   * enumerated by tenant, so this id is recorded but no reconciler can use it.
+   */
+  externalRuntimeId(reference: BackendReference): string | null {
+    try {
+      const parsed = this.parseReference(reference);
+      return parsed.payload.kind === "runtime" ? parsed.payload.sandboxId : null;
+    } catch {
+      return null;
+    }
+  }
+
   async destroy(reference: BackendReference): Promise<void> {
     const parsed = this.parseReference(reference);
     if (parsed.payload.kind !== "runtime") {

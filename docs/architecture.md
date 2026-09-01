@@ -142,10 +142,14 @@ Every decision is logged as `compute.retention_decision` with the thread id, the
 disposition, and the reason. That log line is how this class of issue gets
 diagnosed; a sandbox that vanished has one.
 
-A workspace's concurrently-live sandboxes are capped by
-`MAX_ACTIVE_CONTAINERS_PER_WORKSPACE`, enforced through the D1 ledger in
-`compute/container-ledger.ts`. At the cap, the least-recently-used idle sandbox
-is reclaimed before the request is refused.
+A workspace's concurrently-live AGENT sandboxes are capped by
+`MAX_ACTIVE_AGENT_SANDBOXES_PER_WORKSPACE`, enforced through the D1 ledger in
+`compute/agent-sandbox-ledger.ts` (`agent_sandboxes`). Only `acquiring`/`active`
+rows hold a slot; an `idle` row is a hibernated box with its disk intact and
+holds none. At the cap, the least-recently-used active box is asked to sleep —
+never destroyed — before the request is refused. A row is deleted only when the
+machine is destroyed, which is agent deletion, `exec_shutdown`, or the orphan
+reconciler.
 
 ## Auth
 

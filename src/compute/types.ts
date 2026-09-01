@@ -112,13 +112,25 @@ export interface EffectiveComputeConfig {
   secretEnvNames: string[];
 }
 
-export interface ContainerLedgerRow {
-  threadId: string;
+/**
+ * `acquiring` — a slot is claimed and a sprite may or may not exist yet.
+ * `active` — the box is awake and holds a workspace concurrency slot.
+ * `idle` — the box is hibernated, disk intact, holding no slot.
+ *
+ * There is no "gone" status: a destroyed box has NO ROW. That is the whole
+ * distinction the orphan reconciler runs on.
+ */
+export type AgentSandboxStatus = "acquiring" | "active" | "idle";
+
+export interface AgentSandboxLedgerRow {
+  agentId: string;
+  /** Joined from `agents`; `agent_sandboxes` deliberately has no such column. */
   workspaceId: string;
   provider: string;
-  profile: string;
+  /** The provider-side machine name, or null before/without one. */
+  spriteName: string | null;
+  status: AgentSandboxStatus;
   lastUsedAt: number;
-  expiresAt: number;
 }
 
 export type ComputeConfigResult =

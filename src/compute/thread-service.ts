@@ -8,7 +8,7 @@ import type {
 } from "./backend";
 import type { ComputeResourceProfile, EffectiveComputeConfig } from "./types";
 import type { ComputeProcessRecord, ThreadComputeStore } from "./thread-store";
-import { RECLAIM_MIN_IDLE_MS, type ComputeQuotaGate } from "./container-quota";
+import { RECLAIM_MIN_IDLE_MS, type AgentSandboxGate } from "./agent-sandbox-quota";
 import { ComputeError } from "./errors";
 import { log } from "../log";
 import {
@@ -190,8 +190,6 @@ function withDeadline<T>(promise: Promise<T>, ms: number, onTimeout: () => Error
 
 const LOST_COMPUTE_REMINDER =
   "The previous thread compute environment was missing from its backend, so stale local state was cleared. Future commands will run in a fresh environment. Files and running processes from the missing environment are gone, but previous command output remains available in this conversation.";
-const EXPIRED_RECOVERY_REMINDER =
-  "The previous repository-work compute environment reached the end of its recovery window and was destroyed. The next command will run in a fresh sandbox.";
 const RESTORED_COMPUTE_REMINDER =
   "The previous repository-work compute environment was restored. Continue from the retained checkout if relevant.";
 
@@ -398,7 +396,7 @@ export interface ThreadComputeServiceDeps {
    * Cloudflare-only per-workspace container cap. Undefined for every other
    * provider (see resolveComputeService) — never gate Daytona on the ledger.
    */
-  quota?: ComputeQuotaGate;
+  quota?: AgentSandboxGate;
   /**
    * Liveness reporting for the background work ledger, resolved PER THREAD.
    *
@@ -426,25 +424,14 @@ export interface ThreadComputeServiceDeps {
   getWorkHorizon?: (now?: number) => Promise<number | null>;
   /**
    * Clears the "workspace verified clean" bit. Called from EVERY entry point
-   * that can mutate the sandbox filesystem. Err broad: a command passed to
-   * exec can always write, so all exec paths call it. Missing a path leaves a
-   * stale clean bit and destroys work; a spurious call only preserves a
-   * sandbox that did not need preserving.
+   * that can mutate the sandbox filesystem.
+   *
+   * The bit no longer decides RETENTION — nothing does; the box is kept until
+   * the agent is deleted. It survives as `confirm_work_saved`'s record of
+   * whether the tool's verdict is still current, and clearing it on a write is
+   * what keeps that verdict from going stale.
    */
   markSandboxDirty?: () => Promise<void>;
-  /**
-   * True only when `confirm_work_saved` verified the workspace clean and
-   * nothing has written to the sandbox since (see `markSandboxDirty`). Read
-   * by `resolveIdleDisposition` to skip the git probe entirely.
-   */
-  isSandboxDeclaredClean?: () => Promise<boolean>;
-  /**
-   * Runs the git-based cleanliness probe (Task 2) against the live sandbox.
-   * Absent — as in tests that construct a service without it — defaults to
-   * `probe_failed` in `resolveIdleDisposition`, which preserves. Never treat
-   * an absent probe as `clean`.
-   */
-  probeWorkspaceCleanliness?: () => Promise<WorkspaceCleanliness>;
   /**
    * Ensure THIS thread's working directory holds what the agent declares —
    * clones, worktrees, setup — before the service's first command runs.
@@ -1719,7 +1706,6 @@ export class ThreadComputeService {
     maxLines?: number | undefined;
     maxBytes?: number | undefined;
   }) {
-    await this.cleanupExpiredRecovery(this.deps.now());
     await this.refreshProcessOutput(input.processId);
     const stream = input.stream === "stderr" ? "stderr" : "stdout";
     const result = readOutputChunks(this.deps.store.listOutputChunks(input.processId, stream), {
@@ -1742,7 +1728,6 @@ export class ThreadComputeService {
       limit?: number | undefined;
     } = {},
   ) {
-    await this.cleanupExpiredRecovery(this.deps.now());
     // Preserve legacy Daytona behavior: default 20, hard cap 100.
     const limit = Math.min(input.limit ?? 20, 100);
     const processes = this.deps.store.listProcesses(1_000);
@@ -2234,10 +2219,6 @@ export class ThreadComputeService {
       return;
     }
     const now = this.deps.now();
-    if (await this.cleanupExpiredRecovery(now)) {
-      await this.armAlarm(null);
-      return;
-    }
     if (state.status === "recoverable" || state.status === "absent" || state.status === "error") {
       await this.armAlarm(null);
       return;
@@ -2270,11 +2251,17 @@ export class ThreadComputeService {
       await this.armAlarm(now + this.deps.config.idleTimeoutMs);
       return;
     }
-    // Preserve by default; discard only on proof. Proof is either a verified
-    // clean declaration, or git proving every repo clean. Anything else —
-    // dirty, unversioned files, an unreachable probe — preserves, because
-    // preserving costs a 24h snapshot and discarding wrongly costs work.
-    const disposition = await this.resolveIdleDisposition();
+    // ALWAYS PRESERVE. The idle path has no discard branch any more, and the
+    // reason is the re-key, not caution: the box belongs to the AGENT and holds
+    // every one of its threads' worktrees, so "this thread says its work is
+    // saved" is not evidence about the machine. `confirm_work_saved` used to
+    // send this branch straight to a `deleteSprite`, which would now destroy
+    // sibling threads' uncommitted work on the word of a thread that never
+    // looked at it. The cleanliness probe made the same inference from git.
+    //
+    // Preserving is also nearly free on the provider this phase targets: sprites
+    // hibernate themselves ~30s after activity with the disk intact, and a
+    // `recoverable` release makes no provider call at all.
     const runtime = state.runtimeRef;
     // Both of these must be readable from the catch: once `backend.release`
     // resolves the container is GONE, so rolling back to `active` there would
@@ -2285,39 +2272,30 @@ export class ThreadComputeService {
     this.deps.store.markReleasing(now);
     try {
       recovery = await this.deps.backend.release(runtime, {
-        disposition,
-        ...(disposition === "recoverable" ? { recoveryTtlMs: this.deps.config.recoveryTtlMs } : {}),
+        disposition: "recoverable",
+        recoveryTtlMs: this.deps.config.recoveryTtlMs,
       });
       released = true;
-      if (disposition === "recoverable") {
-        if (!recovery) throw new ComputeError("provider_transient", "missing_recovery_reference");
-        const expiresAt = now + this.deps.config.recoveryTtlMs;
-        this.deps.store.markRecoverable(recovery, now, expiresAt);
-        await this.deps.quota?.release();
-        await this.stopRunningProcesses(now, {
-          deliver: false,
-          detail: "process stopped (environment released; files preserved)",
-        });
-        await this.armAlarm(expiresAt);
-        this.emitLifecycleEvent("release", "active_to_recoverable", "success");
-      } else {
-        this.deps.store.markAbsent(now);
-        await this.deps.quota?.release();
-        await this.stopRunningProcesses(now, {
-          deliver: true,
-          detail: "process stopped (environment discarded after inactivity)",
-        });
-        await this.clearLifecycleState();
-        this.emitLifecycleEvent("discard", "active_to_absent", "success");
-        await this.deps.deliverSystemReminder?.({
-          // The machine's own lifecycle, so it is addressed to the thread this
-          // service was resolved for — the one whose idle turn reclaimed it —
-          // not to a row's owner. See `threadOfProcess` for the other rule.
-          threadId: this.deps.threadId,
-          body: "The thread compute environment was discarded after inactivity. Future commands will run in a fresh environment.",
-          mode: "deferred",
-        });
-      }
+      if (!recovery) throw new ComputeError("provider_transient", "missing_recovery_reference");
+      this.deps.store.markRecoverable(recovery, now);
+      // `idle`, NOT `forget`: the machine still exists, hibernated with the
+      // agent's filesystem on it. Dropping the row here would leave a live
+      // sprite the orphan reconciler cannot account for, and it would delete it.
+      await this.deps.quota?.idle();
+      await this.stopRunningProcesses(now, {
+        deliver: false,
+        detail: "process stopped (environment released; files preserved)",
+      });
+      // Re-homed from the deleted `cleanupExpiredRecovery`. The container the
+      // watchers were polling is gone (or asleep), and nothing polls while the
+      // state is `recoverable`, so a surviving row could only ever fire against
+      // a process that no longer exists.
+      this.clearWatchers();
+      // `null`, not the old recovery expiry: there is no expiry to wake for.
+      // `armAlarm` still folds watchers and the work-ledger horizon, so a box
+      // with open ledger rows keeps its wake.
+      await this.armAlarm(null);
+      this.emitLifecycleEvent("release", "active_to_recoverable", "success");
     } catch {
       if (released) {
         await this.settleDestroyedRuntime(recovery, now);
@@ -2328,75 +2306,6 @@ export class ThreadComputeService {
       this.emitLifecycleEvent("release", "active_to_active", "failure");
       await this.armAlarm(now + this.deps.config.idleTimeoutMs);
     }
-  }
-
-  /**
-   * Discard only on proof: a verified clean declaration, or git proving every
-   * repo clean. An absent probe dep defaults to `probe_failed` — NOT to
-   * `clean` — so a service constructed without the dep preserves rather than
-   * destroys. That default is the safety net for every ambiguous or unknown
-   * state; do not change it to an optional-chaining `clean` default.
-   */
-  private async resolveIdleDisposition(): Promise<"discard" | "recoverable"> {
-    if ((await this.deps.isSandboxDeclaredClean?.()) === true) {
-      log.info("compute.retention_decision", {
-        threadId: this.deps.threadId,
-        disposition: "discard",
-        reason: "declared_clean",
-      });
-      return "discard";
-    }
-    // Everything below this line is an INFERENCE about whether there is
-    // anything to lose, and the reason we act on an inference at all is
-    // billing: on providers whose idle runtime keeps burning compute, holding
-    // it is expensive. A provider that suspends itself has already stopped the
-    // meter, so inferring a discard buys only disk and risks work. The
-    // declared-clean case above still discards — that is stated intent, not a
-    // guess.
-    if (this.deps.backend.nativeIdleSuspend === true) {
-      log.info("compute.retention_decision", {
-        threadId: this.deps.threadId,
-        disposition: "recoverable",
-        reason: "provider_native_idle",
-      });
-      return "recoverable";
-    }
-    const cleanliness = (await this.deps.probeWorkspaceCleanliness?.()) ?? {
-      state: "probe_failed" as const,
-      reason: "probe_unavailable",
-    };
-    // `no_repo` with NO files is genuinely nothing to lose, and it is the same
-    // state `confirmWorkSaved` accepts and sets the bit on — the two deciders
-    // have to agree or a repo-less thread that ran one `exec` (and a chat thread
-    // never calls `confirm_work_saved`) keeps a 24h recovery snapshot forever.
-    // `no_repo` WITH files still preserves: unversioned work is still work.
-    //
-    // "NO files" is the probe's judgement, not `ls`. Since P3 the box is never
-    // literally empty — `ensureWorkspaceRootOnce` creates `/workspace` and this
-    // thread's own directory before the probe's own `exec` can run — so the
-    // probe excludes the scaffolding we make. Get that wrong and this branch is
-    // simply unreachable: every repo-less box reads as `no_repo` + files,
-    // preserves at every idle wake, and on a non-suspending provider bills until
-    // something deletes it. See `PROBE_SCRIPT`.
-    const empty = cleanliness.state === "no_repo" && !cleanliness.hasFiles;
-    const disposition = cleanliness.state === "clean" || empty ? "discard" : "recoverable";
-    const reason =
-      cleanliness.state === "clean"
-        ? "git_clean"
-        : empty
-          ? "empty_workspace"
-          : cleanliness.state === "dirty"
-            ? "dirty"
-            : cleanliness.state === "no_repo"
-              ? "no_repo"
-              : "probe_failed";
-    log.info("compute.retention_decision", {
-      threadId: this.deps.threadId,
-      disposition,
-      reason,
-      ...(cleanliness.state === "dirty" ? { dirtyRepoCount: cleanliness.repos.length } : {}),
-    });
-    return disposition;
   }
 
   /**
@@ -2412,14 +2321,21 @@ export class ThreadComputeService {
     now: number,
   ): Promise<void> {
     if (recovery) {
-      const expiresAt = now + this.deps.config.recoveryTtlMs;
       try {
-        this.deps.store.markRecoverable(recovery, now, expiresAt);
+        this.deps.store.markRecoverable(recovery, now);
       } catch {
-        // nothing recoverable left to do; the backup expires at its provider TTL
+        // nothing recoverable left to do; the reference stays where it is
       }
       try {
-        await this.armAlarm(expiresAt);
+        // Re-homed from the deleted `cleanupExpiredRecovery`, same reason as in
+        // `releaseIfIdle`: nothing polls a watcher while the state is
+        // `recoverable`, and the container it watched is gone.
+        this.clearWatchers();
+      } catch {
+        /* best effort */
+      }
+      try {
+        await this.armAlarm(null);
       } catch {
         /* best effort */
       }
@@ -2440,12 +2356,17 @@ export class ThreadComputeService {
     } catch {
       /* best effort */
     }
-    // The slot IS free — the container is destroyed. Leaving the ledger row
-    // behind would over-count the workspace cap until its TTL lapses.
+    // The slot is free either way, but WHICH transition depends on whether a
+    // machine survived. A recovery reference means a hibernated sprite (or a
+    // snapshot) still exists: `idle` keeps the row so the reconciler can account
+    // for it. No reference means the container is genuinely gone: `forget`.
+    // Getting this backwards is the difference between a row that outlives its
+    // machine and a machine the reaper deletes.
     try {
-      await this.deps.quota?.release();
+      if (recovery) await this.deps.quota?.idle();
+      else await this.deps.quota?.forget();
     } catch {
-      /* best effort; the row expires at its TTL */
+      /* best effort; the reconciler is the backstop */
     }
   }
 
@@ -2494,14 +2415,14 @@ export class ThreadComputeService {
       });
       released = true;
       if (!recovery) throw new ComputeError("provider_transient", "missing_recovery_reference");
-      const expiresAt = now + this.deps.config.recoveryTtlMs;
-      this.deps.store.markRecoverable(recovery, now, expiresAt);
-      await this.deps.quota?.release();
-      await this.armAlarm(expiresAt);
+      this.deps.store.markRecoverable(recovery, now);
+      await this.deps.quota?.idle();
+      this.clearWatchers();
+      await this.armAlarm(null);
       this.emitLifecycleEvent("release", "active_to_recoverable", "success");
       await this.deps.deliverSystemReminder?.({
         threadId: this.deps.threadId,
-        body: "The thread compute environment was released to free a sandbox slot for another thread. Files were preserved; future commands will restore it.",
+        body: "The agent's compute environment was put to sleep to free a sandbox slot for another agent. Files were preserved; future commands will wake it.",
         mode: "deferred",
       });
       return true;
@@ -2539,9 +2460,6 @@ export class ThreadComputeService {
     if (this.deps.attachedRuntime) throw new Error("compute_not_owner");
     if ((await this.deps.hasBlockingWork?.()) === true) throw new Error("compute_children_active");
     const state = this.deps.store.getComputeState();
-    if (state && (await this.cleanupExpiredRecovery(this.deps.now()))) {
-      return { ok: true, terminated: true, stoppedProcesses: 0 };
-    }
     const reference = state?.status === "active" ? state.runtimeRef : state?.recoveryRef;
     if (!reference) return { ok: true, terminated: false, alreadyGone: true };
     const running = this.deps.store
@@ -2567,7 +2485,9 @@ export class ThreadComputeService {
     });
     this.clearWatchers();
     this.deps.store.markAbsent(now);
-    await this.deps.quota?.release();
+    // `forget`: this is one of only two paths that DESTROY the machine (the
+    // other is agent deletion), so the row must go with it.
+    await this.deps.quota?.forget();
     await this.clearLifecycleState();
     await this.deps.clearAlarm?.(this.deps.now());
     await this.deps.deliverSystemReminder?.({
@@ -2687,16 +2607,6 @@ export class ThreadComputeService {
     return { files, totalBytes: total };
   }
 
-  /**
-   * Drop this thread's ledger row unconditionally. Used by thread destroy: the
-   * DO (and its thread_index row) is about to disappear, so a surviving row
-   * would consume a workspace slot AND keep being handed to `reclaimContainer`
-   * as a candidate that can never answer.
-   */
-  async releaseQuotaSlot(): Promise<void> {
-    await this.deps.quota?.release();
-  }
-
   async isComputeLive(): Promise<boolean> {
     const state = this.deps.store.getComputeState();
     return Boolean(
@@ -2742,13 +2652,6 @@ export class ThreadComputeService {
     this.clearWatchers();
     await this.clearLifecycleState();
     await this.deps.clearAlarm?.(this.deps.now());
-  }
-
-  async cleanupExpiredRecoverableCompute(): Promise<void> {
-    // A turn may clean up an expired recovery, but must not restore a live
-    // sandbox until an actual compute or file operation calls ensureRuntime.
-    if (this.deps.attachedRuntime) return;
-    await this.cleanupExpiredRecovery(this.deps.now());
   }
 
   /** DEBUG: provider-neutral raw backend status for a process (diagnose exit detection). */
@@ -2886,9 +2789,9 @@ export class ThreadComputeService {
    * and `stopProcessDirect` already refuse to take; this was the last path
    * still taking it.
    *
-   * The one thing the gate did protect is handled explicitly instead: see the
-   * in-flight check in `cleanupExpiredRecovery`, which stops an interleaving
-   * alarm from destroying the very snapshot a restore is reading.
+   * The one thing the gate did protect — an alarm destroying the very snapshot
+   * a restore was reading — is gone with the TTL destroy itself: nothing
+   * outside agent deletion destroys a recovery reference any more.
    */
   private async ensureRuntime(): Promise<BackendReference> {
     if (this.deps.attachedRuntime) {
@@ -2937,7 +2840,6 @@ export class ThreadComputeService {
 
   private async readOrAcquireRuntime(): Promise<BackendReference> {
     const now = this.deps.now();
-    await this.cleanupExpiredRecovery(now, { fromAcquisition: true });
     const state = this.deps.store.getComputeState();
     if (
       this.deps.config.provider === "daytona" &&
@@ -2973,6 +2875,12 @@ export class ThreadComputeService {
       admitted = true;
       const runtime = await this.deps.backend.acquire(spec, recovery ?? undefined);
       this.deps.store.markActive(runtime, this.deps.now());
+      // IMMEDIATELY after the provider answers, and before anything that can
+      // throw. This is the only moment the machine's provider-side name is
+      // knowable, and the orphan reconciler DELETES every machine it cannot
+      // find a name for — so a `recordRuntime` skipped by an intervening
+      // failure is a sprite scheduled for deletion, not merely one that bills.
+      await this.deps.quota?.recordRuntime(runtime);
       // The ONE genuine provision site, and so the only place a nonce is ever
       // written. Both branches below are a brand-new container on the provider:
       // a fresh acquire obviously, and a recovery restore too — `release()`
@@ -3053,13 +2961,23 @@ export class ThreadComputeService {
       return runtime;
     } catch (error) {
       if (admitted) {
-        // Never leave a ledger row for a container that does not exist: if
-        // admit() succeeded but the backend acquire then failed, the slot must
-        // be freed immediately rather than left to expire after a full TTL.
+        // Free the slot, but the TRANSITION depends on what we were doing.
+        //
+        // A restore (`recovery` present) was WAKING a machine that already
+        // exists and still does — the wake is what failed. `forget` there would
+        // delete the row of a live, hibernated sprite holding the agent's
+        // filesystem, and the orphan reconciler would then delete the sprite:
+        // an unrecoverable loss caused by a transient wake failure. Go back to
+        // `idle`, exactly where it was.
+        //
+        // A fresh acquire that failed may still have stranded a half-created
+        // machine, but nothing here can name it; `forget` is honest about the
+        // row, and the reconciler is the backstop that reaps the strand.
         try {
-          await this.deps.quota?.release();
+          if (recovery) await this.deps.quota?.idle();
+          else await this.deps.quota?.forget();
         } catch {
-          // A failing release must not mask the original acquire error.
+          // A failing ledger write must not mask the original acquire error.
         }
       }
       if (!recovery) {
@@ -3570,57 +3488,24 @@ export class ThreadComputeService {
   }
 
   /**
-   * @param fromAcquisition True only for the call `readOrAcquireRuntime` makes
-   * on its own way in, which runs BEFORE it decides whether to restore and so
-   * is never the racing caller this guards against.
+   * THERE IS NO RECOVERY EXPIRY ANY MORE — deliberately, and this comment is
+   * the tombstone of the function that used to enforce one.
    *
-   * Every other caller is a different DO event — an alarm, a tick, a route —
-   * and one of those landing mid-restore is the hazard. A restore does not move
-   * the status off `recoverable` while it runs (`markAcquiring` fires only on
-   * the fresh-acquire branch, by design), so a TTL expiring during one would
-   * otherwise destroy the very backup the restore is reading, losing the
-   * workspace.
+   * `cleanupExpiredRecovery` destroyed the recovery reference once
+   * `recoveryExpiresAt` passed, and on sprites that DELETE was the only thing
+   * that ever ended a sprite's storage billing. Since P3 the box belongs to the
+   * agent and its filesystem persists until the agent is deleted, so a TTL
+   * destroy would silently throw away the accumulated state of every thread of
+   * that agent, roughly a day after the last one stopped working.
    *
-   * `blockConcurrencyWhile` used to make that unreachable by queueing the alarm
-   * behind the acquisition; `ensureRuntime` no longer holds that gate, so the
-   * exclusion is stated here instead. Skipping is safe: the recovery is about
-   * to become `active`, and a failed restore leaves the latch clear for the
-   * next tick to re-run this.
+   * Its bookkeeping was not deleted with it. `stopRunningProcesses` is
+   * re-homed: both paths into `recoverable` (`releaseIfIdle` and
+   * `settleDestroyedRuntime`) already ran it at the moment of release, which is
+   * where the processes actually died. `clearWatchers` is re-homed to the same
+   * two sites — it had no caller on the release path at all, so a watcher row
+   * survived into `recoverable` and, until the TTL fired, could poll a process
+   * on a container that no longer existed.
    */
-  private async cleanupExpiredRecovery(
-    now: number,
-    { fromAcquisition = false }: { fromAcquisition?: boolean } = {},
-  ): Promise<boolean> {
-    if (this.acquisitionInFlight && !fromAcquisition) return false;
-    const state = this.deps.store.getComputeState();
-    if (
-      state?.status !== "recoverable" ||
-      !state.recoveryRef ||
-      state.recoveryExpiresAt === null ||
-      state.recoveryExpiresAt > now
-    )
-      return false;
-    try {
-      await this.deps.backend.destroy(state.recoveryRef);
-    } catch (error) {
-      if (!this.isRuntimeMissing(error)) throw error;
-    }
-    await this.stopRunningProcesses(now, {
-      deliver: true,
-      detail: "process stopped (recovery window expired)",
-    });
-    this.clearWatchers();
-    this.deps.store.markAbsent(now);
-    await this.clearLifecycleState();
-    await this.deps.clearAlarm?.(this.deps.now());
-    this.emitLifecycleEvent("recovery_expiry", "recoverable_to_absent", "success");
-    await this.deps.deliverSystemReminder?.({
-      threadId: this.deps.threadId,
-      body: EXPIRED_RECOVERY_REMINDER,
-      mode: "deferred",
-    });
-    return true;
-  }
 
   private async markRuntimeMissing(): Promise<void> {
     const now = this.deps.now();
@@ -3630,9 +3515,9 @@ export class ThreadComputeService {
     });
     this.clearWatchers();
     this.deps.store.markAbsent(now);
-    // The container is gone: its ledger row must go too, or it holds a phantom
-    // slot for the rest of its TTL.
-    await this.deps.quota?.release();
+    // The container is gone from the provider's side: its ledger row must go
+    // too, or it holds a phantom slot forever — the row no longer expires.
+    await this.deps.quota?.forget();
     await this.clearLifecycleState();
     await this.deps.clearAlarm?.(this.deps.now());
     await this.deps.deliverSystemReminder?.({

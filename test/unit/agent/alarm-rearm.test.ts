@@ -12,6 +12,7 @@ import {
 } from "../../../src/agent/work-ledger";
 import { FakeComputeBackend } from "../../../src/compute/backends/fake";
 import { DEFAULT_COMPUTE_LIMITS } from "../../../src/compute/config";
+import type { AgentSandboxGate } from "../../../src/compute/agent-sandbox-quota";
 import { ThreadComputeService } from "../../../src/compute/thread-service";
 import type { ThreadComputeStoreLike } from "../../../src/compute/thread-service";
 import type { EffectiveComputeConfig } from "../../../src/compute/types";
@@ -147,7 +148,7 @@ function setup(input: {
   supportsProcessMonitor?: boolean;
   store?: ThreadComputeStoreLike;
   backend?: FakeComputeBackend;
-  quota?: { admit(): Promise<void>; refresh(): Promise<boolean>; release(): Promise<void> };
+  quota?: AgentSandboxGate;
   /** Wire the REAL ledger sink into the service (drives real register/stamp/terminalize). */
   ledger?: ReturnType<typeof memoryLedger>;
 }) {
@@ -255,13 +256,14 @@ describe("sandbox compute alarm re-arm gate", () => {
     // unguarded D1 write on an active container. A throw there propagates out
     // of the tick having armed nothing at all.
     const failRefresh = { value: false };
-    const quota = {
+    const quota: AgentSandboxGate = {
       admit: async () => undefined,
+      recordRuntime: async () => undefined,
       refresh: async () => {
         if (failRefresh.value) throw new Error("d1_write_failed");
-        return true;
       },
-      release: async () => undefined,
+      idle: async () => undefined,
+      forget: async () => undefined,
     };
     const { host, service, scheduleEviction } = setup({ now, rows, quota });
 
@@ -455,13 +457,14 @@ describe("sandbox compute alarm re-arm gate", () => {
       }),
     ];
     const failRefresh = { value: false };
-    const quota = {
+    const quota: AgentSandboxGate = {
       admit: async () => undefined,
+      recordRuntime: async () => undefined,
       refresh: async () => {
         if (failRefresh.value) throw new Error("d1_write_failed");
-        return true;
       },
-      release: async () => undefined,
+      idle: async () => undefined,
+      forget: async () => undefined,
     };
     const { host, service, scheduleEviction } = setup({ now, rows, quota });
 
@@ -493,13 +496,14 @@ describe("sandbox compute alarm re-arm gate", () => {
     const now = { value: 1_000 };
     const rows: WorkRow[] = [];
     const failRefresh = { value: false };
-    const quota = {
+    const quota: AgentSandboxGate = {
       admit: async () => undefined,
+      recordRuntime: async () => undefined,
       refresh: async () => {
         if (failRefresh.value) throw new Error("d1_write_failed");
-        return true;
       },
-      release: async () => undefined,
+      idle: async () => undefined,
+      forget: async () => undefined,
     };
     const { host, service, scheduleEviction } = setup({ now, rows, quota });
 

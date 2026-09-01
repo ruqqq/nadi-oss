@@ -69,7 +69,7 @@ export function createMemoryComputeStore(): ThreadComputeStoreLike {
     markReleasing: (now) => {
       if (state) state = { ...state, status: "releasing", releaseAt: now };
     },
-    markRecoverable: (recoveryRef, now, recoveryExpiresAt) => {
+    markRecoverable: (recoveryRef, now) => {
       state = {
         ...base(now),
         status: "recoverable",
@@ -77,7 +77,7 @@ export function createMemoryComputeStore(): ThreadComputeStoreLike {
         providerConfig: state?.providerConfig ?? null,
         runtimeRef: null,
         recoveryRef,
-        recoveryExpiresAt,
+        recoveryExpiresAt: null,
         lastUsedAt: now,
       };
     },

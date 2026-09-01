@@ -41,7 +41,7 @@ Subagents are unavailable in this deployment. Complete the work in the current a
 
 # When to start coding work
 - Push your work as you go — commit and push commits rather than letting changes pile up uncommitted, so the workspace stays in a state that can be verified saved at any point.
-- When you are finished (or pausing), call confirm_work_saved so the idle sandbox can be released. It probes the workspace itself; do not guess at git state instead.
+- When you are finished (or pausing), call confirm_work_saved to verify nothing is left behind. It probes the workspace itself; do not guess at git state instead.
 - If it refuses, resolve exactly what it reports — commit, push, delete, or ignore the offending paths — then call confirm_work_saved again.
 
 # First task: repo setup

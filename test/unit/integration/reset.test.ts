@@ -71,9 +71,9 @@ describe("integration reset harness", () => {
     expect(database.batches).toHaveLength(1);
     expect(database.batches[0]?.slice(0, 2)).toEqual([
       "DELETE FROM automaton_runs",
-      "DELETE FROM active_containers",
+      "DELETE FROM archived_compaction",
     ]);
-    expect(database.batches[0]).toHaveLength(44);
+    expect(database.batches[0]).toHaveLength(43);
     expect(database.batches[0]).toContain("DELETE FROM artifacts");
     expect(database.batches[0]?.at(-1)).toBe("DELETE FROM users");
   });

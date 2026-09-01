@@ -1,7 +1,6 @@
-import { and, eq, isNull } from "drizzle-orm";
 import type { Env } from "../env";
 import { validateRequestSession, type ValidatedSession } from "../auth/session";
-import { registryDb } from "../db/client";
+import { registryBinding, registryDb } from "../db/client";
 import { AgentRepository, type AgentRepositoryEntry } from "../db/repositories/agents";
 import type { ProjectStatus } from "../db/repositories/projects";
 import { WorkspaceRepository } from "../db/repositories/workspaces";
@@ -13,7 +12,7 @@ import {
 } from "../compute/env-vars";
 import { ComputeEnvSecretsStore } from "../compute/env-secrets";
 import { createWorkspaceSecretsServices } from "../secrets";
-import { threadIndex, type AgentConfig, type AgentRepositoryRow } from "../db/schema";
+import { type AgentConfig, type AgentRepositoryRow } from "../db/schema";
 import { log } from "../log";
 import { resolveAgentScope } from "./agent-scope";
 import { AgentSettingsRepository } from "../db/repositories/agent-settings";
@@ -24,6 +23,14 @@ import {
   validateSandboxDomain,
 } from "../compute/config";
 import type { ComputeResourceProfile } from "../compute/backend";
+import { AgentSandboxLedger } from "../compute/agent-sandbox-ledger";
+
+interface AgentSandboxDeletionStub {
+  destroyForAgentDeletion(input: {
+    workspaceId: string;
+    agentId: string;
+  }): Promise<{ destroyed: boolean; reason?: string }>;
+}
 
 type AgentBody = {
   name?: unknown;
@@ -261,78 +268,53 @@ async function updateAgent(req: Request, env: Env, agentId: string): Promise<Res
   return Response.json({ agent: summary });
 }
 
-/** How many thread sandboxes are torn down at once when an agent is deleted. */
-const AGENT_DELETION_SHUTDOWN_CONCURRENCY = 4;
-
-interface AgentDeletionShutdownStub {
-  shutdownComputeForAgentDeletion(): Promise<{ shutdown: boolean; reason?: string }>;
-}
-
 /**
  * "Delete this agent and its machine. Its files are destroyed."
  *
- * The machine is still keyed per THREAD in this phase, so the agent's machine
- * is every LIVE sandbox belonging to its threads. Archived threads are skipped
- * because archiving a thread already destroyed its DO — and `destroy()` runs
- * `teardownThreadBeforeDestroy`, which shuts the sandbox down — so there is
- * nothing left of theirs to reap.
+ * ONE call to ONE Durable Object, addressed by AGENT id. It used to walk the
+ * agent's non-archived threads and shut each one's sandbox down, which was
+ * right only while the box was keyed by thread. Since P3 it is wrong in both
+ * directions: every thread pointed at the SAME machine, so the walk was N
+ * attempts at one box; and an agent whose threads had all been archived walked
+ * zero threads and returned early, leaving a live sprite with nothing left that
+ * could ever reach it — a machine billing forever, for an agent the user
+ * believes they deleted.
  *
- * MUST be `getAgentByName`, not a raw `idFromName` stub: the raw stub skips
- * `onStart()` (see `automata/fire-due.ts`). Imported DYNAMICALLY for the reason
- * `compute-tools.ts` documents on its own `reclaim`: `agents` touches
- * `cloudflare:workers` at module load, which the plain-node unit environment
- * cannot resolve, and a static import here breaks every unit test that imports
- * this module for its parsers alone (test/unit/http/agent-routes.test.ts).
+ * The ledger row is dropped here too, unconditionally and even when the DO
+ * refused. `execShutdown` throws `compute_children_active` while a subagent
+ * holds a lease, and it is the archive — not the teardown — that stops new
+ * work, so the delete must not be blocked on it. Dropping the row makes the box
+ * an ORPHAN by definition, which is exactly what the reconciler is for: it is
+ * the only thing left that can collect a sprite whose agent is gone. Keeping
+ * the row instead would leave the sprite accounted-for, and therefore never
+ * reaped, forever.
  *
- * Best-effort by construction. Every failure is logged and none is raised: a
- * thread whose DO cannot be reached must not leave the user unable to delete
- * the agent, and the archive that follows is what actually stops new work.
+ * Best-effort by construction. Every failure is logged and none is raised.
  */
-async function destroyAgentSandboxes(env: Env, agentId: string): Promise<void> {
-  const threads = await registryDb(env)
-    .select({ id: threadIndex.id })
-    .from(threadIndex)
-    .where(and(eq(threadIndex.agentId, agentId), isNull(threadIndex.archivedAt)))
-    .all();
-  if (threads.length === 0) return;
-
-  const { getAgentByName } = await import("agents");
-  const queue = threads.map((thread) => thread.id);
-  const workers = Array.from(
-    { length: Math.min(AGENT_DELETION_SHUTDOWN_CONCURRENCY, queue.length) },
-    async () => {
-      for (let threadId = queue.pop(); threadId !== undefined; threadId = queue.pop()) {
-        try {
-          const stub = (await getAgentByName(
-            env.THINK_THREAD_AGENT,
-            threadId,
-          )) as unknown as AgentDeletionShutdownStub;
-          const result = await stub.shutdownComputeForAgentDeletion();
-          // EVERY non-shutdown is logged, `compute_disabled` included. That
-          // reason used to be filtered out as uninteresting, and filtering it
-          // is precisely what would have made "delete an agent you disabled
-          // first destroys nothing" ship in silence: the teardown resolved as
-          // ordinary work, the disabled-agent gate returned null, and the one
-          // line that would have said so was suppressed. A teardown that
-          // decides to do nothing must say that it decided to do nothing.
-          if (!result.shutdown) {
-            log.warn("agent_routes.delete_sandbox_not_shutdown", {
-              agentId,
-              threadId,
-              reason: result.reason,
-            });
-          }
-        } catch (error) {
-          log.warn("agent_routes.delete_sandbox_failed", {
-            agentId,
-            threadId,
-            error: String(error),
-          });
-        }
-      }
-    },
-  );
-  await Promise.all(workers);
+async function destroyAgentSandbox(env: Env, workspaceId: string, agentId: string): Promise<void> {
+  try {
+    const stub = env.AGENT_SANDBOX.get(
+      env.AGENT_SANDBOX.idFromName(agentId),
+    ) as unknown as AgentSandboxDeletionStub;
+    const result = await stub.destroyForAgentDeletion({ workspaceId, agentId });
+    // EVERY non-destroy is logged, `compute_disabled` included. That reason was
+    // once filtered out as uninteresting, and filtering it is precisely what
+    // would make "delete an agent you disabled first destroys nothing" ship in
+    // silence. A teardown that decides to do nothing must say so.
+    if (!result.destroyed) {
+      log.warn("agent_routes.delete_sandbox_not_destroyed", {
+        agentId,
+        reason: result.reason,
+      });
+    }
+  } catch (error) {
+    log.warn("agent_routes.delete_sandbox_failed", { agentId, error: String(error) });
+  }
+  try {
+    await new AgentSandboxLedger(registryBinding(env)).remove(agentId);
+  } catch (error) {
+    log.warn("agent_routes.delete_sandbox_ledger_failed", { agentId, error: String(error) });
+  }
 }
 
 async function archiveAgent(req: Request, env: Env, agentId: string): Promise<Response> {
@@ -356,7 +338,7 @@ async function archiveAgent(req: Request, env: Env, agentId: string): Promise<Re
     // The window this leaves — a turn acquiring a box between the teardown and
     // the write — is milliseconds wide and closes permanently the moment the
     // row lands, since nothing can acquire compute for an archived agent.
-    await destroyAgentSandboxes(env, agentId);
+    await destroyAgentSandbox(env, agent.workspaceId, agentId);
   }
 
   await repo.archive(agentId, Date.now());

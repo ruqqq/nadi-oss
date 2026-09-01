@@ -785,7 +785,14 @@ export class ThreadComputeStore {
     });
   }
 
-  markRecoverable(recoveryRef: BackendReference, now: number, recoveryExpiresAt: number): void {
+  /**
+   * `recovery_expires_at` is written NULL, always, and the parameter that used
+   * to set it is gone. A recovery no longer expires: the box belongs to the
+   * agent and its filesystem persists until the agent is deleted, so the only
+   * thing an expiry could still do is destroy it. The column stays so a record
+   * written by the previous deployment stays parseable — nothing reads it.
+   */
+  markRecoverable(recoveryRef: BackendReference, now: number): void {
     const current = this.getComputeState();
     this.writeState({
       ...this.baseState(current, now),
@@ -794,7 +801,7 @@ export class ThreadComputeStore {
       providerConfig: current?.providerConfig ?? null,
       runtimeRef: null,
       recoveryRef,
-      recoveryExpiresAt,
+      recoveryExpiresAt: null,
       errorCode: null,
       errorDetail: null,
     });

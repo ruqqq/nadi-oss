@@ -230,40 +230,6 @@ export const workspaceSandboxSettings = sqliteTable("workspace_sandbox_settings"
     .default(sql`(unixepoch() * 1000)`),
 });
 
-/**
- * Cross-thread ledger of live containers. Cloudflare exposes no way to
- * enumerate containers by tenant, and per-thread compute state lives inside
- * each thread's DO SQLite, so this is the only place a workspace's concurrent
- * container count is visible.
- *
- * The DO's `compute_state` stays authoritative; this is a claim about reality
- * that is deliberately built to tolerate being stale — `expires_at` bounds how
- * long a leaked row can consume a slot.
- *
- * NOT dropped by the agent/workbench merge (Task 1): the merge plan calls for
- * this to be replaced by `agent_sandboxes`, whose unit of admission is a live
- * AGENT rather than a thread-with-a-container. That rewire touches
- * `container-ledger.ts`, `container-quota.ts`, `compute-tools.ts`, and the
- * TTL/reclaim/idle-release machinery threaded through `thread-service.ts` —
- * scoped out of Task 1 as larger than a schema change; see the Task 1 report.
- */
-export const activeContainers = sqliteTable(
-  "active_containers",
-  {
-    threadId: text("thread_id").primaryKey(),
-    workspaceId: text("workspace_id").notNull(),
-    provider: text("provider").notNull(),
-    profile: text("profile").notNull(),
-    lastUsedAt: integer("last_used_at").notNull(),
-    expiresAt: integer("expires_at").notNull(),
-  },
-  (table) => ({
-    byWorkspace: index("idx_active_containers_ws").on(table.workspaceId, table.expiresAt),
-  }),
-);
-
-export type ActiveContainerRow = typeof activeContainers.$inferSelect;
-
 export const workspacePrivacySettings = sqliteTable("workspace_privacy_settings", {
   workspaceId: text("workspace_id")
     .primaryKey()
@@ -494,24 +460,39 @@ export const agentRepositories = sqliteTable(
 );
 
 /**
- * One row per agent's sandbox. Replaces the concurrency accounting that
- * `active_containers` used to do (see the note on {@link activeContainers}) —
- * the new admission unit is a live AGENT, not a thread-with-a-container.
- * `activeContainers` and its readers (`container-ledger.ts`,
- * `container-quota.ts`, `compute-tools.ts`) are NOT rewired in this task; see
- * the Task 1 report for why that rewire was scoped out.
+ * One row per agent's sandbox. Replaces `active_containers`, dropped in the
+ * same migration: the admission unit is a live AGENT, not a
+ * thread-with-a-container, and the lease no longer expires.
+ *
+ * A ROW MEANS A MACHINE MAY EXIST. There is no "destroyed" status — a destroyed
+ * box has no row — and the orphan reconciler reaps exactly the provider-side
+ * sprites it cannot find a row for. A disabled agent still has its row, which is
+ * what keeps its hibernating box off the reaper's list.
+ *
+ * `status` (`acquiring` | `active` | `idle`) answers CONCURRENCY, not existence:
+ * only the first two consume a workspace slot. See `AgentSandboxLedger`.
+ *
+ * There is deliberately no `workspace_id`: the agent already carries it, and a
+ * copy here would be a second answer that can disagree. Workspace-scoped
+ * queries JOIN `agents`.
  */
-export const agentSandboxes = sqliteTable("agent_sandboxes", {
-  agentId: text("agent_id")
-    .primaryKey()
-    .references(() => agents.id),
-  provider: text("provider").notNull(),
-  spriteName: text("sprite_name"),
-  status: text("status").notNull(),
-  generation: text("generation"),
-  createdAt: integer("created_at").notNull(),
-  lastUsedAt: integer("last_used_at"),
-});
+export const agentSandboxes = sqliteTable(
+  "agent_sandboxes",
+  {
+    agentId: text("agent_id")
+      .primaryKey()
+      .references(() => agents.id),
+    provider: text("provider").notNull(),
+    spriteName: text("sprite_name"),
+    status: text("status").notNull(),
+    generation: text("generation"),
+    createdAt: integer("created_at").notNull(),
+    lastUsedAt: integer("last_used_at"),
+  },
+  (table) => ({
+    byStatus: index("idx_agent_sandboxes_status").on(table.status, table.lastUsedAt),
+  }),
+);
 
 export const threadIndex = sqliteTable(
   "thread_index",

@@ -110,7 +110,7 @@ const CLOUDFLARE_ONLY_VARS = {
   // The three above are a DECISION as of celld v0.4.0, which does implement R2
   // — see the note in CLOUDFLARE_ONLY_BINDINGS — not a missing binding.
   SANDBOX_TRANSPORT: "Cloudflare Sandbox container transport; celld has no containers",
-  MAX_ACTIVE_CONTAINERS_PER_WORKSPACE: "caps Cloudflare containers; celld has none",
+  MAX_ACTIVE_AGENT_SANDBOXES_PER_WORKSPACE: "caps concurrent agent sandboxes; celld has none",
   WORKERS_AI_EMAILS: "Workers AI provider allowlist; celld has no AI binding",
   ATTACHMENT_EXTRACTION: "vision + toMarkdown extraction; needs the AI binding",
   VOICE_INPUT_ENABLED:

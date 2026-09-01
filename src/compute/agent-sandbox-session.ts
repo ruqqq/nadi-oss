@@ -251,9 +251,6 @@ export class SandboxSession extends RpcTarget {
   releaseIfReclaimable(): Call<"releaseIfReclaimable"> {
     return guard(() => this.service.releaseIfReclaimable());
   }
-  releaseQuotaSlot(): Call<"releaseQuotaSlot"> {
-    return guard(() => this.service.releaseQuotaSlot());
-  }
   isComputeLive(): Call<"isComputeLive"> {
     return guard(() => this.service.isComputeLive());
   }
@@ -262,9 +259,6 @@ export class SandboxSession extends RpcTarget {
   }
   destroyRecoverableComputeIfPresent(): Call<"destroyRecoverableComputeIfPresent"> {
     return guard(() => this.service.destroyRecoverableComputeIfPresent());
-  }
-  cleanupExpiredRecoverableCompute(): Call<"cleanupExpiredRecoverableCompute"> {
-    return guard(() => this.service.cleanupExpiredRecoverableCompute());
   }
 
   // --- debug ---

@@ -334,6 +334,13 @@ export class DaytonaComputeBackend implements ComputeBackend {
     return this.recoveryReference(sandboxId);
   }
 
+  /** {@link ComputeBackend.externalRuntimeId} — Daytona's sandbox id. */
+  externalRuntimeId(reference: BackendReference): string | null {
+    const parsed = daytonaReferenceSchema.safeParse(reference);
+    if (!parsed.success || parsed.data.payload.kind === "process") return null;
+    return parsed.data.payload.sandboxId;
+  }
+
   async destroy(reference: BackendReference): Promise<void> {
     const parsed = daytonaReferenceSchema.parse(reference);
     if (parsed.payload.kind === "process") {

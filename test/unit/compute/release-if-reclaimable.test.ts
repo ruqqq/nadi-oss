@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { FakeComputeBackend } from "../../../src/compute/backends/fake";
 import { DEFAULT_COMPUTE_LIMITS } from "../../../src/compute/config";
-import { RECLAIM_MIN_IDLE_MS, type ComputeQuotaGate } from "../../../src/compute/container-quota";
+import {
+  RECLAIM_MIN_IDLE_MS,
+  type AgentSandboxGate,
+} from "../../../src/compute/agent-sandbox-quota";
 import { ThreadComputeService } from "../../../src/compute/thread-service";
 import type { EffectiveComputeConfig } from "../../../src/compute/types";
 import { createMemoryComputeStore } from "./helpers/memory-store";
@@ -23,7 +26,7 @@ const CONFIG: EffectiveComputeConfig = {
 
 function makeService(input?: {
   attachedRuntime?: Awaited<ReturnType<FakeComputeBackend["acquire"]>>;
-  quota?: ComputeQuotaGate;
+  quota?: AgentSandboxGate;
 }) {
   const backend = new FakeComputeBackend();
   const store = createMemoryComputeStore();
@@ -100,11 +103,13 @@ describe("releaseIfReclaimable", () => {
   });
 
   it("REGRESSION (C1): rolls back to active (never discards) when the recoverable release fails", async () => {
-    const release = vi.fn(async () => {});
-    const quota: ComputeQuotaGate = {
+    const idle = vi.fn(async () => {});
+    const quota: AgentSandboxGate = {
       admit: async () => {},
-      refresh: async () => true,
-      release,
+      recordRuntime: async () => {},
+      refresh: async () => {},
+      idle,
+      forget: async () => {},
     };
     const { service, backend, store, goIdle } = makeService({ quota });
     await service.exec({ command: "echo hi" });
@@ -114,19 +119,21 @@ describe("releaseIfReclaimable", () => {
     expect(await service.releaseIfReclaimable()).toBe(false);
     expect(store.getComputeState()?.status).toBe("active");
     expect(backend.destroyCalls).toHaveLength(0);
-    expect(release).not.toHaveBeenCalled();
+    expect(idle).not.toHaveBeenCalled();
   });
 
   it("REGRESSION (N1): keeps the backup reachable when a step AFTER a successful backup fails", async () => {
     // The backup was written and the container destroyed; the ledger delete then
     // fails. Rolling back to `active` here would null recoveryRef and strand the
     // ONLY reference to the user's uncommitted /workspace work.
-    const quota: ComputeQuotaGate = {
+    const quota: AgentSandboxGate = {
       admit: async () => {},
-      refresh: async () => true,
-      release: async () => {
+      recordRuntime: async () => {},
+      refresh: async () => {},
+      idle: async () => {
         throw new Error("d1 unavailable");
       },
+      forget: async () => {},
     };
     const { service, backend, store, goIdle } = makeService({ quota });
     await service.exec({ command: "echo hi" });

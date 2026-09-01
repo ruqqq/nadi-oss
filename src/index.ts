@@ -12,6 +12,7 @@ import { CRON_LAST_DAILY_RUN_KEY, CRON_LAST_TICK_KEY, stampCronRun } from "./cel
 import { autoArchiveIdleThreads } from "./agent/auto-archive";
 import { AUTOMATA_CRON, fireDueAutomata } from "./automata/fire-due";
 import { repairStaleThreadSearchProjections } from "./thread-knowledge/repair";
+import { reconcileOrphanSprites } from "./compute/sprite-reconciler";
 export { ThinkThreadAgent } from "./agent/think-thread-agent";
 export { SubAgent } from "./agent/subagent";
 export { WorkspaceMcpAgent } from "./agent/workspace-mcp-agent";
@@ -134,6 +135,17 @@ export default {
     log.info("worker.scheduled.auto_archive", result);
     const repairResult = await repairStaleThreadSearchProjections(env);
     log.info("worker.scheduled.thread_search_repair", repairResult);
+    // Nothing auto-destroys a sprite since P3, so a crashed acquire strands one
+    // that bills forever. This is the only thing that collects those; it never
+    // touches a sprite the ledger knows about, in any status.
+    try {
+      const reconcileResult = await reconcileOrphanSprites(env);
+      log.info("worker.scheduled.sprite_reconcile", { ...reconcileResult });
+    } catch (error) {
+      // Never let a provider blip stop the daily sweep from stamping: the
+      // reconciler is a backstop, and the auto-archive above already ran.
+      log.warn("worker.scheduled.sprite_reconcile_failed", { error: String(error) });
+    }
     // Stamped only after the sweep succeeds: a throw above leaves the marker
     // untouched, so the endpoint shows the last run that actually completed.
     await stampCronRun(env, CRON_LAST_DAILY_RUN_KEY, controller.scheduledTime);

@@ -31,10 +31,11 @@ Cloudflare's vault and bound to the Worker at deploy time.
   The backend infers the mode from secret-metadata presence — no stored
   configuration state needed.
 
-- **Quota gating.** System mode is quota-gated by `MAX_ACTIVE_CONTAINERS_PER_WORKSPACE`
-  in the D1 ledger (`src/compute/container-ledger.ts`). When a workspace hits the
-  cap, the least-recently-used idle container is reclaimed before the request is
-  refused. BYOK workspaces use sprites.dev's native concurrency limits (the plan
+- **Quota gating.** System mode is quota-gated by
+  `MAX_ACTIVE_AGENT_SANDBOXES_PER_WORKSPACE` in the D1 ledger
+  (`src/compute/agent-sandbox-ledger.ts`). The unit is a concurrently live
+  AGENT. When a workspace hits the cap, the least-recently-used active box is
+  asked to hibernate before the request is refused. BYOK workspaces use sprites.dev's native concurrency limits (the plan
   your account holds caps the number of concurrently RUNNING sprites); the
   application quota is only enforced for system-provided keys.
 

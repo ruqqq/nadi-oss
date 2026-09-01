@@ -42,6 +42,24 @@ import { WORKSPACE_ROOT } from "../workspace-layout";
  * sentinel — the file may only bring an exit FORWARD, never invent one.
  */
 
+/**
+ * Name prefix for every sprite this deployment creates, and the ONLY set of
+ * names the orphan reconciler is allowed to delete.
+ *
+ * It is deliberately not the old `nadi-` prefix. Sprites created before P3 have
+ * no `agent_sandboxes` row and never will — nothing wakes a hibernated box to
+ * backfill one — so a reconciler that reaped every unknown `nadi-*` sprite
+ * would, on its first run after this deploy, delete the live filesystem of every
+ * existing user. The prefix is the epoch marker: a sprite carrying it was
+ * created by code that also writes the row, so its absence from the ledger is
+ * real evidence of a strand rather than evidence of an old deploy.
+ *
+ * Consequence, accepted and stated: pre-P3 `nadi-*` sprites are never reaped by
+ * the reconciler. They remain reachable through their owning DO's stored
+ * reference and are deleted by agent deletion like any other.
+ */
+export const RECONCILABLE_SPRITE_PREFIX = "nadi-b1-";
+
 export const SPRITES_PROFILE_MEMORY_MB: Record<ComputeResourceProfile, number> = {
   small: 2048,
   medium: 4096,
@@ -317,12 +335,6 @@ export function buildSpritesWrapper(input: {
 export class SpritesComputeBackend implements ComputeBackend {
   readonly id = "sprites" as const;
   /**
-   * A sprite hibernates on its own ~30s after activity stops and there is no
-   * way to turn that off, so compute billing has already stopped long before
-   * the service's idle timer fires. See `ComputeBackend.nativeIdleSuspend`.
-   */
-  readonly nativeIdleSuspend = true;
-  /**
    * `buildSpritesWrapper` reads `StartProcessInput.completionCallback` and
    * assembles it into the wrapper (see its doc). See
    * `ComputeBackend.consumesCompletionCallback`.
@@ -444,7 +456,7 @@ export class SpritesComputeBackend implements ComputeBackend {
       return this.runtimeReference(spriteName);
     }
 
-    const spriteName = `nadi-${crypto.randomUUID()}`;
+    const spriteName = `${RECONCILABLE_SPRITE_PREFIX}${crypto.randomUUID()}`;
     // Deliberately created with NO `environment`. It does not reach commands
     // (see `runtimeEnv`), so sending it would write every agent secret and
     // the minted `GH_TOKEN` into a provider-side record that nothing ever
@@ -474,6 +486,13 @@ export class SpritesComputeBackend implements ComputeBackend {
     // calls `destroy()` on this reference, and that DELETE is the only thing
     // that ever stops storage billing.
     return this.recoveryReference(spriteName);
+  }
+
+  /** {@link ComputeBackend.externalRuntimeId} — the sprite name, which IS the machine. */
+  externalRuntimeId(reference: BackendReference): string | null {
+    const parsed = spritesReferenceSchema.safeParse(reference);
+    if (!parsed.success || parsed.data.payload.kind === "process") return null;
+    return parsed.data.payload.spriteName;
   }
 
   async destroy(reference: BackendReference): Promise<void> {

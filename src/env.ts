@@ -258,7 +258,7 @@ export interface Env extends Cloudflare.Env {
    * invalid, absent, or non-positive values fall back to
    * DEFAULT_MAX_ACTIVE_CONTAINERS (10).
    */
-  MAX_ACTIVE_CONTAINERS_PER_WORKSPACE?: string;
+  MAX_ACTIVE_AGENT_SANDBOXES_PER_WORKSPACE?: string;
 
   /**
    * Optional number of hours to retain an idle suspended coding sandbox before

@@ -203,6 +203,15 @@ export class FakeComputeBackend implements ComputeBackend {
     return recovery;
   }
 
+  /** {@link ComputeBackend.externalRuntimeId} — the fake runtime id. */
+  externalRuntimeId(reference: BackendReference): string | null {
+    try {
+      return this.referenceRuntimeId(reference);
+    } catch {
+      return null;
+    }
+  }
+
   async destroy(reference: BackendReference): Promise<void> {
     this.destroyCalls.push(reference);
     const runtimeId = this.referenceRuntimeId(reference);

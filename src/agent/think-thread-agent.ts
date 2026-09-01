@@ -1436,7 +1436,6 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
       // that opened it; `onChatResponse` / `onChatError` null it at the end.
       this._turnSandbox = turnSandbox ?? null;
       hasRepositoryWork = threadHasRepositoryWork;
-      await turnSandbox?.service.cleanupExpiredRecoverableCompute();
     } finally {
       this.currentTurnSetupReminders = undefined;
     }
@@ -3293,43 +3292,6 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
     return { steps };
   }
 
-  /**
-   * Destroy this thread's sandbox because its AGENT was deleted.
-   *
-   * "Delete the agent and its machine" is what the danger zone promises, and
-   * the machine is still keyed per THREAD until P3 — so the agent's machine is
-   * every live sandbox belonging to its threads, and the delete route fans out
-   * to one of these per thread.
-   *
-   * Opened with `purpose: "teardown"`, which is LOAD-BEARING and not a
-   * formality. `resolveEffectiveComputeConfig` withholds compute from an agent
-   * that is disabled or archived — correctly, for work — and this method runs
-   * on exactly such an agent. Resolving it as ordinary work returns null, and
-   * "delete an agent you turned off first", which is how people actually
-   * behave, would destroy nothing and say nothing. `"teardown"` lifts those two
-   * gates and only those two; a `sandbox_enabled: false` agent or a
-   * compute-disabled workspace still resolves to null, because in those cases
-   * there is genuinely no machine to reach.
-   *
-   * NEVER THROWS. A DO RPC rejection is awkward to attribute at the caller (see
-   * `docs`/`memory` on phantom rejections), and a single unreachable thread
-   * must not fail the whole delete: the outcome is reported, not raised.
-   */
-  async shutdownComputeForAgentDeletion(): Promise<{ shutdown: boolean; reason?: string }> {
-    try {
-      const resolved = await this.openSandbox(false, "teardown");
-      if (!resolved) return { shutdown: false, reason: "compute_disabled" };
-      await resolved.service.execShutdown({ confirm: true });
-      return { shutdown: true };
-    } catch (error) {
-      log.warn("think_thread.agent_deletion_shutdown_failed", {
-        threadId: this.name,
-        error: String(error),
-      });
-      return { shutdown: false, reason: String(error) };
-    }
-  }
-
   /** Destroy this thread's sandbox (reclaim the org's shared disk quota). */
   async debugShutdown(): Promise<unknown> {
     const resolved = await this.openSandbox();
@@ -4488,7 +4450,6 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
       threadId: this.name,
       logPrefix: "think_thread",
       cancelActiveSubagents: () => this.cancelActiveSubagentsForDestroy(),
-      resolveComputeService: () => this.openSandbox(),
     });
     await super.destroy();
   }

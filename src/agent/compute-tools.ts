@@ -15,15 +15,16 @@ import { resolveComputeEnvVars } from "../compute/env-resolve";
 import { buildComputeBackend } from "../compute/registry";
 import { applyComputeHostTestOverrides } from "../compute/host-test-overrides";
 import { ComputeError } from "../compute/errors";
-import { ContainerLedger } from "../compute/container-ledger";
+import { AgentSandboxLedger } from "../compute/agent-sandbox-ledger";
 import type { DaytonaConfigurationMode } from "../compute/daytona-config";
 import type { SpritesConfigurationMode } from "../compute/sprites-config";
 import {
-  createComputeQuotaGate,
-  parseMaxActiveContainers,
+  createAgentSandboxGate,
+  parseMaxActiveAgentSandboxes,
   RECLAIM_RPC_TIMEOUT_MS,
-  type ComputeQuotaGate,
-} from "../compute/container-quota";
+  UNLIMITED_AGENT_SANDBOXES,
+  type AgentSandboxGate,
+} from "../compute/agent-sandbox-quota";
 import { buildComputeFileToolDefs } from "./compute-file-tools";
 import type { SandboxSessionResolution } from "../compute/agent-sandbox-client";
 import {
@@ -216,10 +217,6 @@ export interface ComputeServiceHostDeps {
   hasBlockingWork?: () => Promise<boolean>;
   /** Clears the "workspace verified clean" bit. Optional — see thread-service.ts. */
   markSandboxDirty?: () => Promise<void>;
-  /** Read side of the "workspace verified clean" bit; drives idle-release disposition. */
-  isSandboxDeclaredClean?: () => Promise<boolean>;
-  /** Git-based cleanliness probe; drives idle-release disposition when the bit isn't set. */
-  probeWorkspaceCleanliness?: () => Promise<WorkspaceCleanliness>;
   /** @internal for tests only — shrinks sync-first exec timing without waiting on real time. */
   execForegroundTimeoutMs?: number;
   /** @internal for tests only — shrinks sync-first exec polling without waiting on real time. */
@@ -493,13 +490,14 @@ export async function resolveComputeService(hostDeps: ComputeServiceHostDeps): P
         undefined,
         effectiveEnv,
       );
-  const quota = buildComputeQuotaGate({
+  const quota = buildAgentSandboxGate({
     env: deps.env,
     effectiveConfig,
     daytonaMode: inputs.daytonaConfiguration?.mode ?? null,
     spritesMode: inputs.spritesConfiguration?.mode ?? null,
     workspaceId,
-    threadId: deps.threadId,
+    agentId,
+    backend,
     now,
   });
   const service = new ThreadComputeService({
@@ -523,10 +521,6 @@ export async function resolveComputeService(hostDeps: ComputeServiceHostDeps): P
     ...(quota ? { quota } : {}),
     ...(deps.hasBlockingWork ? { hasBlockingWork: deps.hasBlockingWork } : {}),
     ...(deps.markSandboxDirty ? { markSandboxDirty: deps.markSandboxDirty } : {}),
-    ...(deps.isSandboxDeclaredClean ? { isSandboxDeclaredClean: deps.isSandboxDeclaredClean } : {}),
-    ...(deps.probeWorkspaceCleanliness
-      ? { probeWorkspaceCleanliness: deps.probeWorkspaceCleanliness }
-      : {}),
     ...(deps.execForegroundTimeoutMs !== undefined
       ? { execForegroundTimeoutMs: deps.execForegroundTimeoutMs }
       : {}),
@@ -578,11 +572,20 @@ export function isQuotaGatedProvider(
 }
 
 /**
- * Builds the per-workspace sandbox cap, for the providers that spend the
- * operator's capacity — see {@link isQuotaGatedProvider}. Split out from
- * {@link resolveComputeService} so that gate is testable on its own.
+ * Builds the agent's ledger row writer and, for the providers that spend the
+ * operator's capacity, its per-workspace cap — see {@link isQuotaGatedProvider}.
+ *
+ * ALWAYS returns a gate, never `undefined`, and that changed with P3. The old
+ * quota gate existed only to refuse; this one also RECORDS which provider-side
+ * machine an agent owns, and that record is what keeps the orphan reconciler
+ * from deleting it. Skipping the gate for an unrationed provider would have
+ * made every BYOK box invisible to the ledger. A provider we do not ration
+ * gets {@link UNLIMITED_AGENT_SANDBOXES} instead of no gate at all.
+ *
+ * Split out from {@link resolveComputeService} so the limit rule is testable
+ * on its own.
  */
-export function buildComputeQuotaGate(input: {
+export function buildAgentSandboxGate(input: {
   env: Env;
   effectiveConfig: EffectiveComputeConfig;
   /** The workspace's resolved Daytona mode; null when it is not a Daytona workspace. */
@@ -590,50 +593,55 @@ export function buildComputeQuotaGate(input: {
   /** The workspace's resolved Sprites mode; null when it is not a Sprites workspace. */
   spritesMode: SpritesConfigurationMode | null;
   workspaceId: string;
-  threadId: string;
+  agentId: string;
+  backend: ComputeBackend;
   now: () => number;
-}): ComputeQuotaGate | undefined {
-  if (!isQuotaGatedProvider(input.effectiveConfig.provider, input.daytonaMode, input.spritesMode))
-    return undefined;
-  return createComputeQuotaGate({
-    ledger: new ContainerLedger(registryBinding(input.env)),
+}): AgentSandboxGate {
+  const rationed = isQuotaGatedProvider(
+    input.effectiveConfig.provider,
+    input.daytonaMode,
+    input.spritesMode,
+  );
+  return createAgentSandboxGate({
+    ledger: new AgentSandboxLedger(registryBinding(input.env)),
     workspaceId: input.workspaceId,
-    threadId: input.threadId,
+    agentId: input.agentId,
     provider: input.effectiveConfig.provider,
-    profile: input.effectiveConfig.resourceProfile,
-    idleTimeoutMs: input.effectiveConfig.idleTimeoutMs,
-    limit: parseMaxActiveContainers(input.env.MAX_ACTIVE_CONTAINERS_PER_WORKSPACE),
+    limit: rationed
+      ? parseMaxActiveAgentSandboxes(input.env.MAX_ACTIVE_AGENT_SANDBOXES_PER_WORKSPACE)
+      : UNLIMITED_AGENT_SANDBOXES,
+    externalRuntimeId: (runtime) => input.backend.externalRuntimeId(runtime),
     now: input.now,
-    reclaim: (threadId) => reclaimContainer(input.env, threadId),
+    reclaim: (agentId) => reclaimAgentSandbox(input.env, agentId),
   });
 }
 
 /**
- * Ask another thread's DO to give up its idle container.
+ * Ask another AGENT's sandbox DO to put its box to sleep.
  *
- * MUST go through getAgentByName, not `namespace.get(idFromName(...))` — the raw
- * stub bypasses the entry points where onStart() runs (see src/automata/fire-due.ts).
+ * Addressed to `AGENT_SANDBOX` by agent id, not to a thread DO: since P3 the
+ * machine belongs to the agent, and there is no single thread that speaks for
+ * it. The DO answers from the session inputs its last `session()` open
+ * recorded — the same record the alarm replays — so a box that has never been
+ * opened simply refuses.
  *
- * Time-boxed: a DO is single-threaded, so a target mid-turn would otherwise make
- * the caller wait behind its queue. A timeout is just a refusal.
+ * A reclaim only ever RELEASES (hibernate, or snapshot-and-stop). It must never
+ * reach a destroy: the caller wants a concurrency slot, not another agent's
+ * filesystem.
  *
- * Imports `agents` dynamically: it touches `cloudflare:workers` at module load,
- * which breaks node-environment unit tests (e.g. compute-tools-env.test.ts)
- * that import this file only for the tool-def builder and never reach this
- * function. A static top-level import would drag that failure into every
- * consumer of this module regardless of whether reclaim ever runs.
+ * Time-boxed: a DO is single-threaded, so a target mid-turn would otherwise
+ * make the caller wait behind its queue. A timeout is just a refusal.
  */
-async function reclaimContainer(env: Env, threadId: string): Promise<boolean> {
-  const { getAgentByName } = await import("agents");
-  const stub = (await getAgentByName(env.THINK_THREAD_AGENT, threadId)) as unknown as {
-    releaseIfReclaimable: () => Promise<boolean>;
+async function reclaimAgentSandbox(env: Env, agentId: string): Promise<boolean> {
+  const stub = env.AGENT_SANDBOX.get(env.AGENT_SANDBOX.idFromName(agentId)) as unknown as {
+    releaseIfReclaimableForAgent: () => Promise<boolean>;
   };
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<boolean>((resolve) => {
     timer = setTimeout(() => resolve(false), RECLAIM_RPC_TIMEOUT_MS);
   });
   try {
-    return await Promise.race([stub.releaseIfReclaimable(), timeout]);
+    return await Promise.race([stub.releaseIfReclaimableForAgent(), timeout]);
   } finally {
     clearTimeout(timer);
   }
@@ -1047,7 +1055,7 @@ export function buildComputeToolDefs(
       ? {
           confirm_work_saved: tool({
             description:
-              "Declare that all work in the sandbox is committed and pushed. This permits the idle sandbox to be discarded rather than preserved. The workspace is checked before the declaration is accepted: if any repository has uncommitted changes or unpushed commits, the call is refused and the offending paths are returned. Call this when you have finished working and everything is saved.",
+              "Declare that all work in the sandbox is committed and pushed. The workspace is checked before the declaration is accepted: if any repository has uncommitted changes or unpushed commits, the call is refused and the offending paths are returned. Call this when you have finished working and everything is saved.",
             inputSchema: z.object({}),
             execute: async () => {
               try {

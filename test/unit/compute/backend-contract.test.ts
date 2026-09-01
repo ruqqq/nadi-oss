@@ -1132,31 +1132,42 @@ describe("Daytona write guards fail closed on an unanswerable probe", () => {
 });
 
 /**
- * DATA LOSS GUARD. `nativeIdleSuspend` is what stops `resolveIdleDisposition`
- * from destroying an idle sandbox on an inference. Deleting the one line that
- * sets it on Sprites is silent everywhere else — the bug it guards against
- * (a real user's workspace deleted 15 minutes after going idle) simply comes
- * back — so the flag is asserted per backend here.
+ * DATA LOSS GUARD, REPLACED BY P3.
+ *
+ * `nativeIdleSuspend` used to be what stopped `resolveIdleDisposition` from
+ * destroying an idle sandbox on an inference, and deleting the one line that
+ * set it on Sprites was silent everywhere else. Both are gone: there is no
+ * inference and no discard, because the box is the AGENT's and persists until
+ * the agent is deleted.
+ *
+ * What replaces the flag is the property below, which is what actually
+ * mattered: every backend must name its machine, because the orphan reconciler
+ * DELETES every machine it cannot find an `agent_sandboxes` row for. A backend
+ * that returned a name nothing ever recorded, or recorded a name that is not
+ * the machine, loses a filesystem — and nothing else fails.
  */
-describe("ComputeBackend.nativeIdleSuspend", () => {
-  it("is true for Sprites, which hibernates on its own", () => {
+describe("ComputeBackend.externalRuntimeId", () => {
+  it("round-trips the name a freshly acquired runtime carries", async () => {
     const { backend } = createFakeSpritesBackend();
-    expect(backend.nativeIdleSuspend).toBe(true);
+    const runtime = await backend.acquire(TEST_SPEC);
+    const name = backend.externalRuntimeId(runtime);
+    expect(name).toBeTruthy();
+    // It is the SPRITE, not some derived id: the reconciler subtracts these
+    // from the provider's own `listSprites` answer.
+    expect((runtime.payload as { spriteName: string }).spriteName).toBe(name);
   });
 
-  it("is not set for backends whose idle runtime keeps billing", () => {
-    // Daytona passes autoStopInterval: 0 and Cloudflare keepAlive: true, so an
-    // idle runtime there bills until something releases it; the inferred
-    // discards are what stop the meter and must stay on.
-    // Read through the interface: the concrete classes do not declare the
-    // optional property at all, and "absent" is exactly the claim under test.
+  it("never throws on a reference it cannot parse — it runs on the acquire path", () => {
     const backends: ComputeBackend[] = [
+      createFakeSpritesBackend().backend,
       new DaytonaComputeBackend({ apiKey: "test" }),
       createFakeCloudflareBackend().backend,
       new FakeComputeBackend(),
     ];
     for (const backend of backends) {
-      expect(backend.nativeIdleSuspend).toBeUndefined();
+      expect(
+        backend.externalRuntimeId({ provider: "mock", version: 1, payload: { junk: true } }),
+      ).toBeNull();
     }
   });
 });

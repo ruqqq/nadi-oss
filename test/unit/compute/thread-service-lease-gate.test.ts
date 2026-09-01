@@ -52,7 +52,7 @@ function createLifecycleStore(): ThreadComputeStoreLike {
       }),
     markReleasing: (now) =>
       void (state = state && { ...state, status: "releasing", releaseAt: now }),
-    markRecoverable: (recoveryRef, now, recoveryExpiresAt) =>
+    markRecoverable: (recoveryRef, now) =>
       void (state = {
         ...base(now),
         status: "recoverable",
@@ -60,7 +60,7 @@ function createLifecycleStore(): ThreadComputeStoreLike {
         providerConfig: state?.providerConfig ?? null,
         runtimeRef: null,
         recoveryRef,
-        recoveryExpiresAt,
+        recoveryExpiresAt: null,
       }),
     markDiscarding: (now) =>
       void (state = state && {

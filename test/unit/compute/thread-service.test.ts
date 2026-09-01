@@ -30,12 +30,14 @@ const CONFIG: EffectiveComputeConfig = {
 
 /**
  * A stated `dirty` input for the tests below whose subject is the RECOVERY
- * lifecycle, not the retention decision. They need `releaseIfIdle` to preserve;
- * leaving the probe dep absent would obtain that from `resolveIdleDisposition`'s
- * absent-probe DEFAULT instead, so mutating that one default would break every
- * one of them at once and hide which behavior actually regressed. The one test
- * whose subject IS that default ("preserves when no probe dep is wired at all")
- * deliberately passes nothing.
+ * lifecycle.
+ *
+ * P3 SEVERED CLEANLINESS FROM RETENTION: `ThreadComputeServiceDeps` no longer
+ * carries `probeWorkspaceCleanliness` or `isSandboxDeclaredClean`, because the
+ * box is the AGENT's and one thread's verdict about its own directory is not
+ * evidence about the machine. These options are still THREADED THROUGH on
+ * purpose — a test that supplies clean evidence and still observes a preserve
+ * is what fails if any discard path comes back.
  */
 const dirtyProbe = (): (() => Promise<WorkspaceCleanliness>) => async () => ({
   state: "dirty",
@@ -122,11 +124,11 @@ describe("ThreadComputeService lifecycle", () => {
     expect(concreteStore).toBeNull();
   });
 
-  it("lazily acquires compute and discards compute proven clean after the idle timeout", async () => {
-    // Retention no longer decides the disposition (Task 4) — proof does. A
-    // clean probe is the proof supplied here so this test still exercises the
-    // discard path; see the "retention: preserve by default" describe block
-    // below for the full disposition matrix.
+  it("lazily acquires compute and PRESERVES it after the idle timeout, even proven clean", async () => {
+    // P3: there is no discard branch left. The box belongs to the AGENT and
+    // holds every one of its threads' worktrees, so a clean probe on one
+    // thread's directory is not evidence about the machine — and a discard is
+    // a `deleteSprite`.
     const { service, backend, store, now } = createService({
       probeWorkspaceCleanliness: async () => ({ state: "clean" }),
     });
@@ -137,8 +139,8 @@ describe("ThreadComputeService lifecycle", () => {
     now.value = 2_000;
     await service.runComputeTick();
 
-    expect(backend.releaseCalls).toMatchObject([{ options: { disposition: "discard" } }]);
-    expect(store.getComputeState()?.status).toBe("absent");
+    expect(backend.releaseCalls).toMatchObject([{ options: { disposition: "recoverable" } }]);
+    expect(store.getComputeState()?.status).toBe("recoverable");
   });
 
   it("defaults exec to THIS thread's working directory, and an explicit cwd still wins", async () => {
@@ -172,9 +174,11 @@ describe("ThreadComputeService lifecycle", () => {
     expect(backend.releaseCalls).toMatchObject([
       { options: { disposition: "recoverable", recoveryTtlMs: 5_000 } },
     ]);
+    // `recoveryExpiresAt` is NULL, always. A stored expiry is the only thing a
+    // reader could turn back into a timed destroy.
     expect(store.getComputeState()).toMatchObject({
       status: "recoverable",
-      recoveryExpiresAt: 7_000,
+      recoveryExpiresAt: null,
     });
     expect(store.getProcess(started.processId)).toMatchObject({ status: "stopped" });
   });
@@ -195,7 +199,7 @@ describe("ThreadComputeService lifecycle", () => {
     expect(store.getProcess(started.processId)?.status).toBe("stopped");
   });
 
-  it("keeps recoverable compute dormant when a turn starts before expiry", async () => {
+  it("keeps recoverable compute dormant across a bare turn", async () => {
     const { service, backend, store, now } = createService({
       probeWorkspaceCleanliness: dirtyProbe(),
     });
@@ -206,7 +210,7 @@ describe("ThreadComputeService lifecycle", () => {
     const acquiresBefore = backend.acquireCalls.length;
 
     now.value = 2_500;
-    await service.cleanupExpiredRecoverableCompute();
+    await service.runComputeTick();
 
     expect(backend.acquireCalls).toHaveLength(acquiresBefore);
     expect(store.getComputeState()?.status).toBe("recoverable");
@@ -288,10 +292,13 @@ describe("ThreadComputeService lifecycle", () => {
     expect(store.getComputeState()?.status).toBe("recoverable");
   });
 
-  it("destroys expired recovery state and clears the declared-clean bit", async () => {
-    const dirtyCalls: number[] = [];
+  // Was "destroys expired recovery state and clears the declared-clean bit".
+  // THAT DESTROY IS THE FEATURE THIS TASK REMOVED: it was the only thing that
+  // ever ended a sprite's storage billing, and under agent keying it would take
+  // the agent's whole accumulated filesystem with it about a day after the last
+  // thread stopped working.
+  it("REGRESSION: recovery state is never destroyed on a timer", async () => {
     const { service, backend, store, now } = createService({
-      markSandboxDirty: async () => void dirtyCalls.push(1),
       probeWorkspaceCleanliness: dirtyProbe(),
     });
     await service.exec({ command: "pwd" });
@@ -301,12 +308,14 @@ describe("ThreadComputeService lifecycle", () => {
     now.value = 7_000;
     await service.runComputeTick();
 
-    expect(backend.destroyCalls).toHaveLength(1);
-    expect(store.getComputeState()?.status).toBe("absent");
-    expect(dirtyCalls.length).toBeGreaterThan(0);
+    expect(backend.destroyCalls).toHaveLength(0);
+    expect(store.getComputeState()?.status).toBe("recoverable");
   });
 
-  it("does not provision fresh compute on a bare turn once recovery has expired", async () => {
+  // Was "does not provision fresh compute on a bare turn once recovery has
+  // expired", and the second half of that title no longer exists: recovery does
+  // not expire, so the box stays recoverable rather than going absent.
+  it("REGRESSION: a bare turn long past the old TTL neither provisions nor destroys", async () => {
     const { service, backend, store, now } = createService({
       probeWorkspaceCleanliness: dirtyProbe(),
     });
@@ -315,12 +324,14 @@ describe("ThreadComputeService lifecycle", () => {
     await service.runComputeTick();
     expect(store.getComputeState()?.status).toBe("recoverable");
     const acquiresBefore = backend.acquireCalls.length;
+    const destroysBefore = backend.destroyCalls.length;
 
     now.value = 7_000;
-    await service.cleanupExpiredRecoverableCompute();
+    await service.runComputeTick();
 
     expect(backend.acquireCalls).toHaveLength(acquiresBefore);
-    expect(store.getComputeState()?.status).toBe("absent");
+    expect(backend.destroyCalls).toHaveLength(destroysBefore);
+    expect(store.getComputeState()?.status).toBe("recoverable");
   });
 
   it("passes resolved environment and backend-neutral spec values to acquire", async () => {
@@ -1384,183 +1395,64 @@ describe("ThreadComputeService workspace root provisioning", () => {
   });
 });
 
-describe("retention: preserve by default, discard only on proof", () => {
-  it("discards when the workspace was declared clean, without probing", async () => {
-    const probe = vi.fn();
-    const { service, backend } = createService({
-      isSandboxDeclaredClean: async () => true,
-      probeWorkspaceCleanliness: probe,
-    });
-    await makeIdle(service);
-    await service.releaseIfIdle();
-    expect(backend.releaseCalls[0]?.options.disposition).toBe("discard");
-    expect(probe).not.toHaveBeenCalled();
-  });
-
-  it("discards when git proves every repo clean", async () => {
-    const { service, backend } = createService({
-      isSandboxDeclaredClean: async () => false,
-      probeWorkspaceCleanliness: async () => ({ state: "clean" as const }),
-    });
-    await makeIdle(service);
-    await service.releaseIfIdle();
-    expect(backend.releaseCalls[0]?.options.disposition).toBe("discard");
-  });
-
+describe("retention: the agent's box is ALWAYS preserved", () => {
   /**
-   * The two deciders must agree about an EMPTY workspace. `confirmWorkSaved`
-   * accepts `no_repo{hasFiles:false}` and sets the bit ("Workspace is empty"),
-   * so the release path treating the same state as recoverable meant every
-   * repo-less thread that ran a single `exec` — a bare command leaves
-   * /workspace empty, and a chat thread never calls `confirm_work_saved` —
-   * held a 24h recovery snapshot for nothing.
+   * P3 deleted `resolveIdleDisposition` and every discard it could return.
+   *
+   * The disposition matrix this block used to assert was correct while the box
+   * was per-thread: a thread that had proven its own workspace clean owned
+   * nothing worth keeping, so discarding it freed disk on purpose. Under agent
+   * keying the same box holds every OTHER thread's worktree, the agent's
+   * canonical clones and its installed tooling — so `confirm_work_saved` on one
+   * thread became a `deleteSprite` that destroyed sibling threads' uncommitted
+   * work on the word of a thread that never looked at it. The git probe made
+   * the same inference from a directory that is no longer the whole machine.
+   *
+   * The parameterised cases below therefore assert one thing each: whatever the
+   * evidence says, the release preserves.
    */
-  it("discards an EMPTY workspace: no repo and no files is nothing to lose", async () => {
-    const { service, backend } = createService({
-      isSandboxDeclaredClean: async () => false,
-      probeWorkspaceCleanliness: async () => ({ state: "no_repo" as const, hasFiles: false }),
-    });
-    await makeIdle(service);
-    await service.releaseIfIdle();
-    expect(backend.releaseCalls[0]?.options.disposition).toBe("discard");
-  });
-
-  const dispositionCases: Array<[string, WorkspaceCleanliness]> = [
+  const everyCleanlinessVerdict: Array<[string, WorkspaceCleanliness]> = [
+    ["a git-clean workspace", { state: "clean" }],
+    ["an EMPTY workspace", { state: "no_repo", hasFiles: false }],
+    ["no repo but unversioned files present", { state: "no_repo", hasFiles: true }],
     [
       "a dirty repo",
       { state: "dirty", repos: [{ path: "/workspace/a", changes: [" M x"], unpushed: 0 }] },
     ],
-    // The other `no_repo` arm — unversioned files ARE work worth keeping.
-    ["no repo but unversioned files present", { state: "no_repo", hasFiles: true }],
     ["a failed probe", { state: "probe_failed", reason: "unreachable" }],
   ];
-  for (const [name, cleanliness] of dispositionCases) {
+  for (const [name, cleanliness] of everyCleanlinessVerdict) {
     it(`preserves on ${name}`, async () => {
       const { service, backend } = createService({
-        isSandboxDeclaredClean: async () => false,
         probeWorkspaceCleanliness: async () => cleanliness,
       });
       await makeIdle(service);
       await service.releaseIfIdle();
       expect(backend.releaseCalls[0]?.options.disposition).toBe("recoverable");
+      expect(backend.destroyCalls).toHaveLength(0);
     });
   }
 
-  it("logs the retention decision with a dirty-repo COUNT, never repo paths", async () => {
-    // `reason` is the only after-the-fact record of WHY a sandbox was
-    // destroyed or preserved — worth asserting exactly, per the pattern in
-    // automaton-scheduled.integration.test.ts. The dirty repo's `path` must
-    // never appear in the payload (paths can carry sensitive project names).
-    const infoSpy = vi.spyOn(log, "info").mockImplementation(() => {});
-    const { service } = createService({
-      isSandboxDeclaredClean: async () => false,
-      probeWorkspaceCleanliness: async () => ({
-        state: "dirty",
-        repos: [
-          { path: "/workspace/secret-project", changes: [" M x"], unpushed: 0 },
-          { path: "/workspace/another", changes: [], unpushed: 1 },
-        ],
-      }),
-    });
+  // The case that used to discard hardest, and the one with a live user behind
+  // it: a thread stating "my work is saved" must not delete the agent's machine.
+  it("REGRESSION: a declared-clean thread does NOT discard the agent's box", async () => {
+    const { service, backend } = createService({ isSandboxDeclaredClean: async () => true });
     await makeIdle(service);
     await service.releaseIfIdle();
-    expect(infoSpy).toHaveBeenCalledWith("compute.retention_decision", {
-      threadId: "thread_test",
-      disposition: "recoverable",
-      reason: "dirty",
-      dirtyRepoCount: 2,
-    });
-    const dirtyCall = infoSpy.mock.calls.find(([event]) => event === "compute.retention_decision");
-    expect(JSON.stringify(dirtyCall)).not.toContain("secret-project");
-    infoSpy.mockRestore();
+    expect(backend.releaseCalls[0]?.options.disposition).toBe("recoverable");
+    expect(backend.destroyCalls).toHaveLength(0);
   });
 
-  it("logs declared_clean without invoking the probe", async () => {
-    const infoSpy = vi.spyOn(log, "info").mockImplementation(() => {});
-    const { service } = createService({ isSandboxDeclaredClean: async () => true });
+  it("REGRESSION: a declared-clean thread does not discard on a self-suspending provider either", async () => {
+    const backend = Object.assign(new FakeComputeBackend(), { nativeIdleSuspend: true });
+    const { service } = createService({ backend, isSandboxDeclaredClean: async () => true });
     await makeIdle(service);
     await service.releaseIfIdle();
-    expect(infoSpy).toHaveBeenCalledWith("compute.retention_decision", {
-      threadId: "thread_test",
-      disposition: "discard",
-      reason: "declared_clean",
-    });
-    infoSpy.mockRestore();
+    expect(backend.releaseCalls[0]?.options.disposition).toBe("recoverable");
+    expect(backend.destroyCalls).toHaveLength(0);
   });
 
-  /**
-   * The inferred discards (git-clean, empty workspace) exist to stop a runtime
-   * that would otherwise bill while idle — Daytona and Cloudflare deliberately
-   * disable native idle handling. A provider that suspends itself (Sprites)
-   * already stopped the meter, so inferring a discard buys only disk and pays
-   * for it in destroyed work. A real user lost a sandbox exactly this way.
-   */
-  describe("providers that suspend an idle runtime themselves", () => {
-    const nativeIdleBackend = () =>
-      Object.assign(new FakeComputeBackend(), { nativeIdleSuspend: true });
-
-    it("preserves an EMPTY workspace instead of discarding it on inference", async () => {
-      const backend = nativeIdleBackend();
-      const { service } = createService({
-        backend,
-        isSandboxDeclaredClean: async () => false,
-        probeWorkspaceCleanliness: async () => ({ state: "no_repo" as const, hasFiles: false }),
-      });
-      await makeIdle(service);
-      await service.releaseIfIdle();
-      expect(backend.releaseCalls[0]?.options.disposition).toBe("recoverable");
-    });
-
-    it("preserves a git-clean workspace too, and skips the probe round-trip", async () => {
-      const probe = vi.fn(async () => ({ state: "clean" as const }));
-      const backend = nativeIdleBackend();
-      const { service } = createService({
-        backend,
-        isSandboxDeclaredClean: async () => false,
-        probeWorkspaceCleanliness: probe,
-      });
-      await makeIdle(service);
-      await service.releaseIfIdle();
-      expect(backend.releaseCalls[0]?.options.disposition).toBe("recoverable");
-      // The verdict cannot change the outcome, and the probe is an exec
-      // round-trip on every idle timer.
-      expect(probe).not.toHaveBeenCalled();
-    });
-
-    it("still discards on an explicit declared-clean signal", async () => {
-      // Stated intent, not an inference: discarding then frees disk on purpose.
-      const backend = nativeIdleBackend();
-      const { service } = createService({ backend, isSandboxDeclaredClean: async () => true });
-      await makeIdle(service);
-      await service.releaseIfIdle();
-      expect(backend.releaseCalls[0]?.options.disposition).toBe("discard");
-    });
-
-    it("logs the decision with its own reason so it stays diagnosable", async () => {
-      const infoSpy = vi.spyOn(log, "info").mockImplementation(() => {});
-      const { service } = createService({
-        backend: nativeIdleBackend(),
-        isSandboxDeclaredClean: async () => false,
-        probeWorkspaceCleanliness: async () => ({ state: "clean" as const }),
-      });
-      await makeIdle(service);
-      await service.releaseIfIdle();
-      expect(infoSpy).toHaveBeenCalledWith("compute.retention_decision", {
-        threadId: "thread_test",
-        disposition: "recoverable",
-        reason: "provider_native_idle",
-      });
-      infoSpy.mockRestore();
-    });
-  });
-
-  it("preserves when no probe dep is wired at all — the absent-probe safety default", async () => {
-    // A review of Task 4 found this default (absent `probeWorkspaceCleanliness`
-    // resolves to `probe_failed`, never `clean`) was only covered incidentally,
-    // by fixtures elsewhere in this file that happen to omit the dep for other
-    // reasons. This test's stated purpose IS that default: no `isSandboxDeclaredClean`
-    // and no `probeWorkspaceCleanliness` are passed to `createService` at all,
-    // unlike every case above.
+  it("preserves when no probe dep is wired at all", async () => {
     const { service, backend } = createService();
     await makeIdle(service);
     await service.releaseIfIdle();

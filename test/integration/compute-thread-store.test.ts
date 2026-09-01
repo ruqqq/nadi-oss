@@ -217,7 +217,7 @@ describe("ThreadComputeStore (DO SQLite)", () => {
         version: 1 as const,
         payload: { kind: "recovery", sandboxId: "sbx-provider-config" },
       };
-      store.markRecoverable(recovery, 30, 40);
+      store.markRecoverable(recovery, 30);
       expect(store.getComputeState()?.providerConfig).toEqual(providerConfig);
 
       store.markAbsent(50);
@@ -260,7 +260,6 @@ describe("ThreadComputeStore (DO SQLite)", () => {
           payload: { kind: "recovery", sandboxId: "sbx-policy" },
         },
         30,
-        40,
       );
       expect(store.getComputeState()?.acquiredAllowedHosts).toEqual(["api.example.com"]);
 
@@ -487,12 +486,14 @@ describe("ThreadComputeStore (DO SQLite)", () => {
         version: 1 as const,
         payload: { sandboxId: "sbx-1", mode: "stopped" },
       };
-      store.markRecoverable(recovery, 50, 60);
+      store.markRecoverable(recovery, 50);
       expect(store.getComputeState()).toMatchObject({
         status: "recoverable",
         runtimeRef: null,
         recoveryRef: recovery,
-        recoveryExpiresAt: 60,
+        // Always NULL since P3: a stored expiry is the only thing a reader
+        // could turn back into a timed destroy of the agent's filesystem.
+        recoveryExpiresAt: null,
       });
 
       store.markActive(runtime, 65);

@@ -1,0 +1,396 @@
+import { env } from "cloudflare:test";
+import { beforeEach, describe, expect, it } from "vitest";
+import { AgentSandboxLedger } from "../../src/compute/agent-sandbox-ledger";
+import { createAgentSandboxGate } from "../../src/compute/agent-sandbox-quota";
+import { ComputeError } from "../../src/compute/errors";
+import { buildAgentSandboxGate } from "../../src/agent/compute-tools";
+import { DEFAULT_COMPUTE_LIMITS } from "../../src/compute/config";
+import type { BackendReference, ComputeBackend } from "../../src/compute/backend";
+import type { EffectiveComputeConfig } from "../../src/compute/types";
+import type { Env } from "../../src/env";
+import { applyRegistryTestSchema } from "./helpers/registry";
+
+const NOW = 1_000_000;
+
+function ledger() {
+  return new AgentSandboxLedger(env.REGISTRY_DB);
+}
+
+async function seedWorkspaceAgents(rows: { agentId: string; workspaceId: string }[]) {
+  const workspaces = new Set(rows.map((r) => r.workspaceId));
+  for (const workspaceId of workspaces) {
+    await env.REGISTRY_DB.prepare(
+      "INSERT OR IGNORE INTO workspaces (id, name, created_at) VALUES (?1, ?1, 1)",
+    )
+      .bind(workspaceId)
+      .run();
+  }
+  for (const row of rows) {
+    await env.REGISTRY_DB.prepare(
+      `INSERT OR IGNORE INTO agents (id, workspace_id, name, system_prompt, provider, model, created_at)
+       VALUES (?1, ?2, ?1, '', 'mock', 'mock', 1)`,
+    )
+      .bind(row.agentId, row.workspaceId)
+      .run();
+  }
+}
+
+const RUNTIME: BackendReference = {
+  provider: "mock",
+  version: 1,
+  payload: { kind: "runtime", sandboxId: "nadi-b1-machine" },
+};
+
+function gateFor(
+  agentId: string,
+  limit: number,
+  options: {
+    workspaceId?: string;
+    reclaim?: (id: string) => Promise<boolean>;
+    externalRuntimeId?: (runtime: BackendReference) => string | null;
+  } = {},
+) {
+  return createAgentSandboxGate({
+    ledger: ledger(),
+    workspaceId: options.workspaceId ?? "ws1",
+    agentId,
+    provider: "mock",
+    limit,
+    externalRuntimeId:
+      options.externalRuntimeId ??
+      ((runtime) => (runtime.payload as { sandboxId: string }).sandboxId),
+    now: () => NOW,
+    reclaim: options.reclaim ?? (async () => false),
+  });
+}
+
+function effectiveConfig(provider: "cloudflare" | "daytona" | "sprites"): EffectiveComputeConfig {
+  return {
+    provider,
+    providerConfig: { kind: provider },
+    resourceProfile: "small",
+    idleTimeoutMs: 900_000,
+    recoveryTtlMs: 86_400_000,
+    maxProcessRuntimeMs: 600_000,
+    monitorPollIntervalMs: 2_000,
+    limits: DEFAULT_COMPUTE_LIMITS,
+    allowedHosts: null,
+    editableEnv: {},
+    secretEnvNames: [],
+  } as unknown as EffectiveComputeConfig;
+}
+
+const FAKE_BACKEND = {
+  externalRuntimeId: (reference: BackendReference) =>
+    (reference.payload as { sandboxId?: string }).sandboxId ?? null,
+} as unknown as ComputeBackend;
+
+describe("AgentSandboxLedger (real D1)", () => {
+  beforeEach(async () => {
+    await applyRegistryTestSchema(env.REGISTRY_DB);
+    await env.REGISTRY_DB.prepare("DELETE FROM agent_sandboxes").run();
+    await seedWorkspaceAgents([
+      { agentId: "ag_a", workspaceId: "ws1" },
+      { agentId: "ag_b", workspaceId: "ws1" },
+      { agentId: "ag_c", workspaceId: "ws1" },
+      { agentId: "ag_d", workspaceId: "ws1" },
+      { agentId: "ag_other", workspaceId: "ws2" },
+    ]);
+  });
+
+  it("admits up to the limit and refuses past it", async () => {
+    expect(
+      await ledger().tryAdmit({
+        agentId: "ag_a",
+        workspaceId: "ws1",
+        provider: "mock",
+        now: NOW,
+        limit: 2,
+      }),
+    ).toBe(true);
+    expect(
+      await ledger().tryAdmit({
+        agentId: "ag_b",
+        workspaceId: "ws1",
+        provider: "mock",
+        now: NOW,
+        limit: 2,
+      }),
+    ).toBe(true);
+    expect(
+      await ledger().tryAdmit({
+        agentId: "ag_c",
+        workspaceId: "ws1",
+        provider: "mock",
+        now: NOW,
+        limit: 2,
+      }),
+    ).toBe(false);
+    expect(await ledger().countActive("ws1")).toBe(2);
+  });
+
+  // The cap counts CONCURRENCY, and it counts it through the join — there is no
+  // `workspace_id` on `agent_sandboxes` to count flat.
+  it("scopes the cap per workspace, through the join on agents", async () => {
+    expect(
+      await ledger().tryAdmit({
+        agentId: "ag_a",
+        workspaceId: "ws1",
+        provider: "mock",
+        now: NOW,
+        limit: 1,
+      }),
+    ).toBe(true);
+    expect(
+      await ledger().tryAdmit({
+        agentId: "ag_other",
+        workspaceId: "ws2",
+        provider: "mock",
+        now: NOW,
+        limit: 1,
+      }),
+    ).toBe(true);
+    expect(await ledger().countActive("ws1")).toBe(1);
+    expect(await ledger().countActive("ws2")).toBe(1);
+  });
+
+  // THE PERSISTENCE INVARIANT. With no TTL, a hibernated box's row lives
+  // forever; counting it would turn a concurrency cap into "how many agents may
+  // EVER have had a box", and the workspace would wedge permanently.
+  it("an idle box keeps its row but frees its slot", async () => {
+    await ledger().tryAdmit({
+      agentId: "ag_a",
+      workspaceId: "ws1",
+      provider: "mock",
+      now: NOW,
+      limit: 1,
+    });
+    await ledger().recordSprite({ agentId: "ag_a", externalId: "nadi-b1-a", now: NOW });
+    expect(await ledger().countActive("ws1")).toBe(1);
+
+    await ledger().markIdle({ agentId: "ag_a", now: NOW + 1 });
+    expect(await ledger().countActive("ws1")).toBe(0);
+    // The row — and therefore the sprite's accountability — survives.
+    expect(await ledger().listKnownSpriteNames()).toEqual(new Set(["nadi-b1-a"]));
+    expect(
+      await ledger().tryAdmit({
+        agentId: "ag_b",
+        workspaceId: "ws1",
+        provider: "mock",
+        now: NOW,
+        limit: 1,
+      }),
+    ).toBe(true);
+  });
+
+  it("re-admitting the same agent is idempotent, not a second slot, and keeps its sprite name", async () => {
+    await ledger().tryAdmit({
+      agentId: "ag_a",
+      workspaceId: "ws1",
+      provider: "mock",
+      now: NOW,
+      limit: 1,
+    });
+    await ledger().recordSprite({ agentId: "ag_a", externalId: "nadi-b1-a", now: NOW });
+    await ledger().markIdle({ agentId: "ag_a", now: NOW });
+    expect(
+      await ledger().tryAdmit({
+        agentId: "ag_a",
+        workspaceId: "ws1",
+        provider: "mock",
+        now: NOW + 5,
+        limit: 1,
+      }),
+    ).toBe(true);
+    expect(await ledger().countActive("ws1")).toBe(1);
+    // A wake must not blank the name the reconciler reads.
+    expect(await ledger().listKnownSpriteNames()).toEqual(new Set(["nadi-b1-a"]));
+  });
+
+  it("cannot admit over the limit under concurrent calls", async () => {
+    const got = await Promise.all(
+      ["ag_a", "ag_b", "ag_c", "ag_d"].map((agentId) =>
+        ledger().tryAdmit({ agentId, workspaceId: "ws1", provider: "mock", now: NOW, limit: 2 }),
+      ),
+    );
+    expect(got.filter(Boolean)).toHaveLength(2);
+    expect(await ledger().countActive("ws1")).toBe(2);
+  });
+
+  it("touch keeps an active row warm and never resurrects an idle one", async () => {
+    await ledger().tryAdmit({
+      agentId: "ag_a",
+      workspaceId: "ws1",
+      provider: "mock",
+      now: NOW,
+      limit: 2,
+    });
+    await ledger().recordSprite({ agentId: "ag_a", externalId: "s", now: NOW });
+    await ledger().markIdle({ agentId: "ag_a", now: NOW });
+    await ledger().touch({ agentId: "ag_a", now: NOW + 100 });
+    expect(await ledger().countActive("ws1")).toBe(0);
+  });
+
+  it("reclaim candidates are active rows of OTHER agents, least-recently-used first", async () => {
+    for (const [agentId, at] of [
+      ["ag_a", 30],
+      ["ag_b", 10],
+      ["ag_c", 20],
+    ] as const) {
+      await ledger().tryAdmit({ agentId, workspaceId: "ws1", provider: "mock", now: at, limit: 9 });
+      await ledger().recordSprite({ agentId, externalId: agentId, now: at });
+    }
+    const candidates = await ledger().listReclaimCandidates({
+      workspaceId: "ws1",
+      excludeAgentId: "ag_a",
+    });
+    expect(candidates.map((c) => c.agentId)).toEqual(["ag_b", "ag_c"]);
+    expect(candidates[0]?.workspaceId).toBe("ws1");
+  });
+
+  it("clears stale acquiring rows but leaves fresh ones", async () => {
+    await ledger().tryAdmit({
+      agentId: "ag_a",
+      workspaceId: "ws1",
+      provider: "mock",
+      now: 100,
+      limit: 9,
+    });
+    await ledger().tryAdmit({
+      agentId: "ag_b",
+      workspaceId: "ws1",
+      provider: "mock",
+      now: 900,
+      limit: 9,
+    });
+    expect(await ledger().clearStaleAcquiring(500)).toBe(1);
+    expect(await ledger().countAcquiringSince(500)).toBe(1);
+  });
+});
+
+describe("createAgentSandboxGate (real D1)", () => {
+  beforeEach(async () => {
+    await applyRegistryTestSchema(env.REGISTRY_DB);
+    await env.REGISTRY_DB.prepare("DELETE FROM agent_sandboxes").run();
+    await seedWorkspaceAgents([
+      { agentId: "ag_a", workspaceId: "ws1" },
+      { agentId: "ag_b", workspaceId: "ws1" },
+    ]);
+  });
+
+  it("admits exactly one of two CONCURRENT acquires at limit=1", async () => {
+    const results = await Promise.allSettled([
+      gateFor("ag_a", 1).admit(),
+      gateFor("ag_b", 1).admit(),
+    ]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((r) => r.status === "rejected")).toHaveLength(1);
+    expect(await ledger().countActive("ws1")).toBe(1);
+  });
+
+  it("throws quota_exhausted when nothing can be reclaimed", async () => {
+    await gateFor("ag_a", 1).admit();
+    const err = await gateFor("ag_b", 1)
+      .admit()
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ComputeError);
+    expect((err as ComputeError).code).toBe("quota_exhausted");
+  });
+
+  it("reclaims the LRU agent's box and then admits — without deleting its row", async () => {
+    await gateFor("ag_a", 1).admit();
+    await gateFor("ag_a", 1).recordRuntime(RUNTIME);
+    const reclaimed: string[] = [];
+    await expect(
+      gateFor("ag_b", 1, {
+        reclaim: async (id) => {
+          reclaimed.push(id);
+          return true;
+        },
+      }).admit(),
+    ).resolves.toBeUndefined();
+    expect(reclaimed).toEqual(["ag_a"]);
+    // The reclaimed agent's MACHINE is still accounted for. If this row were
+    // deleted the orphan reconciler would delete its hibernated sprite.
+    expect(await ledger().listKnownSpriteNames()).toEqual(new Set(["nadi-b1-machine"]));
+  });
+
+  it("recordRuntime writes the machine name the reconciler reads", async () => {
+    await gateFor("ag_a", 1).admit();
+    expect(await ledger().listKnownSpriteNames()).toEqual(new Set());
+    await gateFor("ag_a", 1).recordRuntime(RUNTIME);
+    expect(await ledger().listKnownSpriteNames()).toEqual(new Set(["nadi-b1-machine"]));
+  });
+
+  it("idle keeps the row; forget removes it", async () => {
+    const gate = gateFor("ag_a", 1);
+    await gate.admit();
+    await gate.recordRuntime(RUNTIME);
+    await gate.idle();
+    expect(await ledger().listKnownSpriteNames()).toEqual(new Set(["nadi-b1-machine"]));
+    await gate.forget();
+    expect(await ledger().listKnownSpriteNames()).toEqual(new Set());
+  });
+});
+
+describe("buildAgentSandboxGate", () => {
+  beforeEach(async () => {
+    await applyRegistryTestSchema(env.REGISTRY_DB);
+    await env.REGISTRY_DB.prepare("DELETE FROM agent_sandboxes").run();
+    await seedWorkspaceAgents([
+      { agentId: "ag_a", workspaceId: "ws1" },
+      { agentId: "ag_b", workspaceId: "ws1" },
+    ]);
+  });
+
+  function build(
+    provider: "cloudflare" | "daytona" | "sprites",
+    modes: { daytonaMode?: "system" | "byok" | null; spritesMode?: "system" | "byok" | null },
+    agentId = "ag_a",
+  ) {
+    return buildAgentSandboxGate({
+      env: { ...(env as unknown as Env), MAX_ACTIVE_AGENT_SANDBOXES_PER_WORKSPACE: "1" },
+      effectiveConfig: effectiveConfig(provider),
+      daytonaMode: modes.daytonaMode ?? null,
+      spritesMode: modes.spritesMode ?? null,
+      workspaceId: "ws1",
+      agentId,
+      backend: FAKE_BACKEND,
+      now: () => NOW,
+    });
+  }
+
+  // A gate is ALWAYS built now: it is the writer of the row that keeps the
+  // orphan reconciler off the box, not merely a refusal.
+  it("rations cloudflare", async () => {
+    await build("cloudflare", {}).admit();
+    await expect(build("cloudflare", {}, "ag_b").admit()).rejects.toBeInstanceOf(ComputeError);
+  });
+
+  it("rations system-managed sprites", async () => {
+    await build("sprites", { spritesMode: "system" }).admit();
+    await expect(
+      build("sprites", { spritesMode: "system" }, "ag_b").admit(),
+    ).rejects.toBeInstanceOf(ComputeError);
+  });
+
+  it("does NOT ration BYOK sprites — but still writes the row", async () => {
+    await build("sprites", { spritesMode: "byok" }).admit();
+    await expect(
+      build("sprites", { spritesMode: "byok" }, "ag_b").admit(),
+    ).resolves.toBeUndefined();
+    expect(await ledger().countActive("ws1")).toBe(2);
+  });
+
+  it("does NOT ration BYOK daytona, nor daytona with an unknown mode", async () => {
+    await build("daytona", { daytonaMode: "byok" }).admit();
+    await expect(build("daytona", { daytonaMode: null }, "ag_b").admit()).resolves.toBeUndefined();
+  });
+
+  it("rations system-managed daytona", async () => {
+    await build("daytona", { daytonaMode: "system" }).admit();
+    await expect(
+      build("daytona", { daytonaMode: "system" }, "ag_b").admit(),
+    ).rejects.toBeInstanceOf(ComputeError);
+  });
+});

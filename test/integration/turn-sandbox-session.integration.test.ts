@@ -660,12 +660,13 @@ describe("the turn's sandbox session", () => {
    * service whose preparation latch is fresh — so once preparation moved onto
    * the per-service path, a signature change since the last turn would start a
    * `git clone` and a setup script inside an alarm handler, for a box nobody is
-   * using, on the very path deciding whether to RELEASE it. The probe's verdict
-   * is read afterwards: a setup script that writes an untracked file turns a
-   * discardable idle box into a preserved one, and a preserved sprite bills
-   * until something deletes it.
+   * using, on the very path deciding whether to RELEASE it.
    *
    * The directories are still created — only the repository work is withheld.
+   *
+   * P3 ANTI-VACUITY NOTE: this used to hook the alarm's cleanliness probe as
+   * proof the alarm had reached the box. That probe is gone with the discard
+   * inference, so the release itself is now the proof.
    */
   it("does not prepare repositories from the alarm's tick", async () => {
     const threadId = "thr_turn_alarm_no_prep";
@@ -713,6 +714,7 @@ describe("the turn's sandbox session", () => {
       now: () => NOW + 30 * 60_000,
     });
     const before = backend.startProcessCalls.length + backend.runCommandCalls.length;
+    const releasesBefore = backend.releaseCalls.length;
     try {
       await runInDurableObject(sandbox, async (instance) => {
         await (instance as unknown as { alarm(): Promise<void> }).alarm();
@@ -725,12 +727,16 @@ describe("the turn's sandbox session", () => {
       ...backend.startProcessCalls.map((call) => call.command),
       ...backend.runCommandCalls.map((call) => call.command),
     ].slice(before);
-    // ANTI-VACUITY: the alarm really did reach the sandbox. Without this the
-    // assertions below hold for an alarm that ran no commands at all.
+    // ANTI-VACUITY: the alarm really did reach the sandbox and run its idle
+    // decision. Without this the assertions below hold for an alarm that did
+    // nothing at all.
     expect(
-      duringAlarm.some((command) => command.includes("PROBE")),
-      `the alarm must have run the cleanliness probe; commands were ${JSON.stringify(duringAlarm)}`,
-    ).toBe(true);
+      backend.releaseCalls.length,
+      "the alarm must have reached the idle release",
+    ).toBeGreaterThan(releasesBefore);
+    // And it PRESERVED: an alarm-side discard would be a `deleteSprite` on the
+    // agent's shared box.
+    expect(backend.releaseCalls.at(-1)?.options.disposition).toBe("recoverable");
     // The gate probe itself must not run either — preparation is not ENTERED.
     // Matched on the gate's own shape rather than on the sentinel's name: the
     // probe script legitimately names the sentinel too, in the exclusion that

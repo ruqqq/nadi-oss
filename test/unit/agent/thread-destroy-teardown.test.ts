@@ -2,85 +2,72 @@ import { describe, expect, it, vi } from "vitest";
 import { teardownThreadBeforeDestroy } from "../../../src/agent/thread-destroy-teardown";
 
 describe("teardownThreadBeforeDestroy", () => {
-  it("is a no-op when compute resolution finds no compute service", async () => {
+  it("cancels the thread's active subagents", async () => {
     const cancelActiveSubagents = vi.fn();
 
     await expect(
       teardownThreadBeforeDestroy({
-        threadId: "thread_none",
-        logPrefix: "thread",
+        threadId: "thread_subagents",
+        logPrefix: "think_thread",
         cancelActiveSubagents,
-        resolveComputeService: async () => null,
       }),
     ).resolves.toBeUndefined();
 
     expect(cancelActiveSubagents).toHaveBeenCalledOnce();
   });
 
-  it("does not block destroy when compute reaping throws", async () => {
-    const execShutdown = vi.fn().mockRejectedValue(new Error("compute unavailable"));
-
+  it("does not block destroy when cancelling subagents throws", async () => {
     await expect(
       teardownThreadBeforeDestroy({
         threadId: "thread_error",
         logPrefix: "thread",
-        resolveComputeService: async () => ({ service: { execShutdown } }),
-      }),
-    ).resolves.toBeUndefined();
-
-    expect(execShutdown).toHaveBeenCalledWith({ confirm: true });
-  });
-
-  it("REGRESSION (I2): releases the quota row even when execShutdown throws", async () => {
-    // execShutdown throws compute_children_active while a subagent is running,
-    // but DO storage is wiped straight after destroy — the ledger row must not
-    // survive the thread.
-    const execShutdown = vi.fn().mockRejectedValue(new Error("compute_children_active"));
-    const releaseQuotaSlot = vi.fn().mockResolvedValue(undefined);
-
-    await teardownThreadBeforeDestroy({
-      threadId: "thread_children",
-      logPrefix: "think_thread",
-      resolveComputeService: async () => ({ service: { execShutdown, releaseQuotaSlot } }),
-    });
-
-    expect(releaseQuotaSlot).toHaveBeenCalledOnce();
-  });
-
-  it("REGRESSION (I2): a failing quota release does not block destroy", async () => {
-    const execShutdown = vi.fn().mockResolvedValue({ ok: true, terminated: true });
-    const releaseQuotaSlot = vi.fn().mockRejectedValue(new Error("D1 down"));
-
-    await expect(
-      teardownThreadBeforeDestroy({
-        threadId: "thread_quota_error",
-        logPrefix: "thread",
-        resolveComputeService: async () => ({ service: { execShutdown, releaseQuotaSlot } }),
-      }),
-    ).resolves.toBeUndefined();
-
-    expect(releaseQuotaSlot).toHaveBeenCalledOnce();
-  });
-
-  it("cancels active subagents before shutting down compute", async () => {
-    const events: string[] = [];
-
-    await teardownThreadBeforeDestroy({
-      threadId: "thread_subagents",
-      logPrefix: "think_thread",
-      cancelActiveSubagents: async () => {
-        events.push("cancel_subagents");
-      },
-      resolveComputeService: async () => ({
-        service: {
-          execShutdown: async () => {
-            events.push("exec_shutdown");
-            return { ok: true, terminated: false, alreadyGone: true };
-          },
+        cancelActiveSubagents: async () => {
+          throw new Error("facet unreachable");
         },
       }),
-    });
+    ).resolves.toBeUndefined();
+  });
 
-    expect(events).toEqual(["cancel_subagents", "exec_shutdown"]);
+  it("is a no-op with nothing to cancel", async () => {
+    await expect(
+      teardownThreadBeforeDestroy({ threadId: "thread_none", logPrefix: "thread" }),
+    ).resolves.toBeUndefined();
+  });
+
+  /**
+   * REGRESSION (P3): destroying ONE thread must not touch the agent's machine.
+   *
+   * This used to call `execShutdown({ confirm: true })` and then drop the quota
+   * row. That was right while the box was keyed by thread. Since the DO is keyed
+   * by AGENT, the same two calls destroy the shared sprite — every sibling
+   * thread's worktree, the canonical clones, the installed tooling — on the
+   * archive of one chat.
+   *
+   * The guard is structural: the module no longer has a way to reach compute at
+   * all. Asserting the surface is what catches a reintroduction, since a
+   * reintroduced call would compile and no existing test would fail.
+   */
+  it("REGRESSION: reads no compute dep off its input at all", async () => {
+    const reads: string[] = [];
+    const deps = new Proxy(
+      {
+        threadId: "thread_shared_box",
+        logPrefix: "think_thread",
+        cancelActiveSubagents: async () => {},
+      } as Record<string, unknown>,
+      {
+        get(target, prop) {
+          if (typeof prop !== "string") return undefined;
+          reads.push(prop);
+          return target[prop];
+        },
+      },
+    );
+
+    await teardownThreadBeforeDestroy(deps as never);
+
+    // Anything compute-shaped read here is a route back to the AGENT's machine.
+    expect(reads.filter((name) => /compute|sandbox|shutdown|quota/i.test(name))).toEqual([]);
+    expect(reads).toContain("cancelActiveSubagents");
   });
 });

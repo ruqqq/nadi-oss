@@ -134,7 +134,7 @@
     "R2_BUCKET_NAME": "nadi-attachments",
     // Max concurrently-live Cloudflare containers per workspace. Not a secret —
     // change it here and redeploy. Invalid/absent falls back to the code default.
-    "MAX_ACTIVE_CONTAINERS_PER_WORKSPACE": "10",
+    "MAX_ACTIVE_AGENT_SANDBOXES_PER_WORKSPACE": "10",
     // Attachment text extraction for text-only models. Images use direct
     // llama-4-scout extraction; documents still use Workers AI toMarkdown.
     "ATTACHMENT_EXTRACTION": "true",

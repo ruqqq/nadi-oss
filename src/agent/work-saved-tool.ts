@@ -73,8 +73,7 @@ export async function confirmWorkSaved(deps: WorkSavedToolDeps): Promise<string>
       });
       return (
         "Refused: could not verify the workspace's git state " +
-        `(${state.reason}). The sandbox is left preserved; retry confirm_work_saved once ` +
-        "the sandbox is reachable."
+        `(${state.reason}). Retry confirm_work_saved once the sandbox is reachable.`
       );
     }
   }

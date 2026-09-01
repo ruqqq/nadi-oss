@@ -12,7 +12,6 @@ import {
   type ReclaimExecService,
   type RepositoryPreparationResult,
 } from "../agent/repository-preparation";
-import { probeWorkspaceCleanliness } from "./workspace-cleanliness";
 import type { ThreadComputeService } from "./thread-service";
 import type { BackendReference } from "./backend";
 import type { WorkRow } from "../agent/work-ledger";
@@ -729,15 +728,15 @@ export class AgentSandbox extends DurableObject<Env> {
        * behaviour without failing anything. `true` for a turn's session: that
        * is the whole point of the per-thread trigger. `false` for the ALARM.
        *
-       * The alarm reaches `exec` through `probeWorkspaceCleanliness`, on a
-       * service whose latch is fresh, so it would otherwise run a full
-       * preparation inside an alarm handler whenever the agent's configuration
-       * had changed since the last turn — a `git clone` plus a setup script,
-       * for a box nobody is using, on the very path that is deciding whether to
-       * RELEASE it. And not merely wasteful: the probe's verdict is read
-       * afterwards, so a setup script that writes an untracked file would turn
-       * a discardable idle box into a preserved one, and a preserved sprite
-       * bills until something deletes it.
+       * The alarm's tick reaches `exec` on a service whose latch is fresh, so
+       * it would otherwise run a full preparation inside an alarm handler
+       * whenever the agent's configuration had changed since the last turn — a
+       * `git clone` plus a setup script, for a box nobody is using, on the very
+       * path that is deciding whether to RELEASE it. (Until P3 it was worse
+       * still: the idle decision read a cleanliness probe afterwards, so a setup
+       * script writing one untracked file flipped a discardable box into a
+       * preserved one. That inference is gone — the box is always preserved —
+       * but running a clone from an alarm is no less wrong for it.)
        *
        * Withholding it does not leave the alarm without a working directory:
        * `ensureWorkspaceRootOnce` still creates `/workspace` and the thread's
@@ -778,12 +777,6 @@ export class AgentSandbox extends DurableObject<Env> {
       workHorizon: "resolving-thread" | "roster";
     },
   ) {
-    // `probeWorkspaceCleanliness` runs against THIS DO's own service rather
-    // than resolving a second one: it fires from `resolveIdleDisposition`, i.e.
-    // from a method of the service the caller already holds, so the holder is
-    // stamped by then and re-resolving would only pay the D1 reads twice. A
-    // null holder is unreachable; the arm below says what it would mean.
-    const local: { service: ThreadComputeService | null } = { service: null };
     // Preparation runs on a SECOND service, and that is not an oversight — the
     // caller's own service DEADLOCKS.
     //
@@ -817,13 +810,7 @@ export class AgentSandbox extends DurableObject<Env> {
       threadId,
       resolveComputeService: resolveHookService,
     });
-    const resolved = await this.buildService(threadId, options, {
-      probeWorkspaceCleanliness: async () => {
-        if (!local.service) return { state: "probe_failed", reason: "no_compute_service" };
-        return probeWorkspaceCleanliness((command, timeoutMs) =>
-          local.service!.execRun({ command, timeoutMs, label: "workspace cleanliness" }),
-        );
-      },
+    return await this.buildService(threadId, options, {
       // NO `onFreshRuntimeAcquired`. It used to carry repository preparation,
       // and that was the whole of H1: it fires only on `absent -> active`, and
       // the compute store is the AGENT's, so it fires once per BOX. Thread A
@@ -860,8 +847,6 @@ export class AgentSandbox extends DurableObject<Env> {
           }
         : {}),
     });
-    local.service = resolved?.service ?? null;
-    return resolved;
   }
 
   /**
@@ -884,7 +869,6 @@ export class AgentSandbox extends DurableObject<Env> {
       workHorizon: "resolving-thread" | "roster";
     },
     hooks: {
-      probeWorkspaceCleanliness?: ComputeServiceHostDeps["probeWorkspaceCleanliness"];
       /**
        * Omitted for the service repository preparation runs ON — see
        * {@link resolveService}. Its absence is what makes preparation's own
@@ -937,9 +921,6 @@ export class AgentSandbox extends DurableObject<Env> {
       // Plain serializable data, not a capability: an attached subagent's
       // parent runtime reference travels as an RPC INPUT. Nothing to relocate.
       ...(options.attachedRuntime ? { attachedRuntime: options.attachedRuntime } : {}),
-      ...(hooks.probeWorkspaceCleanliness
-        ? { probeWorkspaceCleanliness: hooks.probeWorkspaceCleanliness }
-        : {}),
       // Required on `ComputeServiceHostDeps`, so the no-op has to be spelled
       // out here rather than omitted — and spelling it out is the point: a
       // service built without preparation says so.
@@ -1122,6 +1103,100 @@ export class AgentSandbox extends DurableObject<Env> {
    * `params.threadId` would strand every other thread's open rows forever, which
    * is the exact bug this project exists to kill.
    */
+  /**
+   * Put this agent's box to sleep so another agent in the workspace can have
+   * the slot. Returns true only if a box was actually released.
+   *
+   * Addressed to the AGENT, because the machine is the agent's — the quota gate
+   * calls this directly rather than through some thread that happens to be
+   * rostered. There is no per-thread caller and no caller-supplied identity: it
+   * replays the LAST recorded session, exactly as the alarm does, so a box that
+   * has never opened one simply refuses.
+   *
+   * `prepareWorkspace: false`, for the alarm's reason: this decides whether to
+   * RELEASE a box nobody is using, and a preparation here would be the thing
+   * that woke it.
+   *
+   * NEVER DESTROYS. `releaseIfReclaimable` takes the recoverable disposition
+   * unconditionally, so the worst case is a hibernated sprite, disk intact.
+   */
+  async releaseIfReclaimableForAgent(): Promise<boolean> {
+    const params = (await this.ctx.storage.get<SandboxAlarmParams>(ALARM_PARAMS_KEY)) ?? null;
+    if (!params) {
+      log.info("agent_sandbox.reclaim_without_recorded_session", {
+        agentId: this.ctx.id.name ?? "unknown",
+      });
+      return false;
+    }
+    try {
+      const resolved = await this.resolveService(params.threadId, {
+        workspaceThreadId: params.workspaceThreadId ?? params.threadId,
+        prepareWorkspace: false,
+        supportsProcessMonitor: params.supportsProcessMonitor,
+        runtimeConfig: params.runtimeConfig,
+        workHorizon: "roster",
+        ...(params.attachedRuntime ? { attachedRuntime: params.attachedRuntime } : {}),
+      });
+      if (!resolved) return false;
+      return await resolved.service.releaseIfReclaimable();
+    } catch (error) {
+      // A refusal, never a throw: the caller races this against a timeout and
+      // treats any non-`true` as "try the next candidate".
+      log.warn("agent_sandbox.reclaim_failed", {
+        agentId: params.runtimeConfig.agentId,
+        error: String(error),
+      });
+      return false;
+    }
+  }
+
+  /**
+   * DESTROY this agent's machine. One of exactly two paths that may (the other
+   * is the orphan reconciler), and it exists because agent deletion had no way
+   * to reach the box at all.
+   *
+   * The route used to walk the agent's NON-ARCHIVED threads and shut each one's
+   * sandbox down. Under agent keying that is wrong twice over: an agent whose
+   * threads are all archived has no thread to walk and its box was left
+   * stranded, billing forever; and any one thread's `execShutdown` was already
+   * destroying the shared machine, so the walk was N attempts at one machine.
+   *
+   * `purpose: "teardown"` because the caller is DELETING the agent: the
+   * `enabled === false` / `archived_at` gates must not turn "you may not work
+   * here" into "your machine is undeletable".
+   *
+   * Returns why it did nothing, so a teardown that decides to do nothing says
+   * so — the failure mode this route already learned the hard way.
+   */
+  async destroyForAgentDeletion(input: {
+    workspaceId: string;
+    agentId: string;
+  }): Promise<{ destroyed: boolean; reason?: string }> {
+    const params = (await this.ctx.storage.get<SandboxAlarmParams>(ALARM_PARAMS_KEY)) ?? null;
+    // The recorded session names a thread whose DO can take the back-calls the
+    // teardown makes. Falling back to the agent id would address a thread DO
+    // that does not exist — the trap Task 1 removed from the alarm, and it is
+    // the same trap here.
+    if (!params) return { destroyed: false, reason: "no_recorded_session" };
+    const resolved = await this.resolveService(params.threadId, {
+      workspaceThreadId: params.workspaceThreadId ?? params.threadId,
+      prepareWorkspace: false,
+      supportsProcessMonitor: params.supportsProcessMonitor,
+      runtimeConfig: { workspaceId: input.workspaceId, agentId: input.agentId },
+      purpose: "teardown",
+      workHorizon: "roster",
+    });
+    if (!resolved) return { destroyed: false, reason: "compute_disabled" };
+    const result = await resolved.service.execShutdown({ confirm: true });
+    if (!result.terminated) {
+      return {
+        destroyed: false,
+        reason: "alreadyGone" in result ? "already_gone" : "needs_confirmation",
+      };
+    }
+    return { destroyed: true };
+  }
+
   async alarm(): Promise<void> {
     const params = (await this.ctx.storage.get<SandboxAlarmParams>(ALARM_PARAMS_KEY)) ?? null;
     // THE TRAP, and it is gone. This used to fall back to `this.ctx.id.name`

@@ -109,19 +109,20 @@ describe("acquisition deadline", () => {
 });
 
 /**
- * The one thing `blockConcurrencyWhile` was genuinely protecting.
+ * P3: THERE IS NO RECOVERY EXPIRY, so nothing is left that can destroy a
+ * recovery reference on a timer.
  *
- * A recovery RESTORE does not move the persisted status off `recoverable` while
- * it runs — `markAcquiring` fires only on the fresh-acquire branch, by design.
- * The gate used to make that safe by queueing every other DO event behind the
- * acquisition. Without it, an alarm landing mid-restore reaches
- * `cleanupExpiredRecovery`, finds the TTL expired, and destroys the very
- * snapshot the restore is reading — losing the workspace.
+ * `blockConcurrencyWhile` used to be justified here by one real hazard — a
+ * restore does not move the persisted status off `recoverable` while it runs,
+ * so an alarm landing mid-restore reached `cleanupExpiredRecovery`, found the
+ * TTL expired, and destroyed the very snapshot the restore was reading. That
+ * function is gone: the box belongs to the agent and persists until the agent
+ * is deleted.
  *
- * Not hypothetical bookkeeping: `backend.destroy` on the recovery ref is what
- * makes the files unrecoverable.
+ * These pin the ABSENCE. `backend.destroy` on the recovery ref is what makes a
+ * user's files unrecoverable, and no amount of elapsed time may reach it.
  */
-describe("recovery cleanup vs an in-flight restore", () => {
+describe("a recoverable box is never destroyed on a timer", () => {
   function recoverableService(options: { onAcquire?: () => Promise<void> } = {}) {
     const backend = new FakeComputeBackend();
     const destroyed: string[] = [];
@@ -164,7 +165,7 @@ describe("recovery cleanup vs an in-flight restore", () => {
 
     // Recoverable, and NOT yet expired — the restore is legitimate when it
     // starts. The expiry lands while it is still running.
-    store.markRecoverable("recovery-ref" as never, clock, clock + 100);
+    store.markRecoverable("recovery-ref" as never, clock);
     return { service, destroyed, advance: (ms: number) => (clock += ms) };
   }
 
@@ -180,21 +181,23 @@ describe("recovery cleanup vs an in-flight restore", () => {
     const restoring = service.execRun({ command: "true" }).catch(() => undefined);
     await vi.waitFor(() => expect(release).toBeDefined());
 
-    // The TTL lapses mid-restore, then an unrelated event sweeps recoveries.
-    advance(1_000);
-    await service.cleanupExpiredRecoverableCompute();
+    // Long past what used to be the TTL, with an unrelated tick landing on top.
+    advance(1_000_000);
+    await service.runComputeTick();
     expect(destroyed).toEqual([]);
 
     release?.();
     await restoring;
   });
 
-  it("still destroys an expired snapshot when nothing is restoring", async () => {
+  it("REGRESSION: does not destroy an idle snapshot however long it sits", async () => {
     const { service, destroyed, advance } = recoverableService();
-    advance(1_000);
-    await service.cleanupExpiredRecoverableCompute();
-    // The guard is scoped to a live acquisition, not a blanket exemption —
-    // an expired recovery with no restore in flight must still be reclaimed.
-    expect(destroyed).toEqual(["recovery-ref"]);
+    // Far beyond `recoveryTtlMs`, across several ticks. The old code destroyed
+    // here; the whole persistence feature is that this now does nothing.
+    advance(1_000_000);
+    await service.runComputeTick();
+    advance(1_000_000);
+    await service.runComputeTick();
+    expect(destroyed).toEqual([]);
   });
 });
