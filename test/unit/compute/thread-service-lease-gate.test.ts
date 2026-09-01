@@ -128,6 +128,7 @@ function setup() {
       secretEnvNames: [],
     },
     environmentId: "lease_test",
+    threadId: "thr_thread_service_lease_gate",
     env: {},
     setAlarm: async (timestamp) => void alarms.push(timestamp),
     now: () => now.value,

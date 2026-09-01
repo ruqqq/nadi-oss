@@ -125,11 +125,12 @@ function createService(backend: FakeComputeBackend, now: { value: number }) {
     store,
     config: CONFIG,
     environmentId: "thread_test",
+    threadId: "thr_watcher_backstop_probe",
     env: {},
     setAlarm: async () => {},
     now: () => now.value,
     supportsProcessMonitor: true,
-    workLedger: ledger.sink,
+    workLedgerFor: () => ledger.sink,
   });
   return { service, ledger, store };
 }

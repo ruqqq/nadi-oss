@@ -125,20 +125,26 @@ export interface ComputeServiceHostDeps {
    * metadata so the web transcript renders it as a visible completion card
    * (see {@link WatcherCompletionInfo}) instead of hiding it.
    */
-  deliverSystemReminder: (
-    body: string,
-    mode: "deferred" | "proactive",
-    options?: {
-      watcher?: WatcherCompletionInfo;
-      /**
-       * Set ONLY by the watcher-poll path, where a throw is load-bearing: it
-       * leaves the work-ledger row owed so the sweep retries the delivery.
-       * Command paths leave it unset and a failed delivery is swallowed. See
-       * the same field on `ThreadComputeServiceDeps.deliverSystemReminder`.
-       */
-      mustDeliver?: boolean;
-    },
-  ) => Promise<void>;
+  deliverSystemReminder: (input: {
+    /**
+     * WHICH conversation. Required, and not defaulted to `threadId` above:
+     * since P3 one box serves every thread of the agent, so the thread this
+     * service was resolved for and the thread a given reminder belongs to are
+     * different questions. A watcher completing on thread A is delivered to A
+     * even when the alarm's tick was resolved for thread B.
+     */
+    threadId: string;
+    body: string;
+    mode: "deferred" | "proactive";
+    watcher?: WatcherCompletionInfo;
+    /**
+     * Set ONLY by the watcher-poll path, where a throw is load-bearing: it
+     * leaves the work-ledger row owed so the sweep retries the delivery.
+     * Command paths leave it unset and a failed delivery is swallowed. See
+     * the same field on `ThreadComputeServiceDeps.deliverSystemReminder`.
+     */
+    mustDeliver?: boolean;
+  }) => Promise<void>;
   now?: () => number;
   /**
    * Test seam: substitute the backend (e.g. the in-memory fake) instead of
@@ -200,11 +206,16 @@ export interface ComputeServiceHostDeps {
   /** @internal for tests only — advances fake time instead of sleeping. */
   sleep?: (ms: number) => Promise<void>;
   /**
-   * Write surface for the background work ledger (see `WorkLedgerStore`).
-   * Threaded through so watched-process registration/liveness stamps land in
-   * the ledger the reaper reads; the reaper itself never touches compute.
+   * Write surface for the background work ledger (see `WorkLedgerStore`),
+   * resolved PER THREAD. Threaded through so watched-process
+   * registration/liveness stamps land in the ledger the reaper reads; the
+   * reaper itself never touches compute.
+   *
+   * A router since P3, for the same reason `deliverSystemReminder` takes a
+   * `threadId`: the ledger lives on the thread DO, the box serves every thread
+   * of the agent, and a row belongs to the thread that started the work.
    */
-  workLedger?: WorkLedgerSink;
+  workLedgerFor?: (threadId: string) => WorkLedgerSink;
   /**
    * The ledger's next sweep horizon (`nextSweepAt` over open rows). Supplied by
    * the agent, which owns the ledger. Folded into the compute service's single
@@ -503,7 +514,7 @@ export async function resolveComputeService(hostDeps: ComputeServiceHostDeps): P
       ? { execForegroundPollIntervalMs: deps.execForegroundPollIntervalMs }
       : {}),
     ...(deps.sleep ? { sleep: deps.sleep } : {}),
-    ...(deps.workLedger ? { workLedger: deps.workLedger } : {}),
+    ...(deps.workLedgerFor ? { workLedgerFor: deps.workLedgerFor } : {}),
     ...(deps.getWorkHorizon ? { getWorkHorizon: deps.getWorkHorizon } : {}),
     ...(deps.onFreshRuntimeAcquired ? { onFreshRuntimeAcquired: deps.onFreshRuntimeAcquired } : {}),
   });

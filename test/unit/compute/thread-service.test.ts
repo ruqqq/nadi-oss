@@ -310,6 +310,7 @@ describe("ThreadComputeService lifecycle", () => {
       store,
       config: { ...CONFIG, allowedHosts: ["example.com"] },
       environmentId: "thread_env",
+      threadId: "thr_thread_service",
       env: { GH_TOKEN: "secret", NODE_ENV: "production" },
       setAlarm: async () => {},
       now: () => 1,
@@ -466,10 +467,11 @@ describe("ThreadComputeService lifecycle", () => {
       store,
       config: CONFIG,
       environmentId: "thread_watch",
+      threadId: "thr_thread_service",
       env: {},
       setAlarm: async () => {},
       now: () => now.value,
-      deliverSystemReminder: async (body, mode) => void reminders.push({ body, mode }),
+      deliverSystemReminder: async ({ body, mode }) => void reminders.push({ body, mode }),
       supportsProcessMonitor: true,
     });
     const started = await service.execStart({ command: "sleep 30", label: "build" });
@@ -497,10 +499,11 @@ describe("ThreadComputeService lifecycle", () => {
       store,
       config: CONFIG,
       environmentId: "thread_watch_renew",
+      threadId: "thr_thread_service",
       env: {},
       setAlarm: async () => {},
       now: () => now.value,
-      deliverSystemReminder: async (body, mode) => void reminders.push({ body, mode }),
+      deliverSystemReminder: async ({ body, mode }) => void reminders.push({ body, mode }),
       supportsProcessMonitor: true,
     });
     const started = await service.execStart({ command: "sleep 600", label: "long" });
@@ -536,11 +539,12 @@ describe("ThreadComputeService lifecycle", () => {
       store,
       config: CONFIG,
       environmentId: "thread_loss",
+      threadId: "thr_thread_service",
       env: {},
       setAlarm: async () => {},
       clearAlarm: async () => {},
       now: () => 1_000,
-      deliverSystemReminder: async (body) => void reminders.push(body),
+      deliverSystemReminder: async ({ body }) => void reminders.push(body),
     });
     await service.exec({ command: "pwd" });
     const firstRuntime = store.getComputeState()?.runtimeRef;
@@ -643,6 +647,7 @@ describe("ThreadComputeService output retention signal", () => {
   function seedProcess(store: ThreadComputeStoreLike, overrides: Partial<ComputeProcessRecord>) {
     const record: ComputeProcessRecord = {
       id: "proc-ret",
+      threadId: "thr_service_test",
       backendProcessRef: null,
       command: "yes",
       cwd: null,
@@ -1148,6 +1153,7 @@ describe("ThreadComputeService workspace root provisioning", () => {
       store: createMemoryComputeStore(),
       config: CONFIG,
       environmentId: "thread_attached",
+      threadId: "thr_thread_service",
       env: {},
       attachedRuntime,
       setAlarm: async () => {},

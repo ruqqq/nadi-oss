@@ -33,6 +33,7 @@ function makeService(input?: {
     store,
     config: CONFIG,
     environmentId: "thread_test",
+    threadId: "thr_release_if_reclaimable",
     env: {},
     setAlarm: async () => {},
     now: () => clock.now,

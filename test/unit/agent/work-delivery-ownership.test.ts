@@ -72,14 +72,15 @@ async function withRealWatcher(
       store: createMemoryComputeStore(),
       config: CONFIG,
       environmentId: "thread_test",
+      threadId: "thr_work_delivery_ownership",
       env: {},
       setAlarm: async () => {},
       now: () => now.value,
       supportsProcessMonitor: true,
-      workLedger: localWorkLedgerSink(ledger),
+      workLedgerFor: () => localWorkLedgerSink(ledger),
       deliverSystemReminder:
         options?.deliverSystemReminder ??
-        (async (body) => {
+        (async ({ body }) => {
           if (fail) throw new Error("injection buffer write failed");
           reminders.push(body);
         }),

@@ -50,6 +50,7 @@ function buildTools(backend: FakeComputeBackend) {
       secretEnvNames: [],
     },
     environmentId: "fake-env",
+    threadId: "thr_sandbox_tools_integration",
     env: {},
     setAlarm: async () => {},
     now: () => 1000,

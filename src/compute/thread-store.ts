@@ -72,6 +72,17 @@ export type ComputeProcessStatus = "running" | "exited" | "failed" | "stopped";
 
 export interface ComputeProcessRecord {
   id: string;
+  /**
+   * The thread whose turn started this process — the conversation its
+   * completion reminder and its work-ledger row belong to.
+   *
+   * Load-bearing since P3: the store is per-BOX and a box serves every thread
+   * of the agent, so "the thread resolving right now" is no longer the same
+   * answer as "the thread that owns this row". `null` means the row predates
+   * the column and carries no stamp; readers fall back to the resolving
+   * thread, which is exactly the behaviour such a row was written under.
+   */
+  threadId: string | null;
   backendProcessRef: BackendProcessReference | null;
   command: string;
   cwd: string | null;
@@ -110,6 +121,7 @@ interface ComputeStateRow extends Record<string, string | number | null> {
 
 interface ComputeProcessRow extends Record<string, string | number | null> {
   id: string;
+  thread_id: string | null;
   backend_process_ref_json: string | null;
   command: string;
   cwd: string | null;
@@ -140,6 +152,7 @@ interface ComputeOutputChunkRow extends Record<string, string | number | null> {
 
 interface ComputeProcessWatcherRow extends Record<string, string | number | null> {
   process_id: string;
+  thread_id: string | null;
   deadline_at: number;
   poll_interval_ms: number;
   next_poll_at: number;
@@ -297,6 +310,7 @@ function rowToComputeState(row: ComputeStateRow): ComputeState {
 function rowToComputeProcess(row: ComputeProcessRow): ComputeProcessRecord {
   return {
     id: row.id,
+    threadId: row.thread_id,
     backendProcessRef: parseBackendReference(row.backend_process_ref_json),
     command: row.command,
     cwd: row.cwd,
@@ -327,6 +341,7 @@ function rowToOutputChunk(row: ComputeOutputChunkRow): OutputChunkView {
 function rowToWatcher(row: ComputeProcessWatcherRow): WatcherRow {
   return {
     processId: row.process_id,
+    threadId: row.thread_id,
     deadlineAt: row.deadline_at,
     pollIntervalMs: row.poll_interval_ms,
     nextPollAt: row.next_poll_at,
@@ -397,6 +412,7 @@ export class ThreadComputeStore {
       this.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS sandbox_processes (
           id text primary key,
+          thread_id text,
           provider_session_id text,
           provider_command_id text,
           backend_process_ref_json text,
@@ -431,6 +447,7 @@ export class ThreadComputeStore {
       this.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS sandbox_process_watchers (
           process_id text primary key,
+          thread_id text,
           deadline_at integer not null,
           poll_interval_ms integer not null,
           next_poll_at integer not null,
@@ -446,6 +463,7 @@ export class ThreadComputeStore {
       `);
 
       this.ensureProcessReferenceColumn();
+      this.ensureOriginatingThreadColumns();
       this.ensureComputeStateAdditiveColumns();
 
       const version = this.storage.sql
@@ -485,11 +503,13 @@ export class ThreadComputeStore {
   createProcess(process: ComputeProcessRecord): void {
     this.storage.sql.exec(
       `INSERT INTO sandbox_processes
-        (id, provider_session_id, provider_command_id, backend_process_ref_json, command, cwd,
+        (id, thread_id, provider_session_id, provider_command_id, backend_process_ref_json,
+         command, cwd,
          status, exit_code, started_at, finished_at, stdout_bytes, stderr_bytes, stdout_lines,
          stderr_lines, output_truncated, label)
-       VALUES (?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       process.id,
+      process.threadId,
       serializeBackendReference(process.backendProcessRef),
       process.command,
       process.cwd,
@@ -509,6 +529,11 @@ export class ThreadComputeStore {
   updateProcess(id: string, patch: Partial<ComputeProcessRecord>): void {
     const columns: Record<keyof ComputeProcessRecord, string> = {
       id: "id",
+      // Present so this map stays exhaustive over the record, never patched:
+      // {@link ComputeProcessRecord.threadId} is who STARTED the process, and
+      // a row that changed owners would route its completion to a thread that
+      // never asked for it. Skipped alongside `id` below.
+      threadId: "thread_id",
       backendProcessRef: "backend_process_ref_json",
       command: "command",
       cwd: "cwd",
@@ -526,7 +551,7 @@ export class ThreadComputeStore {
     const sets: string[] = [];
     const values: Array<string | number | null> = [];
     for (const key of Object.keys(patch) as Array<keyof ComputeProcessRecord>) {
-      if (key === "id") continue;
+      if (key === "id" || key === "threadId") continue;
       const value = patch[key];
       if (value === undefined) continue;
       sets.push(`${columns[key]} = ?`);
@@ -649,15 +674,17 @@ export class ThreadComputeStore {
   upsertWatcher(row: WatcherRow): void {
     this.storage.sql.exec(
       `INSERT INTO sandbox_process_watchers
-        (process_id, deadline_at, poll_interval_ms, next_poll_at, label, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)
+        (process_id, thread_id, deadline_at, poll_interval_ms, next_poll_at, label, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(process_id) DO UPDATE SET
+        thread_id = excluded.thread_id,
         deadline_at = excluded.deadline_at,
         poll_interval_ms = excluded.poll_interval_ms,
         next_poll_at = excluded.next_poll_at,
         label = excluded.label,
         created_at = excluded.created_at`,
       row.processId,
+      row.threadId,
       row.deadlineAt,
       row.pollIntervalMs,
       row.nextPollAt,
@@ -880,6 +907,35 @@ export class ThreadComputeStore {
       this.storage.sql.exec(
         "ALTER TABLE sandbox_processes ADD COLUMN backend_process_ref_json text",
       );
+    }
+  }
+
+  /**
+   * The originating-thread stamp on processes and watchers (P3).
+   *
+   * Additive `ALTER TABLE ... ADD COLUMN` per DO, exactly like
+   * {@link ensureProcessReferenceColumn}: this is Durable Object SQLite, not
+   * D1, so there is no generated migration path. Nothing is backfilled and
+   * nothing can be — the box no longer knows which thread wrote a row it did
+   * not stamp. A `NULL` here therefore means "written before the stamp
+   * existed", and every reader resolves it to the thread currently resolving
+   * the service, which is the single thread such a row could only ever have
+   * belonged to back when the box was keyed by thread. That keeps a row on
+   * disk from the previous release readable by this one, which the
+   * two-adjacent-versions rule requires.
+   */
+  private ensureOriginatingThreadColumns(): void {
+    const processColumns = this.storage.sql
+      .exec<{ name: string }>("PRAGMA table_info(sandbox_processes)")
+      .toArray();
+    if (!processColumns.some((column) => column.name === "thread_id")) {
+      this.storage.sql.exec("ALTER TABLE sandbox_processes ADD COLUMN thread_id text");
+    }
+    const watcherColumns = this.storage.sql
+      .exec<{ name: string }>("PRAGMA table_info(sandbox_process_watchers)")
+      .toArray();
+    if (!watcherColumns.some((column) => column.name === "thread_id")) {
+      this.storage.sql.exec("ALTER TABLE sandbox_process_watchers ADD COLUMN thread_id text");
     }
   }
 

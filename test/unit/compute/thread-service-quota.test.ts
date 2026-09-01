@@ -54,6 +54,7 @@ function makeService(
     store,
     config: CONFIG,
     environmentId: "thread_test",
+    threadId: "thr_thread_service_quota",
     env: {},
     setAlarm: async () => {},
     clearAlarm: async () => {},

@@ -160,6 +160,7 @@ function setup(input: {
     store,
     config: CONFIG,
     environmentId: "thread_test",
+    threadId: "thr_alarm_rearm",
     env: {},
     // Mirrors compute-tools: the service's setAlarm IS the host's scheduleEviction.
     setAlarm: (timestamp) => scheduleEviction(timestamp),
@@ -167,7 +168,11 @@ function setup(input: {
     supportsProcessMonitor: input.supportsProcessMonitor ?? true,
     getWorkHorizon,
     ...(input.quota ? { quota: input.quota } : {}),
-    ...(input.ledger ? { workLedger: localWorkLedgerSink(input.ledger) } : {}),
+    // A SPREAD, so excess-property checking does not apply to it: this line said
+    // `workLedger:` after the dep became `workLedgerFor`, typecheck stayed
+    // silent, and the service simply ran with no ledger — the whole suite green
+    // except the one assertion that counted open rows. Keep the key correct.
+    ...(input.ledger ? { workLedgerFor: () => localWorkLedgerSink(input.ledger!) } : {}),
   });
   holder.resolved = { service };
 

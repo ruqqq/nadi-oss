@@ -261,9 +261,17 @@ export interface ThreadComputeServiceDeps {
   store: ThreadComputeStoreLike;
   config: EffectiveComputeConfig;
   environmentId: string;
-  /** The owning thread's id, for retention-decision logging only — never used
-   *  for compute addressing (that's `environmentId`, a resource-profile identifier). */
-  threadId?: string;
+  /**
+   * The thread this service was RESOLVED for. Never used for compute
+   * addressing (that's `environmentId`, a resource-profile identifier).
+   *
+   * REQUIRED since P3, and no longer only a log field. It is the stamp written
+   * onto every process and watcher row this service creates, and the fallback
+   * target for a row that carries no stamp. A missing value used to cost a
+   * blank log line; it would now silently route a completion reminder into
+   * `undefined`, so omission is a compile error.
+   */
+  threadId: string;
   env: Record<string, string>;
   /**
    * The origin the sandbox wrapper's own completion callback posts back to
@@ -285,35 +293,48 @@ export interface ThreadComputeServiceDeps {
   setAlarm: (timestamp: number) => Promise<void>;
   clearAlarm?: () => Promise<void>;
   now: () => number;
-  deliverSystemReminder?: (
-    body: string,
-    mode: "deferred" | "proactive",
-    options?: {
-      watcher?: {
-        title: string;
-        command: string;
-        processId: string;
-        /** The ledger terminal's outcome — `fault` once the reaper delivers. */
-        outcome: WorkOutcome;
-        exitCode: number | null;
-        outputTail?: string;
-      };
-      /**
-       * "A failure here MUST reach me." Set only on the watcher-poll path,
-       * where {@link markDelivered} below is unconditional and sits AFTER the
-       * await precisely so a throw leaves the ledger row owed and the sweep
-       * retries it. Every other caller is a COMMAND: the work already happened
-       * on the machine, so an undeliverable notification must not fault it.
-       *
-       * The in-process implementation throws either way (it is a local call).
-       * The flag exists for the sandbox back-call, which is best-effort by
-       * default — a thread DO that cannot be reached may not fail a command —
-       * and re-throws only when this is set. See
-       * `createSandboxThreadHostDeps`.
-       */
-      mustDeliver?: boolean;
-    },
-  ) => Promise<void>;
+  /**
+   * Raise a system reminder in ONE thread's conversation.
+   *
+   * A single OBJECT, not positional arguments, and `threadId` is required
+   * inside it. Since P3 the machine is shared by every thread of the agent, so
+   * "which conversation does this belong to" is a real question at every call
+   * site and had to become one the compiler asks: a watcher completing on
+   * thread A is delivered to A even when the tick that polled it was resolved
+   * for thread B. Positional arguments were rejected precisely because adding
+   * a leading `threadId` to them would have let an existing
+   * `(body, mode) => ...` implementation keep compiling with `body` bound to
+   * the thread id.
+   */
+  deliverSystemReminder?: (input: {
+    /** The conversation this reminder belongs to. */
+    threadId: string;
+    body: string;
+    mode: "deferred" | "proactive";
+    watcher?: {
+      title: string;
+      command: string;
+      processId: string;
+      /** The ledger terminal's outcome — `fault` once the reaper delivers. */
+      outcome: WorkOutcome;
+      exitCode: number | null;
+      outputTail?: string;
+    };
+    /**
+     * "A failure here MUST reach me." Set only on the watcher-poll path,
+     * where {@link markDelivered} below is unconditional and sits AFTER the
+     * await precisely so a throw leaves the ledger row owed and the sweep
+     * retries it. Every other caller is a COMMAND: the work already happened
+     * on the machine, so an undeliverable notification must not fault it.
+     *
+     * The in-process implementation throws either way (it is a local call).
+     * The flag exists for the sandbox back-call, which is best-effort by
+     * default — a thread DO that cannot be reached may not fail a command —
+     * and re-throws only when this is set. See
+     * `createSandboxThreadHostDeps`.
+     */
+    mustDeliver?: boolean;
+  }) => Promise<void>;
   /** Test seam; defaults to {@link ACQUIRE_DEADLINE_MS}. */
   acquireDeadlineMs?: number;
   attachedRuntime?: BackendReference;
@@ -330,11 +351,22 @@ export interface ThreadComputeServiceDeps {
    */
   quota?: ComputeQuotaGate;
   /**
-   * Liveness reporting for the background work ledger. Optional: the compute
-   * service works without it (older tests construct no ledger), but without it
-   * the reaper has nothing to enforce against.
+   * Liveness reporting for the background work ledger, resolved PER THREAD.
+   *
+   * A router, not a sink, and that is the whole point: the ledger lives on the
+   * thread DO, one box now serves every thread of the agent, and a row belongs
+   * to the thread that started the work — not to whichever thread happened to
+   * resolve this service. `workLedgerFor(threadOfProcess(id))` is the only way
+   * a tick resolved for thread B can stamp thread A's row.
+   *
+   * A function rather than a `workLedger` sink with a leading `threadId`
+   * argument on each method, so an implementation that ignores the routing
+   * cannot keep compiling: a `WorkLedgerSink` object is not callable.
+   *
+   * Optional: the compute service works without it (older tests construct no
+   * ledger), but without it the reaper has nothing to enforce against.
    */
-  workLedger?: WorkLedgerSink;
+  workLedgerFor?: (threadId: string) => WorkLedgerSink;
   /**
    * The background work ledger's next sweep horizon (`nextSweepAt` over the
    * open rows), or null when no work is open. Folded into this service's
@@ -388,6 +420,25 @@ export class ThreadComputeService {
   private loggedUnparsableAppBaseUrl = false;
 
   constructor(private readonly deps: ThreadComputeServiceDeps) {}
+
+  /**
+   * Which conversation a process belongs to: the thread that STARTED it.
+   *
+   * Falls back to the thread this service was resolved for, in exactly two
+   * cases and no others — a row written before the stamp column existed
+   * (`threadId === null`), and a process id with no row at all. Both mean "no
+   * better answer exists", and the fallback reproduces the pre-P3 behaviour
+   * those rows were written under. It is NOT a default a writer may rely on:
+   * every write site stamps `this.deps.threadId` explicitly.
+   */
+  private threadOfProcess(processId: string): string {
+    return this.deps.store.getProcess(processId)?.threadId ?? this.deps.threadId;
+  }
+
+  /** The work ledger of the thread that owns `processId` — see {@link threadOfProcess}. */
+  private ledgerOf(processId: string): WorkLedgerSink | undefined {
+    return this.deps.workLedgerFor?.(this.threadOfProcess(processId));
+  }
 
   /**
    * How many alarms this service instance has actually armed (i.e. how many
@@ -784,6 +835,9 @@ export class ThreadComputeService {
     const now = this.deps.now();
     this.deps.store.createProcess({
       id: processId,
+      // The stamp that makes this row's completion routable later. The store
+      // is per-BOX; only the writer knows whose turn started this.
+      threadId: this.deps.threadId,
       backendProcessRef: null,
       command: input.command,
       cwd,
@@ -944,6 +998,11 @@ export class ThreadComputeService {
     | null {
     if (!this.deps.appBaseUrl) return "no_base_url";
     if (!this.deps.betterAuthSecret) return "no_secret";
+    // `threadId` is a REQUIRED dep since P3, so this can only be the empty
+    // string now — a degenerate value the type cannot exclude. It still has to
+    // be caught: the completion token is SCOPED to `(threadId, processId)`, and
+    // one minted for `""` would route the sandbox's push to a thread DO named
+    // `""`. Kept as a guard, narrowed as a claim.
     if (!this.deps.threadId) return "no_thread_id";
     if (!this.consumesCompletionCallback()) return null;
     if (!isParseableUrl(this.deps.appBaseUrl)) {
@@ -1018,7 +1077,7 @@ export class ThreadComputeService {
     if (this.completionCallbackUnavailableReason() !== null) return undefined;
     const appBaseUrl = this.deps.appBaseUrl!;
     const betterAuthSecret = this.deps.betterAuthSecret!;
-    const threadId = this.deps.threadId!;
+    const threadId = this.deps.threadId;
     if (!this.completionSecretPromise) {
       this.completionSecretPromise = deriveCompletionSecret(betterAuthSecret);
     }
@@ -1079,6 +1138,7 @@ export class ThreadComputeService {
     const now = this.deps.now();
     this.deps.store.createProcess({
       id: processId,
+      threadId: this.deps.threadId,
       backendProcessRef: result.process,
       command: input.command,
       cwd,
@@ -1231,6 +1291,7 @@ export class ThreadComputeService {
     const deadlineAt = now + DEFAULT_WATCH_TIMEOUT_MS;
     this.deps.store.upsertWatcher({
       processId,
+      threadId: this.deps.threadId,
       deadlineAt,
       pollIntervalMs: this.deps.config.monitorPollIntervalMs,
       nextPollAt: now + this.deps.config.monitorPollIntervalMs,
@@ -1238,7 +1299,7 @@ export class ThreadComputeService {
       createdAt: now,
     });
     this.deps.store.markProcessAutoWatched(processId, now);
-    await this.deps.workLedger?.register(this.buildProcessWorkRow(processId, now));
+    await this.ledgerOf(processId)?.register(this.buildProcessWorkRow(processId, now));
     await this.armAlarm(this.computeReleaseAt());
     return {
       ok: true,
@@ -1572,7 +1633,7 @@ export class ThreadComputeService {
     // a cancelled process as exited would have it read a truncated output tail
     // as the finished result.
     const stoppedAt = this.deps.now();
-    const closed = await this.deps.workLedger?.terminalize(input.processId, {
+    const closed = await this.ledgerOf(input.processId)?.terminalize(input.processId, {
       outcome: "stopped",
       reason: "process_stopped",
       at: stoppedAt,
@@ -1586,7 +1647,7 @@ export class ThreadComputeService {
     //
     // Only when this call actually closed the row: a false return means the
     // reaper closed it first and may still genuinely owe its delivery.
-    if (closed) await this.deps.workLedger?.markDelivered(input.processId, stoppedAt);
+    if (closed) await this.ledgerOf(input.processId)?.markDelivered(input.processId, stoppedAt);
     this.deps.store.deleteWatcher(input.processId);
     this.emitCommandEvent("command_stop", input.processId, "success");
     return { ok: true, processId: input.processId, ...result };
@@ -1637,7 +1698,7 @@ export class ThreadComputeService {
       // reporting it as `exited` would have the model read a truncated output
       // tail as the finished result.
       const stoppedAt = this.deps.now();
-      const closed = await this.deps.workLedger?.terminalize(process.id, {
+      const closed = await this.ledgerOf(process.id)?.terminalize(process.id, {
         outcome: "stopped",
         reason: "process_stopped",
         at: stoppedAt,
@@ -1651,7 +1712,7 @@ export class ThreadComputeService {
       //
       // Only when this call actually closed the row: a false return means the
       // reaper closed it first and may still genuinely owe its delivery.
-      if (closed) await this.deps.workLedger?.markDelivered(process.id, stoppedAt);
+      if (closed) await this.ledgerOf(process.id)?.markDelivered(process.id, stoppedAt);
       this.deps.store.deleteWatcher(process.id);
     }
     return { stopped, failed };
@@ -1703,6 +1764,11 @@ export class ThreadComputeService {
     const timeoutMs = Math.min(input.timeoutMs ?? DEFAULT_WATCH_TIMEOUT_MS, MAX_WATCH_TIMEOUT_MS);
     const watcher = {
       processId: input.processId,
+      // The PROCESS's owner, not necessarily this service's thread: the
+      // turn-end backstop (`autoWatchRunningProcesses`) runs over every
+      // process in the box, so thread B can adopt a process thread A started —
+      // and its completion still belongs to A.
+      threadId: this.threadOfProcess(input.processId),
       deadlineAt: now + timeoutMs,
       pollIntervalMs: this.deps.config.monitorPollIntervalMs,
       nextPollAt: now + this.deps.config.monitorPollIntervalMs,
@@ -1710,9 +1776,13 @@ export class ThreadComputeService {
       createdAt: now,
     };
     this.deps.store.upsertWatcher(watcher);
-    await this.deps.workLedger?.register(this.buildProcessWorkRow(input.processId, now));
+    await this.ledgerOf(input.processId)?.register(this.buildProcessWorkRow(input.processId, now));
     await this.armAlarm(this.computeReleaseAt());
-    return { ok: true as const, watching: true, ...watcher };
+    // `threadId` is deliberately NOT spread out: this result reaches the model
+    // as the `exec_watch` tool's return, and the routing stamp is bookkeeping
+    // it has no use for.
+    const { threadId: _routedTo, ...view } = watcher;
+    return { ok: true as const, watching: true, ...view };
   }
 
   async execUnwatch(input: { processId: string }) {
@@ -1726,7 +1796,7 @@ export class ThreadComputeService {
     // unwatched process) and the reaper would fault it `no_liveness` one
     // `PROCESS_STALE_AFTER_MS`
     // later, reporting a live process as torn down.
-    await this.deps.workLedger?.deleteRow(input.processId);
+    await this.ledgerOf(input.processId)?.deleteRow(input.processId);
     return { ok: true as const, unwatched: existed };
   }
 
@@ -2043,10 +2113,14 @@ export class ThreadComputeService {
         });
         await this.clearLifecycleState();
         this.emitLifecycleEvent("discard", "active_to_absent", "success");
-        await this.deps.deliverSystemReminder?.(
-          "The thread compute environment was discarded after inactivity. Future commands will run in a fresh environment.",
-          "deferred",
-        );
+        await this.deps.deliverSystemReminder?.({
+          // The machine's own lifecycle, so it is addressed to the thread this
+          // service was resolved for — the one whose idle turn reclaimed it —
+          // not to a row's owner. See `threadOfProcess` for the other rule.
+          threadId: this.deps.threadId,
+          body: "The thread compute environment was discarded after inactivity. Future commands will run in a fresh environment.",
+          mode: "deferred",
+        });
       }
     } catch {
       if (released) {
@@ -2222,10 +2296,11 @@ export class ThreadComputeService {
       await this.deps.quota?.release();
       await this.armAlarm(expiresAt);
       this.emitLifecycleEvent("release", "active_to_recoverable", "success");
-      await this.deps.deliverSystemReminder?.(
-        "The thread compute environment was released to free a sandbox slot for another thread. Files were preserved; future commands will restore it.",
-        "deferred",
-      );
+      await this.deps.deliverSystemReminder?.({
+        threadId: this.deps.threadId,
+        body: "The thread compute environment was released to free a sandbox slot for another thread. Files were preserved; future commands will restore it.",
+        mode: "deferred",
+      });
       return true;
     } catch {
       if (released) {
@@ -2292,10 +2367,11 @@ export class ThreadComputeService {
     await this.deps.quota?.release();
     await this.clearLifecycleState();
     await this.deps.clearAlarm?.();
-    await this.deps.deliverSystemReminder?.(
-      "The thread compute environment was shut down on request. Files and running processes are gone; previous command output remains available.",
-      "deferred",
-    );
+    await this.deps.deliverSystemReminder?.({
+      threadId: this.deps.threadId,
+      body: "The thread compute environment was shut down on request. Files and running processes are gone; previous command output remains available.",
+      mode: "deferred",
+    });
     return { ok: true, terminated: true, stoppedProcesses: running.length };
   }
 
@@ -2691,7 +2767,11 @@ export class ThreadComputeService {
           "success",
           this.deps.now() - startedAt,
         );
-        await this.deps.deliverSystemReminder?.(RESTORED_COMPUTE_REMINDER, "deferred");
+        await this.deps.deliverSystemReminder?.({
+          threadId: this.deps.threadId,
+          body: RESTORED_COMPUTE_REMINDER,
+          mode: "deferred",
+        });
       } else {
         this.emitLifecycleEvent(
           "acquire",
@@ -3020,11 +3100,29 @@ export class ThreadComputeService {
       this.deps.store.deleteWatcher(watcher.processId);
       return false;
     }
+    // THE ROUTING, and it is the reason this whole poll is not simply
+    // `this.deps.*`. This service was resolved for ONE thread — on the alarm
+    // path, whichever thread most recently opened a session — but the watcher
+    // registry is per-BOX and the box serves every thread of the agent. The
+    // reminder and the ledger row below belong to the thread that STARTED the
+    // process, and nothing here would fail if they went elsewhere: the tick
+    // completes, the row is stamped, and the wrong human reads the card.
+    //
+    // The watcher's own stamp leads, and is REDUNDANT today — say so rather
+    // than let it read as load-bearing: this poll already returned above if
+    // the process row is missing, so `threadOfProcess` always has the same
+    // answer, and nulling `watcher.threadId` alone changes no behaviour (it was
+    // mutation-tested). It is kept because the watcher is the row this path
+    // reads, and a routing decision taken at REGISTRATION time — where
+    // `execWatch` resolves the adopting-thread case — should be recorded where
+    // it is used rather than re-derived from a second row.
+    const owner = watcher.threadId ?? this.threadOfProcess(watcher.processId);
+    const ledger = this.deps.workLedgerFor?.(owner);
     const status = await this.pollProcessStatus(runtime, process.backendProcessRef);
     // Stamp only AFTER a successful read. A failed poll must not stamp — that
     // is exactly what lets the reaper reap a watcher whose backend has gone
     // away, without this error path having to cooperate.
-    await this.deps.workLedger?.stampAlive(watcher.processId, now);
+    await ledger?.stampAlive(watcher.processId, now);
     this.updateTerminalProcess(watcher.processId, status);
     const classification = classifyWatcher({ watcher, processStatus: status.status, now });
     if (classification === "pending") {
@@ -3056,7 +3154,7 @@ export class ThreadComputeService {
     // especially, which is the ordinary outcome for a healthy backgrounded
     // process that outlives its watch. Nothing may read a terminal's REASON to
     // decide who owed its delivery; only the `delivered_at` stamp says that.
-    const closed = await this.deps.workLedger?.terminalize(
+    const closed = await ledger?.terminalize(
       watcher.processId,
       classification === "exited"
         ? {
@@ -3109,49 +3207,47 @@ export class ThreadComputeService {
     if (classification === "exited") {
       await this.refreshProcessOutput(watcher.processId);
       const alreadyTold =
-        closed === false && (await this.deps.workLedger?.isDelivered(watcher.processId)) === true;
+        closed === false && (await ledger?.isDelivered(watcher.processId)) === true;
       if (alreadyTold) {
         this.deps.store.deleteWatcher(watcher.processId);
         return true;
       }
       const outputTail = this.buildOutputTail(watcher.processId);
-      await this.deps.deliverSystemReminder?.(
-        `Background process ${title} (${process.command}) exited with code ${status.exitCode ?? "unknown"}. Recent output:\n${outputTail}`,
-        "proactive",
-        {
-          watcher: {
-            title,
-            command: process.command,
-            processId: watcher.processId,
-            outcome: "exited",
-            exitCode: status.exitCode ?? null,
-            outputTail,
-          },
-          mustDeliver: true,
+      await this.deps.deliverSystemReminder?.({
+        threadId: owner,
+        body: `Background process ${title} (${process.command}) exited with code ${status.exitCode ?? "unknown"}. Recent output:\n${outputTail}`,
+        mode: "proactive",
+        watcher: {
+          title,
+          command: process.command,
+          processId: watcher.processId,
+          outcome: "exited",
+          exitCode: status.exitCode ?? null,
+          outputTail,
         },
-      );
+        mustDeliver: true,
+      });
       this.emitCommandEvent("command_completion", watcher.processId, "success");
     } else {
       const alreadyTold =
-        closed === false && (await this.deps.workLedger?.isDelivered(watcher.processId)) === true;
+        closed === false && (await ledger?.isDelivered(watcher.processId)) === true;
       if (alreadyTold) {
         this.deps.store.deleteWatcher(watcher.processId);
         return true;
       }
-      await this.deps.deliverSystemReminder?.(
-        `Background process ${title} (${process.command}) is still running after the watch timeout; no longer watching it.`,
-        "proactive",
-        {
-          watcher: {
-            title,
-            command: process.command,
-            processId: watcher.processId,
-            outcome: "timeout",
-            exitCode: null,
-          },
-          mustDeliver: true,
+      await this.deps.deliverSystemReminder?.({
+        threadId: owner,
+        body: `Background process ${title} (${process.command}) is still running after the watch timeout; no longer watching it.`,
+        mode: "proactive",
+        watcher: {
+          title,
+          command: process.command,
+          processId: watcher.processId,
+          outcome: "timeout",
+          exitCode: null,
         },
-      );
+        mustDeliver: true,
+      });
       this.emitCommandEvent("command_timeout", watcher.processId, "success");
     }
     // Unconditional stamp, paired with the unconditional call above: whenever
@@ -3178,7 +3274,7 @@ export class ThreadComputeService {
     // `alreadyTold` gate above returns on before ever reaching here. Past that
     // gate, the model has now been told about this work exactly once, by a
     // message built from a live status read.
-    await this.deps.workLedger?.markDelivered(watcher.processId, now);
+    await ledger?.markDelivered(watcher.processId, now);
     // Hold release, gated on `closed`: only the call that ACTUALLY closed the
     // ledger row owns its teardown. When `closed` is false, the reaper's
     // `terminalizeWork` -> `reapProcess` got there first and already released
@@ -3258,7 +3354,11 @@ export class ThreadComputeService {
     await this.clearLifecycleState();
     await this.deps.clearAlarm?.();
     this.emitLifecycleEvent("recovery_expiry", "recoverable_to_absent", "success");
-    await this.deps.deliverSystemReminder?.(EXPIRED_RECOVERY_REMINDER, "deferred");
+    await this.deps.deliverSystemReminder?.({
+      threadId: this.deps.threadId,
+      body: EXPIRED_RECOVERY_REMINDER,
+      mode: "deferred",
+    });
     return true;
   }
 
@@ -3275,7 +3375,11 @@ export class ThreadComputeService {
     await this.deps.quota?.release();
     await this.clearLifecycleState();
     await this.deps.clearAlarm?.();
-    await this.deps.deliverSystemReminder?.(LOST_COMPUTE_REMINDER, "deferred");
+    await this.deps.deliverSystemReminder?.({
+      threadId: this.deps.threadId,
+      body: LOST_COMPUTE_REMINDER,
+      mode: "deferred",
+    });
   }
 
   /**
@@ -3312,7 +3416,7 @@ export class ThreadComputeService {
     for (const process of this.deps.store.listProcesses(1_000)) {
       if (process.status !== "running") continue;
       this.deps.store.updateProcess(process.id, { status: "stopped", finishedAt: now });
-      const closed = await this.deps.workLedger?.terminalize(process.id, {
+      const closed = await this.ledgerOf(process.id)?.terminalize(process.id, {
         outcome: "stopped",
         reason: "process_stopped",
         at: now,
@@ -3320,7 +3424,8 @@ export class ThreadComputeService {
       });
       // Only when this call actually closed the row: a false return means the
       // reaper got there first and may still genuinely owe its delivery.
-      if (closed && options.deliver) await this.deps.workLedger?.markDelivered(process.id, now);
+      if (closed && options.deliver)
+        await this.ledgerOf(process.id)?.markDelivered(process.id, now);
     }
   }
 

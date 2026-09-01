@@ -262,7 +262,13 @@ describe("ThreadComputeService completion callback", () => {
     expect(backend.startProcessCalls[0]?.completionCallback).toBeUndefined();
   });
 
-  it("omits the callback when the service has no threadId", async () => {
+  // Was "when the service has no threadId". `threadId` became a REQUIRED dep in
+  // P3 (it routes every back-call), so "omitted entirely" is now a compile
+  // error and cannot be tested. The empty string is what survives of that
+  // scenario, and it still matters: the token is scoped to
+  // `(threadId, processId)`, so one minted for `""` would aim the sandbox's
+  // push at a thread DO named `""`.
+  it("omits the callback when the service's threadId is empty", async () => {
     const backend = new FakeComputeBackend();
     const store = createMemoryComputeStore();
     const service = new ThreadComputeService({
@@ -270,7 +276,7 @@ describe("ThreadComputeService completion callback", () => {
       store,
       config: CONFIG,
       environmentId: "thread_test",
-      // threadId omitted entirely.
+      threadId: "",
       env: {},
       appBaseUrl: "https://nadi.example.com",
       betterAuthSecret: SECRET,

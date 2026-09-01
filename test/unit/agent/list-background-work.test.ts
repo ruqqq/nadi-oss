@@ -336,6 +336,7 @@ describe("ThinkThreadAgent.listBackgroundWork", () => {
         store: createMemoryComputeStore(),
         config: COMPUTE_CONFIG,
         environmentId: "thread_test",
+        threadId: "thr_list_background_work",
         env: {},
         setAlarm: async () => {},
         now: () => now.value,
@@ -343,7 +344,7 @@ describe("ThinkThreadAgent.listBackgroundWork", () => {
         // The SAME storage `instance.listBackgroundWork()` reads — this is
         // what proves the poll path's write is visible to the RPC, not just
         // to a private test double.
-        workLedger: localWorkLedgerSink(store),
+        workLedgerFor: () => localWorkLedgerSink(store),
       });
 
       const started = await service.execStart({ command: "sleep 300", label: "build" });

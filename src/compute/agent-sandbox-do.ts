@@ -123,23 +123,35 @@ export class AgentSandbox extends DurableObject<Env> {
    */
   private threadHostDeps(threadId: string) {
     const deps = createSandboxThreadHostDeps(this.env, threadId);
+    /**
+     * The roster's invariant, enforced at the only place that can create the
+     * obligation: a thread with a ledger row ALWAYS has a roster row.
+     *
+     * `session()` writes one too, but that write is elided per instance and
+     * can have been pruned since. Re-asserting here — BEFORE the row is
+     * registered, and with a fresh stamp — is also what closes the prune race:
+     * the alarm deletes a roster row only if its stamp is unchanged since the
+     * pass began, so a register that lands mid-pass keeps it.
+     *
+     * Applied to the ROUTED sink, not just this thread's: since a register can
+     * now target the thread that owns the row rather than the one that
+     * resolved the service, rostering `threadId` here would put the wrong
+     * thread on the sweep list and leave the real owner's row unswept.
+     */
+    const rosteringSink = (rowThreadId: string) => {
+      const sink = deps.workLedgerFor(rowThreadId);
+      return {
+        ...sink,
+        register: async (row: WorkRow) => {
+          await this.touchSweepRoster(rowThreadId, { force: true });
+          await sink.register(row);
+        },
+      };
+    };
     return {
       ...deps,
-      workLedger: {
-        ...deps.workLedger,
-        // The roster's invariant, enforced at the only place that can create
-        // the obligation: a thread with a ledger row ALWAYS has a roster row.
-        //
-        // `session()` writes one too, but that write is elided per instance and
-        // can have been pruned since. Re-asserting here — BEFORE the row is
-        // registered, and with a fresh stamp — is also what closes the prune
-        // race: the alarm deletes a roster row only if its stamp is unchanged
-        // since the pass began, so a register that lands mid-pass keeps it.
-        register: async (row: WorkRow) => {
-          await this.touchSweepRoster(threadId, { force: true });
-          await deps.workLedger.register(row);
-        },
-      },
+      workLedgerFor: rosteringSink,
+      workLedger: rosteringSink(threadId),
     };
   }
 
@@ -149,6 +161,23 @@ export class AgentSandbox extends DurableObject<Env> {
    * The stamp is the value, not just presence: {@link forgetSweepThread} deletes
    * only on an unchanged stamp, so any concurrent touch cancels a prune that was
    * decided against older evidence.
+   *
+   * KNOWN COST — a `SubAgent`'s id is a RUN id, not a thread id, and it is
+   * rostered here like any other. `threadHostDeps(runId)` resolves it against
+   * `THINK_THREAD_AGENT` and `getAgentByName` CREATES that DO on demand, so
+   * the next alarm instantiates and hydrates a `ThinkThreadAgent` named after
+   * a run id, runs a real sweep against its empty ledger, finds nothing owed
+   * and prunes it. One alarm's worth of DO creation plus storage for an object
+   * nothing reads again.
+   *
+   * NOT fixed by refusing to roster run ids, and the reason is worth writing
+   * down: every back-call a subagent's compute makes ALREADY goes to that same
+   * phantom DO — `openSandbox()` passes `this.name`, which for a `SubAgent` is
+   * the run id, so its ledger rows and its reminders land there too. Dropping
+   * the roster entry alone would leave those rows on the phantom with nothing
+   * left to sweep them. The real fix is routing a subagent's back-calls to a
+   * DO that exists (its parent thread, or the facet itself), which is a change
+   * to `ThinkThreadAgent.openSandbox`, not to this line.
    */
   private async touchSweepRoster(threadId: string, options?: { force?: boolean }): Promise<void> {
     if (!options?.force && this.rosterWritten.has(threadId)) return;
@@ -158,6 +187,37 @@ export class AgentSandbox extends DurableObject<Env> {
     this.lastRosterStamp = Math.max(Date.now(), this.lastRosterStamp + 1);
     await this.ctx.storage.put<number>(SWEEP_ROSTER_PREFIX + threadId, this.lastRosterStamp);
     this.rosterWritten.add(threadId);
+  }
+
+  /**
+   * Min-fold of the ledger horizons of `entries` — the earliest moment any of
+   * them needs this box's single alarm.
+   *
+   * One thread's horizon armed alone does not merely under-serve the others: a
+   * Durable Object has ONE alarm, so it REPLACES a nearer wake they needed.
+   */
+  private async foldWorkHorizon(
+    entries: { threadId: string }[],
+    now?: number,
+  ): Promise<number | null> {
+    let min: number | null = null;
+    for (const entry of entries) {
+      const horizon = await this.threadHostDeps(entry.threadId).getWorkHorizon(now);
+      if (horizon !== null && (min === null || horizon < min)) min = horizon;
+    }
+    return min;
+  }
+
+  /**
+   * {@link foldWorkHorizon} over the CURRENT roster — the `getWorkHorizon` the
+   * alarm's compute service arms with, so its `armAlarm` covers every thread
+   * this box serves rather than only the one whose session it replayed.
+   *
+   * Reads the roster fresh because it is called from inside the tick, before
+   * the sweep has decided what to prune.
+   */
+  private async rosterWorkHorizon(): Promise<number | null> {
+    return this.foldWorkHorizon(await this.readSweepRoster());
   }
 
   /** Every thread this box must sweep, with the stamp the prune compares against. */
@@ -232,6 +292,26 @@ export class AgentSandbox extends DurableObject<Env> {
        * {@link runtimeConfigFor}.
        */
       runtimeConfig?: { workspaceId: string; agentId: string };
+      /**
+       * WHOSE open work this service's `armAlarm` min-folds into the box's one
+       * alarm.
+       *
+       * REQUIRED, and the reason is Task 1b's Finding 1: `armAlarm` is the
+       * sandbox's single arm site, a Durable Object has exactly ONE alarm, and
+       * that alarm serves every thread of the agent. A per-thread horizon
+       * armed here does not merely under-serve the others, it REPLACES a
+       * nearer wake one of them needed. Nothing fails when it is wrong — the
+       * row is terminalized minutes late and its fault reminder arrives with
+       * it — so the choice is stated at every call site rather than defaulted.
+       *
+       * `"resolving-thread"`: only the thread this service is for. What a
+       * `session()` open uses, because folding the roster would cost one
+       * cross-DO RPC per rostered thread on each of a turn's ~25 arms, every
+       * one of them waking a hibernating `ThinkThreadAgent`.
+       * `"roster"`: every thread this box serves. What the ALARM uses, on both
+       * its armed and its fallback path.
+       */
+      workHorizon: "resolving-thread" | "roster";
     },
   ) {
     // `probeWorkspaceCleanliness` runs against THIS DO's own service rather
@@ -311,18 +391,26 @@ export class AgentSandbox extends DurableObject<Env> {
       purpose?: ComputeResolvePurpose;
       attachedRuntime?: BackendReference;
       runtimeConfig?: { workspaceId: string; agentId: string };
+      /** See {@link resolveService}'s option of the same name. */
+      workHorizon: "resolving-thread" | "roster";
     },
     hooks: {
       probeWorkspaceCleanliness?: ComputeServiceHostDeps["probeWorkspaceCleanliness"];
       onFreshRuntimeAcquired?: ComputeServiceHostDeps["onFreshRuntimeAcquired"];
     },
   ) {
+    const host = this.threadHostDeps(threadId);
     return resolveComputeService({
       env: this.env,
       threadId,
       storage: this.ctx.storage,
       resolveRuntimeConfig: async () => options.runtimeConfig ?? this.runtimeConfigFor(threadId),
-      ...this.threadHostDeps(threadId),
+      ...host,
+      // Overrides the single-thread `getWorkHorizon` the spread above carries
+      // — see `options.workHorizon`. AFTER the spread deliberately: the roster
+      // fold has to win, and a reader has to be able to see that it does.
+      getWorkHorizon:
+        options.workHorizon === "roster" ? () => this.rosterWorkHorizon() : host.getWorkHorizon,
       // THIS DO's own alarm, not a back-call. A Durable Object has exactly one
       // alarm, which is the same single-outstanding-wake shape the thread DO's
       // cancel-then-set schedule id used to give `armAlarm` — so `armAlarm`
@@ -430,6 +518,11 @@ export class AgentSandbox extends DurableObject<Env> {
       const resolved = await this.resolveService(input.threadId, {
         supportsProcessMonitor: input.supportsProcessMonitor,
         runtimeConfig: input.runtimeConfig,
+        // A turn arms ~25 times; the roster fold is one cross-DO RPC per
+        // rostered thread and each wakes a hibernating thread DO. The ALARM
+        // pays that instead, once per wake — see the option's doc, and the
+        // residual it names.
+        workHorizon: "resolving-thread",
         ...(input.purpose ? { purpose: input.purpose } : {}),
         ...(input.attachedRuntime ? { attachedRuntime: input.attachedRuntime } : {}),
       });
@@ -498,6 +591,8 @@ export class AgentSandbox extends DurableObject<Env> {
     // Mutated by the sweep: a thread pruned there must not then contribute a
     // horizon that re-arms this box on its behalf.
     let live = roster;
+    // Hoisted for `setSandboxDeclaredClean` below — see FINDING 3 there.
+    const tickThreadId = params?.threadId ?? null;
     await runSandboxComputeAlarm({
       // Log scope only. Never a sweep target — see the field's own doc.
       agentId,
@@ -510,6 +605,12 @@ export class AgentSandbox extends DurableObject<Env> {
         return this.resolveService(params.threadId, {
           supportsProcessMonitor: params.supportsProcessMonitor,
           runtimeConfig: params.runtimeConfig,
+          // FINDING 1. The fallback `workHorizon` below only runs when the
+          // tick armed NOTHING (`armed === false` in `runSandboxComputeAlarm`),
+          // so on the ordinary armed path the roster fold used to be skipped
+          // entirely and the box armed for one thread's horizon. Both paths
+          // fold the roster now.
+          workHorizon: "roster",
           ...(params.attachedRuntime ? { attachedRuntime: params.attachedRuntime } : {}),
         });
       },
@@ -548,20 +649,27 @@ export class AgentSandbox extends DurableObject<Env> {
       },
       // Min-fold across every thread still on the roster. One thread's horizon
       // would arm this box for that thread and strand the rest.
-      workHorizon: async (now) => {
-        let min: number | null = null;
-        for (const entry of live) {
-          const horizon = await this.threadHostDeps(entry.threadId).getWorkHorizon(now);
-          if (horizon !== null && (min === null || horizon < min)) min = horizon;
-        }
-        return min;
-      },
+      //
+      // `live`, not a fresh roster read: the sweep above has just pruned the
+      // threads with nothing open, and a pruned thread must not then contribute
+      // a horizon that re-arms this box on its behalf.
+      workHorizon: (now) => this.foldWorkHorizon(live, now),
       setAlarm: (timestampMs) => this.ctx.storage.setAlarm(timestampMs),
       // The tick's own thread — this is the machine's "clean" bit, written by
       // the thread whose session the tick replayed, exactly as before.
+      //
+      // FINDING 3. The thread id is HOISTED out of the closure rather than
+      // re-read from `params` with an `if (!params) return` guard. That guard
+      // was unreachable (this is only called inside `if (resolved)`, and
+      // `openSession` returns null when there are no params) and it no-opped
+      // SILENTLY — a later refactor that made it live would have dropped a
+      // clean-bit reset with nothing to show for it. Unreachable now means a
+      // throw, which the alarm's own tick guard logs as `alarm_tick_failed`.
       setSandboxDeclaredClean: async (clean) => {
-        if (!params) return;
-        await this.threadHostDeps(params.threadId).setSandboxDeclaredClean(clean);
+        if (tickThreadId === null) {
+          throw new Error("agent_sandbox.clean_bit_without_recorded_session");
+        }
+        await this.threadHostDeps(tickThreadId).setSandboxDeclaredClean(clean);
       },
     });
   }

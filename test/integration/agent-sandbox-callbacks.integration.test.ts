@@ -106,7 +106,7 @@ async function backCalls(threadId: string, agentKey: string = threadId) {
   return {
     deliver: (body: string, mode: "deferred" | "proactive") =>
       runInSandboxDo(sandboxStub(agentKey), async (instance: any) => {
-        await instance.threadHostDeps(threadId).deliverSystemReminder(body, mode);
+        await instance.threadHostDeps(threadId).deliverSystemReminder({ threadId, body, mode });
       }),
     /** Run anything against the DO's own dep object, from inside the DO. */
     with: <T>(fn: (deps: any) => Promise<T>): Promise<T> =>
@@ -261,12 +261,23 @@ describe("AgentSandbox back-calls into the owning thread DO", () => {
       { THINK_THREAD_AGENT: undefined } as unknown as Env,
       "thr_cb_unreachable",
     );
-    await expect(deps.deliverSystemReminder("orphan-marker", "deferred")).resolves.toBeUndefined();
+    await expect(
+      deps.deliverSystemReminder({
+        threadId: "thr_cb_unreachable",
+        body: "orphan-marker",
+        mode: "deferred",
+      }),
+    ).resolves.toBeUndefined();
     await expect(deps.sweepWorkLedger({ kind: "unresolved" })).resolves.toBeUndefined();
     // A watcher-completion reminder is still a COMMAND result unless the caller
     // says otherwise; only `mustDeliver` changes the semantics.
     await expect(
-      deps.deliverSystemReminder("orphan-marker", "proactive", { watcher: WATCHER }),
+      deps.deliverSystemReminder({
+        threadId: "thr_cb_unreachable",
+        body: "orphan-marker",
+        mode: "proactive",
+        watcher: WATCHER,
+      }),
     ).resolves.toBeUndefined();
   });
 
@@ -286,7 +297,10 @@ describe("AgentSandbox back-calls into the owning thread DO", () => {
       "thr_cb_unreachable_watch",
     );
     await expect(
-      deps.deliverSystemReminder("orphan-marker", "proactive", {
+      deps.deliverSystemReminder({
+        threadId: "thr_cb_unreachable_watch",
+        body: "orphan-marker",
+        mode: "proactive",
         watcher: WATCHER,
         mustDeliver: true,
       }),

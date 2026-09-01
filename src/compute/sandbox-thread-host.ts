@@ -85,6 +85,128 @@ async function threadHostStub(env: Env, threadId: string): Promise<SandboxThread
 }
 
 /**
+ * The work-ledger sink for ONE thread. Split out of
+ * {@link createSandboxThreadHostDeps} because since P3 the compute service
+ * reaches it through a ROUTER keyed by the thread that owns each row, not
+ * through a sink bound to the thread that resolved the service.
+ *
+ * `attempt` is passed in rather than rebuilt so the log lines keep naming the
+ * thread the call was actually addressed to.
+ */
+function workLedgerSinkFor(env: Env, threadId: string): WorkLedgerSink {
+  const attempt = backCallAttempt(env, threadId);
+  const call = async (
+    op: string,
+    run: (host: SandboxThreadHost) => Promise<SandboxCallResult<null>>,
+  ): Promise<void> => {
+    await attempt(op, run);
+  };
+  const read = async <T>(
+    op: string,
+    run: (host: SandboxThreadHost) => Promise<SandboxCallResult<T>>,
+    onUnreachable: T,
+  ): Promise<T> => {
+    const result = await attempt(op, run);
+    return result ? result.value : onUnreachable;
+  };
+  return {
+    register: (row) =>
+      call("workLedger.register", (host) => host.sandboxWorkLedgerRegister({ row })),
+    stampAlive: (id, at) =>
+      call("workLedger.stampAlive", (host) => host.sandboxWorkLedgerStampAlive({ id, at })),
+    // `false` = "this call did not close the row". The return value gates
+    // hold release and the delivery stamp, so a failed terminalize claiming
+    // `true` would own a teardown it never performed and stamp a delivery
+    // that never happened. Both are worse than a row the reaper closes later.
+    terminalize: (id, terminal) =>
+      read(
+        "workLedger.terminalize",
+        (host) => host.sandboxWorkLedgerTerminalize({ id, terminal }),
+        false,
+      ),
+    // `false` = "nothing was stamped", which is the truth: the row stays owed
+    // and the sweep retries the delivery.
+    markDelivered: (id, at) =>
+      read(
+        "workLedger.markDelivered",
+        (host) => host.sandboxWorkLedgerMarkDelivered({ id, at }),
+        false,
+      ),
+    // `false` = "not known to have been told", so the caller speaks. A
+    // duplicate card beats silence (thread-service.ts:3020-3045), and the
+    // same unreachable thread makes `markDelivered` fail too, so the row
+    // stays owed and the sweep can still say it.
+    isDelivered: (id) =>
+      read("workLedger.isDelivered", (host) => host.sandboxWorkLedgerIsDelivered({ id }), false),
+    deleteRow: (id) =>
+      call("workLedger.deleteRow", (host) => host.sandboxWorkLedgerDeleteRow({ id })),
+  };
+}
+
+/**
+ * Run one back-call against `threadId`'s DO and return its encoded result, or
+ * `null` when the call could not be completed at all. Never throws.
+ */
+function backCallAttempt(env: Env, threadId: string) {
+  return async function attempt<T>(
+    op: string,
+    run: (host: SandboxThreadHost) => Promise<SandboxCallResult<T>>,
+  ): Promise<{ ok: true; value: T } | null> {
+    try {
+      const result = await run(await threadHostStub(env, threadId));
+      if (result.ok) return result;
+      log.warn("agent_sandbox.thread_back_call_rejected", {
+        threadId,
+        op,
+        code: result.error.code,
+        message: result.error.message,
+      });
+      return null;
+    } catch (error) {
+      log.warn("agent_sandbox.thread_back_call_failed", {
+        threadId,
+        op,
+        error: String(error),
+      });
+      return null;
+    }
+  };
+}
+
+/**
+ * Deliver ONE system reminder into the conversation named by `input.threadId`.
+ *
+ * A free function, not a method on the per-thread deps, because the thread it
+ * targets is decided per CALL: the compute service is resolved for one thread
+ * but a watcher completing on another must be announced where the work
+ * started. The `threadId` the deps object was built with is not consulted here
+ * at all — the caller states it, every time.
+ */
+export async function deliverSandboxSystemReminder(
+  env: Env,
+  input: {
+    threadId: string;
+    body: string;
+    mode: "deferred" | "proactive";
+    watcher?: WatcherCompletionInfo;
+    mustDeliver?: boolean;
+  },
+): Promise<void> {
+  const result = await backCallAttempt(env, input.threadId)("deliverSystemReminder", (host) =>
+    host.deliverSystemReminderFromSandbox({
+      body: input.body,
+      mode: input.mode,
+      ...(input.watcher ? { watcher: input.watcher } : {}),
+    }),
+  );
+  if (result || !input.mustDeliver) return;
+  // The watcher-poll path. See the header: a throw here is what leaves the
+  // ledger row owed so the sweep retries. Swallowing would silently
+  // discharge an obligation the model never saw.
+  throw new Error(`sandbox_reminder_undelivered: ${input.threadId}`);
+}
+
+/**
  * The subset of `ComputeServiceHostDeps` (plus the alarm's sweep) that the
  * sandbox DO cannot satisfy from its own storage, wired to call back into the
  * thread DO that owns `threadId`.
@@ -113,11 +235,24 @@ export function createSandboxThreadHostDeps(
   threadId: string,
 ): {
   sweepWorkLedger: (resolution: SandboxSweepResolution) => Promise<void>;
-  deliverSystemReminder: (
-    body: string,
-    mode: "deferred" | "proactive",
-    options?: { watcher?: WatcherCompletionInfo; mustDeliver?: boolean },
-  ) => Promise<void>;
+  /**
+   * ROUTED, not bound: `input.threadId` decides the target, and `threadId`
+   * above is not consulted. See {@link deliverSandboxSystemReminder}.
+   */
+  deliverSystemReminder: (input: {
+    threadId: string;
+    body: string;
+    mode: "deferred" | "proactive";
+    watcher?: WatcherCompletionInfo;
+    mustDeliver?: boolean;
+  }) => Promise<void>;
+  /** ROUTED, not bound — see {@link workLedgerSinkFor}. */
+  workLedgerFor: (rowThreadId: string) => WorkLedgerSink;
+  /**
+   * This thread's own sink. The invariant-keeping wrapper in
+   * `AgentSandbox.threadHostDeps` needs a sink it can wrap for ONE named
+   * thread, and the alarm's roster fan-out addresses one thread at a time.
+   */
   workLedger: WorkLedgerSink;
   getWorkHorizon: (now?: number) => Promise<number | null>;
   /**
@@ -136,33 +271,7 @@ export function createSandboxThreadHostDeps(
   setSandboxDeclaredClean: (clean: boolean) => Promise<void>;
   isSandboxDeclaredClean: () => Promise<boolean>;
 } {
-  /**
-   * Run one back-call and return its encoded result, or `null` when the call
-   * could not be completed at all. Never throws.
-   */
-  async function attempt<T>(
-    op: string,
-    run: (host: SandboxThreadHost) => Promise<SandboxCallResult<T>>,
-  ): Promise<{ ok: true; value: T } | null> {
-    try {
-      const result = await run(await threadHostStub(env, threadId));
-      if (result.ok) return result;
-      log.warn("agent_sandbox.thread_back_call_rejected", {
-        threadId,
-        op,
-        code: result.error.code,
-        message: result.error.message,
-      });
-      return null;
-    } catch (error) {
-      log.warn("agent_sandbox.thread_back_call_failed", {
-        threadId,
-        op,
-        error: String(error),
-      });
-      return null;
-    }
-  }
+  const attempt = backCallAttempt(env, threadId);
 
   /** Fire-and-forget back-call: a failure is logged and dropped. */
   async function call(
@@ -200,52 +309,9 @@ export function createSandboxThreadHostDeps(
     // must still get its chance to give the thread another wake.
     sweepWorkLedger: (resolution) =>
       call("sweepWorkLedger", (host) => host.sweepSandboxWorkLedger({ resolution })),
-    deliverSystemReminder: async (body, mode, options) => {
-      const result = await attempt("deliverSystemReminder", (host) =>
-        host.deliverSystemReminderFromSandbox({
-          body,
-          mode,
-          ...(options?.watcher ? { watcher: options.watcher } : {}),
-        }),
-      );
-      if (result || !options?.mustDeliver) return;
-      // The watcher-poll path. See the header: a throw here is what leaves the
-      // ledger row owed so the sweep retries. Swallowing would silently
-      // discharge an obligation the model never saw.
-      throw new Error(`sandbox_reminder_undelivered: ${threadId}`);
-    },
-    workLedger: {
-      register: (row) =>
-        call("workLedger.register", (host) => host.sandboxWorkLedgerRegister({ row })),
-      stampAlive: (id, at) =>
-        call("workLedger.stampAlive", (host) => host.sandboxWorkLedgerStampAlive({ id, at })),
-      // `false` = "this call did not close the row". The return value gates
-      // hold release and the delivery stamp, so a failed terminalize claiming
-      // `true` would own a teardown it never performed and stamp a delivery
-      // that never happened. Both are worse than a row the reaper closes later.
-      terminalize: (id, terminal) =>
-        read(
-          "workLedger.terminalize",
-          (host) => host.sandboxWorkLedgerTerminalize({ id, terminal }),
-          false,
-        ),
-      // `false` = "nothing was stamped", which is the truth: the row stays owed
-      // and the sweep retries the delivery.
-      markDelivered: (id, at) =>
-        read(
-          "workLedger.markDelivered",
-          (host) => host.sandboxWorkLedgerMarkDelivered({ id, at }),
-          false,
-        ),
-      // `false` = "not known to have been told", so the caller speaks. A
-      // duplicate card beats silence (thread-service.ts:3020-3045), and the
-      // same unreachable thread makes `markDelivered` fail too, so the row
-      // stays owed and the sweep can still say it.
-      isDelivered: (id) =>
-        read("workLedger.isDelivered", (host) => host.sandboxWorkLedgerIsDelivered({ id }), false),
-      deleteRow: (id) =>
-        call("workLedger.deleteRow", (host) => host.sandboxWorkLedgerDeleteRow({ id })),
-    },
+    deliverSystemReminder: (input) => deliverSandboxSystemReminder(env, input),
+    workLedgerFor: (rowThreadId) => workLedgerSinkFor(env, rowThreadId),
+    workLedger: workLedgerSinkFor(env, threadId),
     // `null` = "no ledger wake to fold in". The alarm's other components
     // (watcher polls, the release time) still arm, and the alarm callback's own
     // fallback arm covers a fold that never ran.

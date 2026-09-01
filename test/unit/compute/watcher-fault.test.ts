@@ -4,7 +4,10 @@ import { DEFAULT_COMPUTE_LIMITS } from "../../../src/compute/config";
 import { ComputeError } from "../../../src/compute/errors";
 import { GENERATION_PATH } from "../../../src/compute/generation";
 import { ThreadComputeService } from "../../../src/compute/thread-service";
-import type { ThreadComputeStoreLike } from "../../../src/compute/thread-service";
+import type {
+  ThreadComputeServiceDeps,
+  ThreadComputeStoreLike,
+} from "../../../src/compute/thread-service";
 import type { EffectiveComputeConfig } from "../../../src/compute/types";
 import { WATCH_ABSOLUTE_TIMEOUT_MS } from "../../../src/compute/watchers";
 import {
@@ -92,8 +95,9 @@ function makeServiceOnSharedStore(input: {
     backend: input.backend,
     store: input.store,
     config: CONFIG,
-    ...(input.workLedger ? { workLedger: input.workLedger } : {}),
+    ...(input.workLedger ? { workLedgerFor: () => input.workLedger! } : {}),
     environmentId: "thread_test",
+    threadId: "thr_watcher_fault",
     env: {},
     setAlarm: async () => {},
     now: () => input.now.value,
@@ -110,7 +114,7 @@ function createService(input: {
   now: { value: number };
   /** Wire the ledger horizon in, exactly as ThinkThreadAgent.sandboxHostDeps does. */
   foldWorkHorizon?: boolean;
-  deliverSystemReminder?: (body: string, mode: "proactive" | "deferred") => Promise<void>;
+  deliverSystemReminder?: ThreadComputeServiceDeps["deliverSystemReminder"];
 }) {
   const ledger = createLedgerSpy();
   const alarms: number[] = [];
@@ -119,11 +123,12 @@ function createService(input: {
     store: createMemoryComputeStore(),
     config: CONFIG,
     environmentId: "thread_test",
+    threadId: "thr_watcher_fault",
     env: {},
     setAlarm: async (timestamp) => void alarms.push(timestamp),
     now: () => input.now.value,
     supportsProcessMonitor: true,
-    workLedger: ledger.sink,
+    workLedgerFor: () => ledger.sink,
     ...(input.deliverSystemReminder ? { deliverSystemReminder: input.deliverSystemReminder } : {}),
     // The agent supplies `nextSweepAt(workLedger.listOpen())`; mirror that over
     // the spy's rows so the fold is exercised against real horizons.

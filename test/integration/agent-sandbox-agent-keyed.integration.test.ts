@@ -262,6 +262,15 @@ describe("the sandbox DO is keyed by agent", () => {
   /**
    * An unreachable thread is NOT a clean one. `getWorkHorizon` collapses both to
    * `null`, which is why the prune reads `probeWorkHorizon` instead.
+   *
+   * Asserted on the ROSTER, not on the probe's two return shapes. The earlier
+   * version of this test carried this title while only checking that
+   * `probeWorkHorizon` answers `{reachable:false}` when it cannot reach a
+   * namespace — which left the `probe.reachable &&` conjunction in
+   * `AgentSandbox.alarm` genuinely unproven, and a test that reads as coverage
+   * but is not is worse than a visible gap. Drop the conjunction and this goes
+   * red: the sweep's own `probeWorkHorizon` also answers `null`, so the entry
+   * is pruned and the thread is silently dropped from every later sweep.
    */
   it("keeps a thread on the roster when its DO could not be reached", async () => {
     const agentId = "agent_sbx_unreach";
@@ -269,17 +278,83 @@ describe("the sandbox DO is keyed by agent", () => {
     await seedAgent(agentId);
     await seedThread(threadId, agentId);
 
-    const probe = await runInSandboxDo(sandboxStub(agentId), async (instance: any) => {
-      const reachable = await instance.threadHostDeps(threadId).probeWorkHorizon();
-      const unreachable = await (
-        await import("../../src/compute/sandbox-thread-host")
-      )
-        .createSandboxThreadHostDeps({ THINK_THREAD_AGENT: undefined } as any, threadId)
-        .probeWorkHorizon();
-      return { reachable, unreachable };
+    await openSession(agentId, threadId);
+    expect(await rosterThreads(agentId)).toEqual([threadId]);
+
+    // The thread namespace is gone, so every back-call this alarm makes fails:
+    // the sweep, and the horizon probe that decides the prune. The thread still
+    // has to be there afterwards — "no answer" is not "nothing to do".
+    await runInSandboxDo(sandboxStub(agentId), async (instance: any) => {
+      const real = instance.env;
+      instance.env = { ...real, THINK_THREAD_AGENT: undefined };
+      try {
+        await instance.alarm();
+      } finally {
+        instance.env = real;
+      }
     });
 
-    expect(probe.reachable).toEqual({ reachable: true, horizon: null });
-    expect(probe.unreachable).toEqual({ reachable: false, horizon: null });
+    expect(
+      await rosterThreads(agentId),
+      "an unreachable thread must be kept: it may still have open work nothing else will sweep",
+    ).toEqual([threadId]);
+
+    // ...and the reachable, genuinely-clean answer still prunes, so the
+    // assertion above is about REACHABILITY and not about the alarm never
+    // pruning at all.
+    await fireAlarm(agentId);
+    expect(await rosterThreads(agentId)).toEqual([]);
+  });
+
+  /**
+   * FINDING 1 — the work-horizon fold on the ARMED path.
+   *
+   * `runSandboxComputeAlarm` only calls the host's `workHorizon` when the tick
+   * armed NOTHING. On the ordinary armed path the horizon comes from the
+   * compute service's own `armAlarm`, whose `getWorkHorizon` dep used to be a
+   * SINGLE thread's — so an agent whose last turn was on thread B would arm at
+   * B's idle release (~30 min) while thread A held a row due in ~1 min, and A's
+   * row was terminalized, and its fault reported, that late. Self-correcting on
+   * the next alarm, and invisible to everything but a clock.
+   */
+  it("arms the ALARM against every rostered thread's horizon, not just the tick's", async () => {
+    const agentId = "agent_sbx_horizon";
+    const holder = "thr_sbx_horizon_holder";
+    const ticker = "thr_sbx_horizon_ticker";
+    await seedAgent(agentId);
+    await seedThread(holder, agentId);
+    await seedThread(ticker, agentId);
+
+    // HOLDER has a live row whose staleness horizon is a minute out. Not stale,
+    // so the sweep leaves it open and it keeps contributing a horizon.
+    const soon = Date.now() + 60_000;
+    await runInSandboxDo(sandboxStub(agentId), async (instance: any) => {
+      await instance.threadHostDeps(holder).workLedger.register({
+        ...staleRow("proc_horizon"),
+        startedAt: Date.now(),
+        lastAliveAt: Date.now(),
+        staleAfterMs: 60_000,
+        deadlineAt: Date.now() + 3_600_000,
+      });
+    });
+
+    // TICKER takes the turn, so it is the tick's single `params.threadId`, and
+    // its own idle release is the far-out horizon the arm would otherwise use.
+    const session = await openSession(agentId, ticker);
+    if (!session.value) throw new Error("expected compute to be enabled");
+    expect((await session.value.session.execRun({ command: "echo hi" })).ok).toBe(true);
+
+    await fireAlarm(agentId);
+
+    const armedAt = await runInSandboxDo(sandboxStub(agentId), async (instance: any) =>
+      instance.ctx.storage.getAlarm(),
+    );
+    expect(armedAt, "the tick must have armed something").not.toBeNull();
+    expect(
+      armedAt,
+      "the armed alarm has to cover the OTHER thread's row: a DO has one alarm, so a " +
+        "horizon armed for the tick's thread alone does not under-serve the rest, it " +
+        "REPLACES the nearer wake they needed",
+    ).toBeLessThanOrEqual(soon + 5_000);
   });
 });

@@ -28,6 +28,17 @@ export const DEFAULT_MONITOR_POLL_INTERVAL_MS = 60_000;
 
 export interface WatcherRow {
   processId: string;
+  /**
+   * The thread this watcher answers to — where its completion reminder is
+   * delivered and whose work ledger holds its row.
+   *
+   * REQUIRED, so a writer cannot acquire the wrong routing by omission: since
+   * P3 one box serves every thread of the agent, and the watcher registry is
+   * per-BOX. `null` is the explicit "row predates the stamp" value, resolved
+   * by the reader to the thread currently resolving the service — never a
+   * writer's shortcut for "whatever thread you like".
+   */
+  threadId: string | null;
   deadlineAt: number;
   pollIntervalMs: number;
   nextPollAt: number;

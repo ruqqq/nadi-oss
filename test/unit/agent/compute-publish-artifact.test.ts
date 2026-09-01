@@ -34,6 +34,7 @@ function createService(backend = new FakeComputeBackend()) {
       secretEnvNames: [],
     },
     environmentId: "fake-env",
+    threadId: "thr_compute_publish_artifact",
     env: {},
     setAlarm: async () => {},
     now: () => 1000,

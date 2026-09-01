@@ -12,6 +12,7 @@ import {
 function watcher(overrides?: Partial<WatcherRow>): WatcherRow {
   return {
     processId: "p1",
+    threadId: "thr_watchers",
     deadlineAt: 1000,
     pollIntervalMs: DEFAULT_MONITOR_POLL_INTERVAL_MS,
     nextPollAt: 500,

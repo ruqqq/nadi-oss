@@ -67,6 +67,7 @@ function buildTools(backend: FakeComputeBackend) {
       secretEnvNames: [],
     },
     environmentId: "fake-env",
+    threadId: "thr_artifacts_integration",
     env: {},
     setAlarm: async () => {},
     now: () => Date.now(),

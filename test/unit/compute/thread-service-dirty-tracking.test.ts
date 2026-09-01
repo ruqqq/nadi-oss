@@ -43,6 +43,7 @@ function createService(input?: {
     store,
     config: CONFIG,
     environmentId: "thread_test",
+    threadId: "thr_thread_service_dirty_tracking",
     env: {},
     setAlarm: async (timestamp) => void alarms.push(timestamp),
     now: () => now.value,

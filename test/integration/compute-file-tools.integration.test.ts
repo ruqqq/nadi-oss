@@ -43,6 +43,7 @@ function buildFileTools(backend: FakeComputeBackend) {
       secretEnvNames: [],
     },
     environmentId: "fake-env",
+    threadId: "thr_compute_file_tools_integration",
     env: {},
     setAlarm: async () => {},
     now: () => 1000,
