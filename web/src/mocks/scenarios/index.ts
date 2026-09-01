@@ -382,7 +382,9 @@ function makeSandbox({
       envVars: { NADI_ENV: "mock" },
     },
     agent: {
-      enabled: null,
+      sandboxEnabled: null,
+      agentEnabled: true,
+      archivedAt: null,
       idleTimeoutMs: null,
       maxProcessRuntimeMs: null,
       networkDomainAllowlist: null,

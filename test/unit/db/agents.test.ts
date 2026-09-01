@@ -51,6 +51,19 @@ const projects = {
   defaultAgentId: "default_agent_id",
 };
 
+// Deleting an agent archives its memories and its PRIVATE skills with it.
+const agentMemories = {
+  __table: "agent_memories",
+  agentId: "agent_id",
+  archivedAt: "archived_at",
+};
+
+const skills = {
+  __table: "skills",
+  agentId: "agent_id",
+  archivedAt: "archived_at",
+};
+
 vi.mock("drizzle-orm", () => ({
   eq: (column: string, value: unknown) => (row: Record<string, unknown>) => row[column] === value,
   and:
@@ -64,11 +77,16 @@ vi.mock("drizzle-orm", () => ({
   desc: (column: string) => ({ column, dir: "desc" }),
 }));
 
+// A whole-module mock BLANKS every export it does not list, so anything
+// `AgentRepository` newly touches must be added here or it reads as undefined
+// at runtime. `archive` now also stamps the agent's memories and private skills.
 vi.mock("../../../src/db/schema", () => ({
   agents,
   agentRepositories,
   agentSecretNames,
   projects,
+  agentMemories,
+  skills,
 }));
 
 interface AgentRow {

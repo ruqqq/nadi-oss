@@ -1,5 +1,5 @@
 import { SELF, env } from "cloudflare:test";
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { drizzle } from "drizzle-orm/d1";
 import { eq } from "drizzle-orm";
 import type { Env } from "../../src/env";
@@ -7,6 +7,7 @@ import * as schema from "../../src/db/schema";
 import { ComputeEnvSecretsStore } from "../../src/compute/env-secrets";
 import { createWorkspaceSecretsServices } from "../../src/secrets";
 import { applyRegistryTestSchema } from "./helpers/registry";
+import { ThinkThreadAgent } from "../../src/agent/think-thread-agent";
 
 const now = 1_800_000_000_000;
 
@@ -24,6 +25,10 @@ async function clearRegistry() {
   const db = drizzle(env.REGISTRY_DB, { schema });
   await db.delete(schema.agentSecretNames);
   await db.delete(schema.agentRepositories);
+  // Both FK `agents`, so they must go before it — and the delete tests below
+  // seed them.
+  await db.delete(schema.agentMemories);
+  await db.delete(schema.skills);
   await db.delete(schema.threadIndex);
   await db.delete(schema.projects);
   await db.delete(schema.agents);
@@ -573,5 +578,192 @@ describe("agent routes", () => {
       headers: cookie(outsider.token),
     });
     expect(res.status).toBe(404);
+  });
+
+  // "Delete this agent and its machine. Its files are destroyed. Threads it ran
+  // stay readable." Before this, delete only stamped `archived_at`: no teardown,
+  // nothing in the compute path gated on it, and the agent's memories and
+  // private skills stayed live.
+  describe("delete", () => {
+    async function seedSecondAgent(workspaceId: string, id: string) {
+      await drizzle(env.REGISTRY_DB, { schema })
+        .insert(schema.agents)
+        .values({
+          id,
+          workspaceId,
+          name: id,
+          systemPrompt: "You are Nadi.",
+          provider: "mock",
+          model: "mock",
+          createdAt: now + 1,
+        });
+      return id;
+    }
+
+    it("archives the agent's memories and PRIVATE skills, and leaves the library's alone", async () => {
+      const seeded = await seedUserWorkspace({
+        userId: "user-agent-delete-knowledge",
+        token: "agent-delete-knowledge-token",
+        workspaceId: "workspace-agent-delete-knowledge",
+      });
+      const doomed = await seedSecondAgent(seeded.workspaceId, "agent-doomed");
+      const db = drizzle(env.REGISTRY_DB, { schema });
+      await db.insert(schema.agentMemories).values([
+        {
+          id: "mem-doomed",
+          workspaceId: seeded.workspaceId,
+          agentId: doomed,
+          content: "remember this",
+          kind: "fact",
+          createdAt: now,
+          updatedAt: now,
+        },
+        {
+          id: "mem-survivor",
+          workspaceId: seeded.workspaceId,
+          agentId: seeded.agentId,
+          content: "not mine to lose",
+          kind: "fact",
+          createdAt: now,
+          updatedAt: now,
+        },
+      ]);
+      await db.insert(schema.skills).values([
+        {
+          id: "skill-private",
+          workspaceId: seeded.workspaceId,
+          agentId: doomed,
+          name: "private-skill",
+          description: "d",
+          body: "b",
+          createdAt: now,
+          updatedAt: now,
+        },
+        {
+          id: "skill-library",
+          workspaceId: seeded.workspaceId,
+          agentId: null,
+          name: "library-skill",
+          description: "d",
+          body: "b",
+          createdAt: now,
+          updatedAt: now,
+        },
+      ]);
+
+      const res = await SELF.fetch(`https://nadi.test/api/agents/${doomed}/archive`, {
+        method: "POST",
+        headers: cookie(seeded.token),
+      });
+      expect(res.status).toBe(200);
+
+      const memories = await db.select().from(schema.agentMemories).all();
+      expect(Object.fromEntries(memories.map((row) => [row.id, row.archivedAt !== null]))).toEqual({
+        "mem-doomed": true,
+        "mem-survivor": false,
+      });
+
+      const skillRows = await db.select().from(schema.skills).all();
+      expect(Object.fromEntries(skillRows.map((row) => [row.id, row.archivedAt !== null]))).toEqual(
+        { "skill-private": true, "skill-library": false },
+      );
+    });
+
+    it("shuts down the machine of every LIVE thread it ran, and no others", async () => {
+      const seeded = await seedUserWorkspace({
+        userId: "user-agent-delete-machines",
+        token: "agent-delete-machines-token",
+        workspaceId: "workspace-agent-delete-machines",
+      });
+      const doomed = await seedSecondAgent(seeded.workspaceId, "agent-doomed-machines");
+      const db = drizzle(env.REGISTRY_DB, { schema });
+      await db.insert(schema.threadIndex).values(
+        [
+          { id: "thr-live-a", agentId: doomed, archivedAt: null },
+          { id: "thr-live-b", agentId: doomed, archivedAt: null },
+          // Archiving a thread already destroyed its DO, which shut its sandbox
+          // down — there is nothing of its left to reap.
+          { id: "thr-archived", agentId: doomed, archivedAt: now },
+          // Another agent's thread. Deleting THIS agent must not touch it.
+          { id: "thr-other-agent", agentId: seeded.agentId, archivedAt: null },
+        ].map((thread) => ({
+          id: thread.id,
+          workspaceId: seeded.workspaceId,
+          agentId: thread.agentId,
+          title: thread.id,
+          runtime: "think" as const,
+          source: "manual" as const,
+          lastMessagePreview: "",
+          archivedAt: thread.archivedAt,
+          createdAt: now,
+          updatedAt: now,
+        })),
+      );
+
+      const shutdown = vi
+        .spyOn(ThinkThreadAgent.prototype, "shutdownComputeForAgentDeletion")
+        .mockImplementation(async function (this: ThinkThreadAgent) {
+          reaped.push(this.name);
+          return { shutdown: true };
+        });
+      const reaped: string[] = [];
+      try {
+        const res = await SELF.fetch(`https://nadi.test/api/agents/${doomed}/archive`, {
+          method: "POST",
+          headers: cookie(seeded.token),
+        });
+        expect(res.status).toBe(200);
+      } finally {
+        shutdown.mockRestore();
+      }
+
+      expect(reaped.sort()).toEqual(["thr-live-a", "thr-live-b"]);
+    });
+
+    it("still deletes the agent when a thread's machine cannot be reached", async () => {
+      const seeded = await seedUserWorkspace({
+        userId: "user-agent-delete-unreachable",
+        token: "agent-delete-unreachable-token",
+        workspaceId: "workspace-agent-delete-unreachable",
+      });
+      const doomed = await seedSecondAgent(seeded.workspaceId, "agent-doomed-unreachable");
+      await drizzle(env.REGISTRY_DB, { schema }).insert(schema.threadIndex).values({
+        id: "thr-unreachable",
+        workspaceId: seeded.workspaceId,
+        agentId: doomed,
+        title: "unreachable",
+        runtime: "think",
+        source: "manual",
+        lastMessagePreview: "",
+        archivedAt: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      const shutdown = vi
+        .spyOn(ThinkThreadAgent.prototype, "shutdownComputeForAgentDeletion")
+        // `mockImplementation`, not `mockRejectedValue`: the latter builds the
+        // rejected promise eagerly and workerd reports it as an uncaught
+        // rejection before the RPC ever hands it back.
+        .mockImplementation(async () => {
+          throw new Error("durable object unreachable");
+        });
+      try {
+        const res = await SELF.fetch(`https://nadi.test/api/agents/${doomed}/archive`, {
+          method: "POST",
+          headers: cookie(seeded.token),
+        });
+        expect(res.status).toBe(200);
+      } finally {
+        shutdown.mockRestore();
+      }
+
+      const row = await drizzle(env.REGISTRY_DB, { schema })
+        .select()
+        .from(schema.agents)
+        .where(eq(schema.agents.id, doomed))
+        .get();
+      expect(row?.archivedAt).toEqual(expect.any(Number));
+    });
   });
 });

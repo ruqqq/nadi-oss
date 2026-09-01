@@ -242,7 +242,11 @@ export async function getAgentComputeSettings(
   void workspaceId;
   const row = await registryDb(env)
     .select({
-      enabled: agents.sandboxEnabled,
+      sandboxEnabled: agents.sandboxEnabled,
+      // The agent's OWN switch and its soft-delete, which the compute decision
+      // must honour as well as `sandbox_enabled`. Same row, no extra query.
+      agentEnabled: agents.enabled,
+      archivedAt: agents.archivedAt,
       idleTimeoutMs: agents.sandboxIdleTimeoutMs,
       maxProcessRuntimeMs: agents.sandboxMaxProcessRuntimeMs,
       networkDomainAllowlist: agents.sandboxNetworkDomainAllowlist,
@@ -253,7 +257,9 @@ export async function getAgentComputeSettings(
     .get();
   if (!row) return null;
   return {
-    enabled: row.enabled,
+    sandboxEnabled: row.sandboxEnabled,
+    agentEnabled: row.agentEnabled,
+    archivedAt: row.archivedAt,
     idleTimeoutMs: row.idleTimeoutMs,
     maxProcessRuntimeMs: row.maxProcessRuntimeMs,
     networkDomainAllowlist: row.networkDomainAllowlist,

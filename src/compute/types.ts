@@ -64,7 +64,22 @@ export interface WorkspaceComputeSettings {
 }
 
 export interface AgentComputeSettings {
-  enabled: boolean | null;
+  /**
+   * `agents.sandbox_enabled` — "this agent gets no machine". NOT the agent's
+   * own on/off switch.
+   *
+   * It was called `enabled` and it read `sandbox_enabled`, so
+   * `resolveEffectiveComputeConfig`'s `agent?.enabled === false` looked like it
+   * gated on the agent being disabled and gated on something else entirely.
+   * Disabling an agent therefore did not take the sandbox off its live threads.
+   * Both names are spelled out here so the two settings cannot be confused
+   * again; they are different settings and both must be honoured.
+   */
+  sandboxEnabled: boolean | null;
+  /** `agents.enabled` — the agent's own switch. `false` means it refuses work. */
+  agentEnabled: boolean;
+  /** `agents.archived_at` — the user's DELETE. An archived agent gets no machine. */
+  archivedAt: number | null;
   idleTimeoutMs: number | null;
   maxProcessRuntimeMs: number | null;
   networkDomainAllowlist: string | null;

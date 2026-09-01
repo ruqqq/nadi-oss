@@ -759,16 +759,23 @@ describe("sandbox settings routes", () => {
     const readAgent = async (res: Response) =>
       ((await res.json()) as { agent: Record<string, unknown> }).agent;
 
-    expect(await readAgent(await putAgent({ enabled: true }))).toMatchObject({ enabled: true });
+    // The request key stays `enabled`; the VIEW calls it `sandboxEnabled`, so
+    // it cannot be mistaken for the agent's own on/off switch again.
+    expect(await readAgent(await putAgent({ enabled: true }))).toMatchObject({
+      sandboxEnabled: true,
+    });
 
     // Omitting a key preserves it...
     expect(await readAgent(await putAgent({ networkDomainAllowlist: "x.com" }))).toMatchObject({
-      enabled: true,
+      sandboxEnabled: true,
     });
 
     // ...but an explicit null clears it. This is the only way back to "inherit".
     const cleared = await readAgent(await putAgent({ enabled: null }));
-    expect(cleared.enabled).toBeNull();
+    expect(cleared.sandboxEnabled).toBeNull();
+    // The agent itself is untouched by any of this — a different setting.
+    expect(cleared.agentEnabled).toBe(true);
+    expect(cleared.archivedAt).toBeNull();
   });
 
   it("saves + merges network restriction settings and validates domains", async () => {

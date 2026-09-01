@@ -264,7 +264,7 @@ async function updateAgentSandboxSettings(
           ? null
           : typeof body.enabled === "boolean"
             ? body.enabled
-            : (existing?.enabled ?? null),
+            : (existing?.sandboxEnabled ?? null),
       sandboxNetworkDomainAllowlist,
       sandboxIdleTimeoutMs:
         typeof body.idleTimeoutMs === "number"

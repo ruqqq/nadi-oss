@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { APICallError } from "ai";
-import { chatErrorForClient, serializeErrorChain } from "../../src/error-details";
+import {
+  chatErrorForClient,
+  serializeErrorChain,
+  ThreadRefusedError,
+} from "../../src/error-details";
 
 describe("serializeErrorChain", () => {
   it("preserves nested error causes", () => {
@@ -46,6 +50,16 @@ describe("chatErrorForClient", () => {
     expect(result.message).toBe(
       "Something went wrong while sending your message. Please try again.",
     );
+  });
+
+  it("shows a thread refusal verbatim, because retrying cannot fix it", () => {
+    // "Your agent is turned off" collapsed into "…try again" would be advice
+    // that cannot work — the fix is a setting, and the message names it.
+    const result = chatErrorForClient(
+      new ThreadRefusedError("This thread's agent is turned off. Turn it back on in Settings."),
+    );
+
+    expect(result.message).toBe("This thread's agent is turned off. Turn it back on in Settings.");
   });
 
   it("preserves provider API errors because they are actionable", () => {

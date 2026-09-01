@@ -77,7 +77,9 @@ describe("resolveEffectiveComputeConfig (resource profile)", () => {
       envVars: {},
     } satisfies WorkspaceComputeSettings,
     agent: {
-      enabled: true,
+      sandboxEnabled: true,
+      agentEnabled: true,
+      archivedAt: null,
       idleTimeoutMs: null,
       maxProcessRuntimeMs: null,
       networkDomainAllowlist: null,
@@ -89,6 +91,32 @@ describe("resolveEffectiveComputeConfig (resource profile)", () => {
       medium: { kind: "snapshot" as const, value: "medium-ok" },
     },
   };
+
+  // The defect: `AgentComputeSettings.enabled` was populated from
+  // `agents.sandbox_enabled`, so the "is this agent off?" check read a
+  // DIFFERENT COLUMN. Disabling an agent left every live thread of its holding
+  // a full sandbox while the UI said "Turn this off to stop the agent from
+  // running". They are separate settings and BOTH must withhold the machine.
+  it.each([
+    ["the agent's own switch is off", { agentEnabled: false }],
+    ["the agent is deleted", { archivedAt: 1_800_000_000_000 }],
+    ["the agent works without a machine", { sandboxEnabled: false }],
+  ])("gives no compute when %s", (_label, patch) => {
+    const result = resolveEffectiveComputeConfig({
+      ...baseInput,
+      agent: { ...baseInput.agent, ...patch },
+      agentResourceProfile: "small",
+    });
+    expect(result).toEqual({ enabled: false, reason: "disabled" });
+  });
+
+  it("still gives compute to an enabled, undeleted agent with sandbox on", () => {
+    const result = resolveEffectiveComputeConfig({
+      ...baseInput,
+      agentResourceProfile: "small",
+    });
+    expect(result.enabled).toBe(true);
+  });
 
   it("takes the resource profile from the thread's agent", () => {
     const result = resolveEffectiveComputeConfig({
@@ -197,7 +225,9 @@ describe("resolveComputeEnvVars (config -> env-resolve wiring)", () => {
         envVars: { WORKSPACE_ONLY: "workspace-value", AGENT_AND_ENV: "workspace-value" },
       },
       agent: {
-        enabled: true,
+        sandboxEnabled: true,
+        agentEnabled: true,
+        archivedAt: null,
         idleTimeoutMs: null,
         maxProcessRuntimeMs: null,
         networkDomainAllowlist: null,

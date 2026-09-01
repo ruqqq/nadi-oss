@@ -515,7 +515,9 @@ describe("SandboxSection network-restrictions gate", () => {
           networkDomainAllowlist: "github.com",
         }),
         agent: {
-          enabled: null,
+          sandboxEnabled: null,
+          agentEnabled: true,
+          archivedAt: null,
           idleTimeoutMs: null,
           maxProcessRuntimeMs: null,
           networkDomainAllowlist: "api.example.com",

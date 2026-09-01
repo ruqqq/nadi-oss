@@ -605,7 +605,13 @@ describe("fireDueAutomata (real D1 + real DO dispatch)", () => {
   // NULL and it IS the environment. The behaviour that matters now is that the
   // automaton's own agent is authoritative — an unattended run must not be
   // silently moved onto another agent's repositories and secrets.
-  it("runs as the automaton's own agent even after that agent is archived", async () => {
+  // Deleting an agent means its threads become read-only history, so an
+  // unattended run on a DELETED agent must not proceed either — it would spend
+  // tokens and clone repositories for an agent the user destroyed. What the
+  // original version of this test was really guarding still holds and is
+  // asserted below: the run is not silently MOVED onto another agent. It stays
+  // on its own agent and fails loudly, with the reason on the run row.
+  it("refuses to run once its own agent is deleted, rather than moving to another", async () => {
     const now = Date.now();
     await insertAgentRow({
       id: "wb_archived_explicit",
@@ -625,15 +631,17 @@ describe("fireDueAutomata (real D1 + real DO dispatch)", () => {
     });
 
     const result = await fireDueAutomata(env, dueAt + 1000);
-    expect(result).toEqual({ fired: 1, skipped: 0 });
+    expect(result).toEqual({ fired: 0, skipped: 1 });
 
     const runs = await listRunsFor("auto_stale_explicit_wb");
     expect(runs).toHaveLength(1);
-    expect(runs[0]?.status).toBe("queued");
+    expect(runs[0]?.status).toBe("failed");
+    expect(runs[0]?.error).toContain("read-only history");
 
+    // Still ITS OWN agent — never reassigned to the workspace's or the
+    // project's.
     const thread = await getThread(runs[0]?.threadId as string);
     expect(thread?.agentId).toBe("wb_archived_explicit");
-    // Nothing was dropped, so nothing is logged as dropped.
     expect(warnSpy).not.toHaveBeenCalledWith("automata.agent_dropped", expect.anything());
   });
 

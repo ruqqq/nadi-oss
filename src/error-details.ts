@@ -48,8 +48,27 @@ export function serializeErrorChain(error: unknown): SerializedErrorDetail[] {
   return details;
 }
 
+/**
+ * A turn refused for a reason the USER changed and can change back — the
+ * agent is turned off, or deleted. Its message is written for the person
+ * reading the thread and is passed through to them verbatim.
+ *
+ * The default is the opposite (see {@link chatErrorForClient}): an internal
+ * turn error collapses to a generic retry line so it cannot leak internals.
+ * That default is right, and it is exactly why refusing a turn by throwing a
+ * plain `Error("agent_disabled")` would show "Something went wrong… try again"
+ * — advice that is wrong, since retrying cannot work.
+ */
+export class ThreadRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ThreadRefusedError";
+  }
+}
+
 /** Keep actionable provider failures, but never expose internal turn errors. */
 export function chatErrorForClient(error: unknown): Error {
   if (APICallError.isInstance(error)) return error;
+  if (error instanceof ThreadRefusedError) return new Error(error.message);
   return new Error(CHAT_RETRY_MESSAGE);
 }

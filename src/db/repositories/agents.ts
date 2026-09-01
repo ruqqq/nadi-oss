@@ -3,10 +3,12 @@ import type { BatchItem } from "drizzle-orm/batch";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import type * as schema from "../schema";
 import {
+  agentMemories,
   agentRepositories,
   agents,
   agentSecretNames,
   projects,
+  skills,
   type AgentConfig,
   type AgentRepositoryRow,
 } from "../schema";
@@ -110,10 +112,22 @@ export class AgentRepository {
 
   /**
    * Soft-delete. Threads keep their `agent_id` (it is NOT NULL and the FK must
-   * hold), so an archived agent's threads stay readable; what goes away is the
-   * agent's availability for new work. Any project still naming it as its
-   * default is cleared in the same batch — a default pointing at an archived
-   * agent would silently hand new threads a dead agent.
+   * hold), so an archived agent's threads stay READABLE — that is the whole
+   * reason the row survives — while `ThinkThreadAgent.assertThreadWritable`
+   * makes them read-only and the compute config withholds a machine.
+   *
+   * What archives WITH the agent, in one batch:
+   *  - any project still naming it as its default (a default pointing at a
+   *    deleted agent would silently hand new threads a dead agent);
+   *  - its memories;
+   *  - its PRIVATE skills. Library skills (`agent_id IS NULL`) are the
+   *    workspace's, not this agent's, and must survive it — which is exactly
+   *    why the filter is `eq(agentId, id)` and not "everything it can see".
+   *
+   * Tearing down the machines is NOT here: it needs the thread Durable Objects
+   * and must happen BEFORE this write (see `archiveAgent` in
+   * `http/agent-routes.ts`), because once the row is archived the compute
+   * config refuses to resolve and there is nothing left to shut down through.
    */
   async archive(id: string, archivedAt: number): Promise<void> {
     await this.db.batch([
@@ -122,6 +136,14 @@ export class AgentRepository {
         .set({ archivedAt })
         .where(and(eq(agents.id, id), isNull(agents.archivedAt))),
       this.db.update(projects).set({ defaultAgentId: null }).where(eq(projects.defaultAgentId, id)),
+      this.db
+        .update(agentMemories)
+        .set({ archivedAt })
+        .where(and(eq(agentMemories.agentId, id), isNull(agentMemories.archivedAt))),
+      this.db
+        .update(skills)
+        .set({ archivedAt })
+        .where(and(eq(skills.agentId, id), isNull(skills.archivedAt))),
     ]);
   }
 

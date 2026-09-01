@@ -296,7 +296,9 @@ export const settingsHandlers = [
     const store = getStore();
     const patch = (await request.json().catch(() => ({}))) as Record<string, unknown>;
     store.sandbox.agent = {
-      enabled: null,
+      sandboxEnabled: null,
+      agentEnabled: true,
+      archivedAt: null,
       idleTimeoutMs: null,
       maxProcessRuntimeMs: null,
       networkDomainAllowlist: null,

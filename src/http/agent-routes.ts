@@ -1,3 +1,4 @@
+import { and, eq, isNull } from "drizzle-orm";
 import type { Env } from "../env";
 import { validateRequestSession, type ValidatedSession } from "../auth/session";
 import { registryDb } from "../db/client";
@@ -12,7 +13,8 @@ import {
 } from "../compute/env-vars";
 import { ComputeEnvSecretsStore } from "../compute/env-secrets";
 import { createWorkspaceSecretsServices } from "../secrets";
-import type { AgentConfig, AgentRepositoryRow } from "../db/schema";
+import { threadIndex, type AgentConfig, type AgentRepositoryRow } from "../db/schema";
+import { log } from "../log";
 import { resolveAgentScope } from "./agent-scope";
 import { AgentSettingsRepository } from "../db/repositories/agent-settings";
 import { parseAgentBehaviourPatch } from "./settings-routes";
@@ -259,6 +261,73 @@ async function updateAgent(req: Request, env: Env, agentId: string): Promise<Res
   return Response.json({ agent: summary });
 }
 
+/** How many thread sandboxes are torn down at once when an agent is deleted. */
+const AGENT_DELETION_SHUTDOWN_CONCURRENCY = 4;
+
+interface AgentDeletionShutdownStub {
+  shutdownComputeForAgentDeletion(): Promise<{ shutdown: boolean; reason?: string }>;
+}
+
+/**
+ * "Delete this agent and its machine. Its files are destroyed."
+ *
+ * The machine is still keyed per THREAD in this phase, so the agent's machine
+ * is every LIVE sandbox belonging to its threads. Archived threads are skipped
+ * because archiving a thread already destroyed its DO — and `destroy()` runs
+ * `teardownThreadBeforeDestroy`, which shuts the sandbox down — so there is
+ * nothing left of theirs to reap.
+ *
+ * MUST be `getAgentByName`, not a raw `idFromName` stub: the raw stub skips
+ * `onStart()` (see `automata/fire-due.ts`). Imported DYNAMICALLY for the reason
+ * `compute-tools.ts` documents on its own `reclaim`: `agents` touches
+ * `cloudflare:workers` at module load, which the plain-node unit environment
+ * cannot resolve, and a static import here breaks every unit test that imports
+ * this module for its parsers alone (test/unit/http/agent-routes.test.ts).
+ *
+ * Best-effort by construction. Every failure is logged and none is raised: a
+ * thread whose DO cannot be reached must not leave the user unable to delete
+ * the agent, and the archive that follows is what actually stops new work.
+ */
+async function destroyAgentSandboxes(env: Env, agentId: string): Promise<void> {
+  const threads = await registryDb(env)
+    .select({ id: threadIndex.id })
+    .from(threadIndex)
+    .where(and(eq(threadIndex.agentId, agentId), isNull(threadIndex.archivedAt)))
+    .all();
+  if (threads.length === 0) return;
+
+  const { getAgentByName } = await import("agents");
+  const queue = threads.map((thread) => thread.id);
+  const workers = Array.from(
+    { length: Math.min(AGENT_DELETION_SHUTDOWN_CONCURRENCY, queue.length) },
+    async () => {
+      for (let threadId = queue.pop(); threadId !== undefined; threadId = queue.pop()) {
+        try {
+          const stub = (await getAgentByName(
+            env.THINK_THREAD_AGENT,
+            threadId,
+          )) as unknown as AgentDeletionShutdownStub;
+          const result = await stub.shutdownComputeForAgentDeletion();
+          if (!result.shutdown && result.reason !== "compute_disabled") {
+            log.warn("agent_routes.delete_sandbox_not_shutdown", {
+              agentId,
+              threadId,
+              reason: result.reason,
+            });
+          }
+        } catch (error) {
+          log.warn("agent_routes.delete_sandbox_failed", {
+            agentId,
+            threadId,
+            error: String(error),
+          });
+        }
+      }
+    },
+  );
+  await Promise.all(workers);
+}
+
 async function archiveAgent(req: Request, env: Env, agentId: string): Promise<Response> {
   const session = await validateRequestSession(env, req);
   if (!session) return new Response("Unauthorized", { status: 401 });
@@ -274,6 +343,13 @@ async function archiveAgent(req: Request, env: Env, agentId: string): Promise<Re
   if (agent.archivedAt === null) {
     const remaining = await repo.countUsableExcluding(agent.workspaceId, agentId);
     if (remaining === 0) return lastAgentRefusal("deleted");
+    // BEFORE the archive write, not after: once the row carries `archived_at`
+    // the effective compute config bails with `disabled`, `openSandbox()`
+    // returns null, and there is no longer any route to the machine at all.
+    // The window this leaves — a turn acquiring a box between the teardown and
+    // the write — is milliseconds wide and closes permanently the moment the
+    // row lands, since nothing can acquire compute for an archived agent.
+    await destroyAgentSandboxes(env, agentId);
   }
 
   await repo.archive(agentId, Date.now());

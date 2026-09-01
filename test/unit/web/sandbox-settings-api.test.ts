@@ -64,7 +64,9 @@ describe("sandbox settings api", () => {
         envVars: {},
       },
       agent: {
-        enabled: null,
+        sandboxEnabled: null,
+        agentEnabled: true,
+        archivedAt: null,
         idleTimeoutMs: null,
         maxProcessRuntimeMs: null,
         networkDomainAllowlist: "c.com",

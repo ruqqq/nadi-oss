@@ -52,7 +52,13 @@ export interface SandboxWorkspaceSettings {
 }
 
 export interface SandboxAgentSettings {
-  enabled: boolean | null;
+  /** `agents.sandbox_enabled` — "no machine for this agent". NOT the agent's
+   *  own on/off switch, which is `AgentSummary.enabled`. */
+  sandboxEnabled: boolean | null;
+  /** The agent's own switch, and its soft-delete. Mirrored here because the
+   *  effective compute config honours both. */
+  agentEnabled: boolean;
+  archivedAt: number | null;
   idleTimeoutMs: number | null;
   maxProcessRuntimeMs: number | null;
   networkDomainAllowlist: string | null;

@@ -134,7 +134,27 @@ export function resolveEffectiveComputeConfig(input: {
 }): ComputeConfigResult {
   const { workspace, agent } = input;
   if (!workspace) return { enabled: false, reason: "missing_workspace_settings" };
-  if (!workspace.enabled || agent?.enabled === false) return { enabled: false, reason: "disabled" };
+  // FOUR separate switches, all of which mean "no machine", and none of which
+  // implies another:
+  //  - the workspace's master compute toggle;
+  //  - `agents.sandbox_enabled` — this agent works without a machine;
+  //  - `agents.enabled` — this agent is turned off entirely, so it gets no
+  //    machine either. This one was MISSING: the check read `agent.enabled`,
+  //    but that field carried `sandbox_enabled`, so disabling an agent left its
+  //    live threads holding a full sandbox while the UI said "Turn this off to
+  //    stop the agent from running";
+  //  - `agents.archived_at` — the user deleted the agent. Its machine goes.
+  // They are collapsed to one `reason` deliberately: the wire type is consumed
+  // by the settings UI, and a disabled agent's user-facing explanation comes
+  // from the send-path refusal (`assertThreadWritable`), not from here.
+  if (
+    !workspace.enabled ||
+    agent?.sandboxEnabled === false ||
+    agent?.agentEnabled === false ||
+    (agent != null && agent.archivedAt !== null)
+  ) {
+    return { enabled: false, reason: "disabled" };
+  }
   if (workspace.provider !== workspace.providerConfig.kind) {
     return { enabled: false, reason: "unsupported_provider" };
   }

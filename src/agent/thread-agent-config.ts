@@ -45,6 +45,10 @@ export interface ThreadRuntimeConfig {
   modelConfig: ModelConfig;
   titleSet: boolean;
   archivedAt: number | null;
+  /** The AGENT's own switch, not the thread's. `false` refuses new turns. */
+  agentEnabled: boolean;
+  /** The AGENT's soft-delete. A deleted agent's threads are read-only history. */
+  agentArchivedAt: number | null;
   source: "manual" | "automaton";
   /** The two background capabilities, resolved independently — see
    *  `resolveWorkspaceBackgroundCapabilities`. Pinned for the whole turn so
@@ -76,6 +80,8 @@ export async function resolveThreadRuntimeConfigForAgent(
       provider: agents.provider,
       model: agents.model,
       systemPrompt: agents.systemPrompt,
+      agentEnabled: agents.enabled,
+      agentArchivedAt: agents.archivedAt,
       modelInputModalities: agents.modelInputModalities,
       reasoningEffort: agents.reasoningEffort,
       modelSupportsReasoning: agents.modelSupportsReasoning,
@@ -133,6 +139,12 @@ export async function resolveThreadRuntimeConfigForAgent(
     kind: row.kind,
     titleSet: row.titleSet,
     archivedAt: row.archivedAt,
+    // `agents` is LEFT joined so TypeScript sees these as nullable, but the
+    // `thread_agent_not_registered` guard above has already thrown if the join
+    // missed — a `null` here can only be an unmatched row, and defaulting to
+    // "usable" keeps that case behaving exactly as it did before.
+    agentEnabled: row.agentEnabled ?? true,
+    agentArchivedAt: row.agentArchivedAt ?? null,
     source: row.source,
     ...(() => {
       const capabilities = resolveWorkspaceBackgroundCapabilities({

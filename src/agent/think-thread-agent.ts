@@ -66,7 +66,7 @@ import {
 } from "../flags";
 import { buildModel } from "../providers/model-factory";
 import { invalidatablePromiseCache } from "./promise-cache";
-import { chatErrorForClient, serializeErrorChain } from "../error-details";
+import { chatErrorForClient, serializeErrorChain, ThreadRefusedError } from "../error-details";
 import {
   buildThreadModelForWorkspace,
   resolveThreadRuntimeConfigForAgent,
@@ -2251,6 +2251,25 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
     if (config.archivedAt != null) {
       throw new Error("thread_archived_read_only");
     }
+    // The AGENT's state, gated HERE — at the one place every turn passes
+    // through, reading D1 live — rather than in the client. Task 6 closed
+    // ROUTING a new thread onto a disabled agent; this closes RUNNING one.
+    // Without it, a thread on an agent the user just turned off kept accepting
+    // messages and simply lost every `exec_*` tool: the compute config bailed
+    // with `reason: "disabled"` and its only consumer discarded the reason, so
+    // the model read a setting the user changed as a broken deployment.
+    // A stale tab cannot bypass this: it is decided from the row, not the
+    // request.
+    if (config.agentArchivedAt != null) {
+      throw new ThreadRefusedError(
+        "This thread's agent was deleted, so the thread is kept as read-only history.",
+      );
+    }
+    if (!config.agentEnabled) {
+      throw new ThreadRefusedError(
+        "This thread's agent is turned off. Turn it back on in Settings → Agents to keep working here.",
+      );
+    }
   }
 
   /**
@@ -3250,6 +3269,33 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
       record("cleanup", errors.length === 0, { threadIds: tempThreadIds, errors });
     }
     return { steps };
+  }
+
+  /**
+   * Destroy this thread's sandbox because its AGENT was deleted.
+   *
+   * "Delete the agent and its machine" is what the danger zone promises, and
+   * the machine is still keyed per THREAD until P3 — so the agent's machine is
+   * every live sandbox belonging to its threads, and the delete route fans out
+   * to one of these per thread.
+   *
+   * NEVER THROWS. A DO RPC rejection is awkward to attribute at the caller (see
+   * `docs`/`memory` on phantom rejections), and a single unreachable thread
+   * must not fail the whole delete: the outcome is reported, not raised.
+   */
+  async shutdownComputeForAgentDeletion(): Promise<{ shutdown: boolean; reason?: string }> {
+    try {
+      const resolved = await this.openSandbox();
+      if (!resolved) return { shutdown: false, reason: "compute_disabled" };
+      await resolved.service.execShutdown({ confirm: true });
+      return { shutdown: true };
+    } catch (error) {
+      log.warn("think_thread.agent_deletion_shutdown_failed", {
+        threadId: this.name,
+        error: String(error),
+      });
+      return { shutdown: false, reason: String(error) };
+    }
   }
 
   /** Destroy this thread's sandbox (reclaim the org's shared disk quota). */
