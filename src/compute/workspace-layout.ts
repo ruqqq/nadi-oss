@@ -44,6 +44,33 @@ export const LEGACY_WORKSPACE_ROOT = "/home/exedev/work";
  */
 export const RESERVED_WORKSPACE_DIR_NAMES = ["repos", "threads"] as const;
 
+/**
+ * The file recording that a thread's working directory is prepared, and for
+ * WHICH configuration. Lives inside that directory, so every event which
+ * destroys the preparation destroys the record with it.
+ *
+ * Declared HERE rather than beside the code that writes it because a second
+ * reader needs the same name and must not drift from it: the workspace
+ * cleanliness probe has to exclude this file when deciding whether the box
+ * holds anything a user could lose. A sentinel counted as "files" preserves an
+ * idle box forever.
+ */
+export const PREPARED_SENTINEL_NAME = ".nadi-prepared";
+
+/**
+ * A marker word carried by repository preparation's gate command, and by
+ * nothing else.
+ *
+ * Load-bearing, in the same way `PROBE_SCRIPT`'s "PROBE" is: test fakes cannot
+ * run a shell, so they recognise this command by its text. Matching on
+ * `PREPARED_SENTINEL_NAME` instead is NOT good enough — the workspace
+ * cleanliness probe names the sentinel too, in the exclusion that stops it
+ * counting as work, and a fake matching that broadly answers the cleanliness
+ * probe with the gate's verdict. That is exactly what happened, and it turned a
+ * dirty workspace into "could not verify".
+ */
+export const PREPARED_GATE_MARKER = "NADI-PREPARED-GATE";
+
 /** Branch prefix for the branch each thread's worktree is checked out on. */
 const THREAD_BRANCH_PREFIX = "nadi/thread-";
 

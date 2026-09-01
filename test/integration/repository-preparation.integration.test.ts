@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createRepositoryPreparation } from "../../src/agent/repository-preparation";
 import { applyRegistryTestSchema, seedRegistryThread } from "./helpers/registry";
 import {
+  PREPARED_GATE_MARKER,
   agentClonePath,
   threadWorkRoot,
   threadWorktreeBranch,
@@ -54,7 +55,7 @@ describe("repository preparation against real D1", () => {
         // `failed`, never `exited`.
         return { status: "failed" as const, processId: "probe", exitCode: 1 };
       }
-      if (input.command.includes(".nadi-prepared")) {
+      if (input.command.includes(PREPARED_GATE_MARKER)) {
         // The gate: this box has never been prepared for this thread. Without
         // this the probe exits 0 and preparation short-circuits, turning every
         // case in this file into a no-op that still matches its summary.

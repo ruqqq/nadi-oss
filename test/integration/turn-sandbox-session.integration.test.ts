@@ -29,7 +29,11 @@ import {
 } from "../../src/compute/host-test-overrides";
 import { applyRegistryTestSchema, seedRegistryThread } from "./helpers/registry";
 import { log } from "../../src/log";
-import { agentClonePath, threadWorktreePath } from "../../src/compute/workspace-layout";
+import {
+  PREPARED_GATE_MARKER,
+  agentClonePath,
+  threadWorktreePath,
+} from "../../src/compute/workspace-layout";
 
 const NOW = 1_800_000_000_000;
 
@@ -175,10 +179,6 @@ describe("the turn's sandbox session", () => {
     // ONE backend for both threads — one agent, one box. This is what makes the
     // second thread's runtime already-active by the time it opens.
     const backend = new FakeComputeBackend();
-    // Neither thread is prepared yet. The fake answers every command 0, which
-    // preparation's gate would read as "already prepared" and skip on — so the
-    // box's state has to be stated rather than inherited from the fake.
-    backend.scriptedExits.push({ match: ".nadi-prepared", exitCode: 1 });
     const commandsFor = async (threadId: string) => {
       const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
       return runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
@@ -238,14 +238,13 @@ describe("the turn's sandbox session", () => {
    * affordable, and the event that must defeat it.
    *
    * WHAT IS SIMULATED, and what is not. The gate is a real `sh -lc 'test ...'`
-   * against the box, and `FakeComputeBackend` answers every command 0 — which
-   * would mean "already prepared" for every run and would turn this whole test
-   * into a no-op. So the box's state is stated explicitly through
-   * `scriptedExits`: present means "the sentinel does not match", absent means
-   * it does. The sentinel's content and placement are asserted in
-   * `test/unit/agent/repository-preparation.test.ts`; what only this test can
-   * see is that the service HONOURS the answer — nothing runs when the box says
-   * prepared, and everything runs when it does not.
+   * against the box, which `FakeComputeBackend` cannot execute. Its default for
+   * that probe is "not prepared" — an empty fake box IS unprepared, and that
+   * default is deliberate so a test cannot acquire "already prepared" by
+   * forgetting to say anything. PREPARED is the state a test must state out
+   * loud, which is what `scriptedExits` does below. The sentinel's content and
+   * placement are asserted in `test/unit/agent/repository-preparation.test.ts`;
+   * what only this test can see is that the service HONOURS the answer.
    */
   it("runs nothing when the box says prepared, and everything when it does not", async () => {
     const threadId = "thr_turn_prep_gate";
@@ -272,7 +271,7 @@ describe("the turn's sandbox session", () => {
       .run();
 
     const backend = new FakeComputeBackend();
-    const NOT_PREPARED = { match: ".nadi-prepared", exitCode: 1 };
+    const PREPARED = { match: PREPARED_GATE_MARKER, exitCode: 0 };
     const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
     const openAndCount = async (shutdownAfter = false) =>
       runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
@@ -291,18 +290,17 @@ describe("the turn's sandbox session", () => {
         }
       });
 
-    // A box with no sentinel: preparation runs.
-    backend.scriptedExits.push(NOT_PREPARED);
+    // A box with no sentinel — the fake's default. Preparation runs.
     expect(await openAndCount()).toBeGreaterThan(1);
 
     // The sentinel now matches: the gate probe, and nothing else. That is what a
     // per-turn trigger would otherwise cost on every turn.
-    backend.scriptedExits.length = 0;
+    backend.scriptedExits.push(PREPARED);
     expect(await openAndCount(true)).toBe(1);
 
     // The box was destroyed, so `/workspace` — and the sentinel inside the
     // thread's own directory — went with it.
-    backend.scriptedExits.push(NOT_PREPARED);
+    backend.scriptedExits.length = 0;
     expect(await openAndCount()).toBeGreaterThan(1);
   });
 
@@ -337,7 +335,9 @@ describe("the turn's sandbox session", () => {
     const backend = new FakeComputeBackend();
     // Not prepared, and the setup script itself exits non-zero. Every setup
     // command is base64-wrapped, so that substring is the script's own shape.
-    backend.scriptedExits.push({ match: ".nadi-prepared", exitCode: 1 });
+    // The setup script itself exits non-zero. Every setup command is
+    // base64-wrapped, so that substring is the script's own shape. The gate
+    // needs no entry: an empty fake box is unprepared by default.
     backend.scriptedExits.push({ match: "base64 -d | bash", exitCode: 3 });
 
     const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
@@ -365,6 +365,140 @@ describe("the turn's sandbox session", () => {
         )}`,
       ).toHaveLength(1);
       expect(JSON.stringify(logged[0]?.[1])).toContain("environment setup failed");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  /**
+   * A permanently failing setup command must not stall every turn forever.
+   *
+   * Withholding the record on failure is the right default — a repository that
+   * silently never arrives is the worse outcome — but it means a broken
+   * `pnpm install` is retried on the first tool call of EVERY turn, with a
+   * 15-minute timeout and no backoff. The cap is per DO wake and in memory, so
+   * it can delay a recovery but never prevent one; what it must do is stop the
+   * stall and say why.
+   */
+  it("stops retrying a permanently failing preparation, and says so", async () => {
+    const threadId = "thr_turn_prep_capped";
+    const workspaceId = "ws_turn_prep_capped";
+    const agentId = "agent_turn_prep_capped";
+    await seedRegistryThread(env.REGISTRY_DB, {
+      threadId,
+      workspaceId,
+      agentId,
+      runtime: "think",
+    });
+    await seedComputeEnabledWorkspace(workspaceId);
+    await env.REGISTRY_DB.prepare("UPDATE agents SET setup_script = ? WHERE id = ?")
+      .bind("exit 7", agentId)
+      .run();
+
+    const backend = new FakeComputeBackend();
+    // The setup script fails, every time. The gate needs no entry: the fake
+    // defaults an unprepared box, and a failed run is never recorded anyway.
+    backend.scriptedExits.push({ match: "base64 -d | bash", exitCode: 7 });
+
+    const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
+    const turn = async () =>
+      runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
+        const agent = instance as unknown as TestableAgent;
+        await agent.__unsafe_ensureInitialized();
+        setComputeHostTestOverrides(threadId, { buildBackend: async () => backend });
+        try {
+          const before = backend.startProcessCalls.length + backend.runCommandCalls.length;
+          const session = await agent.resolveComputeServiceForTest();
+          await session!.service.ensureRuntimeReference();
+          return backend.startProcessCalls.length + backend.runCommandCalls.length - before;
+        } finally {
+          clearComputeHostTestOverrides(threadId);
+        }
+      });
+
+    const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
+    try {
+      // Three attempts, each retrying the whole thing.
+      expect(await turn()).toBeGreaterThan(0);
+      expect(await turn()).toBeGreaterThan(0);
+      expect(await turn()).toBeGreaterThan(0);
+      // The fourth turn pays nothing.
+      expect(await turn()).toBe(0);
+
+      const counts = warn.mock.calls
+        .filter((call) => call[0] === "compute.repository_preparation_incomplete")
+        .map((call) => (call[1] as { consecutiveFailures?: number })?.consecutiveFailures);
+      // The consecutive count is what makes this diagnosable rather than a
+      // mystery stall, so it is asserted rather than assumed.
+      expect(counts).toEqual([1, 2, 3]);
+      expect(
+        warn.mock.calls.filter((call) => call[0] === "compute.repository_preparation_suspended"),
+      ).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  /**
+   * The cap must fire on a STUCK configuration, never on a run of unrelated
+   * transient ones. Keying the count on the failure list is what separates
+   * them: three different failures in a row are three first attempts, not a
+   * reason to stop trying.
+   */
+  it("restarts the failure count when the failure itself changes", async () => {
+    const threadId = "thr_turn_prep_varied";
+    const workspaceId = "ws_turn_prep_varied";
+    const agentId = "agent_turn_prep_varied";
+    await seedRegistryThread(env.REGISTRY_DB, {
+      threadId,
+      workspaceId,
+      agentId,
+      runtime: "think",
+    });
+    await seedComputeEnabledWorkspace(workspaceId);
+    await env.REGISTRY_DB.prepare("UPDATE agents SET setup_script = ? WHERE id = ?")
+      .bind("exit 1", agentId)
+      .run();
+
+    const backend = new FakeComputeBackend();
+    const failWith = (exitCode: number) => {
+      backend.scriptedExits.length = 0;
+      backend.scriptedExits.push({ match: "base64 -d | bash", exitCode });
+    };
+
+    const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
+    const turn = async () =>
+      runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
+        const agent = instance as unknown as TestableAgent;
+        await agent.__unsafe_ensureInitialized();
+        setComputeHostTestOverrides(threadId, { buildBackend: async () => backend });
+        try {
+          const before = backend.startProcessCalls.length + backend.runCommandCalls.length;
+          const session = await agent.resolveComputeServiceForTest();
+          await session!.service.ensureRuntimeReference();
+          return backend.startProcessCalls.length + backend.runCommandCalls.length - before;
+        } finally {
+          clearComputeHostTestOverrides(threadId);
+        }
+      });
+
+    const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
+    try {
+      // Four turns, a DIFFERENT failure each time: every one is attempt 1, and
+      // the fourth still runs. Under a count that ignored the failure it would
+      // have been suspended.
+      for (const exitCode of [4, 5, 6, 8]) {
+        failWith(exitCode);
+        expect(await turn(), `turn failing with ${exitCode} must still attempt`).toBeGreaterThan(0);
+      }
+
+      const counts = warn.mock.calls
+        .filter((call) => call[0] === "compute.repository_preparation_incomplete")
+        .map((call) => (call[1] as { consecutiveFailures?: number })?.consecutiveFailures);
+      expect(counts).toEqual([1, 1, 1, 1]);
+      expect(
+        warn.mock.calls.filter((call) => call[0] === "compute.repository_preparation_suspended"),
+      ).toEqual([]);
     } finally {
       warn.mockRestore();
     }
@@ -404,7 +538,6 @@ describe("the turn's sandbox session", () => {
       .run();
 
     const backend = new FakeComputeBackend();
-    backend.scriptedExits.push({ match: ".nadi-prepared", exitCode: 1 });
 
     // Open a session first, so the box has an alarm record to replay. Its own
     // preparation is expected and is not what this asserts.
@@ -449,12 +582,18 @@ describe("the turn's sandbox session", () => {
       duringAlarm.some((command) => command.includes("PROBE")),
       `the alarm must have run the cleanliness probe; commands were ${JSON.stringify(duringAlarm)}`,
     ).toBe(true);
-    // The gate probe itself must not run either — preparation is not entered.
+    // The gate probe itself must not run either — preparation is not ENTERED.
+    // Matched on the gate's own shape rather than on the sentinel's name: the
+    // probe script legitimately names the sentinel too, in the exclusion that
+    // stops it counting as work.
     expect(
-      duringAlarm.filter((command) => command.includes(".nadi-prepared")),
+      duringAlarm.filter((command) => command.includes('test "$(cat')),
       `the alarm must not enter preparation; commands were ${JSON.stringify(duringAlarm)}`,
     ).toEqual([]);
     expect(duringAlarm.filter((command) => command.includes("git clone"))).toEqual([]);
+    expect(duringAlarm.filter((command) => command.includes("mkdir -p /workspace/repos"))).toEqual(
+      [],
+    );
   });
 
   it("acquiring a fresh runtime through AgentSandbox runs repository preparation", async () => {
@@ -481,9 +620,6 @@ describe("the turn's sandbox session", () => {
       .run();
 
     const backend = new FakeComputeBackend();
-    // See the gate test above: the fake answers every command 0, which the gate
-    // would read as "already prepared".
-    backend.scriptedExits.push({ match: ".nadi-prepared", exitCode: 1 });
     const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
     const commands = await runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
       const agent = instance as unknown as TestableAgent;

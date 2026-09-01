@@ -59,6 +59,17 @@ const ALARM_PARAMS_KEY = "sandbox:alarm-params";
 const SWEEP_ROSTER_PREFIX = "sb:sw:";
 
 /**
+ * How many consecutive failed preparations one thread gets per DO wake before
+ * this box stops retrying it — see {@link AgentSandbox.ensureThreadWorkspacePrepared}.
+ *
+ * Small on purpose. The first attempt is the real one; the next two cover a
+ * transient network or registry blip. Beyond that the evidence says the
+ * configuration is broken, and each further attempt costs the user the first
+ * tool call of a turn.
+ */
+const MAX_PREPARATION_ATTEMPTS = 3;
+
+/**
  * The session inputs the alarm replays for its TICK. Written on every
  * `session()` open, so they track the owning agent's current answers rather
  * than the first ones.
@@ -128,6 +139,19 @@ export class AgentSandbox extends DurableObject<Env> {
 
   /** In-flight workspace preparations, keyed by thread — see {@link ensureThreadWorkspacePrepared}. */
   private readonly preparationInFlight = new Map<string, Promise<void>>();
+
+  /**
+   * Consecutive failed preparations, per thread — see
+   * {@link ensureThreadWorkspacePrepared}'s attempt cap.
+   *
+   * IN MEMORY on this DO instance, deliberately, and not in storage. The cap
+   * exists to stop a permanently failing setup command from blocking the first
+   * tool call of every turn; it must NEVER become a reason a thread stays
+   * unprepared forever. An in-memory counter dies with the DO's wake, so the
+   * worst it can do is skip a few attempts inside one sitting and try again in
+   * the next — self-healing in the safe direction, with no writes and no execs.
+   */
+  private readonly preparationFailures = new Map<string, { key: string; count: number }>();
 
   /**
    * The capabilities that stayed on the thread DO — transcript reminders, the
@@ -222,7 +246,16 @@ export class AgentSandbox extends DurableObject<Env> {
    *
    * Never throws. A preparation failure must not fail the turn, and the caller
    * ({@link ThreadComputeService.ensureWorkspaceRootOnce}) already logs a throw;
-   * SKIPS are the outcome that does not throw, and they are logged here.
+   * a run that merely fell SHORT does not throw at all, and is logged here.
+   *
+   * BOUNDED RETRY. Preparation is withheld from the record whenever anything
+   * failed, so a broken configuration is retried on the first tool call of every
+   * turn — right for a clone that could not reach the network, pathological for
+   * a `pnpm install` that will never succeed, which would stall every turn for
+   * up to `REPOSITORY_SETUP_TIMEOUT_MS`. After {@link MAX_PREPARATION_ATTEMPTS}
+   * consecutive failures with the SAME failure list, this stops attempting for
+   * the rest of this DO's wake and says so. The next wake starts over, so the
+   * cap can delay a recovery but can never prevent one.
    */
   private async ensureThreadWorkspacePrepared(
     threadId: string,
@@ -230,6 +263,8 @@ export class AgentSandbox extends DurableObject<Env> {
   ): Promise<void> {
     const inFlight = this.preparationInFlight.get(threadId);
     if (inFlight) return inFlight;
+    const suspended = this.preparationFailures.get(threadId);
+    if (suspended && suspended.count >= MAX_PREPARATION_ATTEMPTS) return;
     const run = (async () => {
       const result = await prepare();
       // `failures`, not `skipped`. Nothing here throws — a skipped repository
@@ -242,10 +277,38 @@ export class AgentSandbox extends DurableObject<Env> {
       // and it is the same list that decides whether the run is recorded as
       // prepared — so what is retried and what is logged cannot diverge.
       if (result.failures?.length) {
+        // The consecutive count is the diagnosable half. A failing preparation
+        // is retried on the first tool call of EVERY turn — that is the trade
+        // taken deliberately, because the alternative is a repository that
+        // silently never arrives — but "the 4th turn in a row" is what tells an
+        // operator this is a broken configuration rather than a blip, and it is
+        // invisible without saying so.
+        //
+        // Keyed on the failures themselves, so a DIFFERENT failure restarts the
+        // count: this must cap a stuck configuration, never a sequence of
+        // unrelated transient ones.
+        const key = result.failures.join("\u001f");
+        const previous = this.preparationFailures.get(threadId);
+        const count = previous?.key === key ? previous.count + 1 : 1;
+        this.preparationFailures.set(threadId, { key, count });
         log.warn("compute.repository_preparation_incomplete", {
           threadId,
           failures: result.failures,
+          consecutiveFailures: count,
         });
+        if (count >= MAX_PREPARATION_ATTEMPTS) {
+          // Stop retrying for the rest of this DO wake. A 15-minute
+          // `pnpm install` that will never succeed would otherwise stall the
+          // first tool call of every turn, for as long as the user keeps
+          // talking. The next wake tries again.
+          log.warn("compute.repository_preparation_suspended", {
+            threadId,
+            failures: result.failures,
+            consecutiveFailures: count,
+          });
+        }
+      } else {
+        this.preparationFailures.delete(threadId);
       }
     })();
     this.preparationInFlight.set(threadId, run);

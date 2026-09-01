@@ -9,6 +9,8 @@ import {
   AGENT_REPOS_ROOT,
   LEGACY_WORKSPACE_ROOT,
   RESERVED_WORKSPACE_DIR_NAMES,
+  PREPARED_GATE_MARKER,
+  PREPARED_SENTINEL_NAME,
   WORKSPACE_ROOT,
   agentClonePath,
   threadWorkRoot,
@@ -220,8 +222,8 @@ export function createRepositoryPreparation(input: {
 }
 
 /**
- * The file that records "this thread is prepared for this configuration", and
- * WHERE it lives is the whole design.
+ * WHERE the prepared-record lives is the whole design; the name itself is in
+ * `workspace-layout.ts`, because the cleanliness probe reads it too.
  *
  * It sits inside the thread's own working directory, so every event that
  * destroys the preparation destroys the record of it, with nobody having to
@@ -233,11 +235,9 @@ export function createRepositoryPreparation(input: {
  * this replaces. It survives everything except a fresh acquire, so a reclaimed
  * thread reopened on the SAME box read as prepared, `ensureWorkspaceRootOnce`
  * recreated its directory empty, and it worked with no code in it: H1's exact
- * failure, re-entered through the bookkeeping, needing no container reset. It
- * also created a cross-task obligation (Task 4 must delete the row) whose
- * omission fails nothing.
+ * failure, re-entered through the bookkeeping. It also created a cross-task
+ * obligation (Task 4 must delete the row) whose omission fails nothing.
  */
-const PREPARED_SENTINEL_NAME = ".nadi-prepared";
 
 /** Every path a prepared thread must still have, plus its sentinel. */
 function preparedLayout(
@@ -282,7 +282,10 @@ async function isAlreadyPrepared(
     ...layout.required.map((target) => `test -e ${shellQuote(target)}`),
   ].join(" && ");
   const result = await service.exec({
-    command: `sh -lc ${shellQuote(tests)}`,
+    // The marker rides in a shell comment: inert to `sh`, and the only way a
+    // test fake can tell this command apart from the cleanliness probe, which
+    // legitimately names the sentinel too. See `PREPARED_GATE_MARKER`.
+    command: `sh -lc ${shellQuote(`: ${PREPARED_GATE_MARKER}; ${tests}`)}`,
     timeoutMs: REPOSITORY_SETUP_TIMEOUT_MS,
     label: "check thread preparation",
   });

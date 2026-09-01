@@ -1,4 +1,8 @@
-import { WORKSPACE_GIT_SCAN_DEPTH, WORKSPACE_ROOT } from "./workspace-layout";
+import {
+  PREPARED_SENTINEL_NAME,
+  WORKSPACE_GIT_SCAN_DEPTH,
+  WORKSPACE_ROOT,
+} from "./workspace-layout";
 
 const PROBE_TIMEOUT_MS = 30_000;
 
@@ -23,6 +27,21 @@ export type DirtyRepo = { path: string; changes: string[]; unpushed: number };
  * ref already has, i.e. commits that exist ONLY inside the sandbox and die with
  * it. (It used to emit a `NOUPSTREAM` sentinel that parsed to 0 — "nothing to
  * lose" — and such a sandbox was discarded 15 minutes after going idle.)
+ *
+ * EMPTY means "nothing a user could lose", NOT "nothing on disk". It is a
+ * `find` for anything that is not a directory and is not our own sentinel,
+ * because the box always contains scaffolding WE made: since P3 every `exec`
+ * goes through `ensureWorkspaceRootOnce`, which creates `/workspace` AND
+ * `/workspace/threads/<threadId>` before the command runs, and preparation adds
+ * `/workspace/repos`. The old test was `ls -A "$root"`, so from that change on a
+ * box was never empty, `NOREPO EMPTY` was unreachable, and `resolveIdleDisposition`
+ * read `no_repo` + files as "unversioned work" and PRESERVED. A chat thread on a
+ * repo-less agent that ran one command would be held at every idle wake, and on
+ * a non-suspending provider it bills until something deletes it.
+ *
+ * Directories are excluded rather than pruned, so a user's empty `mkdir` no
+ * longer counts either — correct, since an empty directory holds nothing to
+ * lose — while files at ANY depth under `threads/<id>` still do.
  *
  * `--not --remotes` rather than a bare `rev-list --count HEAD`, which counts the
  * WHOLE history: the normal shape of a coding thread is a clone that
@@ -69,7 +88,8 @@ done <<EOF
 $(find "$root" -maxdepth ${WORKSPACE_GIT_SCAN_DEPTH} \\( -type d -o -type f \\) -name .git 2>/dev/null)
 EOF
 if [ "$found" = "0" ]; then
-  if [ -n "$(ls -A "$root" 2>/dev/null)" ]; then
+  leftovers=$(find "$root" ! -type d ! -name "${PREPARED_SENTINEL_NAME}" 2>/dev/null | head -n 1)
+  if [ -n "$leftovers" ]; then
     printf 'NOREPO\\tFILES\\n'
   else
     printf 'NOREPO\\tEMPTY\\n'

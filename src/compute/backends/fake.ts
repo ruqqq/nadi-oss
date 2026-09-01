@@ -18,6 +18,7 @@ import type {
   WriteFileOptions,
 } from "../backend";
 import { ComputeError } from "../errors";
+import { PREPARED_GATE_MARKER } from "../workspace-layout";
 
 type FakeRuntimeStatus = "ready" | "suspended";
 type FakeProcessStatus = "running" | "exited" | "failed" | "stopped";
@@ -100,16 +101,33 @@ export class FakeComputeBackend implements ComputeBackend {
    * command.
    *
    * `nextProcessResult` is single-shot and positional, which cannot express
-   * "this particular probe answers no, every time". The case that needs it is
-   * repository preparation's gate — a `sh -lc 'test ...'` that this fake would
-   * otherwise answer 0 for, i.e. "already prepared", turning every preparation
-   * test into a no-op that still passed its summary assertion. First match wins,
-   * so a test can push a later override in front of an earlier one.
+   * "this particular probe answers this, every time". First match wins, so a
+   * test can push a later override in front of an earlier one.
    */
   readonly scriptedExits: Array<{ match: string; exitCode: number }> = [];
 
-  private scriptedExitFor(command: string): number | undefined {
-    return this.scriptedExits.find((entry) => command.includes(entry.match))?.exitCode;
+  /**
+   * An exit code this fake will not let a test acquire by accident.
+   *
+   * Repository preparation's gate is a `sh -lc 'test ...'` carrying
+   * `PREPARED_GATE_MARKER` — matched on the marker, NOT on the sentinel's name,
+   * which the cleanliness probe also mentions.
+   * This fake answers every command 0, so the gate would read "already
+   * prepared" by DEFAULT — and a preparation test that forgot to say otherwise
+   * would become a no-op that still passed its summary assertion, which is the
+   * exact defect class the seam was added for. An empty fake box IS unprepared,
+   * so that is what it says; a test wanting "prepared" must push a
+   * `scriptedExits` entry and say so out loud.
+   *
+   * It outranks `nextProcessResult` deliberately: a stray positional stub aimed
+   * at some later command must not be able to answer the gate. And when it
+   * applies, `nextProcessResult` is left UNCONSUMED, so the stub still reaches
+   * the command it was written for.
+   */
+  private forcedExitFor(command: string): number | undefined {
+    const scripted = this.scriptedExits.find((entry) => command.includes(entry.match));
+    if (scripted) return scripted.exitCode;
+    return command.includes(PREPARED_GATE_MARKER) ? 1 : undefined;
   }
 
   private nextProcessResult:
@@ -232,10 +250,12 @@ export class FakeComputeBackend implements ComputeBackend {
     });
     const runtimeId = this.activeRuntimeId(runtime);
     void runtimeId;
-    const configured = this.nextProcessResult;
-    this.nextProcessResult = undefined;
+    const forced = this.forcedExitFor(input.command);
+    // Left unconsumed when `forced` applies — see `forcedExitFor`.
+    const configured = forced === undefined ? this.nextProcessResult : undefined;
+    if (forced === undefined) this.nextProcessResult = undefined;
     const isEcho = input.command.startsWith("echo ");
-    const exitCode = configured?.exitCode ?? this.scriptedExitFor(input.command) ?? 0;
+    const exitCode = forced ?? configured?.exitCode ?? 0;
     return {
       status: exitCode === 0 ? "exited" : "failed",
       exitCode,
@@ -671,15 +691,17 @@ export class FakeComputeBackend implements ComputeBackend {
     });
     this.processSeq += 1;
     const processId = `fake_proc_${this.processSeq}`;
-    const configured = this.nextProcessResult;
-    this.nextProcessResult = undefined;
+    const forced = this.forcedExitFor(input.command);
+    // Left unconsumed when `forced` applies — see `forcedExitFor`.
+    const configured = forced === undefined ? this.nextProcessResult : undefined;
+    if (forced === undefined) this.nextProcessResult = undefined;
     const isSleep = /^\s*sleep\b/.test(input.command);
     const isEcho = input.command.startsWith("echo ");
-    const scriptedExit = this.scriptedExitFor(input.command);
     const state: FakeProcessState = {
       runtimeId,
-      status: configured?.status ?? (isSleep ? "running" : "exited"),
-      exitCode: configured?.exitCode ?? scriptedExit ?? (isSleep ? undefined : 0),
+      status:
+        forced !== undefined ? "exited" : (configured?.status ?? (isSleep ? "running" : "exited")),
+      exitCode: forced ?? configured?.exitCode ?? (isSleep ? undefined : 0),
       stdout: configured?.stdout ?? (isEcho ? `${input.command.slice("echo ".length)}\n` : ""),
       stderr: configured?.stderr ?? "",
     };

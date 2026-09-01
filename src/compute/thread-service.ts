@@ -2367,10 +2367,17 @@ export class ThreadComputeService {
     };
     // `no_repo` with NO files is genuinely nothing to lose, and it is the same
     // state `confirmWorkSaved` accepts and sets the bit on — the two deciders
-    // have to agree or a repo-less thread that ran one `exec` (a bare
-    // command leaves /workspace empty, and a chat thread never calls
-    // `confirm_work_saved`) keeps a 24h recovery snapshot forever.
+    // have to agree or a repo-less thread that ran one `exec` (and a chat thread
+    // never calls `confirm_work_saved`) keeps a 24h recovery snapshot forever.
     // `no_repo` WITH files still preserves: unversioned work is still work.
+    //
+    // "NO files" is the probe's judgement, not `ls`. Since P3 the box is never
+    // literally empty — `ensureWorkspaceRootOnce` creates `/workspace` and this
+    // thread's own directory before the probe's own `exec` can run — so the
+    // probe excludes the scaffolding we make. Get that wrong and this branch is
+    // simply unreachable: every repo-less box reads as `no_repo` + files,
+    // preserves at every idle wake, and on a non-suspending provider bills until
+    // something deletes it. See `PROBE_SCRIPT`.
     const empty = cleanliness.state === "no_repo" && !cleanliness.hasFiles;
     const disposition = cleanliness.state === "clean" || empty ? "discard" : "recoverable";
     const reason =

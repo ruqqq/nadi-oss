@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -7,7 +7,14 @@ import {
   PROBE_SCRIPT,
   probeWorkspaceCleanliness,
 } from "../../../src/compute/workspace-cleanliness";
-import { threadWorktreeBranch } from "../../../src/compute/workspace-layout";
+import {
+  AGENT_REPOS_ROOT,
+  PREPARED_SENTINEL_NAME,
+  THREAD_WORK_ROOT,
+  WORKSPACE_ROOT,
+  threadWorkRoot,
+  threadWorktreeBranch,
+} from "../../../src/compute/workspace-layout";
 
 /**
  * The probe's verdict is decided in the shell, and the parser cannot see it: a
@@ -192,6 +199,71 @@ describe("PROBE_SCRIPT against real git repositories", () => {
     expect(await runProbe(withFiles)).toEqual({ state: "no_repo", hasFiles: true });
     const empty = workspace(() => undefined);
     expect(await runProbe(empty)).toEqual({ state: "no_repo", hasFiles: false });
+  });
+
+  /**
+   * THE BOX IS NEVER LITERALLY EMPTY, and `EMPTY` still has to be reachable.
+   *
+   * Since P3 every `exec` goes through `ensureWorkspaceRootOnce`, which creates
+   * `/workspace` and `/workspace/threads/<threadId>` BEFORE the command runs —
+   * including before this probe's own exec. Preparation adds `/workspace/repos`
+   * and, on a clean run, a sentinel inside the thread's directory. The old
+   * emptiness test was `ls -A /workspace`, so from that change on `NOREPO EMPTY`
+   * was unreachable: every repo-less box read as `no_repo` + files,
+   * `resolveIdleDisposition` called that "unversioned work", preserved it at
+   * every idle wake, and on a non-suspending provider it billed until something
+   * deleted it. A chat thread on a setup-script-only agent that ran one command
+   * is enough.
+   *
+   * The fixture is built from the LAYOUT HELPERS, relative to the root they
+   * declare, so a new scaffolding directory that nobody teaches the probe about
+   * breaks this test rather than silently re-preserving every box.
+   */
+  describe("the scaffolding this system makes does not count as work", () => {
+    /** The same relative paths `ensureWorkspaceRootOnce` and preparation create. */
+    const relative = (absolute: string) => absolute.slice(WORKSPACE_ROOT.length + 1);
+    const THREAD_ID = "thr_00000000-0000-4000-8000-0000000000ee";
+
+    /** A root laid out exactly as a box that has run one bare command. */
+    function scaffolded(extra?: (root: string) => void): string {
+      return workspace((root) => {
+        sh(`mkdir -p "${join(root, relative(threadWorkRoot(THREAD_ID)))}"`, root);
+        sh(`mkdir -p "${join(root, relative(AGENT_REPOS_ROOT))}"`, root);
+        extra?.(root);
+      });
+    }
+
+    it("reports EMPTY for a box holding only the layout directories", async () => {
+      const root = scaffolded();
+      // ANTI-VACUITY: the scaffolding really is there, so `ls -A` would say
+      // "files" and the old test would have passed for the wrong reason.
+      expect(readdirSync(root).sort()).toEqual([
+        relative(AGENT_REPOS_ROOT),
+        relative(THREAD_WORK_ROOT),
+      ]);
+      expect(await runProbe(root)).toEqual({ state: "no_repo", hasFiles: false });
+    });
+
+    it("reports EMPTY when the preparation sentinel is the only file", async () => {
+      const root = scaffolded((base) => {
+        const threadDir = join(base, relative(threadWorkRoot(THREAD_ID)));
+        sh(`printf %s abc123 > "${join(threadDir, PREPARED_SENTINEL_NAME)}"`, base);
+      });
+      expect(await runProbe(root)).toEqual({ state: "no_repo", hasFiles: false });
+    });
+
+    it("still reports FILES for a user's file inside the thread's directory", async () => {
+      const root = scaffolded((base) => {
+        const threadDir = join(base, relative(threadWorkRoot(THREAD_ID)));
+        sh(`echo notes > "${join(threadDir, "notes.md")}"`, base);
+      });
+      expect(await runProbe(root)).toEqual({ state: "no_repo", hasFiles: true });
+    });
+
+    it("still reports FILES for a user's file at the top of the box", async () => {
+      const root = scaffolded((base) => sh(`echo notes > "${join(base, "notes.md")}"`, base));
+      expect(await runProbe(root)).toEqual({ state: "no_repo", hasFiles: true });
+    });
   });
 
   it("reports dirty for uncommitted changes in an otherwise pushed clone", async () => {
