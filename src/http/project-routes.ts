@@ -261,7 +261,7 @@ async function parseDefaultAgentId(
 
   const clean = value.trim();
   try {
-    await new AgentRepository(db).assertActiveAgentInWorkspace(clean, workspaceId);
+    await new AgentRepository(db).assertUsableAgentInWorkspace(clean, workspaceId);
     return { ok: true, value: clean };
   } catch {
     return { ok: false, response: new Response("Not found", { status: 404 }) };

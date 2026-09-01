@@ -69,6 +69,26 @@ export interface AgentListItem {
   enabled: boolean;
 }
 
+/**
+ * The agents a picker may OFFER: the enabled ones, plus whichever is already
+ * selected so a control never blanks out or silently resets when its current
+ * agent is disabled.
+ *
+ * A disabled agent is not a valid destination for work — routing a thread onto
+ * one gives it no `exec_*` tools and says nothing — and the server refuses it
+ * (`assertUsableAgentInWorkspace`). This is the one definition of that rule on
+ * the client, so the pickers and the project default cannot disagree.
+ *
+ * NOT for the management surface: Settings lists disabled agents on purpose,
+ * because turning one back on is the point.
+ */
+export function selectableAgents<T extends { id: string; enabled: boolean }>(
+  agents: T[],
+  keepSelectedId?: string | null,
+): T[] {
+  return agents.filter((agent) => agent.enabled || agent.id === keepSelectedId);
+}
+
 export type AgentStatus = "active" | "archived" | "all";
 
 export type CreateAgentInput = {

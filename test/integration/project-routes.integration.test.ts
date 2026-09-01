@@ -130,6 +130,7 @@ async function insertEnvironment(input: {
   workspaceId: string;
   name: string;
   createdAt: number;
+  enabled?: boolean;
 }) {
   const db = drizzle(env.REGISTRY_DB, { schema });
   await db.insert(schema.agents).values({
@@ -143,6 +144,7 @@ async function insertEnvironment(input: {
     description: "",
     setupScript: "",
     sandboxEnvVarsJson: "{}",
+    enabled: input.enabled ?? true,
     createdAt: input.createdAt,
     updatedAt: input.createdAt,
   });
@@ -418,6 +420,33 @@ describe("project routes", () => {
       body: JSON.stringify({ defaultAgentId: "env-does-not-exist" }),
     });
     expect(missingRes.status).toBe(404);
+  });
+
+  // A default pointing at a disabled agent is not a harmless setting: new chats
+  // in the project would route onto it and run with no `exec_*` tools, silently.
+  // Refused here rather than accepted and then quietly ignored at thread create.
+  it("rejects a defaultAgentId naming a DISABLED agent", async () => {
+    const seeded = await seedUserWorkspace();
+    await insertProject({
+      id: "project-disabled-env",
+      workspaceId: seeded.workspaceId,
+      name: "Disabled Env",
+      createdAt: now,
+    });
+    await insertEnvironment({
+      id: "env-disabled-default",
+      workspaceId: seeded.workspaceId,
+      name: "Disabled",
+      enabled: false,
+      createdAt: now,
+    });
+
+    const res = await SELF.fetch("https://nadi.test/api/projects/project-disabled-env", {
+      method: "PATCH",
+      headers: { ...cookie(seeded.token), "Content-Type": "application/json" },
+      body: JSON.stringify({ defaultAgentId: "env-disabled-default" }),
+    });
+    expect(res.status).toBe(404);
   });
 
   it("clears a project's default agent when set to null", async () => {

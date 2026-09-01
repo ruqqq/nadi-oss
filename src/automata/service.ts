@@ -145,7 +145,7 @@ async function resolveExplicitAgentId(
   }
   const clean = value.trim();
   try {
-    await new AgentRepository(db).assertActiveAgentInWorkspace(clean, workspaceId);
+    await new AgentRepository(db).assertUsableAgentInWorkspace(clean, workspaceId);
   } catch {
     // 404, not 403: never confirm another workspace's agent exists.
     throw new AutomatonProjectNotFoundError("Agent not found.");
@@ -182,7 +182,7 @@ async function resolveAutomatonAgentId(
     (await new ProjectRepository(db).getById(projectId))?.defaultAgentId ?? null;
   if (defaultAgentId === null) return fallbackAgentId;
   try {
-    await new AgentRepository(db).assertActiveAgentInWorkspace(defaultAgentId, workspaceId);
+    await new AgentRepository(db).assertUsableAgentInWorkspace(defaultAgentId, workspaceId);
     return defaultAgentId;
   } catch {
     return fallbackAgentId;

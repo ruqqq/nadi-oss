@@ -41,6 +41,8 @@ const AGENT_FIXTURE = {
   workspaceId: "ws_1",
   name: "Nadi",
   description: "",
+  // Mirrors AgentListItem: the pickers offer only ENABLED agents.
+  enabled: true,
   setupScript: "",
   repositories: [],
   envVars: {},

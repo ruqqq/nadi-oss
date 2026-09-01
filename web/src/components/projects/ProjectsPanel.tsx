@@ -20,7 +20,7 @@ import {
   updateProject,
   type ProjectSummary,
 } from "../../projects-api";
-import { listAgents, type AgentListItem } from "../../agents-api";
+import { listAgents, selectableAgents, type AgentListItem } from "../../agents-api";
 import { listThreads, type ThreadSummary } from "../../threads-api";
 import { isNetworkFailure } from "../../lib/offline-state";
 import { isThreadListEmpty, THREAD_PAGE_SIZE } from "../../lib/thread-list-state";
@@ -579,7 +579,11 @@ export function ProjectsPanel({
                           </SelectTrigger>
                           <SelectContent>
                             <SelectItem value="none">None</SelectItem>
-                            {agents.map((agent) => (
+                            {/* A disabled agent is not offered as a project
+                                default: new chats would route onto it and run
+                                with no exec_* tools. The one already set stays
+                                listed so the control keeps its value. */}
+                            {selectableAgents(agents, projectForm.defaultAgentId).map((agent) => (
                               <SelectItem key={agent.id} value={agent.id}>
                                 {agent.name}
                               </SelectItem>

@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { ArrowSquareOut, CaretDown, Check, Robot } from "../../icons";
 import { useMediaQuery } from "../../lib/use-media-query";
 import { useVisualViewportInset } from "../../lib/use-visual-viewport-inset";
-import type { AgentListItem } from "../../agents-api";
+import { selectableAgents, type AgentListItem } from "../../agents-api";
 import { Button } from "../ui/button";
 import {
   Command,
@@ -106,13 +106,20 @@ function AgentPickerBase({
   // hiding behind it (only while the sheet is open).
   const viewport = useVisualViewportInset(open && isMobile);
 
-  const selected = value === null ? null : (agents.find((agent) => agent.id === value) ?? null);
+  // A DISABLED agent is not a destination for work: routed onto one, a thread
+  // runs with no `exec_*` tools and nothing says why. The one already selected
+  // stays listed so the trigger keeps its name and re-picking it is a harmless
+  // no-op; every other disabled agent is simply not on offer. The server
+  // refuses one anyway (`assertUsableAgentInWorkspace`) — this is so the user
+  // never reaches that refusal.
+  const offered = useMemo(() => selectableAgents(agents, value), [agents, value]);
+  const selected = value === null ? null : (offered.find((agent) => agent.id === value) ?? null);
   const fallbackLabel = inheritLabel ?? "Choose an agent";
   const label = selected?.name ?? (value === null ? fallbackLabel : (selectedName ?? fallbackLabel));
   const matches = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    return needle ? agents.filter((agent) => agent.name.toLowerCase().includes(needle)) : agents;
-  }, [agents, query]);
+    return needle ? offered.filter((agent) => agent.name.toLowerCase().includes(needle)) : offered;
+  }, [offered, query]);
   const showInherit = inheritLabel !== null && query.trim() === "";
 
   const reset = () => {

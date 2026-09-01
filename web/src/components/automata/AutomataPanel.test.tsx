@@ -21,9 +21,12 @@ vi.mock("../../automata-api", async () => {
 });
 
 const listAgentsMock = vi.fn();
-vi.mock("../../agents-api", () => ({
-  listAgents: (...a: unknown[]) => listAgentsMock(...a),
-}));
+// Spread the real module: a whole-module factory BLANKS every sibling export,
+// and AgentPicker imports `selectableAgents` from here.
+vi.mock("../../agents-api", async () => {
+  const actual = await vi.importActual<typeof import("../../agents-api")>("../../agents-api");
+  return { ...actual, listAgents: (...a: unknown[]) => listAgentsMock(...a) };
+});
 
 const getDefaultAgentSettings = vi.fn();
 vi.mock("../../settings-api", async () => {
@@ -42,6 +45,8 @@ const AGENT_FIXTURE = {
   workspaceId: "ws",
   name: "Backend",
   description: "",
+  // Mirrors AgentListItem: the pickers offer only ENABLED agents.
+  enabled: true,
   setupScript: "",
   repositories: [],
   envVars: {},

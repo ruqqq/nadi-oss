@@ -210,6 +210,7 @@ async function insertEnvironment(input: {
   setupScript?: string;
   createdAt: number;
   archivedAt?: number | null;
+  enabled?: boolean;
 }) {
   const db = drizzle(env.REGISTRY_DB, { schema });
   await db.insert(schema.agents).values({
@@ -224,6 +225,7 @@ async function insertEnvironment(input: {
     description: "",
     setupScript: input.setupScript ?? "",
     sandboxEnvVarsJson: "{}",
+    enabled: input.enabled ?? true,
     createdAt: input.createdAt,
     updatedAt: input.createdAt,
     archivedAt: input.archivedAt ?? null,
@@ -1596,6 +1598,74 @@ describe("thread routes", () => {
       makeExecutionContext(),
     );
     expect(compact?.status).toBe(409);
+  });
+
+  // Disable stops an agent taking NEW work. Routing a thread onto one does not
+  // fail loudly - the thread simply runs with no `exec_*` tools and nothing
+  // says why - so the refusal lives at the data source, where a stale client
+  // that still offers the disabled agent cannot get past it.
+  it("REFUSES switching a thread onto a DISABLED agent", async () => {
+    const seeded = await seedUserWorkspace({
+      userId: "user-thread-switch-disabled",
+      token: "thread-switch-disabled-token",
+      workspaceId: "workspace-thread-switch-disabled",
+    });
+    await insertEnvironment({
+      id: "env-disabled",
+      workspaceId: seeded.workspaceId,
+      name: "Disabled Env",
+      enabled: false,
+      createdAt: now,
+    });
+    await insertThread({
+      id: "thr_switch_disabled",
+      workspaceId: seeded.workspaceId,
+      agentId: seeded.agentId,
+      title: "Switch",
+      updatedAt: now,
+    });
+
+    const res = await SELF.fetch("https://nadi.test/api/threads/thr_switch_disabled", {
+      method: "PATCH",
+      headers: {
+        cookie: `better-auth.session_token=${seeded.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ agentId: "env-disabled" }),
+    });
+
+    expect(res.status).toBe(404);
+    // Refused means UNCHANGED - not silently moved, and not left half-moved.
+    await expect(readThread("thr_switch_disabled")).resolves.toMatchObject({
+      agentId: seeded.agentId,
+    });
+  });
+
+  // The same gate on the create path: a disabled agent is not a destination.
+  it("REFUSES creating a thread on a DISABLED agent", async () => {
+    const seeded = await seedUserWorkspace({
+      userId: "user-thread-create-disabled",
+      token: "thread-create-disabled-token",
+      workspaceId: "workspace-thread-create-disabled",
+    });
+    await insertEnvironment({
+      id: "env-create-disabled",
+      workspaceId: seeded.workspaceId,
+      name: "Disabled Env",
+      enabled: false,
+      createdAt: now,
+    });
+
+    const res = await SELF.fetch("https://nadi.test/api/threads", {
+      method: "POST",
+      headers: {
+        cookie: `better-auth.session_token=${seeded.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ agentId: "env-create-disabled" }),
+    });
+
+    expect(res.status).toBe(404);
   });
 
   // There is no "clear the environment" any more: a thread's agent IS its

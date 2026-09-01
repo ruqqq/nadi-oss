@@ -125,12 +125,49 @@ export class AgentRepository {
     ]);
   }
 
+  /**
+   * An agent that still EXISTS and may be CONFIGURED: in the workspace and not
+   * archived. A DISABLED agent passes — that is the whole point of disable over
+   * delete, that the box and its settings survive and can still be fixed.
+   *
+   * This is NOT the predicate for routing work. See
+   * {@link assertUsableAgentInWorkspace}.
+   */
   async assertActiveAgentInWorkspace(agentId: string, workspaceId: string): Promise<AgentConfig> {
     const row = await this.db
       .select()
       .from(agents)
       .where(
         and(eq(agents.id, agentId), eq(agents.workspaceId, workspaceId), isNull(agents.archivedAt)),
+      )
+      .get();
+    if (!row) throw new Error("agent_not_found");
+    return row;
+  }
+
+  /**
+   * An agent that may be given NEW WORK: in the workspace, not archived, AND
+   * enabled.
+   *
+   * Every surface that ROUTES a thread — creating one, switching one, a
+   * project's default, an automaton's override — asks this, not
+   * {@link assertActiveAgentInWorkspace}. Routing onto a disabled agent does
+   * not fail: the thread runs with no `exec_*` tools and nothing says why,
+   * which is the silent-wrong-value failure this codebase keeps producing. A
+   * stale client that offers a disabled agent is refused here, at the data
+   * source, rather than trusted.
+   */
+  async assertUsableAgentInWorkspace(agentId: string, workspaceId: string): Promise<AgentConfig> {
+    const row = await this.db
+      .select()
+      .from(agents)
+      .where(
+        and(
+          eq(agents.id, agentId),
+          eq(agents.workspaceId, workspaceId),
+          isNull(agents.archivedAt),
+          eq(agents.enabled, true),
+        ),
       )
       .get();
     if (!row) throw new Error("agent_not_found");

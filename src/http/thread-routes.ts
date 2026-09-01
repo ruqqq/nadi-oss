@@ -1411,11 +1411,11 @@ async function resolveThreadAgentId(
   const defaultAgentId = project?.defaultAgentId ?? null;
   if (defaultAgentId === null) return { ok: true, value: fallbackAgentId };
 
-  // A stale project default (e.g. the agent was archived after being set as
-  // default) must not be adopted, nor 400 the thread create over a default the
+  // A stale project default (the agent was archived or disabled after being set
+  // as default) must not be adopted, nor 400 the thread create over a default the
   // caller never explicitly requested — fall back to the workspace's agent.
   try {
-    await new AgentRepository(db).assertActiveAgentInWorkspace(defaultAgentId, workspaceId);
+    await new AgentRepository(db).assertUsableAgentInWorkspace(defaultAgentId, workspaceId);
     return { ok: true, value: defaultAgentId };
   } catch {
     return { ok: true, value: fallbackAgentId };
@@ -1455,7 +1455,7 @@ async function resolveThreadAgentPatch(
     // Loads and validates the row anyway, so returning its `name` alongside
     // the id (for the save-work message the live-sandbox switch path sends)
     // costs no extra query.
-    const row = await new AgentRepository(db).assertActiveAgentInWorkspace(clean, workspaceId);
+    const row = await new AgentRepository(db).assertUsableAgentInWorkspace(clean, workspaceId);
     return { ok: true, hasValue: true, value: clean, name: row.name };
   } catch {
     return { ok: false, response: new Response("Not found", { status: 404 }) };
