@@ -542,6 +542,7 @@ describe("createRepositoryPreparation", () => {
       const second = makeService([], [], { alreadyPrepared: true });
       await expect(prepare(second)()).resolves.toEqual({
         summary: "Repositories were already prepared for this thread.",
+        signature: written.match(/[0-9a-f]{64}/)?.[0],
       });
       expect(second.exec).toHaveBeenCalledTimes(1);
       expect(second.sentinelWrites).toEqual([]);
@@ -984,6 +985,7 @@ describe("createRepositoryPreparation", () => {
 
     await expect(prepareRepositories()).resolves.toEqual({
       summary: "No project repositories are configured for this thread.",
+      signature: null,
     });
     expect(listRepositoriesMock).not.toHaveBeenCalled();
     expect(resolveComputeService).not.toHaveBeenCalled();
@@ -1001,6 +1003,7 @@ describe("createRepositoryPreparation", () => {
 
     await expect(prepareRepositories()).resolves.toEqual({
       summary: "No project repositories are configured for this thread.",
+      signature: null,
     });
     expect(listRepositoriesMock).not.toHaveBeenCalled();
     expect(resolveComputeService).not.toHaveBeenCalled();
@@ -1018,9 +1021,199 @@ describe("createRepositoryPreparation", () => {
 
     await expect(prepareRepositories()).resolves.toEqual({
       summary: "No project repositories are configured for this thread.",
+      signature: null,
     });
     expect(listRepositoriesMock).toHaveBeenCalledWith("env-1");
     expect(resolveComputeService).not.toHaveBeenCalled();
+  });
+
+  /**
+   * WHAT THE SIGNATURE COVERS, one input at a time.
+   *
+   * The gate here is a REAL comparison, not a boolean the test sets: `makeBox`
+   * keeps the value the sentinel write stored and answers the gate probe by
+   * comparing it against the digest that probe carries — the same thing
+   * `test "$(cat sentinel)" = <signature>` does inside the container. So
+   * "preparation re-ran" is observed, not asserted about a hash.
+   *
+   * Each input is proved ALONE: everything else about the agent is held fixed
+   * and one field moves. A test that changed two things at once would still
+   * pass if only one of them were hashed.
+   *
+   * And the value case is the load-bearing one. `sandbox_env_vars_json` is a
+   * NAME -> VALUE map, the signature is written into a file inside a sandbox
+   * the model can read, and hashing the map wholesale would put every secret's
+   * value into that digest. Changing only a VALUE must therefore leave the
+   * signature alone — which is exactly the assertion that fails if someone
+   * hashes the object instead of `Object.keys`.
+   */
+  describe("the signature covers the agent's whole sandbox configuration", () => {
+    /** An agent with a setup script and no repositories: the shortest run. */
+    function agentRow(overrides: Record<string, unknown> = {}) {
+      return {
+        id: "env-1",
+        workspaceId: "workspace-1",
+        name: "env",
+        setupScript: "echo hi",
+        resourceProfile: "small",
+        sandboxNetworkDomainAllowlist: null,
+        sandboxEnvVarsJson: null,
+        ...overrides,
+      };
+    }
+
+    /** The 64-hex digest a gate probe or a sentinel write carries. */
+    function digestOf(command: string): string {
+      const match = /[0-9a-f]{64}/.exec(command);
+      expect(match, `no signature in: ${command}`).toBeTruthy();
+      return (match as RegExpExecArray)[0];
+    }
+
+    /**
+     * A box that REMEMBERS its sentinel across turns, and answers the gate by
+     * comparing — the in-container `test "$(cat ...)" = <sig>`, in memory.
+     */
+    function makeBox() {
+      let stored: string | null = null;
+      /** One turn against this box. Resolves to whether preparation RAN. */
+      return {
+        get sentinel() {
+          return stored;
+        },
+        async turn(): Promise<{ ran: boolean; signature: string }> {
+          let ran = false;
+          let seen: string | null = null;
+          const exec = vi.fn(async (input: { command: string; label?: string }) => {
+            if (input.label === "check thread preparation") {
+              seen = digestOf(input.command);
+              return {
+                status: "exited" as const,
+                processId: "gate",
+                exitCode: stored !== null && stored === seen ? 0 : 1,
+              };
+            }
+            if (input.label === "record thread preparation") {
+              stored = digestOf(input.command);
+              return { status: "exited" as const, processId: "sentinel", exitCode: 0 };
+            }
+            ran = true;
+            return { status: "exited" as const, processId: "work", exitCode: 0 };
+          });
+          const result = await createRepositoryPreparation({
+            env: {} as never,
+            threadId: THREAD_ID,
+            resolveComputeService: async () =>
+              ({ service: { exec, execOutput: vi.fn() } }) as never,
+          })();
+          expect(result.signature).toBe(seen);
+          return { ran, signature: seen as unknown as string };
+        },
+      };
+    }
+
+    /**
+     * Prepare once with `before`, then once with `after`, on the SAME box.
+     * Returns whether the second turn re-prepared.
+     */
+    async function reprepared(
+      before: Record<string, unknown>,
+      after: Record<string, unknown>,
+    ): Promise<boolean> {
+      listRepositoriesMock.mockResolvedValue([]);
+      const box = makeBox();
+      getAgentMock.mockResolvedValue(agentRow(before));
+      const first = await box.turn();
+      // ANTI-VACUITY: the first turn must actually have prepared and recorded,
+      // or "the second turn re-prepared" would be meaningless.
+      expect(first.ran).toBe(true);
+      expect(box.sentinel).toBe(first.signature);
+      getAgentMock.mockResolvedValue(agentRow(after));
+      return (await box.turn()).ran;
+    }
+
+    it("does NOT re-prepare when nothing changed", async () => {
+      expect(await reprepared({}, {})).toBe(false);
+    });
+
+    it("re-prepares when only the setup script changed", async () => {
+      expect(await reprepared({ setupScript: "echo hi" }, { setupScript: "echo bye" })).toBe(true);
+    });
+
+    it("re-prepares when only the resource profile changed", async () => {
+      expect(await reprepared({ resourceProfile: "small" }, { resourceProfile: "medium" })).toBe(
+        true,
+      );
+    });
+
+    it("re-prepares when only the network allowlist changed", async () => {
+      expect(
+        await reprepared(
+          { sandboxNetworkDomainAllowlist: null },
+          { sandboxNetworkDomainAllowlist: "github.com" },
+        ),
+      ).toBe(true);
+    });
+
+    /**
+     * An allowlist is a SET. Two agents that allow the same hosts are one
+     * configuration, and re-typing the same list in another order must not cost
+     * every thread of the agent a fresh clone and setup run.
+     */
+    it("does NOT re-prepare when the allowlist is only reordered or re-spaced", async () => {
+      expect(
+        await reprepared(
+          { sandboxNetworkDomainAllowlist: "github.com,registry.npmjs.org" },
+          { sandboxNetworkDomainAllowlist: " REGISTRY.NPMJS.ORG , github.com " },
+        ),
+      ).toBe(false);
+    });
+
+    it("re-prepares when only an env var NAME changed", async () => {
+      expect(
+        await reprepared(
+          { sandboxEnvVarsJson: JSON.stringify({ API_BASE: "https://one.example" }) },
+          { sandboxEnvVarsJson: JSON.stringify({ API_HOST: "https://one.example" }) },
+        ),
+      ).toBe(true);
+    });
+
+    it("re-prepares when an env var is ADDED", async () => {
+      expect(
+        await reprepared(
+          { sandboxEnvVarsJson: JSON.stringify({ A: "1" }) },
+          { sandboxEnvVarsJson: JSON.stringify({ A: "1", B: "2" }) },
+        ),
+      ).toBe(true);
+    });
+
+    /**
+     * THE ONE THAT PROVES NAMES-ONLY. If the signature hashed the env var map
+     * rather than its keys, this would re-prepare — and every value in it would
+     * be inside a digest written to a file the model can `cat`.
+     */
+    it("does NOT re-prepare when only an env var VALUE changed", async () => {
+      expect(
+        await reprepared(
+          { sandboxEnvVarsJson: JSON.stringify({ TOKEN: "secret-one" }) },
+          { sandboxEnvVarsJson: JSON.stringify({ TOKEN: "secret-two" }) },
+        ),
+      ).toBe(false);
+    });
+
+    /** Belt and braces on the same point, stated as a property of the digest. */
+    it("never writes an env var value into the digest input", async () => {
+      listRepositoriesMock.mockResolvedValue([]);
+      const box = makeBox();
+      getAgentMock.mockResolvedValue(
+        agentRow({ sandboxEnvVarsJson: JSON.stringify({ TOKEN: "secret-one" }) }),
+      );
+      const { signature } = await box.turn();
+      // A digest is 64 hex characters and cannot contain the value, so the
+      // meaningful check is the one above; this pins the shape of what lands in
+      // the box beside it.
+      expect(signature).toMatch(/^[0-9a-f]{64}$/);
+      expect(signature).not.toContain("secret");
+    });
   });
 });
 

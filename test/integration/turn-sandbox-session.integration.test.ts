@@ -505,6 +505,155 @@ describe("the turn's sandbox session", () => {
   });
 
   /**
+   * A SUSPENSION MUST NOT OUTLIVE THE CONFIGURATION THAT CAUSED IT.
+   *
+   * The cap returns before `prepare()`, so nothing inside preparation could
+   * move it: a user who fixed a broken `setup_script` mid-wake got no attempt
+   * at all until the DO was evicted, and the only log was the one-shot
+   * `..._suspended` from three turns earlier — so a turn that silently did no
+   * preparation looked exactly like a turn with nothing to prepare.
+   *
+   * Both halves are asserted: the skip is LOGGED while the configuration is
+   * unchanged, and the very next turn after the configuration changes attempts
+   * again.
+   */
+  it("invalidates the suspension when the agent's configuration changes, and logs the skip", async () => {
+    const threadId = "thr_turn_prep_unstuck";
+    const workspaceId = "ws_turn_prep_unstuck";
+    const agentId = "agent_turn_prep_unstuck";
+    await seedRegistryThread(env.REGISTRY_DB, {
+      threadId,
+      workspaceId,
+      agentId,
+      runtime: "think",
+    });
+    await seedComputeEnabledWorkspace(workspaceId);
+    await env.REGISTRY_DB.prepare("UPDATE agents SET setup_script = ? WHERE id = ?")
+      .bind("exit 7", agentId)
+      .run();
+
+    const backend = new FakeComputeBackend();
+    backend.scriptedExits.push({ match: "base64 -d | bash", exitCode: 7 });
+
+    const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
+    const turn = async () =>
+      runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
+        const agent = instance as unknown as TestableAgent;
+        await agent.__unsafe_ensureInitialized();
+        setComputeHostTestOverrides(threadId, { buildBackend: async () => backend });
+        try {
+          const before = backend.startProcessCalls.length + backend.runCommandCalls.length;
+          const session = await agent.resolveComputeServiceForTest();
+          await session!.service.ensureRuntimeReference();
+          return backend.startProcessCalls.length + backend.runCommandCalls.length - before;
+        } finally {
+          clearComputeHostTestOverrides(threadId);
+        }
+      });
+
+    const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
+    try {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        expect(await turn(), `attempt ${attempt + 1} must run`).toBeGreaterThan(0);
+      }
+      // Suspended, and the skip says so — not silence.
+      expect(await turn()).toBe(0);
+      const skips = warn.mock.calls.filter(
+        (call) => call[0] === "compute.repository_preparation_skipped",
+      );
+      expect(
+        skips,
+        `expected the skip to be logged; warns were ${JSON.stringify(
+          warn.mock.calls.map((call) => call[0]),
+        )}`,
+      ).toHaveLength(1);
+      expect((skips[0]?.[1] as { consecutiveFailures?: number })?.consecutiveFailures).toBe(3);
+
+      // The user fixes the setup script, in the SAME DO wake.
+      await env.REGISTRY_DB.prepare("UPDATE agents SET setup_script = ? WHERE id = ?")
+        .bind("echo fixed", agentId)
+        .run();
+      backend.scriptedExits.length = 0;
+      expect(await turn(), "a fixed configuration must be attempted immediately").toBeGreaterThan(
+        0,
+      );
+      // And it succeeded, so nothing new was suspended or reported incomplete.
+      expect(
+        warn.mock.calls.filter((call) => call[0] === "compute.repository_preparation_incomplete"),
+      ).toHaveLength(3);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  /**
+   * The count restarts on a CONFIGURATION change too, not only on a different
+   * failure message.
+   *
+   * Two failures under the old configuration and one under the new one are one
+   * attempt at the new one — but the failure text here is identical (`exit 7`
+   * either way), so keying the count on the failure list alone would carry the
+   * old attempts across and suspend the new configuration after a single try.
+   * Nothing would fail; the user would simply get no preparation for the rest
+   * of the wake.
+   */
+  it("restarts the failure count when the configuration changes under an identical failure", async () => {
+    const threadId = "thr_turn_prep_recount";
+    const workspaceId = "ws_turn_prep_recount";
+    const agentId = "agent_turn_prep_recount";
+    await seedRegistryThread(env.REGISTRY_DB, {
+      threadId,
+      workspaceId,
+      agentId,
+      runtime: "think",
+    });
+    await seedComputeEnabledWorkspace(workspaceId);
+    await env.REGISTRY_DB.prepare("UPDATE agents SET setup_script = ? WHERE id = ?")
+      .bind("exit 7", agentId)
+      .run();
+
+    const backend = new FakeComputeBackend();
+    backend.scriptedExits.push({ match: "base64 -d | bash", exitCode: 7 });
+
+    const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
+    const turn = async () =>
+      runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
+        const agent = instance as unknown as TestableAgent;
+        await agent.__unsafe_ensureInitialized();
+        setComputeHostTestOverrides(threadId, { buildBackend: async () => backend });
+        try {
+          const session = await agent.resolveComputeServiceForTest();
+          await session!.service.ensureRuntimeReference();
+        } finally {
+          clearComputeHostTestOverrides(threadId);
+        }
+      });
+
+    const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
+    try {
+      await turn();
+      await turn();
+      // A configuration change that does NOT change the failure text.
+      await env.REGISTRY_DB.prepare(
+        "UPDATE agents SET sandbox_network_domain_allowlist = ? WHERE id = ?",
+      )
+        .bind("github.com", agentId)
+        .run();
+      await turn();
+
+      const counts = warn.mock.calls
+        .filter((call) => call[0] === "compute.repository_preparation_incomplete")
+        .map((call) => (call[1] as { consecutiveFailures?: number })?.consecutiveFailures);
+      expect(counts).toEqual([1, 2, 1]);
+      expect(
+        warn.mock.calls.filter((call) => call[0] === "compute.repository_preparation_suspended"),
+      ).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  /**
    * The ALARM must not clone.
    *
    * Its tick reaches `exec` through the workspace-cleanliness probe, on a

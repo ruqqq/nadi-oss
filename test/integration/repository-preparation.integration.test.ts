@@ -159,6 +159,10 @@ describe("repository preparation against real D1", () => {
 
     await expect(prepareRepositories()).resolves.toEqual({
       summary: "No project repositories are configured for this thread.",
+      // A no-op run was performed for NO configuration, and says so. The
+      // caller's suspension record is stamped with this, so `null` here is the
+      // statement that there is nothing to be suspended over.
+      signature: null,
     });
     expect(service.exec).not.toHaveBeenCalled();
   });
@@ -185,6 +189,8 @@ describe("repository preparation against real D1", () => {
     await expect(prepareRepositories()).resolves.toEqual({
       summary: "No repositories are configured for this thread; the agent's setup script ran.",
       environmentSetup: { state: "ok", detail: "environment setup completed" },
+      // A real run, so a real digest of the agent's declared configuration.
+      signature: expect.stringMatching(/^[0-9a-f]{64}$/),
     });
     // base64 of "set -e\necho hello-from-setup" — the script really reached the
     // shell, rather than the call merely being counted.
@@ -218,6 +224,10 @@ describe("repository preparation against real D1", () => {
 
     await expect(prepareRepositories()).resolves.toEqual({
       summary: "No project repositories are configured for this thread.",
+      // A no-op run was performed for NO configuration, and says so. The
+      // caller's suspension record is stamped with this, so `null` here is the
+      // statement that there is nothing to be suspended over.
+      signature: null,
     });
     expect(resolveComputeService).not.toHaveBeenCalled();
   });

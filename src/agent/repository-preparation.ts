@@ -5,6 +5,8 @@ import { AgentRepository } from "../db/repositories/agents";
 import type { Env } from "../env";
 import type { ThreadComputeService } from "../compute/thread-service";
 import { sha256Hex } from "../compute/files/hash";
+import { parseDomainList } from "../compute/config";
+import { parseEnvVarsJson } from "../compute/env-vars";
 import {
   AGENT_REPOS_ROOT,
   LEGACY_WORKSPACE_ROOT,
@@ -61,6 +63,18 @@ export interface RepositoryPreparationResult {
    * was both marked prepared AND never logged.
    */
   failures?: string[];
+  /**
+   * The configuration fingerprint this run was performed FOR, or `null` when
+   * there was no configuration to prepare.
+   *
+   * REQUIRED rather than optional, and returned on every path including the
+   * no-op ones, because its only consumer is the caller's suspension record
+   * (`AgentSandbox.ensureThreadWorkspacePrepared`): a record stamped with the
+   * wrong signature — or with none — suppresses preparation for the rest of a
+   * DO wake after the user has already fixed the configuration, and nothing
+   * fails. An optional field would let a future return site omit it silently.
+   */
+  signature: string | null;
 }
 
 // The layout is constructed in ONE place; see `compute/workspace-layout.ts`.
@@ -74,56 +88,158 @@ type CommandResult = { ok: true } | { ok: false; exitCode: number | null; status
 type PathProbeResult = { kind: "exists" } | { kind: "missing" } | { kind: "error"; reason: string };
 type GitProbeResult = { kind: "git" } | { kind: "not_git" } | { kind: "error"; reason: string };
 
+/**
+ * A repository as preparation and the signature both see it.
+ *
+ * Named rather than inlined so the projection has ONE shape: a new
+ * `agent_repositories` column reaches the signature only by being added here,
+ * at the single load site below, and in the digest — never in one and not the
+ * others.
+ */
+export interface PreparationRepository {
+  name: string;
+  url: string;
+  defaultBranch: string;
+  checkoutPathName: string;
+  rootDirectory: string;
+  setupCommand: string;
+}
+
+/**
+ * THE agent configuration one preparation is performed for — every input the
+ * signature covers, read LIVE from D1 in ONE place.
+ *
+ * `envVarNames` is a `string[]`, never the map it came from, and that is the
+ * whole safeguard rather than a comment: the signature is written into a file
+ * inside a sandbox the model can read, so an env var VALUE must be structurally
+ * unable to reach it. `preparationSignature` is handed only this type, so there
+ * is no value in its scope to hash even by accident. The projection happens at
+ * the single load site below.
+ *
+ * `resourceProfile` is the agent's DECLARED profile, not the one the live box
+ * was acquired under (`EffectiveComputeConfig.resourceProfile`, which prefers
+ * the stored value while a runtime exists). The signature answers "which
+ * configuration was this prepared for", and the declared value is the one a
+ * user edits; hashing the effective one would make a profile edit invisible for
+ * exactly as long as the stale box lived.
+ */
+export interface PreparationConfig {
+  repositories: PreparationRepository[];
+  setupScript: string;
+  resourceProfile: string;
+  /** Normalized, deduped and SORTED — see {@link preparationSignature}. */
+  networkDomainAllowlist: string[];
+  /** NAMES only, sorted. Never values. */
+  envVarNames: string[];
+}
+
+/**
+ * Read the agent configuration `threadId` would be prepared for, or `null` when
+ * the thread has no agent row.
+ *
+ * ONE load site for two callers — preparation itself, and the sandbox DO's
+ * suspension check, which needs the current signature WITHOUT running a
+ * preparation. A second construction of this projection is how the two would
+ * come to disagree about what "changed".
+ */
+export async function loadPreparationConfig(
+  env: Env,
+  threadId: string,
+): Promise<PreparationConfig | null> {
+  const db = registryDb(env);
+  // LIVE, not snapshotted: a thread clones whatever its AGENT currently
+  // declares, so editing the repository list takes effect on the next
+  // preparation. The per-thread snapshot this used to read is gone — a shared
+  // box cannot honour a per-thread config version.
+  //
+  // Keyed on `agentId`, which is what `agent_repositories.agent_id` holds now.
+  // That column's values and this key moved in one commit deliberately: a lag
+  // in either direction returns zero rows, which lands in the caller's no-op
+  // branch with an EMPTY `skipped` list, so nothing is cloned and nothing
+  // anywhere says so. See the tests for both no-op branches.
+  const configId = (await new ThreadRepository(db).getById(threadId))?.agentId ?? null;
+  if (configId === null) return null;
+  const environmentRepo = new AgentRepository(db);
+  // Ordered by id — the same order the snapshot rows were built and read in.
+  const repositories = await environmentRepo.listRepositories(configId);
+  const agent = await environmentRepo.getById(configId);
+  return {
+    repositories: repositories.map((repository) => ({
+      name: repository.name,
+      url: repository.url,
+      defaultBranch: repository.defaultBranch,
+      checkoutPathName: repository.checkoutPathName,
+      rootDirectory: repository.rootDirectory,
+      setupCommand: repository.setupCommand,
+    })),
+    // The setup script is a STANDALONE machine field on the agent now (it used
+    // to be a workbench field that only ever appeared alongside repositories),
+    // so it is resolved HERE rather than only in the repository path's tail: a
+    // user who writes a setup script and adds no repositories must still get it
+    // run. Read LIVE, like the repository list.
+    setupScript: agent?.setupScript.trim() ?? "",
+    resourceProfile: agent?.resourceProfile ?? "",
+    // `parseDomainList` already trims, lowercases and drops blanks; the dedupe
+    // and the sort are added here so a reorder — or the same domain typed twice
+    // — is the SAME configuration. Two agents allowing the same hosts are one
+    // configuration, not two.
+    networkDomainAllowlist: [
+      ...new Set(parseDomainList(agent?.sandboxNetworkDomainAllowlist)),
+    ].sort(),
+    // The projection to NAMES happens HERE and only here. `parseEnvVarsJson`
+    // returns the map; nothing downstream of this line ever holds it.
+    envVarNames: Object.keys(parseEnvVarsJson(agent?.sandboxEnvVarsJson)).sort(),
+  };
+}
+
+/**
+ * The current signature for `threadId`, or `null` when there is no agent
+ * configuration to prepare. D1 reads only — no sandbox, no `exec`.
+ */
+export async function currentPreparationSignature(
+  env: Env,
+  threadId: string,
+): Promise<string | null> {
+  const config = await loadPreparationConfig(env, threadId);
+  return config === null ? null : await preparationSignature(config);
+}
+
 export function createRepositoryPreparation(input: {
   env: Env;
   threadId: string;
   resolveComputeService: () => Promise<{ service: RepositoryExecService } | null>;
 }): () => Promise<RepositoryPreparationResult> {
   return async () => {
-    const db = registryDb(input.env);
-    // LIVE, not snapshotted: a thread clones whatever its AGENT currently
-    // declares, so editing the repository list takes effect on the next
-    // preparation. The per-thread snapshot this used to read is gone — a shared
-    // box cannot honour a per-thread config version.
-    //
-    // Keyed on `agentId`, which is what `agent_repositories.agent_id` holds now.
-    // That column's values and this key moved in one commit deliberately: a lag
-    // in either direction returns zero rows, which lands in the branch below
-    // with an EMPTY `skipped` list, so nothing is cloned and nothing anywhere
-    // says so. See the tests for both no-op branches.
-    const configId = (await new ThreadRepository(db).getById(input.threadId))?.agentId ?? null;
-    if (configId === null) {
-      return { summary: "No project repositories are configured for this thread." };
+    const config = await loadPreparationConfig(input.env, input.threadId);
+    if (config === null) {
+      return {
+        summary: "No project repositories are configured for this thread.",
+        signature: null,
+      };
     }
-    const environmentRepo = new AgentRepository(db);
-    // Ordered by id — the same order the snapshot rows were built and read in.
-    const repositories = await environmentRepo.listRepositories(configId);
-    // The setup script is a STANDALONE machine field on the agent now (it used
-    // to be a workbench field that only ever appeared alongside repositories),
-    // so it is resolved HERE rather than only in the repository path's tail: a
-    // user who writes a setup script and adds no repositories must still get it
-    // run. Read LIVE, like the repository list.
-    const agent = await environmentRepo.getById(configId);
-    const setupScript = agent?.setupScript.trim() ?? "";
+    const { repositories, setupScript } = config;
     // The zero-repo early exit is KEPT for its other purpose: an agent with
     // neither repositories NOR a setup script has nothing to prepare, and must
     // not start acquiring compute just to discover that.
     if (repositories.length === 0 && setupScript === "") {
-      return { summary: "No project repositories are configured for this thread." };
+      return {
+        summary: "No project repositories are configured for this thread.",
+        signature: null,
+      };
     }
 
     const resolved = await input.resolveComputeService();
     if (!resolved) throw new Error("sandbox execution is not enabled for this thread");
 
-    const signature = await preparationSignature(repositories, setupScript);
+    const signature = await preparationSignature(config);
     const layout = preparedLayout(input.threadId, repositories);
     if (await isAlreadyPrepared(resolved.service, layout, signature)) {
-      return { summary: "Repositories were already prepared for this thread." };
+      return { summary: "Repositories were already prepared for this thread.", signature };
     }
 
     const rootPreparation = await runCommand(
       resolved.service,
-      rootPreparationCommand(input.threadId),
+      WORKSPACE_SCAFFOLDING_COMMANDS.workRoot({ threadId: input.threadId, signature }),
       undefined,
       "prepare sandbox work root",
     );
@@ -217,6 +333,7 @@ export function createRepositoryPreparation(input: {
       ...(skipped.length > 0 ? { skipped } : {}),
       ...(environmentSetup !== null ? { environmentSetup } : {}),
       ...(failures.length > 0 ? { failures } : {}),
+      signature,
     };
   };
 }
@@ -304,38 +421,41 @@ async function writePreparedSentinel(
   threadId: string,
   signature: string,
 ): Promise<void> {
-  const sentinel = path.join(threadWorkRoot(threadId), PREPARED_SENTINEL_NAME);
   await runCommand(
     service,
-    `sh -lc ${shellQuote(`printf %s ${shellQuote(signature)} > ${shellQuote(sentinel)}`)}`,
+    WORKSPACE_SCAFFOLDING_COMMANDS.sentinel({ threadId, signature }),
     undefined,
     "record thread preparation",
   );
 }
 
 /**
- * A stable fingerprint of everything preparation would act on.
+ * A stable fingerprint of the configuration preparation acts on.
  *
- * Order comes from `listRepositories` (by id), which is the order preparation
- * itself iterates, so two agents cannot collide by declaring the same set in a
- * different order — and one agent cannot appear unchanged after a reorder that
- * changes nothing. Hashed rather than stored raw so an agent with many
- * repositories cannot grow the stored value without bound.
+ * Takes {@link PreparationConfig} and nothing else. That is the safeguard on
+ * "names, never values": there is no env var map in this scope to hash by
+ * mistake, because the projection to names happened at the single load site.
+ * The digest is written into `.nadi-prepared` INSIDE the sandbox, which the
+ * model can read, so a leaked value would be a leaked secret.
+ *
+ * Repository order comes from `listRepositories` (by id), which is the order
+ * preparation itself iterates, so a reorder there is a real change. The
+ * allowlist and the env var names are SORTED at the load site instead: they are
+ * sets, and two agents allowing the same hosts in a different order are one
+ * configuration.
+ *
+ * Hashed rather than stored raw so an agent with many repositories cannot grow
+ * the file inside the box without bound.
+ *
+ * `v` is bumped whenever the shape below changes, so a sentinel written by an
+ * older deployment cannot be read as covering inputs it never hashed. Bumping
+ * it costs one idempotent re-preparation per live thread on rollout, which is
+ * the safe direction.
  */
-async function preparationSignature(
-  repositories: Array<{
-    name: string;
-    url: string;
-    defaultBranch: string;
-    checkoutPathName: string;
-    rootDirectory: string;
-    setupCommand: string;
-  }>,
-  setupScript: string,
-): Promise<string> {
+async function preparationSignature(config: PreparationConfig): Promise<string> {
   const payload = JSON.stringify({
-    v: 1,
-    repositories: repositories.map((repository) => [
+    v: 2,
+    repositories: config.repositories.map((repository) => [
       repository.name,
       repository.url,
       repository.defaultBranch,
@@ -343,7 +463,10 @@ async function preparationSignature(
       repository.rootDirectory,
       repository.setupCommand,
     ]),
-    setupScript,
+    setupScript: config.setupScript,
+    resourceProfile: config.resourceProfile,
+    networkDomainAllowlist: config.networkDomainAllowlist,
+    envVarNames: config.envVarNames,
   });
   return sha256Hex(new TextEncoder().encode(payload).buffer as ArrayBuffer);
 }
@@ -804,6 +927,60 @@ function parseGithubHttpsUrl(value: string): URL | null {
  * `assertSafeSegment`, so none can carry a metacharacter; the body uses only
  * double quotes and runs under `sh -lc '...'`.
  */
+/**
+ * Everything a preparation writes for `threadId`, and what the signature was.
+ * One shape for every entry in {@link WORKSPACE_SCAFFOLDING_COMMANDS}, so the
+ * set can be enumerated and run without knowing which one is which.
+ */
+export interface WorkspaceScaffoldingInput {
+  threadId: string;
+  signature: string;
+}
+
+/**
+ * EVERY command this system runs that creates something inside the workspace
+ * root WITHOUT a user asking — the box's own scaffolding — as one object.
+ *
+ * This is not a registry that has to be kept in step with the code; it is where
+ * the commands are DEFINED, so a new one is added here or it does not exist.
+ * That is the point. The cleanliness probe treats a box as EMPTY — i.e.
+ * DISCARDABLE — when the only non-directory entries under the root are ones it
+ * excludes by name (`PREPARED_SENTINEL_NAME`). A new scaffolding FILE that
+ * nobody told the probe about flips every box in the fleet to `NOREPO FILES`,
+ * which preserves it, and a preserved sprite bills until something deletes it.
+ * There is no auto-destroy.
+ *
+ * `workspace-cleanliness-script.test.ts` runs every value here against a real
+ * `/bin/sh` and asserts the probe still reports EMPTY afterwards, so adding a
+ * file here goes RED instead of silently preserving the fleet. When it does go
+ * red, the fix is NOT to widen the probe's exclusions by reflex: excluding more
+ * makes DISCARD more likely, and discard destroys a user's filesystem, which is
+ * the unrecoverable direction. Deciding that the new file makes a box non-empty
+ * is a legitimate answer; it just has to be a decision.
+ *
+ * `ensureWorkspaceRootOnce` is deliberately not here: it goes through
+ * `backend.createDirectory`, not a shell command, and creates DIRECTORIES only
+ * — which the probe already discounts (`! -type d`), because an empty directory
+ * holds nothing a user could lose.
+ */
+export const WORKSPACE_SCAFFOLDING_COMMANDS = {
+  /**
+   * Make the agent's clone root and this thread's working directory, and sweep
+   * any pre-P3 top-level checkout (or a pre-`/workspace` one) into the clone
+   * root. Directories only.
+   */
+  workRoot: ({ threadId }: WorkspaceScaffoldingInput): string => rootPreparationCommand(threadId),
+  /**
+   * Record that this thread is prepared for `signature`. The one scaffolding
+   * FILE — see {@link PREPARED_SENTINEL_NAME}, which the probe excludes by
+   * name.
+   */
+  sentinel: ({ threadId, signature }: WorkspaceScaffoldingInput): string => {
+    const sentinel = path.join(threadWorkRoot(threadId), PREPARED_SENTINEL_NAME);
+    return `sh -lc ${shellQuote(`printf %s ${shellQuote(signature)} > ${shellQuote(sentinel)}`)}`;
+  },
+} as const satisfies Record<string, (input: WorkspaceScaffoldingInput) => string>;
+
 function rootPreparationCommand(threadId: string): string {
   const workRoot = threadWorkRoot(threadId);
   return (

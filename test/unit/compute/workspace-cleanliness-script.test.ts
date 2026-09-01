@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -9,12 +9,14 @@ import {
 } from "../../../src/compute/workspace-cleanliness";
 import {
   AGENT_REPOS_ROOT,
+  LEGACY_WORKSPACE_ROOT,
   PREPARED_SENTINEL_NAME,
   THREAD_WORK_ROOT,
   WORKSPACE_ROOT,
   threadWorkRoot,
   threadWorktreeBranch,
 } from "../../../src/compute/workspace-layout";
+import { WORKSPACE_SCAFFOLDING_COMMANDS } from "../../../src/agent/repository-preparation";
 
 /**
  * The probe's verdict is decided in the shell, and the parser cannot see it: a
@@ -276,6 +278,96 @@ describe("PROBE_SCRIPT against real git repositories", () => {
     const result = await runProbe(root);
     expect(result.state).toBe("dirty");
     expect(result.state === "dirty" && result.repos[0]?.changes).toEqual([" M f1.txt"]);
+  });
+});
+
+/**
+ * THE EXCLUSION LIST, PINNED TO PRODUCTION.
+ *
+ * The probe calls a box EMPTY — i.e. DISCARDABLE — when every non-directory
+ * entry under the root is one it excludes by name. Today that is exactly the
+ * preparation sentinel. The guard on that used to be the hand-built fixture
+ * above: a FIXTURE, listing what somebody believed production writes. If a
+ * later change makes preparation write a second scaffolding FILE — an env
+ * stamp, a `.gitconfig`, a second marker — that fixture keeps passing while
+ * every box in the fleet starts reading `NOREPO FILES` and is PRESERVED
+ * forever. A preserved sprite bills until something deletes it; there is no
+ * auto-destroy.
+ *
+ * So this runs PRODUCTION'S OWN scaffolding commands — every value of
+ * `WORKSPACE_SCAFFOLDING_COMMANDS`, which is where those commands are DEFINED,
+ * not a list kept alongside them — through a real `/bin/sh`, and then asks the
+ * real probe. Add a scaffolding file and this goes red.
+ *
+ * When it does go red, WIDENING THE EXCLUSION LIST IS NOT THE REFLEX. Excluding
+ * more makes DISCARD more likely, and discard destroys a user's filesystem —
+ * the unrecoverable direction, unlike preservation, which merely costs money.
+ * "This new file means the box is not empty" is a legitimate answer. It just
+ * has to be a decision someone makes.
+ */
+describe("the probe's exclusion list against what production actually writes", () => {
+  const THREAD_ID = "thr_00000000-0000-4000-8000-0000000000fe";
+  const SIGNATURE = "a".repeat(64);
+
+  /**
+   * The command verbatim, with only its two absolute roots repointed at temp
+   * directories — and the substitution asserted, because `LEGACY_WORKSPACE_ROOT`
+   * is a real path on a developer's machine and an unsubstituted command would
+   * move their directories.
+   */
+  function rooted(command: string, root: string, legacy: string): string {
+    const out = command.split(LEGACY_WORKSPACE_ROOT).join(legacy).split(WORKSPACE_ROOT).join(root);
+    expect(out, `no root to repoint in: ${command}`).not.toBe(command);
+    expect(out).not.toContain(WORKSPACE_ROOT);
+    expect(out).not.toContain(LEGACY_WORKSPACE_ROOT);
+    return out;
+  }
+
+  /** Runs every scaffolding command, in order, against a fresh temp box. */
+  function scaffoldForReal(): { root: string; commands: string[] } {
+    const base = mkdtempSync(join(tmpdir(), "nadi-scaffold-"));
+    // NOT named "workspace": `rooted` asserts the substituted command no longer
+    // mentions `WORKSPACE_ROOT` anywhere, and a temp path ending in
+    // `/workspace` would satisfy that check by accident.
+    const root = join(base, "box");
+    const legacy = join(base, "legacy");
+    sh(`mkdir -p "${root}" "${legacy}"`, base);
+    const commands = Object.values(WORKSPACE_SCAFFOLDING_COMMANDS).map((build) =>
+      build({ threadId: THREAD_ID, signature: SIGNATURE }),
+    );
+    // Not vacuous: an empty registry would make every assertion below trivially
+    // true, and `Object.values` on a renamed export is exactly that.
+    expect(commands.length).toBeGreaterThan(0);
+    for (const command of commands) sh(rooted(command, root, legacy), base);
+    return { root, commands };
+  }
+
+  it("leaves the box EMPTY after every scaffolding command production runs", async () => {
+    const { root } = scaffoldForReal();
+
+    // ANTI-VACUITY: the commands really ran and really made the layout, so
+    // "EMPTY" below is a verdict about a populated box, not about a missing one.
+    expect(readdirSync(root).sort()).toEqual([
+      AGENT_REPOS_ROOT.slice(WORKSPACE_ROOT.length + 1),
+      THREAD_WORK_ROOT.slice(WORKSPACE_ROOT.length + 1),
+    ]);
+    const threadDir = join(root, threadWorkRoot(THREAD_ID).slice(WORKSPACE_ROOT.length + 1));
+    expect(readdirSync(threadDir)).toEqual([PREPARED_SENTINEL_NAME]);
+    expect(readFileSync(join(threadDir, PREPARED_SENTINEL_NAME), "utf8")).toBe(SIGNATURE);
+
+    expect(await runProbe(root)).toEqual({ state: "no_repo", hasFiles: false });
+  });
+
+  /**
+   * The other half of the pin, and the reason widening is not the reflex: the
+   * probe is NOT excluding by some broad rule that would also swallow a user's
+   * file. One extra file beside the sentinel and the verdict flips to FILES.
+   */
+  it("reports FILES the moment anything else is written beside the sentinel", async () => {
+    const { root } = scaffoldForReal();
+    const threadDir = join(root, threadWorkRoot(THREAD_ID).slice(WORKSPACE_ROOT.length + 1));
+    sh(`echo stamp > "${join(threadDir, ".nadi-env-stamp")}"`, root);
+    expect(await runProbe(root)).toEqual({ state: "no_repo", hasFiles: true });
   });
 });
 

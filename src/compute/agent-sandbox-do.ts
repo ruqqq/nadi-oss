@@ -7,6 +7,7 @@ import { createSandboxThreadHostDeps, type SandboxSweepResolution } from "./sand
 import { runSandboxComputeAlarm } from "./sandbox-alarm";
 import {
   createRepositoryPreparation,
+  currentPreparationSignature,
   type RepositoryPreparationResult,
 } from "../agent/repository-preparation";
 import { probeWorkspaceCleanliness } from "./workspace-cleanliness";
@@ -151,7 +152,27 @@ export class AgentSandbox extends DurableObject<Env> {
    * worst it can do is skip a few attempts inside one sitting and try again in
    * the next — self-healing in the safe direction, with no writes and no execs.
    */
-  private readonly preparationFailures = new Map<string, { key: string; count: number }>();
+  private readonly preparationFailures = new Map<
+    string,
+    {
+      key: string;
+      count: number;
+      /**
+       * The configuration this thread was failing to prepare, as
+       * `RepositoryPreparationResult.signature`.
+       *
+       * The suspension is a statement about a CONFIGURATION, not about a
+       * thread. Without this the cap outlived the thing it was capping: a user
+       * whose `setup_script` had a typo fixed it, and every turn for the rest
+       * of the DO's wake still skipped preparation, because the early return
+       * fires before `prepare()` and nothing else could move the counter.
+       *
+       * `null` when there was no configuration to prepare, which never reaches
+       * the cap (such a run has no failures).
+       */
+      signature: string | null;
+    }
+  >();
 
   /**
    * The capabilities that stayed on the thread DO — transcript reminders, the
@@ -263,9 +284,38 @@ export class AgentSandbox extends DurableObject<Env> {
   ): Promise<void> {
     const inFlight = this.preparationInFlight.get(threadId);
     if (inFlight) return inFlight;
-    const suspended = this.preparationFailures.get(threadId);
-    if (suspended && suspended.count >= MAX_PREPARATION_ATTEMPTS) return;
+    // The cap check lives INSIDE `run`, not between the `get` above and the
+    // `set` below, and that placement is load-bearing. It awaits a D1 read, and
+    // an await out here would put a suspension point between "is anyone
+    // preparing this" and "I am", so two `exec`s in one turn could both miss the
+    // latch and both start a preparation. Nothing between the `get` and the
+    // `set` may await. Inside `run` the read is still ahead of everything else,
+    // and concurrent callers await this same promise.
     const run = (async () => {
+      const suspended = this.preparationFailures.get(threadId);
+      if (suspended && suspended.count >= MAX_PREPARATION_ATTEMPTS) {
+        // A SUSPENSION MUST NOT OUTLIVE THE CONFIGURATION THAT CAUSED IT.
+        //
+        // The cap is here to stop a `pnpm install` that will never succeed from
+        // stalling the first tool call of every turn. It is not here to punish a
+        // user who has since fixed it — and before this check it did exactly
+        // that, because the skip fired before `prepare()`, so the failure key
+        // could not change for the rest of the wake. D1 reads only; no exec, no
+        // sandbox.
+        const signature = await currentPreparationSignature(this.env, threadId);
+        if (signature !== null && signature === suspended.signature) {
+          // Logged at the SKIP, not only once when the cap was reached. The
+          // one-shot `compute.repository_preparation_suspended` says a cap
+          // happened; without this, a turn that silently did no preparation
+          // looks identical to a turn that had nothing to prepare.
+          log.warn("compute.repository_preparation_skipped", {
+            threadId,
+            consecutiveFailures: suspended.count,
+          });
+          return;
+        }
+        this.preparationFailures.delete(threadId);
+      }
       const result = await prepare();
       // `failures`, not `skipped`. Nothing here throws — a skipped repository
       // and a setup command that exited non-zero are both ordinary return
@@ -289,8 +339,12 @@ export class AgentSandbox extends DurableObject<Env> {
         // unrelated transient ones.
         const key = result.failures.join("\u001f");
         const previous = this.preparationFailures.get(threadId);
-        const count = previous?.key === key ? previous.count + 1 : 1;
-        this.preparationFailures.set(threadId, { key, count });
+        // A DIFFERENT configuration restarts the count as surely as a different
+        // failure list does: three failures under the old setup script say
+        // nothing about the new one.
+        const count =
+          previous?.key === key && previous.signature === result.signature ? previous.count + 1 : 1;
+        this.preparationFailures.set(threadId, { key, count, signature: result.signature });
         log.warn("compute.repository_preparation_incomplete", {
           threadId,
           failures: result.failures,
