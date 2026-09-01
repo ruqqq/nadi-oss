@@ -41,6 +41,26 @@ Cloudflare's vault and bound to the Worker at deploy time.
 
 ## 2. Deploying
 
+### One-time checklist for the P3 (persistent agent sandbox) deploy
+
+- **`MAX_ACTIVE_CONTAINERS_PER_WORKSPACE` was renamed to
+  `MAX_ACTIVE_AGENT_SANDBOXES_PER_WORKSPACE`.** Both wrangler configs in this
+  repo are updated, but a value set anywhere OUTSIDE the repo — the private
+  overlay's `wrangler.prod.jsonc`, a dashboard var, a celld env file — is now
+  read by nothing. The cap silently falls back to the default of 10 and nothing
+  fails. Grep every deployment surface for the old name before shipping.
+- **Sprites created before this deploy are never reaped by the orphan
+  reconciler.** Only names carrying the `nadi-b1-` prefix are eligible, because
+  a pre-P3 sprite has no `agent_sandboxes` row and nothing will ever backfill
+  one. Legacy sprites stay reachable through their owning Durable Object and
+  are deleted by agent deletion; they otherwise bill until then.
+- **Nothing auto-destroys a sprite any more.** The daily cron's
+  `reconcileOrphanSprites` is the only collector of a strand, and it covers
+  system-managed keys only. Watch for `compute.sprite_orphan_reaped` (a steady
+  rate is a bug report about the acquire path, not housekeeping) and
+  `compute.sprite_reconcile_truncated` (the listing was incomplete, so strands
+  are being missed).
+
 Sprites needs no container image, so there is nothing here like the Docker
 build that `docs/operations/cloudflare-sandbox.md` describes — the deploy is the
 ordinary one:

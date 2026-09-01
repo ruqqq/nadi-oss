@@ -1,6 +1,11 @@
 import { env } from "cloudflare:test";
-import { beforeEach, describe, expect, it } from "vitest";
-import { ACQUIRE_GRACE_MS, reconcileOrphanSprites } from "../../src/compute/sprite-reconciler";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  ACQUIRE_GRACE_MS,
+  LIST_SPRITES_MAX_RESULTS,
+  reconcileOrphanSprites,
+} from "../../src/compute/sprite-reconciler";
+import { log } from "../../src/log";
 import { RECONCILABLE_SPRITE_PREFIX } from "../../src/compute/backends/sprites";
 import type { SpritesClient } from "../../src/compute/backends/sprites-client";
 import type { Env } from "../../src/env";
@@ -128,6 +133,51 @@ describe("reconcileOrphanSprites", () => {
     const noKey = { ...(env as unknown as Env), SPRITES_API_KEY: "  " };
     const result = await reconcileOrphanSprites(noKey, { now: () => NOW });
     expect(result.skipped).toBe("no_system_key");
+  });
+
+  // F4. The client has no cursor handling, so a short page hides strands from
+  // the ONLY thing that collects them. Truncation can only under-reap — `known`
+  // comes from D1 unpaginated, so every name we did see is still classified
+  // correctly — but a silent under-reap bills forever with no line to show it.
+  it("asks for an explicit page size and says so when the answer fills it", async () => {
+    const asked: Array<number | undefined> = [];
+    const names = Array.from(
+      { length: LIST_SPRITES_MAX_RESULTS },
+      (_, i) => `${RECONCILABLE_SPRITE_PREFIX}${i}`,
+    );
+    const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
+    const client = {
+      listSprites: async (maxResults?: number) => {
+        asked.push(maxResults);
+        return { names };
+      },
+      deleteSprite: async () => {},
+    } as unknown as SpritesClient;
+
+    try {
+      await reconcileOrphanSprites(envWithKey(), { client, now: () => NOW });
+      expect(asked).toEqual([LIST_SPRITES_MAX_RESULTS]);
+      expect(warn).toHaveBeenCalledWith("compute.sprite_reconcile_truncated", {
+        returned: LIST_SPRITES_MAX_RESULTS,
+        maxResults: LIST_SPRITES_MAX_RESULTS,
+      });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("does not cry truncation on a short page", async () => {
+    const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
+    const { client } = fakeClient([`${RECONCILABLE_SPRITE_PREFIX}one`]);
+    try {
+      await reconcileOrphanSprites(envWithKey(), { client, now: () => NOW });
+      expect(warn).not.toHaveBeenCalledWith(
+        "compute.sprite_reconcile_truncated",
+        expect.anything(),
+      );
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("a failing delete does not stop the rest of the pass", async () => {

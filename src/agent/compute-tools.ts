@@ -879,12 +879,14 @@ export function buildComputeToolDefs(
     }),
     exec_shutdown: tool({
       description:
-        "Shut down and delete this thread's code sandbox entirely, freeing its resources. Use when the sandbox is no longer needed. Idempotent — safe to call when no sandbox exists. If any process is still running, the call is refused and returns the running processes unless you pass confirm: true (running processes will be killed). After shutdown, a future exec transparently starts a fresh sandbox.",
+        "DESTRUCTIVE AND SHARED: permanently deletes this AGENT's whole machine, which every thread of the agent shares. All of it goes — this thread's working directory and every other thread's, the repository clones, and anything the setup script installed. Uncommitted work anywhere in the agent is unrecoverable. It is not a way to tidy up or free resources; the machine is kept on purpose and hibernates for free when idle. Use it only to reset a machine that is genuinely broken, and only when the user asked for that. Always refused unless you pass confirm: true; the refusal lists any processes it would kill (an empty list does NOT mean there is nothing to lose). Idempotent when no machine exists. A later exec starts a fresh, empty one.",
       inputSchema: z.object({
         confirm: z
           .boolean()
           .optional()
-          .describe("Set true to proceed when processes are still running (they will be killed)."),
+          .describe(
+            "REQUIRED to proceed. Set true only after confirming with the user that the agent's entire filesystem, shared by all of its threads, should be destroyed.",
+          ),
       }),
       execute: async (input) => {
         try {

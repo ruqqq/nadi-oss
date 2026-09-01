@@ -165,7 +165,12 @@ describe("AgentSandboxLedger (real D1)", () => {
       now: NOW,
       limit: 1,
     });
-    await ledger().recordSprite({ agentId: "ag_a", externalId: "nadi-b1-a", now: NOW });
+    await ledger().recordSprite({
+      agentId: "ag_a",
+      provider: "mock",
+      externalId: "nadi-b1-a",
+      now: NOW,
+    });
     expect(await ledger().countActive("ws1")).toBe(1);
 
     await ledger().markIdle({ agentId: "ag_a", now: NOW + 1 });
@@ -191,7 +196,12 @@ describe("AgentSandboxLedger (real D1)", () => {
       now: NOW,
       limit: 1,
     });
-    await ledger().recordSprite({ agentId: "ag_a", externalId: "nadi-b1-a", now: NOW });
+    await ledger().recordSprite({
+      agentId: "ag_a",
+      provider: "mock",
+      externalId: "nadi-b1-a",
+      now: NOW,
+    });
     await ledger().markIdle({ agentId: "ag_a", now: NOW });
     expect(
       await ledger().tryAdmit({
@@ -225,7 +235,7 @@ describe("AgentSandboxLedger (real D1)", () => {
       now: NOW,
       limit: 2,
     });
-    await ledger().recordSprite({ agentId: "ag_a", externalId: "s", now: NOW });
+    await ledger().recordSprite({ agentId: "ag_a", provider: "mock", externalId: "s", now: NOW });
     await ledger().markIdle({ agentId: "ag_a", now: NOW });
     await ledger().touch({ agentId: "ag_a", now: NOW + 100 });
     expect(await ledger().countActive("ws1")).toBe(0);
@@ -238,7 +248,7 @@ describe("AgentSandboxLedger (real D1)", () => {
       ["ag_c", 20],
     ] as const) {
       await ledger().tryAdmit({ agentId, workspaceId: "ws1", provider: "mock", now: at, limit: 9 });
-      await ledger().recordSprite({ agentId, externalId: agentId, now: at });
+      await ledger().recordSprite({ agentId, provider: "mock", externalId: agentId, now: at });
     }
     const candidates = await ledger().listReclaimCandidates({
       workspaceId: "ws1",
@@ -265,6 +275,97 @@ describe("AgentSandboxLedger (real D1)", () => {
     });
     expect(await ledger().clearStaleAcquiring(500)).toBe(1);
     expect(await ledger().countAcquiringSince(500)).toBe(1);
+  });
+
+  /**
+   * THE WORST BUG IN THE PHASE, and it lived inside guard 3's own cure.
+   *
+   * `tryAdmit`'s `ON CONFLICT DO UPDATE` moves an existing row to `acquiring`
+   * on every wake and PRESERVES `sprite_name` — so a hibernated box being
+   * restored sits in `acquiring` while still naming a live machine holding the
+   * agent's whole disk. The rollback that would put it back runs in the Worker,
+   * so a Worker or DO death mid-restore skips it. `clearStaleAcquiring` then
+   * DELETED that row, and the next reconciler pass saw a `nadi-b1-*` sprite
+   * with no row and deleted a live agent's filesystem.
+   */
+  it("REGRESSION: a stale acquire that NAMES a machine is demoted to idle, never deleted", async () => {
+    // The exact shape a crashed wake leaves: an idle box, re-admitted (which is
+    // what a restore does), then abandoned before the rollback could run.
+    await ledger().tryAdmit({
+      agentId: "ag_a",
+      workspaceId: "ws1",
+      provider: "mock",
+      now: 10,
+      limit: 9,
+    });
+    await ledger().recordSprite({
+      agentId: "ag_a",
+      provider: "mock",
+      externalId: "nadi-b1-live",
+      now: 10,
+    });
+    await ledger().markIdle({ agentId: "ag_a", now: 20 });
+    await ledger().tryAdmit({
+      agentId: "ag_a",
+      workspaceId: "ws1",
+      provider: "mock",
+      now: 100,
+      limit: 9,
+    });
+
+    const row = await env.REGISTRY_DB.prepare(
+      "SELECT status, sprite_name FROM agent_sandboxes WHERE agent_id = 'ag_a'",
+    ).first<{ status: string; sprite_name: string | null }>();
+    // ANTI-VACUITY: the wake really did leave a NAMED row sitting in `acquiring`.
+    expect(row).toEqual({ status: "acquiring", sprite_name: "nadi-b1-live" });
+
+    expect(await ledger().clearStaleAcquiring(500)).toBe(1);
+
+    // The machine is still accounted for, so the reconciler will not touch it.
+    expect(await ledger().listKnownSpriteNames()).toEqual(new Set(["nadi-b1-live"]));
+    const after = await env.REGISTRY_DB.prepare(
+      "SELECT status FROM agent_sandboxes WHERE agent_id = 'ag_a'",
+    ).first<{ status: string }>();
+    expect(after?.status).toBe("idle");
+    // And it no longer blocks the reap pass, nor holds a concurrency slot.
+    expect(await ledger().countAcquiringSince(0)).toBe(0);
+    expect(await ledger().countActive("ws1")).toBe(0);
+  });
+
+  it("a stale acquire with NO machine name is deleted — the only case with evidence", async () => {
+    await ledger().tryAdmit({
+      agentId: "ag_b",
+      workspaceId: "ws1",
+      provider: "mock",
+      now: 100,
+      limit: 9,
+    });
+    expect(await ledger().clearStaleAcquiring(500)).toBe(1);
+    const after = await env.REGISTRY_DB.prepare(
+      "SELECT agent_id FROM agent_sandboxes WHERE agent_id = 'ag_b'",
+    ).first();
+    expect(after).toBeNull();
+  });
+
+  // F2. A bare `UPDATE` matches zero rows and says nothing, leaving a live
+  // sprite with no row for the reaper to spare.
+  it("recordSprite re-creates a row that was cleared under it", async () => {
+    await ledger().tryAdmit({
+      agentId: "ag_c",
+      workspaceId: "ws1",
+      provider: "mock",
+      now: 10,
+      limit: 9,
+    });
+    await ledger().remove("ag_c");
+    await ledger().recordSprite({
+      agentId: "ag_c",
+      provider: "mock",
+      externalId: "nadi-b1-rescued",
+      now: 20,
+    });
+    expect(await ledger().listKnownSpriteNames()).toEqual(new Set(["nadi-b1-rescued"]));
+    expect(await ledger().countActive("ws1")).toBe(1);
   });
 });
 

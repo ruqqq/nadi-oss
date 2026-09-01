@@ -257,9 +257,6 @@ export class SandboxSession extends RpcTarget {
   isComputeLiveOrAcquiring(): Call<"isComputeLiveOrAcquiring"> {
     return guard(() => this.service.isComputeLiveOrAcquiring());
   }
-  destroyRecoverableComputeIfPresent(): Call<"destroyRecoverableComputeIfPresent"> {
-    return guard(() => this.service.destroyRecoverableComputeIfPresent());
-  }
 
   // --- debug ---
   debugInspectPath(path: Arg<"debugInspectPath", 0>): Call<"debugInspectPath"> {

@@ -156,6 +156,7 @@ export function createAgentSandboxGate(input: {
       }
       await input.ledger.recordSprite({
         agentId: input.agentId,
+        provider: input.provider,
         externalId,
         now: input.now(),
       });

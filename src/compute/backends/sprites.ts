@@ -214,10 +214,10 @@ function holdIdFor(processId: string): string {
  * the session's argv, only its foreground. Nor can anything kill it by hand: the
  * session leaves `listSessions` the moment its foreground exits (observed at
  * +11s), so no session id exists to target. And the service never intervenes,
- * because `nativeIdleSuspend` makes `resolveIdleDisposition` return
- * "recoverable" and `release(recoverable)` makes no provider call — the only
- * thing that ends it is TTL eviction calling `destroy()` at `recoveryTtlMs`,
- * i.e. ~24 HOURS of fully awake CPU and RAM.
+ * because `release` always takes the recoverable disposition and that makes no
+ * provider call. Since P3 there is no TTL eviction either — NOTHING ends it —
+ * so an unreaped hold is fully awake CPU and RAM until the agent is deleted,
+ * not the ~24 HOURS this used to say.
  *
  * Hence two more stop conditions, both self-terminating because nothing else
  * can:
@@ -242,9 +242,10 @@ function holdIdFor(processId: string): string {
  *     trade that keeps the bound finite.
  *
  * Worst case after either fires: up to 60s to notice, then `HOLD_EXPIRY` lapses
- * on its own, so ~6 minutes of awake billing instead of 24 hours. The sprite is
- * NOT destroyed — with no hold it hibernates, disk intact, exactly as it does
- * between turns, and the normal 24h recovery TTL still governs deletion.
+ * on its own, so ~6 minutes of awake billing instead of an unbounded stretch of
+ * it. The sprite is NOT destroyed — with no hold it hibernates, disk intact,
+ * exactly as it does between turns, and it stays that way until the agent is
+ * deleted.
  *
  * The rc write itself is a write-then-RENAME, not a plain redirect: `> rc`
  * creates the file before `printf` fills it, so a status poll landing in that
@@ -482,9 +483,11 @@ export class SpritesComputeBackend implements ComputeBackend {
       return null;
     }
     // Recoverable: NO provider call. Hibernation is automatic after ~30s idle,
-    // and there is no archive to take. The service layer's TTL eviction later
-    // calls `destroy()` on this reference, and that DELETE is the only thing
-    // that ever stops storage billing.
+    // and there is no archive to take. NOTHING EXPIRES THIS REFERENCE — the
+    // service layer's TTL eviction was deleted in P3, because it was also the
+    // only thing that ever destroyed the agent's persistent filesystem. The
+    // sprite (and its storage bill) now lasts until agent deletion,
+    // `exec_shutdown`, or the orphan reconciler.
     return this.recoveryReference(spriteName);
   }
 

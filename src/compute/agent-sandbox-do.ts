@@ -445,11 +445,10 @@ export class AgentSandbox extends DurableObject<Env> {
    * IT IS DELIBERATELY NOT ON THE ALARM, and this is the one place the plan and
    * the code differ. The plan's other trigger was "the alarm, if the box is
    * already awake" — but nothing here can ask whether a sprite is awake without
-   * `exec`ing, which IS the wake. Worse, the alarm's only existing `exec` is the
-   * cleanliness probe, and `resolveIdleDisposition` short-circuits before it on
-   * every provider with `nativeIdleSuspend` (sprites, the provider this phase is
-   * for), so on exactly the deployment that matters an alarm-side reclaim could
-   * only ever be the thing that woke a hibernated box to delete a directory.
+   * `exec`ing, which IS the wake. Since P3 the alarm's tick has NO `exec` of its
+   * own at all (the cleanliness probe went with the discard inference), so an
+   * alarm-side reclaim could only ever be the thing that woke a hibernated box
+   * to delete a directory — the argument is stronger now, not weaker.
    * The residual is bounded and cheap: an agent that is never used again keeps
    * some directories until its box is released, which happens anyway.
    *

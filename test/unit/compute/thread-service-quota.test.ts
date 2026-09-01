@@ -138,16 +138,40 @@ describe("ThreadComputeService wired to an AgentSandboxGate", () => {
     expect(calls).toEqual(["admit"]);
   });
 
-  it("forgets the row on a normal exec_shutdown — the machine is destroyed", async () => {
+  it("forgets the row on a confirmed exec_shutdown — the machine is destroyed", async () => {
     const { gate } = makeQuotaSpy();
     const { service } = makeService(gate);
 
     await service.exec({ command: "echo hi" });
     expect(gate.forget).not.toHaveBeenCalled();
 
-    await service.execShutdown({});
+    await service.execShutdown({ confirm: true });
 
     expect(gate.forget).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * REGRESSION: the confirmation gate used to fire only when processes were
+   * RUNNING, which made the quiet box — the one with an accumulated
+   * filesystem and nothing in flight — the case that got destroyed with no
+   * prompt at all. Running processes are the recoverable loss; the agent's
+   * disk, shared by every one of its threads, is not.
+   */
+  it("REGRESSION: an unconfirmed exec_shutdown on a QUIET box destroys nothing", async () => {
+    const { gate } = makeQuotaSpy();
+    const { service, backend, store } = makeService(gate);
+
+    await service.exec({ command: "echo hi" });
+    // Anti-vacuity: there is a live machine to lose, and nothing running.
+    expect(store.getComputeState()?.status).toBe("active");
+    expect(store.listProcesses(10).filter((p) => p.status === "running")).toHaveLength(0);
+
+    const result = await service.execShutdown({});
+
+    expect(result).toMatchObject({ terminated: false, needsConfirmation: true });
+    expect(backend.destroyCalls).toHaveLength(0);
+    expect(gate.forget).not.toHaveBeenCalled();
+    expect(store.getComputeState()?.status).toBe("active");
   });
 
   // THE TASK-5 INVARIANT. An idle release is a hibernation, not a destruction:

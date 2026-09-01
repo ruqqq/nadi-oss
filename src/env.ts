@@ -254,9 +254,15 @@ export interface Env extends Cloudflare.Env {
   DEBUG_WORKSPACE_ID?: string;
 
   /**
-   * Max concurrently-live Cloudflare containers per workspace. Optional:
-   * invalid, absent, or non-positive values fall back to
-   * DEFAULT_MAX_ACTIVE_CONTAINERS (10).
+   * Max concurrently-live AGENT sandboxes per workspace, for the providers
+   * whose capacity comes out of the operator's budget. Only `acquiring` and
+   * `active` rows count; a hibernated (`idle`) box holds no slot.
+   *
+   * Optional: invalid, absent, or non-positive values fall back to
+   * DEFAULT_MAX_ACTIVE_AGENT_SANDBOXES (10). RENAMED in P3 from
+   * `MAX_ACTIVE_CONTAINERS_PER_WORKSPACE` — a value still set under the old
+   * name anywhere outside this repo is silently ignored and the default
+   * applies, with nothing failing.
    */
   MAX_ACTIVE_AGENT_SANDBOXES_PER_WORKSPACE?: string;
 

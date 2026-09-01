@@ -20,6 +20,22 @@ import { log } from "../log";
  */
 export const ACQUIRE_GRACE_MS = 30 * 60 * 1000;
 
+/**
+ * Explicit page size for the provider listing, because the DEFAULT is unknown.
+ *
+ * `listSprites()` with no `max_results` leaves the page size to the provider,
+ * and the client has no cursor handling at all — so a default smaller than the
+ * account's sprite count silently hides strands from the only thing that
+ * collects them, and the WARN line that would report them never appears. An
+ * explicit bound at least makes truncation DETECTABLE (a full page is
+ * suspicious), which is what {@link reconcileOrphanSprites} logs on.
+ *
+ * NOT a cursor implementation. Adding one means knowing the real response's
+ * pagination shape, which this environment cannot observe — see the live-smoke
+ * list. Raise it, or paginate properly, once the API's behaviour is known.
+ */
+export const LIST_SPRITES_MAX_RESULTS = 1000;
+
 export interface SpriteReconcileResult {
   scanned: number;
   orphans: number;
@@ -82,7 +98,20 @@ export async function reconcileOrphanSprites(
   }
 
   const known = await ledger.listKnownSpriteNames();
-  const { names } = await client.listSprites();
+  const { names } = await client.listSprites(LIST_SPRITES_MAX_RESULTS);
+  // A TRUNCATED LISTING UNDER-REAPS; IT CANNOT OVER-REAP. `known` comes from
+  // D1 unpaginated, so every name we DID see is still classified correctly —
+  // the guards do not weaken. What a short page costs is strands we never look
+  // at, and since this is now the only collector those bill forever with
+  // nothing to show for it. So reap what we saw, and say plainly that the
+  // answer was incomplete rather than reporting a clean pass.
+  const truncated = names.length >= LIST_SPRITES_MAX_RESULTS;
+  if (truncated) {
+    log.warn("compute.sprite_reconcile_truncated", {
+      returned: names.length,
+      maxResults: LIST_SPRITES_MAX_RESULTS,
+    });
+  }
   const orphans = names.filter(
     (name) => name.startsWith(RECONCILABLE_SPRITE_PREFIX) && !known.has(name),
   );

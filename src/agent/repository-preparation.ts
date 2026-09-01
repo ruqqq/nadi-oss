@@ -1088,25 +1088,24 @@ export type ReclaimOutcome =
  * than failing on it, so the cost of keeping one is a ref per archived thread
  * in the clone.
  *
- * WHAT KEEPING IT DOES *NOT* BUY, because a comment that over-claims here is
- * worse than none: the branch is not preserved forever, and this reclaim
- * SHORTENS the window it survives. `PROBE_SCRIPT` measures each repo's own
- * `HEAD` against its own upstream and nothing else, so commits sitting on a
- * kept, not-checked-out `nadi/thread-<id>` ref are INVISIBLE to it. Remove the
- * dirty worktree that was the box's only evidence of work and the agent's clone
- * probes `clean`, so on any provider WITHOUT `nativeIdleSuspend` the next idle
- * wake DISCARDS the box — clone, branch and commits together. The honest claim
- * is therefore: keeping the branch is strictly better than deleting it (which
- * loses the commits now, on every provider), and it buys a recovery window
- * bounded by the box's idle timeout, not an indefinite one.
+ * WHAT KEEPING IT BUYS, RESTATED FOR P3. This paragraph used to say the window
+ * was bounded by the box's idle timeout: removing the dirty worktree let the
+ * agent's clone probe `clean`, and the next idle wake DISCARDED the whole box —
+ * clone, branch and commits together — on any provider without native idle
+ * suspend. That discard is gone. Nothing infers a destroy from a probe any
+ * more, and the box persists until the agent is deleted, so a kept
+ * `nadi/thread-<id>` ref now survives for as long as the agent does. The
+ * cleanliness probe still cannot SEE those commits (`PROBE_SCRIPT` measures
+ * each repo's own `HEAD` against its own upstream), but nothing acts on that
+ * blindness any longer.
  *
  * The probe is deliberately NOT widened to count refs unmerged into any remote.
- * It would be the safe DIRECTION (more preserve, less discard), but a thread
+ * It would be the safe DIRECTION, but a thread
  * that commits without pushing is the normal shape of a coding turn, so after
- * the first such thread every agent's box would probe dirty forever and be
- * preserved forever — and a preserved sprite bills until something deletes it,
- * with no auto-destroy. The bounded fix is retiring branches whose commits a
- * remote already has, which needs its own task and its own ruling.
+ * the first such thread every agent's box would probe dirty forever. Since P3
+ * that costs nothing — every box is preserved regardless — which is exactly why
+ * widening the probe buys nothing either. The verdict no longer decides
+ * retention at all; it only tells `confirm_work_saved` whether to refuse.
  *
  * The repo root is swept by GLOB rather than from the agent's configured
  * repository list, and that is load-bearing twice over: a DELETED thread has no

@@ -1,3 +1,4 @@
+import { log } from "../log";
 import type { AgentSandboxLedgerRow, AgentSandboxStatus } from "./types";
 
 export type { AgentSandboxLedgerRow, AgentSandboxStatus };
@@ -104,19 +105,32 @@ export class AgentSandboxLedger {
    * bills. It is written on the acquire path immediately after the provider
    * returns, and `externalId` is `null` only for a provider that has no
    * enumerable machine name (see `ComputeBackend.externalRuntimeId`).
+   *
+   * AN UPSERT, NOT A BARE `UPDATE`. A bare update matches zero rows whenever
+   * the row is not where the caller assumed — cleared by the stale-acquire
+   * settle, or by a concurrent agent delete — and says nothing, leaving a LIVE
+   * sprite with no row at all for the reaper to spare. That is the defect class
+   * this phase keeps hitting: a write whose failure changes behaviour and fails
+   * nothing. The insert arm re-creates the row rather than losing the machine;
+   * `created_at` falls back to `now` because the original is unrecoverable and
+   * nothing reads it for correctness.
    */
   async recordSprite(input: {
     agentId: string;
+    provider: string;
     externalId: string | null;
     now: number;
   }): Promise<void> {
     await this.db
       .prepare(
-        `UPDATE agent_sandboxes
-            SET status = 'active', sprite_name = ?2, last_used_at = ?3
-          WHERE agent_id = ?1`,
+        `INSERT INTO agent_sandboxes (agent_id, provider, sprite_name, status, created_at, last_used_at)
+         VALUES (?1, ?4, ?2, 'active', ?3, ?3)
+         ON CONFLICT(agent_id) DO UPDATE SET
+           status       = 'active',
+           sprite_name  = excluded.sprite_name,
+           last_used_at = excluded.last_used_at`,
       )
-      .bind(input.agentId, input.externalId, input.now)
+      .bind(input.agentId, input.externalId, input.now, input.provider)
       .run();
   }
 
@@ -136,12 +150,24 @@ export class AgentSandboxLedger {
    * Deleting the row here is the mistake this method exists to prevent — the
    * sprite is still there, hibernated with the user's filesystem on it, and a
    * row-less sprite is precisely what the orphan reconciler deletes.
+   *
+   * A bare `UPDATE` that matches nothing is NOT benign here, and it must not
+   * pass in silence: it means a live sprite already has no row, so the reaper
+   * will delete it. It is deliberately not made an upsert — `markIdle` can be
+   * reached moments after a legitimate agent-delete dropped the row, and
+   * re-creating it there would resurrect a lease for a machine that is being
+   * destroyed on purpose, and pin the FK to an archived agent. Log instead, and
+   * let the reconciler be the collector. `changes` is `undefined` on runtimes
+   * that do not report it; only a hard zero is evidence.
    */
   async markIdle(input: { agentId: string; now: number }): Promise<void> {
-    await this.db
+    const result = await this.db
       .prepare("UPDATE agent_sandboxes SET status = 'idle', last_used_at = ?2 WHERE agent_id = ?1")
       .bind(input.agentId, input.now)
       .run();
+    if (result.meta?.changes === 0) {
+      log.warn("compute.sandbox_idle_no_row", { agentId: input.agentId });
+    }
   }
 
   /** The box is GONE (destroyed, or never created). Only ever called after a destroy. */
@@ -233,16 +259,44 @@ export class AgentSandboxLedger {
   }
 
   /**
-   * Drop `acquiring` rows that have not moved since `before`. Returns how many went.
+   * Settle `acquiring` rows that have not moved since `before`, so one wedged
+   * acquire cannot block reconciliation for good and strand every sprite after
+   * it. Returns how many rows were touched.
    *
-   * Without this one wedged acquire would block reconciliation for good, and
-   * every sprite stranded after it would bill forever.
+   * TWO OUTCOMES, AND CONFLATING THEM DESTROYS A FILESYSTEM. This used to
+   * DELETE every stale `acquiring` row, which was the worst defect in the
+   * phase:
+   *
+   * `tryAdmit`'s `ON CONFLICT DO UPDATE` moves an EXISTING row to `acquiring`
+   * on every wake and deliberately preserves `sprite_name` — so a hibernated
+   * box being restored sits in `acquiring` while still naming a live machine
+   * holding the agent's entire disk. The rollback that would put it back
+   * (`readOrAcquireRuntime`'s `idle()` branch) runs in the Worker, so a Worker
+   * or DO death mid-restore skips it. Thirty minutes later the row was deleted;
+   * the next pass saw a `nadi-b1-*` sprite with no row and deleted a live
+   * agent's filesystem. Guard 3's cure was worse than the disease.
+   *
+   * So: a NAMED row is DEMOTED to `idle` — it names a machine that exists, and
+   * `idle` is the truth about it, with the slot freed either way. Only an
+   * UNNAMED row is DELETED, and that is the only case this pass has evidence
+   * about: no name means no machine anything here can account for, and whatever
+   * was stranded is collected by the sprite sweep, never by the row.
    */
   async clearStaleAcquiring(before: number): Promise<number> {
-    const result = await this.db
-      .prepare("DELETE FROM agent_sandboxes WHERE status = 'acquiring' AND last_used_at <= ?1")
+    const demoted = await this.db
+      .prepare(
+        `UPDATE agent_sandboxes SET status = 'idle'
+          WHERE status = 'acquiring' AND last_used_at <= ?1 AND sprite_name IS NOT NULL`,
+      )
       .bind(before)
       .run();
-    return result.meta?.changes ?? 0;
+    const deleted = await this.db
+      .prepare(
+        `DELETE FROM agent_sandboxes
+          WHERE status = 'acquiring' AND last_used_at <= ?1 AND sprite_name IS NULL`,
+      )
+      .bind(before)
+      .run();
+    return (demoted.meta?.changes ?? 0) + (deleted.meta?.changes ?? 0);
   }
 }

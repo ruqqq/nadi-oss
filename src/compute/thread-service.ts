@@ -2063,9 +2063,9 @@ export class ThreadComputeService {
 
   /**
    * Best-effort hold release. Not optional hygiene on sprites: a held sprite
-   * bills CPU and RAM, and `nativeIdleSuspend = true` makes
-   * `resolveIdleDisposition` skip the inferred discards that would otherwise
-   * reclaim it — so a wedged process with no release stays awake and billing.
+   * bills CPU and RAM, and since P3 NOTHING reclaims it — the TTL destroy and
+   * the inferred discards are both gone, so a wedged process with no release
+   * stays awake and billing until the agent is deleted.
    * Swallows everything: the terminal is the caller's obligation, not this.
    *
    * Looks up the row's OWN `backendProcessRef` — never a locally-derived id —
@@ -2447,6 +2447,26 @@ export class ThreadComputeService {
     }
   }
 
+  /**
+   * DESTROY the agent's machine, on explicit request. One of only two paths
+   * that may (the other is agent deletion).
+   *
+   * THE BLAST RADIUS CHANGED AND THE GATE DID NOT. This was written when the
+   * box was per-thread, so "shut down this thread's sandbox" destroyed exactly
+   * what the caller owned, and the confirmation existed to protect RUNNING
+   * PROCESSES — it was never a data-loss gate, because there was no sibling
+   * data to lose. Since P3 the box is the AGENT's: this deletes every sibling
+   * thread's worktree, the agent's canonical clones and everything its setup
+   * script installed.
+   *
+   * So `confirm` is now REQUIRED UNCONDITIONALLY, not only when processes are
+   * running. A quiet box is the DANGEROUS case, not the safe one — running
+   * processes are the recoverable loss and an accumulated filesystem is not —
+   * and it was precisely the case that destroyed it with no prompt at all.
+   * `runningProcesses` stays in the unconfirmed answer so the caller still sees
+   * what else it would kill; an empty list now means "nothing running", not
+   * "nothing to lose".
+   */
   async execShutdown(input: { confirm?: boolean | undefined } = {}): Promise<
     | { ok: true; terminated: false; alreadyGone: true }
     | {
@@ -2465,7 +2485,7 @@ export class ThreadComputeService {
     const running = this.deps.store
       .listProcesses(1_000)
       .filter((process) => process.status === "running");
-    if (running.length > 0 && input.confirm !== true) {
+    if (input.confirm !== true) {
       return {
         ok: true,
         terminated: false,
@@ -2492,7 +2512,7 @@ export class ThreadComputeService {
     await this.deps.clearAlarm?.(this.deps.now());
     await this.deps.deliverSystemReminder?.({
       threadId: this.deps.threadId,
-      body: "The thread compute environment was shut down on request. Files and running processes are gone; previous command output remains available.",
+      body: "The agent's compute environment was shut down on request. Its whole filesystem is gone — every thread of this agent loses its working directory, the repository clones, and anything the setup script installed. Running processes are gone; previous command output remains available. The next command starts a fresh, empty machine.",
       mode: "deferred",
     });
     return { ok: true, terminated: true, stoppedProcesses: running.length };
@@ -2633,25 +2653,6 @@ export class ThreadComputeService {
     return (
       (await this.isComputeLive()) || this.deps.store.getComputeState()?.status === "acquiring"
     );
-  }
-
-  async destroyRecoverableComputeIfPresent(): Promise<void> {
-    if (this.deps.attachedRuntime) return;
-    const state = this.deps.store.getComputeState();
-    if (state?.status !== "recoverable" || !state.recoveryRef) return;
-    try {
-      await this.deps.backend.destroy(state.recoveryRef);
-    } catch (error) {
-      if (!this.isRuntimeMissing(error)) throw error;
-    }
-    this.deps.store.markAbsent(this.deps.now());
-    await this.stopRunningProcesses(this.deps.now(), {
-      deliver: true,
-      detail: "process stopped (recoverable environment destroyed)",
-    });
-    this.clearWatchers();
-    await this.clearLifecycleState();
-    await this.deps.clearAlarm?.(this.deps.now());
   }
 
   /** DEBUG: provider-neutral raw backend status for a process (diagnose exit detection). */

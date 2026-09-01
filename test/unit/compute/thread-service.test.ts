@@ -174,12 +174,14 @@ describe("ThreadComputeService lifecycle", () => {
     expect(backend.releaseCalls).toMatchObject([
       { options: { disposition: "recoverable", recoveryTtlMs: 5_000 } },
     ]);
-    // `recoveryExpiresAt` is NULL, always. A stored expiry is the only thing a
-    // reader could turn back into a timed destroy.
-    expect(store.getComputeState()).toMatchObject({
-      status: "recoverable",
-      recoveryExpiresAt: null,
-    });
+    // NO `recoveryExpiresAt` ASSERTION HERE, deliberately. `store` is
+    // `createMemoryComputeStore`, a hand-written fake, so an assertion on a
+    // field the fake hardcodes proves nothing about production — a mutation
+    // that restored the real expiry write left this whole file green. The
+    // "no expiry is stored" invariant is pinned in
+    // `compute-thread-store.integration.test.ts`, against real DO SQLite.
+    // What this suite proves honestly is which backend/quota calls were made.
+    expect(store.getComputeState()).toMatchObject({ status: "recoverable" });
     expect(store.getProcess(started.processId)).toMatchObject({ status: "stopped" });
   });
 

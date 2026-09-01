@@ -249,8 +249,10 @@ export class SubAgent extends ThinkThreadAgent {
    * implementation would only clear this facet's own storage, which nothing
    * ever reads (`releaseIfIdle` no-ops in attached mode). Left un-overridden,
    * a parent that called `confirm_work_saved` before spawning keeps a bit that
-   * is now a lie, and `resolveIdleDisposition` short-circuits on it and
-   * DESTROYS the subagent's uncommitted work.
+   * is now a lie. Since P3 that lie no longer DESTROYS the subagent's work —
+   * the bit does not decide retention, because nothing does — but it still
+   * misreports the workspace to the next caller of `confirm_work_saved`, so
+   * the override stays.
    *
    * Invalidating at the WRITE rather than when the run closes is the point: a
    * run can be closed by the reaper (silence, deadline) or by a crashed facet,
