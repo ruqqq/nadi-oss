@@ -1,14 +1,25 @@
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, isNull } from "drizzle-orm";
 import type { Env } from "../env";
 import type { ValidatedSession } from "../auth/session";
 import { registryDb } from "../db/client";
 import { agents, workspaceMembers } from "../db/schema";
 
 /**
- * Resolve the caller's workspace + configured agent. Nadi is single-workspace,
- * single-agent per user today, so we take the earliest membership joined to the
- * earliest agent — the same selection `selectThreadTarget` uses in thread-routes.
- * Revisit when multi-agent/multi-workspace lands (callers will then specify a target).
+ * Resolve the caller's workspace + an agent to scope an un-targeted request to.
+ *
+ * Multi-agent HAS landed: a workspace really does hold several agents now, and
+ * the surfaces that address ONE of them take an explicit id (see
+ * {@link resolveAgentScopeById}). This is the fallback for the requests that
+ * name none — `/api/memories` with no `agentId`, `/api/skills`, the workspace
+ * lookups — so it takes the earliest membership joined to the earliest agent
+ * that is USABLE, exactly as `selectThreadTarget` does in thread-routes.
+ *
+ * Archived and disabled agents are excluded HERE, at the data source: without
+ * it, deleting an agent would leave `/api/memories` resolving onto the deleted
+ * agent's memories, and a stale id would keep being handed out after the row
+ * stopped being available for work. The last-agent guard on archive and disable
+ * (`AgentRepository.countUsableExcluding`) is what guarantees a row still
+ * matches. Multi-WORKSPACE has not landed; that part still takes the earliest.
  */
 export async function resolveAgentScope(
   env: Env,
@@ -18,8 +29,16 @@ export async function resolveAgentScope(
     .select({ workspaceId: workspaceMembers.workspaceId, agentId: agents.id })
     .from(workspaceMembers)
     .innerJoin(agents, eq(agents.workspaceId, workspaceMembers.workspaceId))
-    .where(eq(workspaceMembers.userId, session.user.id))
-    .orderBy(asc(workspaceMembers.createdAt), asc(agents.createdAt))
+    .where(
+      and(
+        eq(workspaceMembers.userId, session.user.id),
+        isNull(agents.archivedAt),
+        eq(agents.enabled, true),
+      ),
+    )
+    // The id tie-break matches `selectThreadTarget`: without it two agents
+    // created in the same millisecond make "the workspace's agent" a coin flip.
+    .orderBy(asc(workspaceMembers.createdAt), asc(agents.createdAt), asc(agents.id))
     .get();
   return row ?? null;
 }

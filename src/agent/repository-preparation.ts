@@ -62,11 +62,17 @@ export function createRepositoryPreparation(input: {
     const environmentRepo = new AgentRepository(db);
     // Ordered by id — the same order the snapshot rows were built and read in.
     const repositories = await environmentRepo.listRepositories(configId);
-    // Preserved exactly: with no repositories configured this returns BEFORE
-    // resolving compute and before the environment setup script. An environment
-    // whose only content is a setup script never ran it, and this task is not
-    // the place to change that.
-    if (repositories.length === 0) {
+    // The setup script is a STANDALONE machine field on the agent now (it used
+    // to be a workbench field that only ever appeared alongside repositories),
+    // so it is resolved HERE rather than only in the repository path's tail: a
+    // user who writes a setup script and adds no repositories must still get it
+    // run. Read LIVE, like the repository list.
+    const agent = await environmentRepo.getById(configId);
+    const setupScript = agent?.setupScript.trim() ?? "";
+    // The zero-repo early exit is KEPT for its other purpose: an agent with
+    // neither repositories NOR a setup script has nothing to prepare, and must
+    // not start acquiring compute just to discover that.
+    if (repositories.length === 0 && setupScript === "") {
       return { summary: "No project repositories are configured for this thread." };
     }
 
@@ -177,10 +183,13 @@ export function createRepositoryPreparation(input: {
       );
     }
 
-    const environmentSetup = await runEnvironmentSetup(environmentRepo, configId, resolved.service);
+    const environmentSetup = await runEnvironmentSetup(setupScript, resolved.service);
 
     return {
-      summary: "Repositories are ready for coding work.",
+      summary:
+        repositories.length === 0
+          ? "No repositories are configured for this thread; the agent's setup script ran."
+          : "Repositories are ready for coding work.",
       ...(prepared.length > 0 ? { prepared } : {}),
       ...(skipped.length > 0 ? { skipped } : {}),
       ...(environmentSetup !== null ? { environmentSetup } : {}),
@@ -188,19 +197,16 @@ export function createRepositoryPreparation(input: {
   };
 }
 
-// Runs the environment bundle's setup script exactly once, after every repo has
-// been cloned and had its own per-repo setup run — so environment-level setup
-// (e.g. cross-repo tooling) can assume all checkouts already exist. Returns
-// `null` (skipped silently) when the thread has no environment bundle or the
-// bundle has no setup script configured. Read LIVE, like the repository list.
+// Runs the agent's setup script exactly once, after every repo has been cloned
+// and had its own per-repo setup run — so agent-level setup (e.g. cross-repo
+// tooling) can assume all checkouts already exist. Returns `null` (skipped
+// silently) when the agent has no setup script configured. The script itself is
+// resolved by the CALLER, which needs it before it can decide whether acquiring
+// compute is worth it at all.
 async function runEnvironmentSetup(
-  environmentRepo: AgentRepository,
-  configId: string,
+  script: string,
   service: RepositoryExecService,
 ): Promise<string | null> {
-  const environment = await environmentRepo.getById(configId);
-  if (!environment) return null;
-  const script = environment.setupScript.trim();
   if (script === "") return null;
 
   const result = await runCommand(

@@ -200,9 +200,11 @@ export const workspaceSandboxSettings = sqliteTable("workspace_sandbox_settings"
   enabled: integer("enabled", { mode: "boolean" }).notNull().default(false),
   provider: text("provider").notNull().default("daytona"),
   providerConfigJson: text("provider_config_json"),
-  // DEAD: superseded by workbenches.resourceProfile. No reader or writer
-  // remains. Kept so drizzle stays in sync with the deployed DB; dropped in
-  // the follow-up cleanup ticket alongside the legacy snapshot columns.
+  // DEAD: superseded by `agents.resource_profile` (the `workbenches` table it
+  // originally deferred to was dropped when the workbench merged into the
+  // agent). No reader or writer remains. Kept so drizzle stays in sync with the
+  // deployed DB; dropped in the follow-up cleanup ticket alongside the legacy
+  // snapshot columns.
   defaultResourceProfile: text("default_resource_profile").notNull().default("small"),
   image: text("image").notNull().default(""),
   snapshot: text("snapshot"),

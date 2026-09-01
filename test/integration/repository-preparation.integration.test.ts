@@ -110,4 +110,61 @@ describe("repository preparation against real D1", () => {
     });
     expect(service.exec).not.toHaveBeenCalled();
   });
+
+  it("runs the setup script of an agent that declares NO repositories", async () => {
+    const threadId = "thr_prep_live_script_only";
+    const { agentId } = await seedRegistryThread(env.REGISTRY_DB, {
+      threadId,
+      workspaceId: "workspace-prep-live-script-only",
+      runtime: "think",
+    });
+    await env.REGISTRY_DB.prepare("UPDATE agents SET setup_script = ? WHERE id = ?")
+      .bind("echo hello-from-setup", agentId)
+      .run();
+
+    const service = missingCheckoutService();
+    const prepareRepositories = createRepositoryPreparation({
+      env: env as never,
+      threadId,
+      resolveComputeService: async () => ({ service: service as never }),
+    });
+
+    await expect(prepareRepositories()).resolves.toEqual({
+      summary: "No repositories are configured for this thread; the agent's setup script ran.",
+      environmentSetup: "environment setup completed",
+    });
+    // base64 of "set -e\necho hello-from-setup" — the script really reached the
+    // shell, rather than the call merely being counted.
+    const encoded = Buffer.from("set -e\necho hello-from-setup", "utf8").toString("base64");
+    expect(service.exec).toHaveBeenCalledWith(
+      expect.objectContaining({
+        command: expect.stringContaining(encoded),
+        cwd: "/workspace",
+        label: "environment setup",
+      }),
+    );
+  });
+
+  it("acquires NO compute for an agent with neither repositories nor a setup script", async () => {
+    const threadId = "thr_prep_live_nothing";
+    await seedRegistryThread(env.REGISTRY_DB, {
+      threadId,
+      workspaceId: "workspace-prep-live-nothing",
+      runtime: "think",
+    });
+
+    const resolveComputeService = vi.fn(async () => ({
+      service: missingCheckoutService() as never,
+    }));
+    const prepareRepositories = createRepositoryPreparation({
+      env: env as never,
+      threadId,
+      resolveComputeService,
+    });
+
+    await expect(prepareRepositories()).resolves.toEqual({
+      summary: "No project repositories are configured for this thread.",
+    });
+    expect(resolveComputeService).not.toHaveBeenCalled();
+  });
 });
