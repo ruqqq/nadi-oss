@@ -1713,7 +1713,9 @@ describe("ThinkThreadAgent spike", () => {
     // exercises the back-call from an alarm rather than from a turn.
     const threadId = "think-exec-background";
     const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
-    const sandboxStub = env.AGENT_SANDBOX.get(env.AGENT_SANDBOX.idFromName(threadId));
+    const sandboxStub = env.AGENT_SANDBOX.get(
+      env.AGENT_SANDBOX.idFromName("agent-think-exec-background"),
+    );
     const provider = new FakeComputeBackend();
     // A REALISTIC epoch, not 1000. The sandbox arms its idle/watcher alarm off
     // this clock, so an epoch near zero arms an alarm in 1970 — it fires

@@ -120,6 +120,17 @@ export function createSandboxThreadHostDeps(
   ) => Promise<void>;
   workLedger: WorkLedgerSink;
   getWorkHorizon: (now?: number) => Promise<number | null>;
+  /**
+   * {@link getWorkHorizon} with the "the thread DO answered" fact KEPT, instead
+   * of collapsed into the unreachable fallback.
+   *
+   * The alarm's sweep roster needs that distinction and `getWorkHorizon` cannot
+   * carry it: an unreachable thread and a thread with nothing owed both answer
+   * `null`, and pruning the roster on the first would silently drop the sweep of
+   * a thread that still has open work. `reachable: false` means "no answer" —
+   * never "nothing to do".
+   */
+  probeWorkHorizon: (now?: number) => Promise<{ reachable: boolean; horizon: number | null }>;
   hasBlockingWork: () => Promise<boolean>;
   markSandboxDirty: () => Promise<void>;
   setSandboxDeclaredClean: (clean: boolean) => Promise<void>;
@@ -169,6 +180,18 @@ export function createSandboxThreadHostDeps(
   ): Promise<T> {
     const result = await attempt(op, run);
     return result ? result.value : onUnreachable;
+  }
+
+  /** See the return type above: the reachability fact, kept rather than collapsed. */
+  async function probeWorkHorizon(
+    now?: number,
+  ): Promise<{ reachable: boolean; horizon: number | null }> {
+    const result = await attempt("probeWorkHorizon", (host) =>
+      host.getSandboxWorkHorizon(now === undefined ? {} : { now }),
+    );
+    return result
+      ? { reachable: true, horizon: result.value }
+      : { reachable: false, horizon: null };
   }
 
   return {
@@ -226,12 +249,8 @@ export function createSandboxThreadHostDeps(
     // `null` = "no ledger wake to fold in". The alarm's other components
     // (watcher polls, the release time) still arm, and the alarm callback's own
     // fallback arm covers a fold that never ran.
-    getWorkHorizon: (now) =>
-      read(
-        "getWorkHorizon",
-        (host) => host.getSandboxWorkHorizon(now === undefined ? {} : { now }),
-        null,
-      ),
+    getWorkHorizon: async (now) => (await probeWorkHorizon(now)).horizon,
+    probeWorkHorizon,
     // `true` = "assume a child subagent holds this machine". The consequence of
     // a wrong `false` is deleting a shared container out from under a live
     // child; the consequence of a wrong `true` is a sandbox that stays up until

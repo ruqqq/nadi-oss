@@ -53,9 +53,9 @@ function storageOf(instance: { ctx: { storage: DurableObjectStorage } }): Durabl
   return instance.ctx.storage;
 }
 
-async function readComputeStatus(threadId: string): Promise<string | null> {
-  // `idFromName` for AGENT_SANDBOX — a plain DO with no onStart to bypass.
-  const stub = env.AGENT_SANDBOX.get(env.AGENT_SANDBOX.idFromName(threadId));
+async function readComputeStatus(agentId: string): Promise<string | null> {
+  // `idFromName(agentId)` — the box is keyed by AGENT since P3, not by thread.
+  const stub = env.AGENT_SANDBOX.get(env.AGENT_SANDBOX.idFromName(agentId));
   return runInDurableObject(stub, (instance: AgentSandbox) =>
     computeStatus(storageOf(instance as unknown as { ctx: { storage: DurableObjectStorage } })),
   );
@@ -177,7 +177,7 @@ describe("deleting an agent destroys its machine", () => {
   it("even when the user turned the agent OFF before deleting it", async () => {
     const seeded = await seedWorkspaceWithLiveThread("disable-then-delete");
     await acquireMachine(seeded.threadId);
-    expect(await readComputeStatus(seeded.threadId)).toBe("active");
+    expect(await readComputeStatus(seeded.doomedAgentId)).toBe("active");
 
     // Step one of the ordinary flow: stop it. Through the real route, so the
     // column that is written is the one the compute path reads.
@@ -189,7 +189,7 @@ describe("deleting an agent destroys its machine", () => {
     expect(disable.status).toBe(200);
     // The machine is still there — "Its machine and files are kept" is what
     // disable promises, and it is what makes the next step matter.
-    expect(await readComputeStatus(seeded.threadId)).toBe("active");
+    expect(await readComputeStatus(seeded.doomedAgentId)).toBe("active");
 
     // Step two: remove it.
     const del = await SELF.fetch(`https://nadi.test/api/agents/${seeded.doomedAgentId}/archive`, {
@@ -199,7 +199,7 @@ describe("deleting an agent destroys its machine", () => {
     expect(del.status).toBe(200);
 
     expect(
-      await readComputeStatus(seeded.threadId),
+      await readComputeStatus(seeded.doomedAgentId),
       "the machine of a DISABLED agent must still be destroyed when the agent is deleted — " +
         "a sprite nothing deletes bills until its idle TTL, while the dialog says its files are destroyed",
     ).toBe("absent");
@@ -215,7 +215,7 @@ describe("deleting an agent destroys its machine", () => {
   it("and when the agent was never disabled", async () => {
     const seeded = await seedWorkspaceWithLiveThread("delete-while-enabled");
     await acquireMachine(seeded.threadId);
-    expect(await readComputeStatus(seeded.threadId)).toBe("active");
+    expect(await readComputeStatus(seeded.doomedAgentId)).toBe("active");
 
     const del = await SELF.fetch(`https://nadi.test/api/agents/${seeded.doomedAgentId}/archive`, {
       method: "POST",
@@ -223,6 +223,6 @@ describe("deleting an agent destroys its machine", () => {
     });
     expect(del.status).toBe(200);
 
-    expect(await readComputeStatus(seeded.threadId)).toBe("absent");
+    expect(await readComputeStatus(seeded.doomedAgentId)).toBe("absent");
   });
 });

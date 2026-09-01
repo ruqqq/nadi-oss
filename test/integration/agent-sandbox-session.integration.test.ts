@@ -29,9 +29,15 @@ void _assertFilesFitsTheToolTarget;
 const now = 1_800_000_000_000;
 
 const WORKSPACE_ID = "ws_sbx_session";
-const AGENT_ID = "agent_sbx_session";
+/**
+ * The DO is keyed by AGENT now, so the agent id is what decides which storage
+ * snapshot a test gets. A single shared agent id would put every `it()` in this
+ * file into ONE sandbox DO — and a DO addressed by `idFromName` is not proven to
+ * get a fresh snapshot per test — so the per-test thread id derives a per-test
+ * AGENT id, and the isolation the old per-thread keying gave for free is kept.
+ */
+const agentIdFor = (threadId: string) => `agent_${threadId}`;
 const DISABLED_WORKSPACE_ID = "ws_sbx_session_off";
-const DISABLED_AGENT_ID = "agent_sbx_session_off";
 
 /**
  * See the fixture note in `agent-sandbox-do.integration.test.ts`: seeded from
@@ -45,7 +51,7 @@ async function seedComputeEnabledThread(threadId: string) {
     .insert(schema.workspaces)
     .values({ id: WORKSPACE_ID, name: "Sandbox WS", flagsJson: "{}", createdAt: now });
   await db.insert(schema.agents).values({
-    id: AGENT_ID,
+    id: agentIdFor(threadId),
     workspaceId: WORKSPACE_ID,
     name: "Nadi",
     systemPrompt: "",
@@ -67,7 +73,7 @@ async function seedComputeEnabledThread(threadId: string) {
   await db.insert(schema.threadIndex).values({
     id: threadId,
     workspaceId: WORKSPACE_ID,
-    agentId: AGENT_ID,
+    agentId: agentIdFor(threadId),
     kind: "regular",
     title: "T",
     source: "manual",
@@ -83,7 +89,7 @@ async function seedComputeDisabledThread(threadId: string) {
     .insert(schema.workspaces)
     .values({ id: DISABLED_WORKSPACE_ID, name: "Off WS", flagsJson: "{}", createdAt: now });
   await db.insert(schema.agents).values({
-    id: DISABLED_AGENT_ID,
+    id: agentIdFor(threadId),
     workspaceId: DISABLED_WORKSPACE_ID,
     name: "Nadi",
     systemPrompt: "",
@@ -105,7 +111,7 @@ async function seedComputeDisabledThread(threadId: string) {
   await db.insert(schema.threadIndex).values({
     id: threadId,
     workspaceId: DISABLED_WORKSPACE_ID,
-    agentId: DISABLED_AGENT_ID,
+    agentId: agentIdFor(threadId),
     kind: "regular",
     title: "T",
     source: "manual",
@@ -114,8 +120,9 @@ async function seedComputeDisabledThread(threadId: string) {
   });
 }
 
+/** The AGENT's box — `idFromName(agentId)`, which is what P3 re-keyed. */
 function stub(threadId: string) {
-  return env.AGENT_SANDBOX.get(env.AGENT_SANDBOX.idFromName(threadId));
+  return env.AGENT_SANDBOX.get(env.AGENT_SANDBOX.idFromName(agentIdFor(threadId)));
 }
 
 /**
@@ -123,13 +130,16 @@ function stub(threadId: string) {
  * `threadId`: a `SubAgent` runs under a run id with no `thread_index` row and
  * borrows its parent's workspace/agent.
  */
-const RUNTIME_CONFIG = { workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+const runtimeConfigFor = (threadId: string) => ({
+  workspaceId: WORKSPACE_ID,
+  agentId: agentIdFor(threadId),
+});
 
 async function openSession(threadId: string, supportsProcessMonitor = true) {
   const opened = await stub(threadId).session({
     threadId,
     supportsProcessMonitor,
-    runtimeConfig: RUNTIME_CONFIG,
+    runtimeConfig: runtimeConfigFor(threadId),
   });
   if (!opened.ok) throw new Error(`session failed: ${opened.error.code}`);
   if (!opened.value) throw new Error("expected compute to be enabled");
@@ -166,7 +176,7 @@ describe("AgentSandbox.session", () => {
     const opened = await stub(threadId).session({
       threadId,
       supportsProcessMonitor: true,
-      runtimeConfig: { workspaceId: DISABLED_WORKSPACE_ID, agentId: DISABLED_AGENT_ID },
+      runtimeConfig: { workspaceId: DISABLED_WORKSPACE_ID, agentId: agentIdFor(threadId) },
     });
     // `null` is the signal callers must keep treating as "hide every compute
     // tool". Collapsing it into `ok: false` would make a disabled workspace
@@ -190,7 +200,7 @@ describe("AgentSandbox.session", () => {
       const opened = await stub(threadId).session({
         threadId,
         supportsProcessMonitor: true,
-        runtimeConfig: RUNTIME_CONFIG,
+        runtimeConfig: runtimeConfigFor(threadId),
       });
       expect(opened.ok).toBe(false);
       if (opened.ok) return;
@@ -218,7 +228,7 @@ describe("AgentSandbox.session", () => {
       await seedComputeEnabledThread(threadId);
       const resolved = await openSandboxSession(env, threadId, {
         supportsProcessMonitor: true,
-        runtimeConfig: RUNTIME_CONFIG,
+        runtimeConfig: runtimeConfigFor(threadId),
       });
       expect(resolved).not.toBeNull();
       await expect(
@@ -234,7 +244,7 @@ describe("AgentSandbox.session", () => {
       await seedComputeEnabledThread(threadId);
       const resolved = await openSandboxSession(env, threadId, {
         supportsProcessMonitor: true,
-        runtimeConfig: RUNTIME_CONFIG,
+        runtimeConfig: runtimeConfigFor(threadId),
       });
       const written = await resolved!.service.files.writeFile({
         path: "note.txt",
@@ -279,7 +289,7 @@ describe("AgentSandbox.session", () => {
 
     const resolved = await openSandboxSession(env, threadId, {
       supportsProcessMonitor: true,
-      runtimeConfig: RUNTIME_CONFIG,
+      runtimeConfig: runtimeConfigFor(threadId),
     });
     const read = await resolved!.service.files.readFile({ path: "a/b.txt" });
     // `readFile` returns line-numbered content, so match on the line body.
@@ -384,10 +394,12 @@ describe("AgentSandbox.session", () => {
 
       const db = drizzle(env.REGISTRY_DB, { schema });
       await db.select().from(schema.threadIndex).all();
-      await stub("thr_sess_lifetime_other").session({
+      // A second SESSION on the same box (agent-keyed since P3), which is
+      // still a separate RPC invocation — the property this test needs.
+      await stub(threadId).session({
         threadId: "thr_sess_lifetime_other",
         supportsProcessMonitor: true,
-        runtimeConfig: RUNTIME_CONFIG,
+        runtimeConfig: runtimeConfigFor(threadId),
       });
 
       expect((await session.execRun({ command: "echo after" })).ok).toBe(true);
@@ -445,7 +457,7 @@ describe("AgentSandbox.session", () => {
         (instance as unknown as { __pending?: unknown }).__pending = stub(threadId).session({
           threadId,
           supportsProcessMonitor: true,
-          runtimeConfig: RUNTIME_CONFIG,
+          runtimeConfig: runtimeConfigFor(threadId),
         });
       });
 

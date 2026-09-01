@@ -9,6 +9,7 @@ import { createRepositoryPreparation } from "../agent/repository-preparation";
 import { probeWorkspaceCleanliness } from "./workspace-cleanliness";
 import type { ThreadComputeService } from "./thread-service";
 import type { BackendReference } from "./backend";
+import type { WorkRow } from "../agent/work-ledger";
 import {
   SandboxSession,
   encodeSandboxError,
@@ -42,14 +43,31 @@ export type { SandboxCallResult, SandboxCallError } from "./agent-sandbox-sessio
 const ALARM_PARAMS_KEY = "sandbox:alarm-params";
 
 /**
- * The session inputs the alarm replays. Written on every `session()` open, so
- * they track the owning agent's current answers rather than the first ones.
+ * Prefix for the SWEEP ROSTER: one tiny row per thread this box has served,
+ * whose value is a monotonic stamp (see {@link AgentSandbox.touchSweepRoster}).
+ *
+ * A prefix `list`, not one map under a single key, because a map is capped at
+ * the 128KB per-value limit — an agent with a few hundred threads would start
+ * throwing inside `session()` and take every turn down with it.
+ *
+ * Kept SHORT on purpose. celld compiles a prefix scan into a SQL LIKE pattern
+ * with a 49-byte budget; six bytes leaves the whole budget for the thread id.
+ */
+const SWEEP_ROSTER_PREFIX = "sb:sw:";
+
+/**
+ * The session inputs the alarm replays for its TICK. Written on every
+ * `session()` open, so they track the owning agent's current answers rather
+ * than the first ones.
  */
 interface SandboxAlarmParams {
   /**
-   * Recorded rather than read off `ctx.id.name`, which is populated for an
-   * `idFromName` id but is not something this class should depend on for a
-   * value it already has in hand.
+   * The thread the tick's compute service binds its back-calls to — the LAST
+   * thread to open a session, since the machine is one and the tick is one.
+   *
+   * NEVER derived from `ctx.id.name`: since P3 that name is the AGENT id, and
+   * an agent id used as a thread id addresses a thread DO that does not exist.
+   * The alarm has no fallback for a missing record; it simply does not tick.
    */
   threadId: string;
   supportsProcessMonitor: boolean;
@@ -62,8 +80,14 @@ interface SandboxAlarmParams {
  * output chunks and watchers that used to live in each thread's own Durable
  * Object. The thread DO keeps the conversation; this owns the machine.
  *
- * Keyed by `threadId`, so behaviour matches the thread-local path it replaces.
- * P3 re-keys it to `agentId`.
+ * Keyed by `agentId` (P3): ONE box per agent, shared by every thread of it and
+ * by its subagent runs. `ctx.id.name` is therefore an AGENT id — it is not a
+ * thread id and must never be used as one.
+ *
+ * The SESSION is still per-thread: `session({ threadId })` names which
+ * conversation the compute service's back-calls (system reminders, the work
+ * ledger) belong to. The store underneath is per-BOX and so is the alarm, which
+ * is why the alarm fans its sweep out over {@link SWEEP_ROSTER_PREFIX}.
  */
 export class AgentSandbox extends DurableObject<Env> {
   /**
@@ -76,6 +100,21 @@ export class AgentSandbox extends DurableObject<Env> {
   private lastAlarmParams: string | undefined;
 
   /**
+   * Thread ids whose sweep-roster row THIS instance has already written — the
+   * same write-elision trick, for the same ~25-opens-per-turn reason.
+   *
+   * Invalidated when the alarm PRUNES a row (see {@link forgetSweepThread}).
+   * Without that, a hot instance would elide the re-write and the thread would
+   * be silently missing from every later sweep: the exact defect class this
+   * project keeps hitting — a stale cached value that changes behaviour and
+   * fails nothing.
+   */
+  private readonly rosterWritten = new Set<string>();
+
+  /** Last stamp this instance wrote — see {@link touchSweepRoster}. */
+  private lastRosterStamp = 0;
+
+  /**
    * The capabilities that stayed on the thread DO — transcript reminders, the
    * work ledger and its sweep, the child-subagent lease and the "workspace
    * verified clean" bit — reached by RPC. Best-effort by
@@ -83,7 +122,67 @@ export class AgentSandbox extends DurableObject<Env> {
    * see `createSandboxThreadHostDeps`.
    */
   private threadHostDeps(threadId: string) {
-    return createSandboxThreadHostDeps(this.env, threadId);
+    const deps = createSandboxThreadHostDeps(this.env, threadId);
+    return {
+      ...deps,
+      workLedger: {
+        ...deps.workLedger,
+        // The roster's invariant, enforced at the only place that can create
+        // the obligation: a thread with a ledger row ALWAYS has a roster row.
+        //
+        // `session()` writes one too, but that write is elided per instance and
+        // can have been pruned since. Re-asserting here — BEFORE the row is
+        // registered, and with a fresh stamp — is also what closes the prune
+        // race: the alarm deletes a roster row only if its stamp is unchanged
+        // since the pass began, so a register that lands mid-pass keeps it.
+        register: async (row: WorkRow) => {
+          await this.touchSweepRoster(threadId, { force: true });
+          await deps.workLedger.register(row);
+        },
+      },
+    };
+  }
+
+  /**
+   * Record that `threadId` has a work ledger this box's alarm must sweep.
+   *
+   * The stamp is the value, not just presence: {@link forgetSweepThread} deletes
+   * only on an unchanged stamp, so any concurrent touch cancels a prune that was
+   * decided against older evidence.
+   */
+  private async touchSweepRoster(threadId: string, options?: { force?: boolean }): Promise<void> {
+    if (!options?.force && this.rosterWritten.has(threadId)) return;
+    // Strictly increasing within an instance, so two touches in the same
+    // millisecond still produce different stamps and the compare-and-delete
+    // below cannot mistake the second for the first.
+    this.lastRosterStamp = Math.max(Date.now(), this.lastRosterStamp + 1);
+    await this.ctx.storage.put<number>(SWEEP_ROSTER_PREFIX + threadId, this.lastRosterStamp);
+    this.rosterWritten.add(threadId);
+  }
+
+  /** Every thread this box must sweep, with the stamp the prune compares against. */
+  private async readSweepRoster(): Promise<{ threadId: string; stamp: number }[]> {
+    const rows = await this.ctx.storage.list<number>({ prefix: SWEEP_ROSTER_PREFIX });
+    return [...rows].map(([key, stamp]) => ({
+      threadId: key.slice(SWEEP_ROSTER_PREFIX.length),
+      stamp,
+    }));
+  }
+
+  /**
+   * Drop a swept-clean thread from the roster — compare-and-delete on `stamp`.
+   *
+   * Pruning is not an optimization: without it the alarm would keep waking (and
+   * on the archive path, RESURRECTING) the DO of every thread the agent has ever
+   * had, forever. It is safe only because it is evidence-based — the caller has
+   * a REACHABLE "nothing open, nothing owed" answer — and because any newer
+   * touch changes the stamp and vetoes the delete.
+   */
+  private async forgetSweepThread(threadId: string, stamp: number): Promise<void> {
+    const current = await this.ctx.storage.get<number>(SWEEP_ROSTER_PREFIX + threadId);
+    if (current !== stamp) return;
+    await this.ctx.storage.delete(SWEEP_ROSTER_PREFIX + threadId);
+    this.rosterWritten.delete(threadId);
   }
 
   /**
@@ -322,6 +421,12 @@ export class AgentSandbox extends DurableObject<Env> {
         await this.ctx.storage.put<SandboxAlarmParams>(ALARM_PARAMS_KEY, params);
         this.lastAlarmParams = encoded;
       }
+      // The sweep roster. Written on EVERY thread's open, not just the last
+      // one's: the record above is a single slot the next thread overwrites,
+      // and the alarm that replaced the per-thread alarms must still sweep
+      // every thread this box serves. `workLedger.register` re-asserts it —
+      // see {@link threadHostDeps}.
+      await this.touchSweepRoster(input.threadId);
       const resolved = await this.resolveService(input.threadId, {
         supportsProcessMonitor: input.supportsProcessMonitor,
         runtimeConfig: input.runtimeConfig,
@@ -361,52 +466,103 @@ export class AgentSandbox extends DurableObject<Env> {
    * The session is opened HERE, inside this invocation, and nothing is reused
    * from an earlier one: an alarm is a new invocation, and whether an RPC stub
    * survives one is unproven.
+   *
+   * ONE TICK, MANY SWEEPS. The machine is agent-scoped, so the tick is: it polls
+   * one store's watchers and one environment's idle disposition, and running it
+   * per thread would poll each watcher N times. The LEDGER is per thread and
+   * lives on each thread's own DO, and this alarm is the only wake it has left
+   * (P1 moved the compute alarm off the thread DO; `runSandboxComputeAlarm`
+   * explains why a second alarm cannot be added back). So the sweep fans out
+   * over {@link SWEEP_ROSTER_PREFIX} — every thread this box has served — and
+   * `workHorizon` min-folds their horizons. A sweep driven off the tick's single
+   * `params.threadId` would strand every other thread's open rows forever, which
+   * is the exact bug this project exists to kill.
    */
   async alarm(): Promise<void> {
     const params = (await this.ctx.storage.get<SandboxAlarmParams>(ALARM_PARAMS_KEY)) ?? null;
-    // `ctx.id.name` is populated for the `idFromName` id every caller uses, and
-    // is the only identity an alarm that predates the first recorded session
-    // has. Without either there is no thread to sweep for and nothing to tick.
-    const threadId = params?.threadId ?? this.ctx.id.name;
-    if (!threadId) {
-      log.warn("agent_sandbox.alarm_without_thread_id", {});
+    // THE TRAP, and it is gone. This used to fall back to `this.ctx.id.name`
+    // when no session had been recorded. That name is now the AGENT id, so the
+    // fallback would have swept — and delivered reminders into — a thread DO
+    // named after an agent, silently and forever. There is no identity to
+    // recover here: an alarm with neither a recorded tick nor a roster entry has
+    // nothing to do, and says so.
+    const roster = await this.readSweepRoster();
+    // Log scope only, and `?? unknown` is deliberate: `ctx.id.name` is
+    // `string | undefined` (an `idFromString` id carries no name), and coercing
+    // it into an identity is precisely the mistake above.
+    const agentId = this.ctx.id.name ?? params?.runtimeConfig.agentId ?? "unknown";
+    if (!params && roster.length === 0) {
+      log.warn("agent_sandbox.alarm_without_recorded_session", { agentId });
       return;
     }
-    const host = this.threadHostDeps(threadId);
+    // Mutated by the sweep: a thread pruned there must not then contribute a
+    // horizon that re-arms this box on its behalf.
+    let live = roster;
     await runSandboxComputeAlarm({
-      threadId,
+      // Log scope only. Never a sweep target — see the field's own doc.
+      agentId,
       openSession: async () => {
         // No recorded session inputs means no tick: `supportsProcessMonitor`
         // and `runtimeConfig` are required precisely so nothing acquires them
         // by omission, and an alarm is not exempt. The sweep below still runs —
         // that is the half that must keep happening when compute is gone.
         if (!params) return null;
-        return this.resolveService(threadId, {
+        return this.resolveService(params.threadId, {
           supportsProcessMonitor: params.supportsProcessMonitor,
           runtimeConfig: params.runtimeConfig,
           ...(params.attachedRuntime ? { attachedRuntime: params.attachedRuntime } : {}),
         });
       },
       sweepWorkLedger: async (resolved) => {
-        const resolution: SandboxSweepResolution =
-          resolved === undefined
-            ? { kind: "unresolved" }
-            : resolved === null
-              ? { kind: "disabled" }
-              : {
-                  kind: "session",
-                  // A FRESH target over the tick's already-resolved service, not
-                  // a stashed one: it lives exactly as long as this alarm
-                  // invocation, which is the span the sweep runs in.
-                  session: new SandboxSession(resolved.service),
-                  workspaceId: resolved.workspaceId,
-                  config: resolved.config,
-                };
-        await host.sweepWorkLedger(resolution);
+        const remaining: typeof live = [];
+        for (const entry of live) {
+          const host = this.threadHostDeps(entry.threadId);
+          const resolution: SandboxSweepResolution =
+            resolved === undefined
+              ? { kind: "unresolved" }
+              : resolved === null
+                ? { kind: "disabled" }
+                : {
+                    // A FRESH target per thread over the tick's already-resolved
+                    // service, not a stashed or reused one: an `RpcTarget` is not
+                    // proven to survive being sent twice, and each lives exactly
+                    // as long as this alarm invocation.
+                    kind: "session",
+                    session: new SandboxSession(resolved.service),
+                    workspaceId: resolved.workspaceId,
+                    config: resolved.config,
+                  };
+          await host.sweepWorkLedger(resolution);
+          // Prune on EVIDENCE, never on silence: `reachable` is the whole point
+          // of `probeWorkHorizon`. An unreachable thread and a swept-clean one
+          // both answer `horizon: null`, and dropping the first would lose the
+          // sweep of a thread that still has open work.
+          const probe = await host.probeWorkHorizon();
+          if (probe.reachable && probe.horizon === null) {
+            await this.forgetSweepThread(entry.threadId, entry.stamp);
+            continue;
+          }
+          remaining.push(entry);
+        }
+        live = remaining;
       },
-      workHorizon: (now) => host.getWorkHorizon(now),
+      // Min-fold across every thread still on the roster. One thread's horizon
+      // would arm this box for that thread and strand the rest.
+      workHorizon: async (now) => {
+        let min: number | null = null;
+        for (const entry of live) {
+          const horizon = await this.threadHostDeps(entry.threadId).getWorkHorizon(now);
+          if (horizon !== null && (min === null || horizon < min)) min = horizon;
+        }
+        return min;
+      },
       setAlarm: (timestampMs) => this.ctx.storage.setAlarm(timestampMs),
-      setSandboxDeclaredClean: (clean) => host.setSandboxDeclaredClean(clean),
+      // The tick's own thread — this is the machine's "clean" bit, written by
+      // the thread whose session the tick replayed, exactly as before.
+      setSandboxDeclaredClean: async (clean) => {
+        if (!params) return;
+        await this.threadHostDeps(params.threadId).setSandboxDeclaredClean(clean);
+      },
     });
   }
 }

@@ -70,8 +70,16 @@ describe("compute state lives in AgentSandbox, and only there", () => {
 
   it("a tool's command writes compute state to the sandbox DO and none to the thread DO", async () => {
     const threadId = "thr_split_brain";
+    // Its OWN workspace and agent, not the helper's shared defaults. The
+    // sandbox DO is keyed by AGENT since P3 and `integration-fast` runs
+    // `isolate: false`, so every suite that took `agent-workspace-test` would
+    // otherwise share ONE box — and its leftover `compute_state` row, from a
+    // provider this test never configured.
+    const agentId = "agent_split_brain";
     const { workspaceId } = await seedRegistryThread(env.REGISTRY_DB, {
       threadId,
+      workspaceId: "ws_split_brain",
+      agentId,
       runtime: "think",
     });
     // The `mock` provider is a real, deployment-selectable backend, so nothing
@@ -88,9 +96,9 @@ describe("compute state lives in AgentSandbox, and only there", () => {
       await tools.exec!.execute!({ command: "echo split-brain" }, {} as never);
     });
 
-    // `idFromName` for AGENT_SANDBOX (a plain DurableObject with no onStart) —
-    // deliberately NOT getAgentByName, which is right only for the thread DO.
-    const sandboxStub = env.AGENT_SANDBOX.get(env.AGENT_SANDBOX.idFromName(threadId));
+    // `idFromName(agentId)` — the box is the AGENT's since P3. Deliberately NOT
+    // getAgentByName, which is right only for the thread DO.
+    const sandboxStub = env.AGENT_SANDBOX.get(env.AGENT_SANDBOX.idFromName(agentId));
     const sandboxRows = await runInDurableObject(sandboxStub, (instance: AgentSandbox) =>
       computeStateRowCount(
         storageOf(instance as unknown as { ctx: { storage: DurableObjectStorage } }),

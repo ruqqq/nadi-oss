@@ -227,7 +227,9 @@ function stubFor(threadId: string) {
  * plain DurableObject with no `onStart` to bypass, unlike the thread agent.
  */
 function sandboxStubFor(threadId: string) {
-  return env.AGENT_SANDBOX.get(env.AGENT_SANDBOX.idFromName(threadId));
+  // `agent-${threadId}` is the agent id `seedThread` writes, and the box is
+  // keyed by AGENT since P3.
+  return env.AGENT_SANDBOX.get(env.AGENT_SANDBOX.idFromName(`agent-${threadId}`));
 }
 
 /** Bump the live generation nonce through the real store, in the DO that holds it. */

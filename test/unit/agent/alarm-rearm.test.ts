@@ -205,7 +205,7 @@ function setup(input: {
    * `setAlarm` is this sandbox's single alarm.
    */
   const host: SandboxAlarmHost<{ service: ThreadComputeService }> = {
-    threadId: agent.name,
+    agentId: "agent_alarm_rearm",
     openSession: async () =>
       (holder.resolved as { service: ThreadComputeService } | undefined) ?? null,
     sweepWorkLedger: async (resolved) => {

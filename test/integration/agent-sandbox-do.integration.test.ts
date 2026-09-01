@@ -12,7 +12,13 @@ import {
 const now = 1_800_000_000_000;
 
 const WORKSPACE_ID = "ws_sbx";
-const AGENT_ID = "agent_sbx";
+/**
+ * The DO is keyed by AGENT since P3, so the agent id — not the thread id — is
+ * what decides which sandbox storage a test touches. One shared agent id would
+ * put every `it()` in this file into ONE box, and the per-test thread ids below
+ * would stop isolating anything.
+ */
+const agentIdFor = (threadId: string) => `agent_${threadId}`;
 
 /**
  * Seeds the workspace/agent/sandbox-settings rows and a thread-index row for
@@ -37,7 +43,7 @@ async function seedComputeEnabledThread(threadId: string) {
     createdAt: now,
   });
   await db.insert(schema.agents).values({
-    id: AGENT_ID,
+    id: agentIdFor(threadId),
     workspaceId: WORKSPACE_ID,
     name: "Nadi",
     systemPrompt: "",
@@ -63,7 +69,7 @@ async function seedComputeEnabledThread(threadId: string) {
   await db.insert(schema.threadIndex).values({
     id: threadId,
     workspaceId: WORKSPACE_ID,
-    agentId: AGENT_ID,
+    agentId: agentIdFor(threadId),
     kind: "regular",
     title: "T",
     source: "manual",
@@ -72,21 +78,25 @@ async function seedComputeEnabledThread(threadId: string) {
   });
 }
 
+/** The AGENT's box — `idFromName(agentId)`, which is what P3 re-keyed. */
 function stub(threadId: string) {
-  return env.AGENT_SANDBOX.get(env.AGENT_SANDBOX.idFromName(threadId));
+  return env.AGENT_SANDBOX.get(env.AGENT_SANDBOX.idFromName(agentIdFor(threadId)));
 }
 
 /**
  * The caller's identity, which `session()` requires rather than deriving from
  * `threadId` — see `AgentSandbox.session`.
  */
-const RUNTIME_CONFIG = { workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+const runtimeConfigFor = (threadId: string) => ({
+  workspaceId: WORKSPACE_ID,
+  agentId: agentIdFor(threadId),
+});
 
 async function openSession(threadId: string, supportsProcessMonitor = true) {
   const opened = await stub(threadId).session({
     threadId,
     supportsProcessMonitor,
-    runtimeConfig: RUNTIME_CONFIG,
+    runtimeConfig: runtimeConfigFor(threadId),
   });
   if (!opened.ok) throw new Error(`session failed: ${opened.error.code}`);
   if (!opened.value) throw new Error("expected compute to be enabled");

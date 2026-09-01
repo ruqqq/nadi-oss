@@ -81,8 +81,14 @@ describe("sandbox retention loop (DO + D1 integration)", () => {
     // made about. If a write after the declaration didn't clear it, a stale
     // "clean" would authorize discarding work the model never verified.
     const threadId = "thr_retention_rearm";
+    // Its OWN workspace and agent, not the helper's defaults. The sandbox DO is
+    // keyed by AGENT since P3, so two tests taking `agent-workspace-test` share
+    // ONE box — and the second inherits the first's `compute_state` row, whose
+    // runtime reference belongs to a backend instance that no longer exists.
     const { workspaceId } = await seedRegistryThread(env.REGISTRY_DB, {
       threadId,
+      workspaceId: "ws_retention_rearm",
+      agentId: "agent_retention_rearm",
       runtime: "think",
     });
     // Approach: the D1 `mock` provider. Nothing here needs a scripted backend
@@ -111,8 +117,11 @@ describe("sandbox retention loop (DO + D1 integration)", () => {
 
   it("a dirty workspace refuses the declaration and stays preserved", async () => {
     const threadId = "thr_retention_dirty";
+    // Own workspace and agent — see the sibling test above.
     const { workspaceId } = await seedRegistryThread(env.REGISTRY_DB, {
       threadId,
+      workspaceId: "ws_retention_dirty",
+      agentId: "agent_retention_dirty",
       runtime: "think",
     });
     await seedComputeEnabledWorkspace(workspaceId);

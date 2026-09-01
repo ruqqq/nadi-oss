@@ -20,7 +20,12 @@ const WATCHER = {
 };
 
 const WORKSPACE_ID = "ws_sbx_cb";
-const AGENT_ID = "agent_sbx_cb";
+/**
+ * Per-test AGENT id: the sandbox DO is keyed by agent since P3, so a single
+ * shared agent id would put every `it()` in this file into ONE box. Threads that
+ * are meant to share a box pass the SAME id explicitly.
+ */
+const agentIdFor = (key: string) => `agent_${key}`;
 
 /**
  * Same fixture shape as `agent-sandbox-do.integration.test.ts`: seeded fresh
@@ -28,7 +33,11 @@ const AGENT_ID = "agent_sbx_cb";
  * test, and with a per-test thread id because a DO addressed by name is not
  * guaranteed a fresh snapshot per `it()`.
  */
-async function seedComputeEnabledThread(threadId: string, seedWorkspace: boolean) {
+async function seedComputeEnabledThread(
+  threadId: string,
+  seedWorkspace: boolean,
+  agentId: string = agentIdFor(threadId),
+) {
   const db = drizzle(env.REGISTRY_DB, { schema });
   if (seedWorkspace) {
     await db.insert(schema.workspaces).values({
@@ -38,7 +47,7 @@ async function seedComputeEnabledThread(threadId: string, seedWorkspace: boolean
       createdAt: now,
     });
     await db.insert(schema.agents).values({
-      id: AGENT_ID,
+      id: agentId,
       workspaceId: WORKSPACE_ID,
       name: "Nadi",
       systemPrompt: "",
@@ -61,7 +70,7 @@ async function seedComputeEnabledThread(threadId: string, seedWorkspace: boolean
   await db.insert(schema.threadIndex).values({
     id: threadId,
     workspaceId: WORKSPACE_ID,
-    agentId: AGENT_ID,
+    agentId,
     kind: "regular",
     title: "T",
     source: "manual",
@@ -70,8 +79,9 @@ async function seedComputeEnabledThread(threadId: string, seedWorkspace: boolean
   });
 }
 
-function sandboxStub(threadId: string) {
-  return env.AGENT_SANDBOX.get(env.AGENT_SANDBOX.idFromName(threadId));
+/** The AGENT's box. `key` is the agent id, not the thread id — P3 re-keyed it. */
+function sandboxStub(key: string) {
+  return env.AGENT_SANDBOX.get(env.AGENT_SANDBOX.idFromName(agentIdFor(key)));
 }
 
 function threadStub(threadId: string) {
@@ -92,15 +102,15 @@ async function transcriptText(threadId: string): Promise<string> {
  * to the compute service — from inside the sandbox DO, which is where a real
  * reminder is raised.
  */
-async function backCalls(threadId: string) {
+async function backCalls(threadId: string, agentKey: string = threadId) {
   return {
     deliver: (body: string, mode: "deferred" | "proactive") =>
-      runInSandboxDo(sandboxStub(threadId), async (instance: any) => {
+      runInSandboxDo(sandboxStub(agentKey), async (instance: any) => {
         await instance.threadHostDeps(threadId).deliverSystemReminder(body, mode);
       }),
     /** Run anything against the DO's own dep object, from inside the DO. */
     with: <T>(fn: (deps: any) => Promise<T>): Promise<T> =>
-      runInSandboxDo(sandboxStub(threadId), async (instance: any) =>
+      runInSandboxDo(sandboxStub(agentKey), async (instance: any) =>
         fn(instance.threadHostDeps(threadId)),
       ),
   };
@@ -129,11 +139,15 @@ describe("AgentSandbox back-calls into the owning thread DO", () => {
   it("delivers a deferred reminder into the OWNING thread and no other", async () => {
     const owner = "thr_cb_owner";
     const sibling = "thr_cb_sibling";
-    await seedComputeEnabledThread(owner, true);
-    await seedComputeEnabledThread(sibling, false);
+    // ONE agent, TWO threads — which is exactly the P3 shape: both threads share
+    // a single box, so the back-call's routing is the only thing keeping the
+    // reminder out of the sibling's transcript.
+    const agentId = agentIdFor("cb_routing");
+    await seedComputeEnabledThread(owner, true, agentId);
+    await seedComputeEnabledThread(sibling, false, agentId);
 
     const body = "sandbox-callback-marker-alpha";
-    await (await backCalls(owner)).deliver(body, "deferred");
+    await (await backCalls(owner, "cb_routing")).deliver(body, "deferred");
 
     expect(await transcriptText(owner)).toContain(body);
     // The half that makes this test meaningful: routing, not just delivery.

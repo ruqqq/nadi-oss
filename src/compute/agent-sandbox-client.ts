@@ -99,19 +99,30 @@ function unwrapping(session: object): SandboxSessionClient {
 }
 
 /**
- * The thread's sandbox DO.
+ * The AGENT's sandbox DO — one box per agent, shared by every thread of it.
+ *
+ * Keyed by `agentId`, not `threadId`: the machine belongs to the agent and its
+ * filesystem outlives any one conversation. The thread is still named on every
+ * `session()` call, because the SESSION is per-thread even though the box is
+ * not.
+ *
+ * The agent id comes from the caller's `runtimeConfig`, which is the only
+ * authority on it: a `SubAgent`'s facet name is a RUN id with no `thread_index`
+ * row, and its agent is its PARENT's — so a D1 lookup on the thread id would
+ * throw for every subagent turn and, worse, a guess would address (and bill)
+ * the wrong agent's machine.
  *
  * `idFromName` (not `getAgentByName`) is deliberate: `AgentSandbox` is a plain
  * Durable Object with no `onStart` to bypass, unlike the thread agent — whose
  * transcript hydrates in `onStart` and which must therefore be reached with
  * `getAgentByName`. Both are right; do not harmonize them.
  */
-function agentSandboxFor(env: Env, threadId: string) {
-  return env.AGENT_SANDBOX.get(env.AGENT_SANDBOX.idFromName(threadId));
+function agentSandboxFor(env: Env, agentId: string) {
+  return env.AGENT_SANDBOX.get(env.AGENT_SANDBOX.idFromName(agentId));
 }
 
 /**
- * Opens ONE per-turn compute session on the thread's `AgentSandbox`.
+ * Opens ONE per-turn compute session on the AGENT's `AgentSandbox`.
  *
  * Deliberately shaped like `resolveComputeService`: `{ service, workspaceId,
  * config }`, or `null` when compute is DISABLED for the thread — which callers
@@ -139,6 +150,10 @@ export async function openSandboxSession(
      * The CALLER's workspace/agent. Required, because `threadId` does not
      * determine it: a `SubAgent`'s id is a run id with no thread row, and its
      * config is its parent's. See `AgentSandbox.session`.
+     *
+     * `agentId` is ALSO the DO key — see {@link agentSandboxFor}. It was
+     * already required for the resolve, which is why re-keying needed no new
+     * input at any of the call sites.
      */
     runtimeConfig: { workspaceId: string; agentId: string };
     /**
@@ -150,7 +165,7 @@ export async function openSandboxSession(
     attachedRuntime?: BackendReference;
   },
 ): Promise<SandboxSessionResolution | null> {
-  const sandbox = agentSandboxFor(env, threadId);
+  const sandbox = agentSandboxFor(env, options.runtimeConfig.agentId);
   const opened = await sandbox.session({
     threadId,
     supportsProcessMonitor: options.supportsProcessMonitor,

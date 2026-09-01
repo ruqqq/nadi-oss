@@ -25,7 +25,16 @@ export interface SandboxAlarmComputeService {
  * the session across RPC to the thread DO that owns the ledger).
  */
 export interface SandboxAlarmHost<S extends { service: SandboxAlarmComputeService }> {
-  threadId: string;
+  /**
+   * The AGENT this alarm belongs to — log scope only, never a sweep target.
+   *
+   * It was `threadId` while the DO was keyed by thread. It is deliberately not
+   * that any more: one box now serves every thread of the agent, so a single
+   * thread id here would name the wrong scope in every log line and, worse,
+   * invite a future caller to reuse it as "the thread to sweep". The sweep
+   * targets come from the host's own roster — see `AgentSandbox.alarm`.
+   */
+  agentId: string;
   /**
    * Resolve THIS invocation's compute session. `null` = compute is disabled for
    * the thread; a THROW = resolution failed. The two are different downstream —
@@ -36,13 +45,19 @@ export interface SandboxAlarmHost<S extends { service: SandboxAlarmComputeServic
    */
   openSession(): Promise<S | null>;
   /**
-   * Run the thread DO's work-ledger sweep. `undefined` means "resolution never
-   * completed — resolve independently"; `null` means "compute is disabled, do
-   * not resolve". That distinction is `runWorkLedgerSweep`'s own contract and is
-   * preserved across the wire.
+   * Run the work-ledger sweep for EVERY thread this box serves — the host fans
+   * out, because one agent-keyed alarm is the only wake the ledger has.
+   *
+   * `undefined` means "resolution never completed — resolve independently";
+   * `null` means "compute is disabled, do not resolve". That distinction is
+   * `runWorkLedgerSweep`'s own contract and is preserved across the wire.
    */
   sweepWorkLedger(session: S | null | undefined): Promise<void>;
-  /** The thread DO's ledger horizon at `now` (open rows + an owed retry wake). */
+  /**
+   * The ledger horizon at `now` (open rows + an owed retry wake), MIN-folded
+   * across every thread this box serves. A per-thread answer would arm the
+   * fallback for one thread and strand the rest.
+   */
   workHorizon(now: number): Promise<number | null>;
   /** Arm this sandbox's single alarm. */
   setAlarm(timestampMs: number): Promise<void>;
@@ -95,7 +110,7 @@ export interface SandboxAlarmHost<S extends { service: SandboxAlarmComputeServic
 export async function runSandboxComputeAlarm<S extends { service: SandboxAlarmComputeService }>(
   host: SandboxAlarmHost<S>,
 ): Promise<void> {
-  const threadId = host.threadId;
+  const agentId = host.agentId;
   // The alarm fires outside any turn, so an unregistered thread or any
   // resolution error would otherwise surface as an uncaught rejection in the
   // alarm handler. Swallow + log.
@@ -114,7 +129,7 @@ export async function runSandboxComputeAlarm<S extends { service: SandboxAlarmCo
   try {
     resolved = await host.openSession();
   } catch (error) {
-    log.warn("agent_sandbox.alarm_resolve_failed", { threadId, error: String(error) });
+    log.warn("agent_sandbox.alarm_resolve_failed", { agentId, error: String(error) });
   }
   // Own guard: a tick failure must not skip the sweep or the fallback arm below
   // — that is the whole point of sampling `alarmArmCount`.
@@ -129,7 +144,7 @@ export async function runSandboxComputeAlarm<S extends { service: SandboxAlarmCo
         await host.setSandboxDeclaredClean(false);
       }
     } catch (error) {
-      log.warn("agent_sandbox.alarm_tick_failed", { threadId, error: String(error) });
+      log.warn("agent_sandbox.alarm_tick_failed", { agentId, error: String(error) });
     } finally {
       armed = (await service.alarmArmCount()) > armCountBefore;
     }
@@ -142,7 +157,7 @@ export async function runSandboxComputeAlarm<S extends { service: SandboxAlarmCo
   try {
     await host.sweepWorkLedger(resolved);
   } catch (error) {
-    log.warn("agent_sandbox.alarm_sweep_failed", { threadId, error: String(error) });
+    log.warn("agent_sandbox.alarm_sweep_failed", { agentId, error: String(error) });
   }
   // Fallback re-arm, outside every guard above. The tick's `armAlarm` is the
   // sandbox's one arm site and min-folds the ledger horizon, so when it armed
@@ -205,6 +220,6 @@ export async function runSandboxComputeAlarm<S extends { service: SandboxAlarmCo
         : workHorizon;
     if (horizon !== null) await host.setAlarm(horizon);
   } catch (error) {
-    log.warn("agent_sandbox.alarm_rearm_failed", { threadId, error: String(error) });
+    log.warn("agent_sandbox.alarm_rearm_failed", { agentId, error: String(error) });
   }
 }
