@@ -1,5 +1,7 @@
 import {
   PREPARED_SENTINEL_NAME,
+  THREAD_WORKTREE_GIT_SCAN_DEPTH,
+  threadWorkRoot,
   WORKSPACE_GIT_SCAN_DEPTH,
   WORKSPACE_ROOT,
 } from "./workspace-layout";
@@ -69,9 +71,27 @@ export type DirtyRepo = { path: string; changes: string[]; unpushed: number };
  * verdict that lets an idle sandbox holding uncommitted work be discarded — so
  * this is load-bearing, not a tuning knob.
  */
-export const PROBE_SCRIPT = `# PROBE workspace cleanliness (marker word load-bearing: unit tests stub exec by matching "PROBE" in the command string — don't remove)
+export const PROBE_SCRIPT = probeScript(WORKSPACE_ROOT, WORKSPACE_GIT_SCAN_DEPTH);
+
+/**
+ * The probe, scoped to `root`.
+ *
+ * SCOPE IS THE WHOLE QUESTION SINCE P3. `/workspace` is the AGENT's box, shared
+ * by every one of its threads, so a probe rooted there answers about the
+ * canonical clones and about SIBLING threads' worktrees. That is right for a
+ * question about the machine and wrong for `confirm_work_saved`, which is a
+ * per-thread tool: rooted at the box, thread A is refused by thread B's dirty
+ * worktree and is handed B's repository PATHS to show its model — a cross-thread
+ * leak on top of a wrong answer. See {@link threadProbeScript}.
+ *
+ * The `find` depth travels with the root and is DERIVED from the layout, never
+ * written as a number: a bound one level short finds nothing and reports
+ * `no_repo`, which reads as "nothing to lose".
+ */
+export function probeScript(root: string, scanDepth: number): string {
+  return `# PROBE workspace cleanliness (marker word load-bearing: unit tests stub exec by matching "PROBE" in the command string — don't remove)
 set -u
-root="${WORKSPACE_ROOT}"
+root="${root}"
 found=0
 while IFS= read -r gitdir; do
   [ -z "$gitdir" ] && continue
@@ -85,7 +105,7 @@ while IFS= read -r gitdir; do
   fi
   printf '%s\\t%s\\t%s\\n' "$repo" "$status" "$unpushed"
 done <<EOF
-$(find "$root" -maxdepth ${WORKSPACE_GIT_SCAN_DEPTH} \\( -type d -o -type f \\) -name .git 2>/dev/null)
+$(find "$root" -maxdepth ${scanDepth} \\( -type d -o -type f \\) -name .git 2>/dev/null)
 EOF
 if [ "$found" = "0" ]; then
   leftovers=$(find "$root" ! -type d ! -name "${PREPARED_SENTINEL_NAME}" 2>/dev/null | head -n 1)
@@ -96,6 +116,19 @@ if [ "$found" = "0" ]; then
   fi
 fi
 `;
+}
+
+/**
+ * The probe scoped to ONE THREAD's working directory — what
+ * `confirm_work_saved` asks, since that tool speaks for a thread and not for
+ * the agent's machine.
+ *
+ * The depth is `THREAD_WORKTREE_GIT_SCAN_DEPTH`, not the box-wide one, because
+ * the root is two segments deeper.
+ */
+export function threadProbeScript(threadId: string): string {
+  return probeScript(threadWorkRoot(threadId), THREAD_WORKTREE_GIT_SCAN_DEPTH);
+}
 
 class UnparseableProbeLineError extends Error {}
 
@@ -192,9 +225,20 @@ export async function probeWorkspaceCleanliness(
     stderr: string;
     stdoutTruncated?: boolean | undefined;
   }>,
+  /**
+   * REQUIRED. Which script to run — {@link PROBE_SCRIPT} for the whole box, or
+   * {@link threadProbeScript} for one thread's directory.
+   *
+   * Stated at every call site rather than defaulted, because the wrong scope
+   * does not fail: it returns a confident verdict about the wrong filesystem.
+   * A per-thread caller silently given the box-wide script is refused by a
+   * SIBLING thread's dirty worktree, and is handed that sibling's repository
+   * paths to show its own model.
+   */
+  script: string,
 ): Promise<WorkspaceCleanliness> {
   try {
-    const result = await exec(PROBE_SCRIPT, PROBE_TIMEOUT_MS);
+    const result = await exec(script, PROBE_TIMEOUT_MS);
     if (result.exitCode !== 0) {
       return {
         state: "probe_failed",

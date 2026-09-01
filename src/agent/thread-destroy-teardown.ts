@@ -18,9 +18,15 @@ export interface ThreadDestroyTeardownDeps {
  * thread. Archiving a chat would have wiped the agent's filesystem.
  *
  * A thread's own working directory is still reclaimed, lazily and by the box
- * itself: `repo.archive` marks it `pending_removal` and the next turn that has
- * the box awake removes it (Task 4). Nothing else of the thread's is on the
- * machine.
+ * itself: the ARCHIVE SITES call `releaseThreadWorkspace`, which records the
+ * debt on the agent's sandbox DO, and the next turn that has the box awake
+ * removes it. Nothing else of the thread's is on the machine.
+ *
+ * There are FOUR such call sites, not one, and that is deliberate rather than
+ * redundant: hanging the trigger off the archive helper alone missed the
+ * route's own `empty_snapshot` escape, which stamps `archived_at` itself and
+ * would have leaked those directories forever. Do not "simplify" them back into
+ * the helper.
  *
  * The quota row is the AGENT's, not the thread's, so it must not be dropped
  * here either: it is what tells the orphan reconciler the agent's sprite is

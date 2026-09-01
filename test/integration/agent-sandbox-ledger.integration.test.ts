@@ -458,8 +458,16 @@ describe("AgentSandboxLedger (real D1)", () => {
     ).toBe(true);
   });
 
-  // DISABLE is not DELETE: it leaves `archived_at` null, so a paused agent's
-  // box stays protected by every one of the four answers above.
+  /**
+   * DISABLE is not DELETE: it leaves `archived_at` null, so a paused agent's box
+   * stays protected by every one of the four answers above.
+   *
+   * It DOES keep holding its slot here, and that is correct at this layer — the
+   * row still says `active`. What frees it is the box being put to sleep, which
+   * needs `purpose: "reclaim"` to resolve for a disabled agent at all; see
+   * `env-resolve.test.ts`. Without that lift nothing could ever write `idle`,
+   * and this row would pin a slot until the agent was deleted.
+   */
   it("a DISABLED agent's box is still counted, offered and protected", async () => {
     await ledger().tryAdmit({
       agentId: "ag_a",

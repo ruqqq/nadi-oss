@@ -20,7 +20,10 @@ describe("confirmWorkSaved", () => {
       setDeclaredClean: set,
     });
     expect(set).toHaveBeenCalledWith(true);
-    expect(message).toMatch(/discard/i);
+    // NOT /discard/i any more: P3 removed the idle discard, so a success line
+    // promising one described a mechanism that no longer exists. What the tool
+    // reports now is the check it actually did.
+    expect(message).toMatch(/committed and pushed/i);
   });
 
   it("refuses and does NOT set the bit when a repo is dirty", async () => {

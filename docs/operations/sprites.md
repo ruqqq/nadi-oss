@@ -56,10 +56,18 @@ Cloudflare's vault and bound to the Worker at deploy time.
   are deleted by agent deletion; they otherwise bill until then.
 - **Nothing auto-destroys a sprite any more.** The daily cron's
   `reconcileOrphanSprites` is the only collector of a strand, and it covers
-  system-managed keys only. Watch for `compute.sprite_orphan_reaped` (a steady
-  rate is a bug report about the acquire path, not housekeeping) and
-  `compute.sprite_reconcile_truncated` (the listing was incomplete, so strands
-  are being missed).
+  system-managed keys only. Watch for `compute.sprite_orphan_reaped` — a steady
+  rate is a bug report about the acquire path, not housekeeping — and
+  `compute.sprite_reconcile_listed`, whose `returned` plateauing at a round
+  number means the provider is paginating and strands are being missed.
+- **Run the FIRST cron dry.** Set `SPRITE_RECONCILER_DRY_RUN="true"` for the
+  deploy, read every `compute.sprite_orphan_would_reap` line, confirm each names
+  a sprite that genuinely has no owner, then unset it. The reaper's first guard
+  assumes no pre-existing sprite carries the `nadi-b1-` prefix; that assumption
+  has only ever been checked against this repo's code, and the first real pass
+  deletes on it. Exactly the string `"true"` enables the dry run — any other
+  value reaps for real, so a mistyped flag cannot silently disable the collector,
+  and a forgotten one shows up as a steady `would_reap` line rather than silence.
 
 Sprites needs no container image, so there is nothing here like the Docker
 build that `docs/operations/cloudflare-sandbox.md` describes — the deploy is the

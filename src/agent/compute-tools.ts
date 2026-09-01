@@ -43,10 +43,7 @@ import { getGithubAppConfig } from "../github/config";
 import { applyGithubToken } from "./github-token-wiring";
 import { ThreadRepository } from "../db/repositories/threads";
 import { AgentRepository } from "../db/repositories/agents";
-import {
-  probeWorkspaceCleanliness,
-  type WorkspaceCleanliness,
-} from "../compute/workspace-cleanliness";
+import { probeWorkspaceCleanliness, threadProbeScript } from "../compute/workspace-cleanliness";
 import { confirmWorkSaved, type WorkSavedToolDeps } from "./work-saved-tool";
 
 /** Guess a mime from a filename when the sandbox provider did not supply one.
@@ -1057,7 +1054,7 @@ export function buildComputeToolDefs(
       ? {
           confirm_work_saved: tool({
             description:
-              "Declare that all work in the sandbox is committed and pushed. The workspace is checked before the declaration is accepted: if any repository has uncommitted changes or unpushed commits, the call is refused and the offending paths are returned. Call this when you have finished working and everything is saved.",
+              "Check that everything in YOUR working directory is committed and pushed. Your directory is probed against git before the declaration is accepted: if any repository in it has uncommitted changes or unpushed commits, the call is refused and the offending paths are returned. Other threads of this agent have their own directories and are neither checked nor affected. Call this when you have finished working, to confirm nothing is left behind.",
             inputSchema: z.object({}),
             execute: async () => {
               try {
@@ -1143,9 +1140,20 @@ export async function createComputeTools(
       workSaved:
         !attachedRuntime && deps.setSandboxDeclaredClean
           ? {
+              // SCOPED TO THIS THREAD'S DIRECTORY, not to the box. Since P3
+              // `/workspace` is the AGENT's machine, so the box-wide script
+              // would refuse thread A because thread B has uncommitted work —
+              // and would hand B's repository paths to A's model to explain
+              // why. `confirm_work_saved` speaks for one thread.
               probe: async () =>
-                probeWorkspaceCleanliness((command, timeoutMs) =>
-                  resolved.service.execRun({ command, timeoutMs, label: "workspace cleanliness" }),
+                probeWorkspaceCleanliness(
+                  (command, timeoutMs) =>
+                    resolved.service.execRun({
+                      command,
+                      timeoutMs,
+                      label: "workspace cleanliness",
+                    }),
+                  threadProbeScript(deps.threadId),
                 ),
               setDeclaredClean: deps.setSandboxDeclaredClean,
               threadId: deps.threadId,

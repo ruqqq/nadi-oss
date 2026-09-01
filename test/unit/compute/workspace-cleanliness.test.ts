@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { probeWorkspaceCleanliness } from "../../../src/compute/workspace-cleanliness";
+import {
+  PROBE_SCRIPT,
+  probeWorkspaceCleanliness,
+} from "../../../src/compute/workspace-cleanliness";
 
 function fakeExec(
   script: Record<
@@ -26,6 +29,7 @@ describe("probeWorkspaceCleanliness", () => {
   it("reports clean when a repo exists with no changes and nothing unpushed", async () => {
     const result = await probeWorkspaceCleanliness(
       fakeExec({ PROBE: { stdout: "/workspace/app\t\t0\n" } }),
+      PROBE_SCRIPT,
     );
     expect(result.state).toBe("clean");
   });
@@ -33,6 +37,7 @@ describe("probeWorkspaceCleanliness", () => {
   it("reports dirty when any repo has changes", async () => {
     const result = await probeWorkspaceCleanliness(
       fakeExec({ PROBE: { stdout: "/workspace/app\t M src/a.ts\t0\n" } }),
+      PROBE_SCRIPT,
     );
     expect(result.state).toBe("dirty");
     expect(result.state === "dirty" && result.repos[0]?.path).toBe("/workspace/app");
@@ -41,6 +46,7 @@ describe("probeWorkspaceCleanliness", () => {
   it("reports dirty when a repo has unpushed commits", async () => {
     const result = await probeWorkspaceCleanliness(
       fakeExec({ PROBE: { stdout: "/workspace/app\t\t3\n" } }),
+      PROBE_SCRIPT,
     );
     expect(result.state).toBe("dirty");
     expect(result.state === "dirty" && result.repos[0]?.unpushed).toBe(3);
@@ -51,6 +57,7 @@ describe("probeWorkspaceCleanliness", () => {
       fakeExec({
         PROBE: { stdout: "/workspace/a\t\t0\n/workspace/b\t M x\t0\n/workspace/c\t\t0\n" },
       }),
+      PROBE_SCRIPT,
     );
     expect(result.state).toBe("dirty");
     expect(result.state === "dirty" && result.repos).toHaveLength(1);
@@ -59,6 +66,7 @@ describe("probeWorkspaceCleanliness", () => {
   it("reports no_repo with hasFiles when files exist outside version control", async () => {
     const result = await probeWorkspaceCleanliness(
       fakeExec({ PROBE: { stdout: "NOREPO\tFILES\n" } }),
+      PROBE_SCRIPT,
     );
     expect(result).toEqual({ state: "no_repo", hasFiles: true });
   });
@@ -66,6 +74,7 @@ describe("probeWorkspaceCleanliness", () => {
   it("reports no_repo without files for an untouched workspace", async () => {
     const result = await probeWorkspaceCleanliness(
       fakeExec({ PROBE: { stdout: "NOREPO\tEMPTY\n" } }),
+      PROBE_SCRIPT,
     );
     expect(result).toEqual({ state: "no_repo", hasFiles: false });
   });
@@ -73,6 +82,7 @@ describe("probeWorkspaceCleanliness", () => {
   it("reports probe_failed on a non-zero exit", async () => {
     const result = await probeWorkspaceCleanliness(
       fakeExec({ PROBE: { exitCode: 127, stderr: "git: not found" } }),
+      PROBE_SCRIPT,
     );
     expect(result.state).toBe("probe_failed");
   });
@@ -80,7 +90,7 @@ describe("probeWorkspaceCleanliness", () => {
   it("reports probe_failed when exec throws", async () => {
     const result = await probeWorkspaceCleanliness(async () => {
       throw new Error("runtime unreachable");
-    });
+    }, PROBE_SCRIPT);
     expect(result.state).toBe("probe_failed");
   });
 
@@ -92,6 +102,7 @@ describe("probeWorkspaceCleanliness", () => {
     // string and is not exercised by this stub-based test.
     const result = await probeWorkspaceCleanliness(
       fakeExec({ PROBE: { stdout: "/workspace/wt/feature-branch\t M src/a.ts\t0\n" } }),
+      PROBE_SCRIPT,
     );
     expect(result.state).toBe("dirty");
     expect(result.state === "dirty" && result.repos[0]?.path).toBe("/workspace/wt/feature-branch");
@@ -108,12 +119,20 @@ describe("probeWorkspaceCleanliness", () => {
    */
   it("maps a non-zero count to dirty and zero to clean", async () => {
     expect(
-      (await probeWorkspaceCleanliness(fakeExec({ PROBE: { stdout: "/workspace/app\t\t2\n" } })))
-        .state,
+      (
+        await probeWorkspaceCleanliness(
+          fakeExec({ PROBE: { stdout: "/workspace/app\t\t2\n" } }),
+          PROBE_SCRIPT,
+        )
+      ).state,
     ).toBe("dirty");
     expect(
-      (await probeWorkspaceCleanliness(fakeExec({ PROBE: { stdout: "/workspace/app\t\t0\n" } })))
-        .state,
+      (
+        await probeWorkspaceCleanliness(
+          fakeExec({ PROBE: { stdout: "/workspace/app\t\t0\n" } }),
+          PROBE_SCRIPT,
+        )
+      ).state,
     ).toBe("clean");
   });
 
@@ -125,7 +144,7 @@ describe("probeWorkspaceCleanliness", () => {
     await probeWorkspaceCleanliness(async (script) => {
       command = script;
       return { exitCode: 0, stdout: "/workspace/app\t\t0\n", stderr: "" };
-    });
+    }, PROBE_SCRIPT);
     expect(command).toContain("rev-list --count HEAD --not --remotes");
     expect(command).not.toContain("NOUPSTREAM");
   });
@@ -135,6 +154,7 @@ describe("probeWorkspaceCleanliness", () => {
     // count) must preserve, not be read as "nothing to lose".
     const result = await probeWorkspaceCleanliness(
       fakeExec({ PROBE: { stdout: "/workspace/app\t\tNOUPSTREAM\n" } }),
+      PROBE_SCRIPT,
     );
     expect(result.state).toBe("probe_failed");
   });
@@ -156,6 +176,7 @@ describe("probeWorkspaceCleanliness", () => {
           stdoutTruncated: true,
         },
       }),
+      PROBE_SCRIPT,
     );
     expect(result.state).toBe("probe_failed");
   });
@@ -163,6 +184,7 @@ describe("probeWorkspaceCleanliness", () => {
   it("treats an untruncated tail normally", async () => {
     const result = await probeWorkspaceCleanliness(
       fakeExec({ PROBE: { stdout: "/workspace/b\t\t0\n", stdoutTruncated: false } }),
+      PROBE_SCRIPT,
     );
     expect(result.state).toBe("clean");
   });
@@ -173,12 +195,18 @@ describe("probeWorkspaceCleanliness", () => {
    * nothing about. It must land on `probe_failed`, which preserves.
    */
   it("reports probe_failed when stdout is empty despite a zero exit", async () => {
-    const result = await probeWorkspaceCleanliness(fakeExec({ PROBE: { stdout: "" } }));
+    const result = await probeWorkspaceCleanliness(
+      fakeExec({ PROBE: { stdout: "" } }),
+      PROBE_SCRIPT,
+    );
     expect(result.state).toBe("probe_failed");
   });
 
   it("reports probe_failed when stdout is whitespace-only", async () => {
-    const result = await probeWorkspaceCleanliness(fakeExec({ PROBE: { stdout: "   \n\t\n  " } }));
+    const result = await probeWorkspaceCleanliness(
+      fakeExec({ PROBE: { stdout: "   \n\t\n  " } }),
+      PROBE_SCRIPT,
+    );
     expect(result.state).toBe("probe_failed");
   });
 
@@ -187,6 +215,7 @@ describe("probeWorkspaceCleanliness", () => {
     // path containing a literal pipe character stays one entry.
     const result = await probeWorkspaceCleanliness(
       fakeExec({ PROBE: { stdout: "/workspace/app\t M weird|name.ts\x1f?? other.ts\t0\n" } }),
+      PROBE_SCRIPT,
     );
     expect(result.state).toBe("dirty");
     expect(result.state === "dirty" && result.repos[0]?.changes).toEqual([
@@ -198,6 +227,7 @@ describe("probeWorkspaceCleanliness", () => {
   it("reports probe_failed when stdout contains only unrecognizable lines", async () => {
     const result = await probeWorkspaceCleanliness(
       fakeExec({ PROBE: { stdout: "not a probe line at all\n" } }),
+      PROBE_SCRIPT,
     );
     expect(result.state).toBe("probe_failed");
   });

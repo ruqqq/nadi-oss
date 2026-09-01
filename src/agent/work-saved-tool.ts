@@ -8,24 +8,38 @@ export interface WorkSavedToolDeps {
 }
 
 /**
- * Declares the sandbox's work saved, but only ACCEPTS the declaration when a
- * fresh probe agrees. There is no override: a dirty or unverifiable workspace
- * always refuses, and the bit is only ever set against a state that was just
- * checked, not merely claimed. `no_repo` with files present also refuses —
- * without that arm, unversioned work would sail through as "zero dirty
- * repos" and be discarded on idle.
+ * Declares THIS THREAD's work saved, but only ACCEPTS the declaration when a
+ * fresh probe agrees. There is no override: a dirty or unverifiable working
+ * directory always refuses, and the bit is only ever set against a state that
+ * was just checked, not merely claimed. `no_repo` with files present also
+ * refuses — without that arm, unversioned work would sail through as "zero
+ * dirty repos".
+ *
+ * SCOPE AND CONSEQUENCE BOTH CHANGED IN P3, and the copy had to follow.
+ *
+ * Scope: `/workspace` is now the AGENT's box, shared by every thread, so the
+ * probe is rooted at the CALLER's own directory (`threadProbeScript`). Left
+ * box-wide, thread A was refused because thread B had uncommitted work, and B's
+ * repository paths were returned to A's model to explain why.
+ *
+ * Consequence: this no longer permits anything. Its old success line —
+ * "The sandbox may now be discarded when idle" — described the idle discard,
+ * which this phase deleted; the box is kept until the agent is deleted whatever
+ * this tool says. What survives is the check itself, which is worth having on
+ * its own: it is the one thing that tells a model, against git rather than
+ * against its own belief, that nothing it did is about to be left behind.
  */
 export async function confirmWorkSaved(deps: WorkSavedToolDeps): Promise<string> {
   const state = await deps.probe();
   switch (state.state) {
     case "clean": {
       await deps.setDeclaredClean(true);
-      return "Workspace verified clean. The sandbox may now be discarded when idle.";
+      return "Your working directory is verified clean: everything is committed and pushed.";
     }
     case "no_repo": {
       if (!state.hasFiles) {
         await deps.setDeclaredClean(true);
-        return "Workspace is empty. The sandbox may now be discarded when idle.";
+        return "Your working directory is empty — there is nothing unsaved.";
       }
       log.info("compute.work_saved_refused", {
         threadId: deps.threadId,
@@ -58,7 +72,7 @@ export async function confirmWorkSaved(deps: WorkSavedToolDeps): Promise<string>
         dirtyRepoCount: state.repos.length,
       });
       return (
-        "Refused: the workspace is not fully saved. The following repositories have " +
+        "Refused: your working directory is not fully saved. The following repositories have " +
         "uncommitted changes or unpushed commits:\n" +
         `${repoLines}\n` +
         "Commit, push, delete, or add an ignore rule for the offending paths, then call " +

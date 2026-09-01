@@ -2223,11 +2223,12 @@ export class ThreadComputeService {
       await this.armAlarm(null);
       return;
     }
-    // The ledger row's TTL is only a little longer than the idle timeout, but a
-    // tick can leave the container ALIVE (watchers pending, or blocking work in
-    // releaseIfIdle) without any other refresh path running. Keep the lease warm
-    // on every tick that confirms the container is still active, or a live
-    // container silently loses its row and defeats the workspace cap.
+    // The row has NO TTL since P3 — nothing expires it, and only a destroy
+    // removes it (see `AgentSandboxLedger`'s class doc). What this refresh
+    // maintains is `last_used_at`, which is the LRU ordering the reclaim picks
+    // from: a tick can leave the box ALIVE (watchers pending, or blocking work
+    // in releaseIfIdle) without any other refresh path running, and a stale
+    // stamp makes a busy box look like the best candidate to put to sleep.
     if (this.deps.store.getComputeState()?.status === "active") await this.deps.quota?.refresh();
     await this.pollDueWatchers();
     if (this.deps.store.countWatchers() > 0) {

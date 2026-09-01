@@ -104,7 +104,7 @@ function runProbe(root: string) {
       stderr: result.stderr,
       stdoutTruncated: false,
     };
-  });
+  }, PROBE_SCRIPT);
 }
 
 /** The third field of the single repo line the script emitted. */

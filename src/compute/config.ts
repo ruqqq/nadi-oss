@@ -138,36 +138,49 @@ export function resolveEffectiveComputeConfig(input: {
   const { workspace, agent } = input;
   if (!workspace) return { enabled: false, reason: "missing_workspace_settings" };
   // FOUR separate switches, all of which mean "no machine", and none of which
-  // implies another. They split cleanly into two kinds, and the split is what
-  // `purpose` turns on:
+  // implies another. What `purpose` turns on is not which of them is a
+  // PERMISSION — all four are — but whether a machine may still EXIST despite
+  // one of them being off:
   //
-  // DOES A MACHINE EXIST TO REACH — always enforced, teardown included:
-  //  - the workspace's master compute toggle. Off means there is no configured
-  //    provider to issue a destroy against at all;
-  //  - `agents.sandbox_enabled === false` — this agent works without a machine,
-  //    so there has never been one to destroy.
-  //
-  // MAY THIS AGENT USE A MACHINE — lifted for `purpose: "teardown"`:
+  //  - the workspace's master compute toggle;
+  //  - `agents.sandbox_enabled === false` — this agent works without a machine;
   //  - `agents.enabled` — the agent is turned off. This gate was MISSING
-  //    entirely: the check read `agent.enabled`, but that field carried
-  //    `sandbox_enabled`, so disabling an agent left its live threads holding a
-  //    full sandbox while the UI said "Turn this off to stop the agent from
-  //    running";
+  //    entirely at one point: the check read `agent.enabled`, but that field
+  //    carried `sandbox_enabled`, so disabling an agent left its live threads
+  //    holding a full sandbox while the UI said "Turn this off to stop the
+  //    agent from running";
   //  - `agents.archived_at` — the user deleted the agent.
   //
-  // Lifting those two for teardown is not a loophole, it is the point: "you may
-  // not WORK here" must never become "your machine is now unreachable, and
-  // therefore undeletable". Without it, disable-then-delete — the ordinary way
-  // people behave — would leave a sprite billing until its idle TTL while the
-  // dialog said "Its files are destroyed."
+  // ALL FOUR ARE LIFTED FOR `purpose: "teardown"`, and the last two were the
+  // easy half. The first two used to sit in an always-enforced arm on the
+  // premise "there has never been a machine to destroy" — WHICH IS FALSE FOR
+  // ANY BOX THAT PREDATES THE TOGGLE. Untick an agent's sandbox setting (which
+  // tears nothing down), then delete the agent: the teardown resolved `null`,
+  // the route dropped the ledger row anyway, and the dialog still said "Its
+  // files are destroyed". On sprites the reconciler collects the machine; on
+  // every other provider nothing does and it bills forever. The workspace
+  // master toggle has the identical shape. Neither says anything about whether
+  // a provider is configured — that is what `unsupported_provider` and
+  // `missing_secret` below are for, and those stay enforced for every purpose
+  // precisely because they DO mean "nothing to issue a destroy against".
+  //
+  // `agents.enabled` alone is additionally lifted for `purpose: "reclaim"`.
+  // A disabled agent's box is live and intentional, so something must still be
+  // able to put it to SLEEP: nothing else can ever write its ledger row `idle`,
+  // and an `active` row that nothing can move holds a workspace concurrency
+  // slot until the agent is deleted. See {@link ComputeResolvePurpose}.
+  //
+  // The rule under all of it: "you may not WORK here" must never become "your
+  // machine is now unreachable, and therefore undeletable — or unreleasable".
   //
   // The four are collapsed to one `reason` deliberately: the wire type is
   // consumed by the settings UI, and a disabled agent's user-facing explanation
   // comes from the send-path refusal (`assertThreadWritable`), not from here.
-  const agentMayUseCompute =
-    input.purpose === "teardown" ||
-    (agent?.agentEnabled !== false && (agent == null || agent.archivedAt === null));
-  if (!workspace.enabled || agent?.sandboxEnabled === false || !agentMayUseCompute) {
+  const teardown = input.purpose === "teardown";
+  const agentEnabledGate = teardown || input.purpose === "reclaim" || agent?.agentEnabled !== false;
+  const notArchived = teardown || agent == null || agent.archivedAt === null;
+  const sandboxAllowed = teardown || (workspace.enabled && agent?.sandboxEnabled !== false);
+  if (!sandboxAllowed || !agentEnabledGate || !notArchived) {
     return { enabled: false, reason: "disabled" };
   }
   if (workspace.provider !== workspace.providerConfig.kind) {

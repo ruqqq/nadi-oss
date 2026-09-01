@@ -1,6 +1,10 @@
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ACQUIRE_GRACE_MS, reconcileOrphanSprites } from "../../src/compute/sprite-reconciler";
+import {
+  ACQUIRE_GRACE_MS,
+  parseSpriteReconcilerDryRun,
+  reconcileOrphanSprites,
+} from "../../src/compute/sprite-reconciler";
 import { log } from "../../src/log";
 import { RECONCILABLE_SPRITE_PREFIX } from "../../src/compute/backends/sprites";
 import type { SpritesClient } from "../../src/compute/backends/sprites-client";
@@ -198,6 +202,86 @@ describe("reconcileOrphanSprites", () => {
     } finally {
       logged.mockRestore();
     }
+  });
+
+  /**
+   * GUARD 3'S SECOND HALF. The first check runs before the listing, so a cold
+   * start that begins BETWEEN the `known` read and the provider listing writes
+   * its `acquiring` row too late to be counted and creates its sprite too late
+   * to be in `known` — the machine is in `names`, absent from `known`, and gets
+   * deleted out from under a live turn. Guard 3 is ordered to prevent exactly
+   * this and missed it by two statements.
+   */
+  it("REGRESSION: aborts when an acquire starts DURING the pass", async () => {
+    const orphan = `${RECONCILABLE_SPRITE_PREFIX}mid-flight`;
+    const client = {
+      // The cold start lands here: after `known` was read, before we classify.
+      listSprites: async () => {
+        await seedRow({
+          agentId: "ag_racer",
+          status: "acquiring",
+          spriteName: null,
+          lastUsedAt: NOW,
+        });
+        return { names: [orphan] };
+      },
+      deleteSprite: async () => {
+        throw new Error("must not reap while an acquire is in flight");
+      },
+    } as unknown as SpritesClient;
+
+    const result = await reconcileOrphanSprites(envWithKey(), { client, now: () => NOW });
+    expect(result.skipped).toBe("acquire_in_flight");
+    expect(result.deleted).toBe(0);
+    // ANTI-VACUITY: without the second check this sprite qualifies as an orphan.
+    expect(result.scanned).toBe(1);
+  });
+
+  /**
+   * THE DRY RUN. Guard 1 assumes no pre-existing sprite carries
+   * `RECONCILABLE_SPRITE_PREFIX`, which is asserted against this repo's code and
+   * never against the real fleet — and the first cron after deploy DELETES on
+   * that assumption. A log-only pass makes it readable first.
+   */
+  it("dry run reports the orphans it would reap and deletes nothing", async () => {
+    const orphan = `${RECONCILABLE_SPRITE_PREFIX}would-go`;
+    const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
+    const { client, deleted } = fakeClient([orphan]);
+    try {
+      const result = await reconcileOrphanSprites(envWithKey(), {
+        client,
+        now: () => NOW,
+        dryRun: true,
+      });
+      expect(deleted).toEqual([]);
+      expect(result).toMatchObject({ orphans: 1, deleted: 0, dryRun: true });
+      expect(warn).toHaveBeenCalledWith("compute.sprite_orphan_would_reap", {
+        spriteName: orphan,
+      });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  // The flag's OTHER setting must never be a silent way to stop the only
+  // collector, so only the exact string opts in.
+  it.each([
+    ["true", true],
+    ["TRUE", true],
+    [" true ", true],
+    ["1", false],
+    ["yes", false],
+    ["", false],
+    ["false", false],
+  ])("parses SPRITE_RECONCILER_DRY_RUN %j as %s", (value, expected) => {
+    expect(parseSpriteReconcilerDryRun(value)).toBe(expected);
+  });
+
+  it("reaps for real when the flag is absent", async () => {
+    const orphan = `${RECONCILABLE_SPRITE_PREFIX}for-real`;
+    const { client, deleted } = fakeClient([orphan]);
+    await reconcileOrphanSprites(envWithKey(), { client, now: () => NOW });
+    expect(deleted).toEqual([orphan]);
   });
 
   it("a failing delete does not stop the rest of the pass", async () => {

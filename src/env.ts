@@ -267,6 +267,21 @@ export interface Env extends Cloudflare.Env {
   MAX_ACTIVE_AGENT_SANDBOXES_PER_WORKSPACE?: string;
 
   /**
+   * Set to exactly `"true"` to make the daily orphan reconciler LOG the sprites
+   * it would delete instead of deleting them.
+   *
+   * Insurance for the first cron after the P3 deploy: guard 1 assumes no
+   * pre-existing sprite carries `RECONCILABLE_SPRITE_PREFIX`, and that
+   * assumption has only ever been checked against this repo's code, never
+   * against the real fleet. A dry pass turns it into something an operator can
+   * read (`compute.sprite_orphan_would_reap`) before anything is irreversible.
+   *
+   * Any other value reaps for real — a mistyped flag must never be a silent way
+   * to disable the only collector.
+   */
+  SPRITE_RECONCILER_DRY_RUN?: string;
+
+  /**
    * Optional number of hours to retain an idle suspended coding sandbox before
    * expiry cleanup. Invalid or absent values are sanitized by sandbox config.
    */

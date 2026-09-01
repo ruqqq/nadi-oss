@@ -110,29 +110,25 @@ describe("resolveEffectiveComputeConfig (resource profile)", () => {
     expect(result).toEqual({ enabled: false, reason: "disabled" });
   });
 
-  // `purpose: "teardown"` lifts the two gates that describe the AGENT's
-  // AVAILABILITY, and only those. "You may not work here" must never become
-  // "your machine is unreachable, and therefore undeletable".
+  /**
+   * `purpose: "teardown"` lifts ALL FOUR of those gates. "You may not work
+   * here" must never become "your machine is unreachable, and therefore
+   * undeletable".
+   *
+   * The last two used to sit in an always-enforced arm on the premise "there
+   * has never been a machine to destroy", WHICH IS FALSE FOR ANY BOX THAT
+   * PREDATES THE TOGGLE. Untick an agent's sandbox setting — which tears
+   * nothing down — then delete the agent: the teardown resolved null, the route
+   * dropped the ledger row anyway, and the dialog still said "Its files are
+   * destroyed". On sprites the reconciler eventually collects the machine; on
+   * every other provider nothing does and it bills forever.
+   */
   it.each([
-    ["the agent's own switch is off", { agentEnabled: false }],
-    ["the agent is deleted", { archivedAt: 1_800_000_000_000 }],
-  ])("still resolves for teardown when %s", (_label, patch) => {
-    const result = resolveEffectiveComputeConfig({
-      ...baseInput,
-      agent: { ...baseInput.agent, ...patch },
-      agentResourceProfile: "small",
-      purpose: "teardown",
-    });
-    expect(result.enabled).toBe(true);
-  });
-
-  // The other two gates say a machine does not EXIST to reach, so teardown
-  // must not lift them: there is nothing to destroy, and on a compute-disabled
-  // workspace no provider to issue a destroy against.
-  it.each([
+    ["the agent's own switch is off", { agent: { agentEnabled: false } }],
+    ["the agent is deleted", { agent: { archivedAt: 1_800_000_000_000 } }],
     ["the agent works without a machine", { agent: { sandboxEnabled: false } }],
     ["the workspace has compute off", { workspace: { enabled: false } }],
-  ])("still refuses teardown when %s", (_label, patch) => {
+  ])("still resolves for teardown when %s", (_label, patch) => {
     const result = resolveEffectiveComputeConfig({
       ...baseInput,
       ...("agent" in patch ? { agent: { ...baseInput.agent, ...patch.agent } } : {}),
@@ -141,6 +137,60 @@ describe("resolveEffectiveComputeConfig (resource profile)", () => {
         : {}),
       agentResourceProfile: "small",
       purpose: "teardown",
+    });
+    expect(result.enabled).toBe(true);
+  });
+
+  // What teardown must still refuse: the gates that say no provider exists to
+  // issue a destroy AGAINST. Those are about the machine's reachability, not
+  // the agent's permission, so lifting them would buy nothing and hide a
+  // misconfiguration behind a resolve that cannot work.
+  it("still refuses teardown when the provider has no credential", () => {
+    const result = resolveEffectiveComputeConfig({
+      ...baseInput,
+      daytonaCredentialPresent: false,
+      agentResourceProfile: "small",
+      purpose: "teardown",
+    });
+    expect(result).toEqual({ enabled: false, reason: "missing_secret" });
+  });
+
+  /**
+   * `purpose: "reclaim"` lifts `agents.enabled` AND NOTHING ELSE.
+   *
+   * A disabled agent's box is live and intentional. If nothing can resolve for
+   * it, nothing can ever run `releaseIfIdle`, so its `agent_sandboxes` row pins
+   * `active` and holds a workspace concurrency slot until the agent is deleted
+   * — while `listReclaimCandidates` keeps offering an agent whose reclaim can
+   * only refuse. A reclaim can never destroy (the recoverable disposition is
+   * unconditional), which is what makes the lift safe.
+   */
+  it("resolves for reclaim when the agent's own switch is off", () => {
+    const result = resolveEffectiveComputeConfig({
+      ...baseInput,
+      agent: { ...baseInput.agent, agentEnabled: false },
+      agentResourceProfile: "small",
+      purpose: "reclaim",
+    });
+    expect(result.enabled).toBe(true);
+  });
+
+  // NOT lifted for reclaim: an archived agent's box is being destroyed, its row
+  // is already excluded from reclaim candidates, and ticking against a
+  // destroyed sprite would only produce errors.
+  it.each([
+    ["the agent is deleted", { agent: { archivedAt: 1_800_000_000_000 } }],
+    ["the agent works without a machine", { agent: { sandboxEnabled: false } }],
+    ["the workspace has compute off", { workspace: { enabled: false } }],
+  ])("still refuses reclaim when %s", (_label, patch) => {
+    const result = resolveEffectiveComputeConfig({
+      ...baseInput,
+      ...("agent" in patch ? { agent: { ...baseInput.agent, ...patch.agent } } : {}),
+      ...("workspace" in patch
+        ? { workspace: { ...baseInput.workspace, ...patch.workspace } }
+        : {}),
+      agentResourceProfile: "small",
+      purpose: "reclaim",
     });
     expect(result).toEqual({ enabled: false, reason: "disabled" });
   });

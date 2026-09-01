@@ -1051,8 +1051,23 @@ export interface DiscardedThreadWorktree {
 
 export type ReclaimOutcome =
   | {
+      /** The pass RAN. Per-root success is {@link removed}, not this. */
       ok: true;
       discarded: DiscardedThreadWorktree[];
+      /**
+       * Thread ids whose work root is now GONE — removed by this pass, or
+       * already absent when it started, which owes the same thing.
+       *
+       * The caller drops exactly these pending rows and KEEPS the rest. Before
+       * this existed the script aborted the whole loop on the first failing
+       * `rm -rf`, so one undeletable root made the caller keep every row in the
+       * batch — including roots it had just removed — and oldest-first ordering
+       * pinned the failure at the head of every later batch. Nothing on that
+       * box was ever reclaimed again.
+       */
+      removed: string[];
+      /** True when at least one root could not be removed. The batch still drained. */
+      partial: boolean;
       /**
        * The audit lines were a TAIL. The removal still happened — this says the
        * log beside it is incomplete, never that the reclaim failed.
@@ -1120,8 +1135,14 @@ export function reclaimThreadWorkspacesScript(threadIds: string[]): string {
   const roots = threadIds.map((threadId) => shellQuote(threadWorkRoot(threadId))).join(" ");
   return `# ${RECLAIM_MARKER} reclaim thread workspaces (marker word load-bearing: test fakes match it in the command string — don't remove)
 set -u
+__nadi_failed=0
 for root in ${roots}; do
-  [ -d "$root" ] || continue
+  # A root that is already gone is a SUCCESS, not a skip: the removal it owed
+  # has happened, so it must report DONE or its pending row is never dropped.
+  if [ ! -d "$root" ]; then
+    printf '${RECLAIM_MARKER}\tDONE\t%s\n' "$root"
+    continue
+  fi
   while IFS= read -r gitdir; do
     [ -z "$gitdir" ] && continue
     repo=$(dirname "$gitdir")
@@ -1135,12 +1156,24 @@ for root in ${roots}; do
   done <<EOF
 $(find "$root" -maxdepth ${THREAD_WORKTREE_GIT_SCAN_DEPTH} \\( -type d -o -type f \\) -name .git 2>/dev/null)
 EOF
-  rm -rf "$root" || exit 1
+  # PER-ROOT ACCOUNTING. An early exit here WAS A WEDGE: an abort skipped the
+  # prune tail below and returned non-zero, which made the caller keep EVERY
+  # pending row — including the roots this pass had already removed. Oldest-first
+  # ordering then pins the failing root at the head of every later batch, so no
+  # thread's directory on that box is ever reclaimed again and each wake burns
+  # three failed execs on a turn's first tool call. Record it, keep going, and
+  # report the failure in the exit code once the batch is done.
+  if rm -rf "$root"; then
+    printf '${RECLAIM_MARKER}\tDONE\t%s\n' "$root"
+  else
+    __nadi_failed=1
+  fi
 done
 for clone in ${AGENT_REPOS_ROOT}/*/; do
   [ -d "$clone" ] || continue
   git -C "$clone" worktree prune >/dev/null 2>&1 || true
 done
+exit $__nadi_failed
 `;
 }
 
@@ -1165,16 +1198,26 @@ export async function reclaimThreadWorkspaces(input: {
     timeoutMs: RECLAIM_TIMEOUT_MS,
     label: "reclaim thread workspaces",
   });
-  if (result.exitCode !== 0) {
-    return {
-      ok: false,
-      reason: `reclaim exited ${result.exitCode}: ${result.stderr || result.stdout || "no output"}`,
-    };
-  }
+  // A NON-ZERO EXIT NO LONGER MEANS NOTHING HAPPENED, so this no longer bails
+  // on it. The script records each root's outcome and exits 1 only once the
+  // whole batch has been attempted, so the DONE lines below are what say which
+  // removals actually landed; discarding them on the exit code would re-create
+  // the wedge the per-root accounting exists to prevent.
+  //
+  // A genuine transport failure THROWS out of `execRun` and never reaches here,
+  // which is the only case where nothing in the output can be trusted.
+  const removed: string[] = [];
   const discarded: DiscardedThreadWorktree[] = [];
   for (const line of result.stdout.split("\n")) {
     const fields = line.split("\t");
-    if (fields.length !== 5 || fields[0] !== RECLAIM_MARKER) continue;
+    if (fields[0] !== RECLAIM_MARKER) continue;
+    if (fields.length === 3 && fields[1] === "DONE") {
+      const doneRoot = fields[2] as string;
+      const doneThreadId = doneRoot.slice(doneRoot.lastIndexOf("/") + 1);
+      if (requested.has(doneThreadId)) removed.push(doneThreadId);
+      continue;
+    }
+    if (fields.length !== 5) continue;
     const [, root, repoPath, changesRaw, unpushedRaw] = fields as [
       string,
       string,
@@ -1198,7 +1241,24 @@ export async function reclaimThreadWorkspaces(input: {
       unpushed: countField(unpushedRaw),
     });
   }
-  return { ok: true, discarded, auditTruncated: result.stdoutTruncated };
+  // A ZERO EXIT IS ITSELF THE PROOF, and the DONE lines are only needed when it
+  // is not. The loop has exactly one way to set a non-zero status — an `rm -rf`
+  // that failed — so `exitCode === 0` means every requested root is gone,
+  // whatever survived output truncation. Deriving the whole answer from parsed
+  // stdout instead would make a truncated or unparseable audit look like a
+  // failed removal and retry `rm -rf` against directories that no longer exist,
+  // forever: the exact rule this function's doc already states about output.
+  //
+  // On a NON-zero exit the DONE lines are the only per-root evidence there is,
+  // and they are what stop one undeletable root from stranding its whole batch.
+  const allRemoved = result.exitCode === 0;
+  return {
+    ok: true,
+    discarded,
+    removed: allRemoved ? [...requested] : removed,
+    partial: !allRemoved,
+    auditTruncated: result.stdoutTruncated,
+  };
 }
 
 /** An unparseable count becomes -1, which reads as "unknown" in the log. */

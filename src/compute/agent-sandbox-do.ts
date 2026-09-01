@@ -513,7 +513,6 @@ export class AgentSandbox extends DurableObject<Env> {
         });
         return;
       }
-      this.reclaimFailures = 0;
       // WARN, not info, and one line per worktree. The removal is unconditional
       // by ruling, so this is the only record that a user's uncommitted or
       // unpushed work was destroyed — it is what turns "where did my work go"
@@ -529,9 +528,31 @@ export class AgentSandbox extends DurableObject<Env> {
       if (outcome.auditTruncated) {
         log.warn("compute.thread_workspace_reclaim_audit_truncated", { threadIds });
       }
-      // Deleted only after a reclaim that actually ran. A failed pass keeps
-      // every row, so the removal is owed until it happens.
-      await this.ctx.storage.delete(threadIds.map((threadId) => PENDING_RECLAIM_PREFIX + threadId));
+      // PER-ROOT, NOT PER-BATCH. Drop exactly the rows whose directory is now
+      // gone and KEEP the rest, so one undeletable root cannot hold the whole
+      // batch hostage: `pending` is sorted oldest-first, so an all-or-nothing
+      // delete pinned a permanently failing root at the head of every later
+      // batch and no thread on that box was ever reclaimed again.
+      // CONSECUTIVE, so the cap still bounds a permanently failing `rm` to three
+      // attempts per wake rather than stalling the first tool call of every
+      // turn. Reset only on a pass that removed everything it asked for — a
+      // partial pass DRAINED the batch, which is the fix, but the root it could
+      // not remove is still a failure and must count as one.
+      if (outcome.partial) {
+        this.reclaimFailures += 1;
+        log.warn("compute.thread_workspace_reclaim_partial", {
+          requested: threadIds.length,
+          removed: outcome.removed.length,
+          consecutiveFailures: this.reclaimFailures,
+        });
+      } else {
+        this.reclaimFailures = 0;
+      }
+      if (outcome.removed.length > 0) {
+        await this.ctx.storage.delete(
+          outcome.removed.map((threadId) => PENDING_RECLAIM_PREFIX + threadId),
+        );
+      }
     })().catch((error) => {
       this.reclaimFailures += 1;
       log.warn("compute.thread_workspace_reclaim_failed", {
@@ -837,6 +858,18 @@ export class AgentSandbox extends DurableObject<Env> {
       // roots of threads that have ended, and `worktree prune` removes only
       // registrations whose directory is already gone — so this is a preference,
       // not an invariant.
+      //
+      // ACCEPTED, UNBOUNDED DEBT, RECORDED HERE BECAUSE IT IS RECORDED NOWHERE
+      // ELSE: this hook is the ONLY thing that pays reclaim debt, and it runs
+      // only on a turn. An agent whose threads are ALL archived therefore
+      // accrues `/workspace/threads/*` forever — nothing wakes the box to
+      // collect it, and its disk grows with every retired thread until the
+      // agent is deleted. That follows directly from the never-wake-a-hibernated
+      // -sprite-to-delete-a-directory ruling and is the price of it, not an
+      // oversight. It compounds with the phase's other accepted disk debt (a
+      // removed repository's canonical clone lingers, per the spec) and neither
+      // has a bound. Anything that reclaims this has to answer the question the
+      // ruling settled: what makes waking a box worth the bill.
       ...(options.prepareWorkspace
         ? {
             ensureThreadWorkspace: async () => {
@@ -1133,6 +1166,13 @@ export class AgentSandbox extends DurableObject<Env> {
         prepareWorkspace: false,
         supportsProcessMonitor: params.supportsProcessMonitor,
         runtimeConfig: params.runtimeConfig,
+        // A DISABLED agent's box must still be reachable to be put to SLEEP.
+        // Without this the resolve returns null, `markIdle` never runs, and the
+        // row pins `active` forever: `listReclaimCandidates` keeps offering an
+        // agent whose reclaim can only refuse, and the workspace loses a slot
+        // per disabled agent until each is deleted. A reclaim can never
+        // destroy, which is what makes lifting the gate safe here.
+        purpose: "reclaim",
         workHorizon: "roster",
         ...(params.attachedRuntime ? { attachedRuntime: params.attachedRuntime } : {}),
       });
@@ -1230,11 +1270,16 @@ export class AgentSandbox extends DurableObject<Env> {
         return this.resolveService(params.threadId, {
           workspaceThreadId: params.workspaceThreadId ?? params.threadId,
           // NOT the alarm's job — see the option's doc. The tick issues no
-          // model commands; its only `exec` is the cleanliness probe, whose
-          // verdict a setup script could flip from discard to preserve.
+          // model commands.
           prepareWorkspace: false,
           supportsProcessMonitor: params.supportsProcessMonitor,
           runtimeConfig: params.runtimeConfig,
+          // The tick is what RELEASES an idle box, so it needs the same lift as
+          // the reclaim RPC: a disabled agent's box would otherwise never reach
+          // `releaseIfIdle`, and its ledger row would never go `idle`. This is
+          // also what makes the slot free itself one idle timeout after the
+          // disable, instead of only under cap pressure.
+          purpose: "reclaim",
           // FINDING 1. The fallback `workHorizon` below only runs when the
           // tick armed NOTHING (`armed === false` in `runSandboxComputeAlarm`),
           // so on the ordinary armed path the roster fold used to be skipped

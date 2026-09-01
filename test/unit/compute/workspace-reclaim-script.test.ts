@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -161,7 +161,7 @@ function runProbe(root: string) {
       stderr: result.stderr,
       stdoutTruncated: false,
     };
-  });
+  }, PROBE_SCRIPT);
 }
 
 describe("reclaimThreadWorkspacesScript against a real git", () => {
@@ -244,8 +244,70 @@ describe("reclaimThreadWorkspacesScript against a real git", () => {
   it("reports nothing for a thread whose directory is already gone, and still succeeds", async () => {
     const root = box([]);
     const outcome = await runReclaim(root, [THREAD_A]);
-    expect(outcome).toEqual({ ok: true, discarded: [], auditTruncated: false });
+    // `removed` includes it: a root that is already gone owes exactly the same
+    // thing a root this pass deleted owes, so its pending row must drop too.
+    // Left out, the row would be retried forever against a directory that will
+    // never exist.
+    expect(outcome).toEqual({
+      ok: true,
+      discarded: [],
+      removed: [THREAD_A],
+      partial: false,
+      auditTruncated: false,
+    });
   });
+
+  /**
+   * THE WEDGE, END TO END AGAINST A REAL /bin/sh.
+   *
+   * The script used to `rm -rf "$root" || exit 1`. One undeletable root aborted
+   * the loop, skipped the `worktree prune` tail, and returned non-zero — so the
+   * caller kept EVERY pending row in the batch, including the roots it had just
+   * removed. `pending` is sorted oldest-first, so the failing root was pinned at
+   * the head of every later batch: no thread's directory on that box was ever
+   * reclaimed again, and each wake burned three failed execs on the first tool
+   * call of a turn.
+   *
+   * A read-only PARENT is what makes `rm -rf` genuinely fail as an unbounded
+   * user — the same shape as a root the sandbox cannot unlink. Skipped as root,
+   * where permission bits do not apply and the premise is not reproducible.
+   */
+  it.skipIf(process.getuid?.() === 0)(
+    "REGRESSION: a root that cannot be removed does not strand the rest of the batch",
+    async () => {
+      const root = box([THREAD_A, THREAD_B]);
+      const undeletable = join(root, "threads", THREAD_A);
+      // A read-only directory INSIDE A's root, not A's parent: the parent is
+      // shared with B, and locking that would make BOTH undeletable and prove
+      // nothing about draining the batch.
+      const locked = join(undeletable, "locked");
+      mkdirSync(locked);
+      writeFileSync(join(locked, "pinned"), "x");
+      // ANTI-VACUITY: both roots exist, and only A is unremovable.
+      expect(existsSync(undeletable)).toBe(true);
+      expect(existsSync(join(root, "threads", THREAD_B))).toBe(true);
+      chmodSync(locked, 0o500);
+      try {
+        expect(sh(`rm -rf "${undeletable}"`, root).status).not.toBe(0);
+        expect(existsSync(undeletable)).toBe(true);
+
+        const outcome = await runReclaim(root, [THREAD_A, THREAD_B]);
+
+        expect(outcome.ok).toBe(true);
+        // B drained even though A could not: its pending row is dropped and it
+        // is not offered again.
+        expect(outcome.ok && outcome.removed).toEqual([THREAD_B]);
+        expect(outcome.ok && outcome.partial).toBe(true);
+        // And the tail still ran — the prune is what keeps git's worktree
+        // registrations from outliving the directories.
+        expect(gitOut(clonePath(root), "worktree", "list")).not.toContain(
+          worktreePath(root, THREAD_B),
+        );
+      } finally {
+        chmodSync(locked, 0o700);
+      }
+    },
+  );
 
   it("reclaims several threads in ONE command", async () => {
     const root = box([THREAD_A, THREAD_B]);
@@ -316,13 +378,30 @@ describe("reclaimThreadWorkspaces output handling", () => {
     };
   }
 
-  it("fails on a non-zero exit, so the pending rows are kept and retried", async () => {
+  /**
+   * A NON-ZERO EXIT NO LONGER MEANS NOTHING HAPPENED, and that is the whole
+   * point of the per-root accounting.
+   *
+   * The script used to `exit 1` on the first failing `rm -rf`, which aborted the
+   * loop, skipped the `worktree prune` tail, and made this function report total
+   * failure — so the caller kept EVERY pending row in the batch, including the
+   * roots already removed. `pending` is sorted oldest-first, so the failing root
+   * was pinned at the head of every later batch: nothing on that box was ever
+   * reclaimed again, and each wake burned three failed execs on the first tool
+   * call of a turn.
+   */
+  it("REGRESSION: a partial failure still reports the roots that WERE removed", async () => {
     const outcome = await reclaimThreadWorkspaces({
-      threadIds: [THREAD_A],
-      service: serviceReturning({ exitCode: 1, stdout: "", stderr: "rm: permission denied" }),
+      threadIds: [THREAD_A, THREAD_B],
+      service: serviceReturning({
+        exitCode: 1,
+        stdout: `${RECLAIM_MARKER}\tDONE\t${threadWorkRoot(THREAD_A)}`,
+        stderr: "rm: permission denied",
+      }),
     });
-    expect(outcome.ok).toBe(false);
-    expect(outcome.ok === false && outcome.reason).toContain("rm: permission denied");
+    expect(outcome.ok).toBe(true);
+    expect(outcome.ok && outcome.removed).toEqual([THREAD_A]);
+    expect(outcome.ok && outcome.partial).toBe(true);
   });
 
   /**
@@ -348,6 +427,14 @@ describe("reclaimThreadWorkspaces output handling", () => {
     expect(outcome).toEqual({
       ok: true,
       discarded: [{ threadId: THREAD_A, path: "/w", changes: -1, unpushed: 2 }],
+      // The exit was ZERO, which is itself the proof that every requested root
+      // is gone — the loop's only route to a non-zero status is a failed
+      // `rm -rf`. Deriving `removed` from parsed stdout instead would make a
+      // truncated or garbled audit look like a failed removal and retry the
+      // `rm -rf` forever. The DONE lines carry the answer only when the exit
+      // says something went wrong.
+      removed: [THREAD_A],
+      partial: false,
       auditTruncated: false,
     });
   });
@@ -355,8 +442,18 @@ describe("reclaimThreadWorkspaces output handling", () => {
   it("flags a truncated audit without failing the reclaim", async () => {
     const outcome = await reclaimThreadWorkspaces({
       threadIds: [THREAD_A],
-      service: serviceReturning({ exitCode: 0, stdout: "", stdoutTruncated: true }),
+      service: serviceReturning({
+        exitCode: 0,
+        stdout: `${RECLAIM_MARKER}\tDONE\t${threadWorkRoot(THREAD_A)}`,
+        stdoutTruncated: true,
+      }),
     });
-    expect(outcome).toEqual({ ok: true, discarded: [], auditTruncated: true });
+    expect(outcome).toEqual({
+      ok: true,
+      discarded: [],
+      removed: [THREAD_A],
+      partial: false,
+      auditTruncated: true,
+    });
   });
 });

@@ -89,13 +89,29 @@ export interface AgentComputeSettings {
 /**
  * Why a compute session is being resolved.
  *
- * `"work"` (the default) is every ordinary resolve: a turn, a tool, the idle
- * alarm. `"teardown"` is the one caller that is DESTROYING the machine rather
- * than using it, and it lifts exactly the two gates that describe the AGENT's
- * availability rather than the machine's existence — see
- * `resolveEffectiveComputeConfig`.
+ * Three answers, and the two non-`work` ones exist for the same reason stated
+ * twice: **"you may not WORK here" must never become "your machine is now
+ * unreachable".** Once it does, the machine either bills forever or wedges a
+ * workspace, and no user action can reach it.
+ *
+ * - `"work"` — every ordinary resolve: a turn, a tool.
+ * - `"teardown"` — the caller is DESTROYING the machine. Lifts every gate that
+ *   describes the AGENT's availability, and (since P3) the two that describe
+ *   whether the agent is ALLOWED a machine, because neither says anything about
+ *   whether one already exists.
+ * - `"reclaim"` — the caller is RELEASING the machine: putting it to sleep, or
+ *   ticking the alarm that decides to. It lifts `agents.enabled` and nothing
+ *   else. A disabled agent's box is live and intentional, and if nothing can
+ *   resolve for it, nothing can ever mark its ledger row `idle` — so it holds a
+ *   workspace concurrency slot until the agent is deleted. `archived_at` is
+ *   deliberately NOT lifted: an archived agent's box is being destroyed, its
+ *   row is already excluded from reclaim candidates, and ticking against a
+ *   destroyed sprite would only produce errors.
+ *
+ * A reclaim can never destroy — `releaseIfReclaimable` takes the recoverable
+ * disposition unconditionally — which is what makes lifting a gate for it safe.
  */
-export type ComputeResolvePurpose = "work" | "teardown";
+export type ComputeResolvePurpose = "work" | "teardown" | "reclaim";
 
 export interface EffectiveComputeConfig {
   provider: ComputeProviderId;

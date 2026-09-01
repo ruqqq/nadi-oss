@@ -25,7 +25,20 @@ export interface SpriteReconcileResult {
   orphans: number;
   deleted: number;
   staleAcquiring: number;
+  /** True when the pass only REPORTED orphans. See `SPRITE_RECONCILER_DRY_RUN`. */
+  dryRun?: boolean;
   skipped?: "no_system_key" | "acquire_in_flight";
+}
+
+/**
+ * Opt-in log-only mode, read from `env.SPRITE_RECONCILER_DRY_RUN`.
+ *
+ * Exactly the string `"true"` enables it. Anything else — absent, empty,
+ * `"1"`, `"yes"` — reaps for real, which is the deliberate direction: a
+ * mistyped flag must not silently disable the only collector this phase has.
+ */
+export function parseSpriteReconcilerDryRun(value: unknown): boolean {
+  return typeof value === "string" && value.trim().toLowerCase() === "true";
 }
 
 /**
@@ -66,7 +79,7 @@ export interface SpriteReconcileResult {
  */
 export async function reconcileOrphanSprites(
   env: Env,
-  options: { client?: SpritesClient; now?: () => number } = {},
+  options: { client?: SpritesClient; now?: () => number; dryRun?: boolean } = {},
 ): Promise<SpriteReconcileResult> {
   const apiKey = env.SPRITES_API_KEY?.trim();
   const client = options.client ?? (apiKey ? createSpritesClient({ apiKey }) : null);
@@ -74,6 +87,7 @@ export async function reconcileOrphanSprites(
     return { scanned: 0, orphans: 0, deleted: 0, staleAcquiring: 0, skipped: "no_system_key" };
 
   const now = (options.now ?? (() => Date.now()))();
+  const dryRun = options.dryRun ?? parseSpriteReconcilerDryRun(env.SPRITE_RECONCILER_DRY_RUN);
   const ledger = new AgentSandboxLedger(registryBinding(env));
 
   // FIRST, so a permanently wedged acquire cannot pin guard 3 open forever.
@@ -111,9 +125,50 @@ export async function reconcileOrphanSprites(
   // be. The live smoke settles the pagination shape; see the report.
   const { names } = await client.listSprites();
   log.info("compute.sprite_reconcile_listed", { returned: names.length });
+
+  // GUARD 3, SECOND HALF — and without it the first half misses by two
+  // statements. A cold start that begins AFTER the `countAcquiringSince` above
+  // writes its `acquiring` row too late to be counted, and creates its sprite
+  // AFTER `known` was read — so the machine is in `names`, absent from `known`,
+  // and gets deleted out from under a live turn. Re-checking here closes the
+  // window: any acquire that touched the ledger at any point during this pass
+  // aborts it. Deferring costs a day; reaping a machine mid-provision costs a
+  // user's filesystem, and the whole pass is discretionary.
+  const inFlightAfter = await ledger.countAcquiringSince(now - ACQUIRE_GRACE_MS);
+  if (inFlightAfter > 0) {
+    log.info("compute.sprite_reconcile_deferred", {
+      acquiring: inFlightAfter,
+      staleAcquiring,
+      phase: "after_listing",
+    });
+    return {
+      scanned: names.length,
+      orphans: 0,
+      deleted: 0,
+      staleAcquiring,
+      skipped: "acquire_in_flight",
+    };
+  }
+
   const orphans = names.filter(
     (name) => name.startsWith(RECONCILABLE_SPRITE_PREFIX) && !known.has(name),
   );
+
+  // THE DRY RUN. Guard 1's premise — that no pre-P3 sprite carries
+  // `RECONCILABLE_SPRITE_PREFIX` — is asserted against this repo's own code and
+  // has never been checked against the real fleet, and the first cron after
+  // deploy deletes on that assumption. One flag buys a log-only pass that names
+  // every sprite it WOULD have destroyed, so the assumption can be read off
+  // production before anything is irreversible. Default is OFF (a `true` string
+  // opts in), because the flag's other setting must not be a way to silently
+  // stop the only collector: a deployment that forgets to unset it sees a
+  // steady `would_reap` line, not silence.
+  if (dryRun) {
+    for (const name of orphans) {
+      log.warn("compute.sprite_orphan_would_reap", { spriteName: name });
+    }
+    return { scanned: names.length, orphans: orphans.length, deleted: 0, staleAcquiring, dryRun };
+  }
 
   let deleted = 0;
   for (const name of orphans) {
