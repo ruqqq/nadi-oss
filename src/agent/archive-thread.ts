@@ -8,6 +8,7 @@ import {
   type ArchivedCompactionRow,
 } from "../db/repositories/archived-compactions";
 import { log } from "../log";
+import { releaseThreadWorkspace } from "../compute/agent-sandbox-client";
 import { reconcileThreadSearchProjectionFromMessages } from "../thread-knowledge/projector";
 
 export type ArchiveOutcome = "archived" | "already_archived" | "active_turn" | "empty_snapshot";
@@ -53,6 +54,7 @@ export async function archiveThreadCore(env: Env, threadId: string): Promise<Arc
     const messages = await archivedMessages.listForThread(threadId);
     await refreshArchivedSearchProjection(env, repo, threadId, thread.updatedAt, messages);
     await repo.archive(threadId, Date.now());
+    await releaseThreadWorkspace(env, { threadId, agentId: thread.agentId });
     return "archived";
   }
 
@@ -87,6 +89,14 @@ export async function archiveThreadCore(env: Env, threadId: string): Promise<Arc
   await new ArchivedCompactionRepository(db).replaceForThread(threadId, compactions);
   await refreshArchivedSearchProjection(env, repo, threadId, thread.updatedAt, messages);
   await repo.archive(threadId, Date.now());
+
+  // AFTER the index write, never before it. Archive is terminal — the snapshot
+  // is in D1, `archived_at` is set, the DO is destroyed one line below, and
+  // there is no unarchive path anywhere in the app — so the thread's working
+  // directory is owed a removal from the moment this row lands. Marking it
+  // before the write would owe a removal for a thread whose archive could still
+  // fail and leave it active.
+  await releaseThreadWorkspace(env, { threadId, agentId: thread.agentId });
 
   try {
     await stub.destroy();

@@ -1,4 +1,5 @@
 import type { Env } from "../env";
+import { log } from "../log";
 import type { BackendReference } from "./backend";
 import type { ComputeResolvePurpose, EffectiveComputeConfig } from "./types";
 import {
@@ -187,6 +188,39 @@ export async function openSandboxSession(
     opened.value.workspaceId,
     opened.value.config,
   );
+}
+
+/**
+ * Tell the agent's box that a thread has ENDED and its working directory can go.
+ *
+ * BEST-EFFORT AND LAZY, both deliberately. Lazy: this records a debt on the DO
+ * and returns — it runs no command, wakes no sprite, and arms no alarm, because
+ * auto-archive is a cron over many idle threads and eager removal would wake
+ * every idle agent's box nightly to delete a directory nobody is waiting on.
+ * Best-effort: a thread's archive or deletion must not fail because a Durable
+ * Object could not be reached, and the cost of a lost mark is a directory that
+ * lingers in a box until that box is released — money, never work.
+ *
+ * `agentId` comes from the ending thread's own row, which is the only authority
+ * on which box holds its directory. It is also the DO key — see
+ * {@link agentSandboxFor}.
+ */
+export async function releaseThreadWorkspace(
+  env: Env,
+  input: { threadId: string; agentId: string },
+): Promise<void> {
+  try {
+    const result = await agentSandboxFor(env, input.agentId).releaseThreadWorkspace({
+      threadId: input.threadId,
+    });
+    if (!result.ok) throw decodeSandboxError(result.error);
+  } catch (error) {
+    log.warn("compute.release_thread_workspace_failed", {
+      threadId: input.threadId,
+      agentId: input.agentId,
+      error: String(error),
+    });
+  }
 }
 
 /**

@@ -299,4 +299,66 @@ describe("archiveThreadCore", () => {
     });
     expect(await archiveThreadCore(env, threadId)).toBe("already_archived");
   });
+
+  /**
+   * P3 TASK 4 — ARCHIVE IS THE TRIGGER, and it is the right one because it is
+   * TERMINAL: the transcript is snapshotted to D1, `archived_at` is set, the DO
+   * is destroyed, and there is no unarchive path anywhere in the app (no route,
+   * no repository method, no UI action ever writes `archivedAt` back to null).
+   * That is what makes an unconditional reclaim of the thread's worktree safe.
+   *
+   * What is asserted here is only the DEBT, not the removal: ending a thread
+   * must never run a command or wake a sprite. The removal itself is
+   * `thread-workspace-reclaim.integration.test.ts`.
+   */
+  describe("marks the thread's sandbox workspace for reclaim", () => {
+    /** Mirrors `AgentSandbox`'s own `PENDING_RECLAIM_PREFIX`. */
+    const PENDING_RECLAIM_PREFIX = "sb:rc:";
+    /** ...and its `ALARM_PARAMS_KEY`, which every `session()` open writes. */
+    const ALARM_PARAMS_KEY = "sandbox:alarm-params";
+
+    const boxFor = (agentId: string) =>
+      env.AGENT_SANDBOX.get(env.AGENT_SANDBOX.idFromName(agentId));
+
+    async function pending(agentId: string): Promise<string[]> {
+      return await runInDurableObject(boxFor(agentId), async (_instance, state) => {
+        const rows = await state.storage.list<number>({ prefix: PENDING_RECLAIM_PREFIX });
+        return [...rows.keys()].map((key) => key.slice(PENDING_RECLAIM_PREFIX.length));
+      });
+    }
+
+    async function archiveOneMessageThread(threadId: string, agentId: string) {
+      await seedRegistryThread(env.REGISTRY_DB, { threadId, agentId, runtime: "think" });
+      const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
+      await runInThinkDo(stub, async (instance: any) => {
+        await instance.__unsafe_ensureInitialized();
+        await instance.addMessages([{ id: "m1", role: "user", parts: [] }]);
+      });
+      expect(await archiveThreadCore(env, threadId)).toBe("archived");
+    }
+
+    it("records the debt on the AGENT's box", async () => {
+      const agentId = "agent_arch_reclaim";
+      // The evidence `releaseThreadWorkspace` requires: a box that has opened a
+      // session at least once, i.e. one that can actually hold a thread
+      // directory. Written directly because this suite is about the archive
+      // trigger, not about compute resolution.
+      await runInDurableObject(boxFor(agentId), async (_instance, state) => {
+        await state.storage.put(ALARM_PARAMS_KEY, {
+          threadId: "thr_core_reclaim",
+          supportsProcessMonitor: false,
+          runtimeConfig: { workspaceId: "ws-x", agentId },
+        });
+      });
+
+      await archiveOneMessageThread("thr_core_reclaim", agentId);
+      expect(await pending(agentId)).toEqual(["thr_core_reclaim"]);
+    });
+
+    it("records nothing on a box that has never opened a session", async () => {
+      const agentId = "agent_arch_no_box";
+      await archiveOneMessageThread("thr_core_reclaim_nobox", agentId);
+      expect(await pending(agentId)).toEqual([]);
+    });
+  });
 });

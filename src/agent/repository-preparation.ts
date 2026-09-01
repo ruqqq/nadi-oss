@@ -10,9 +10,11 @@ import { parseEnvVarsJson } from "../compute/env-vars";
 import {
   AGENT_REPOS_ROOT,
   LEGACY_WORKSPACE_ROOT,
+  RECLAIM_MARKER,
   RESERVED_WORKSPACE_DIR_NAMES,
   PREPARED_GATE_MARKER,
   PREPARED_SENTINEL_NAME,
+  THREAD_WORKTREE_GIT_SCAN_DEPTH,
   WORKSPACE_ROOT,
   agentClonePath,
   threadWorkRoot,
@@ -1004,4 +1006,171 @@ function shellQuote(value: string): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/* ------------------------------------------------------------------------- *
+ * RECLAIM — the inverse of `ensureThreadWorktree`, kept in this file on
+ * purpose: the reason the reclaim leaves the BRANCH behind is written down at
+ * the `add` site, and the two have to be read together or the next person
+ * deletes it "for tidiness" and takes every unpushed commit with it.
+ * ------------------------------------------------------------------------- */
+
+/** The service a reclaim runs on — one run-to-completion command, nothing else. */
+export type ReclaimExecService = Pick<ThreadComputeService, "execRun">;
+
+/**
+ * Generous, and for one reason: `rm -rf` of a prepared checkout is
+ * `node_modules`-sized. Shorter than the setup timeout because nothing here
+ * builds anything.
+ */
+const RECLAIM_TIMEOUT_MS = 5 * 60 * 1000;
+
+/** One worktree the reclaim destroyed, and what was in it when it did. */
+export interface DiscardedThreadWorktree {
+  threadId: string;
+  path: string;
+  /** `git status --porcelain` line count — uncommitted changes, gone with it. */
+  changes: number;
+  /** Commits that existed only inside the box (`rev-list HEAD --not --remotes`). */
+  unpushed: number;
+}
+
+export type ReclaimOutcome =
+  | {
+      ok: true;
+      discarded: DiscardedThreadWorktree[];
+      /**
+       * The audit lines were a TAIL. The removal still happened — this says the
+       * log beside it is incomplete, never that the reclaim failed.
+       */
+      auditTruncated: boolean;
+    }
+  | { ok: false; reason: string };
+
+/**
+ * THE reclaim command. One `exec` for a BATCH of threads, not one per thread:
+ * an agent whose auto-archive cron retired 300 threads between two turns would
+ * otherwise pay 300 round trips on the first tool call of the next turn.
+ *
+ * What it does, in order, per thread:
+ *
+ *  1. AUDIT FIRST. For every worktree under the thread's work root, emit its
+ *     dirty-file count and its unpushed-commit count. The removal below is
+ *     unconditional — no dirty check, no unpushed check, the user's explicit
+ *     call, since the work ledger already pressures the model to push — so this
+ *     line is the only thing that can ever answer "where did my work go". It
+ *     costs two git commands on a box that is awake anyway.
+ *  2. `rm -rf` the thread's work root — its worktrees, its scratch files and
+ *     the preparation sentinel that lives inside it, all in one.
+ *  3. `git worktree prune` in every clone under the agent's repo root, which is
+ *     what clears the administrative record the removed directory left behind.
+ *
+ * THE BRANCH IS DELIBERATELY LEFT. `prune` clears the registration and never
+ * the branch, and neither `branch -D` nor `add -B` is used here, because both
+ * discard commits the thread made and never pushed — permanently, with nothing
+ * to restore from. The unconditional-removal ruling is about the WORKTREE, and
+ * a checkout can be recreated from its branch; the branch is the only copy of
+ * those commits. `ensureThreadWorktree` re-attaches an orphaned branch rather
+ * than failing on it, so the cost of keeping one is a ref per archived thread
+ * in the clone, and the benefit is that reclaiming a thread whose work was
+ * committed-but-not-pushed stays recoverable at all.
+ *
+ * The repo root is swept by GLOB rather than from the agent's configured
+ * repository list, and that is load-bearing twice over: a DELETED thread has no
+ * `thread_index` row left to read a config from, and a repository dropped from
+ * the agent's config since would keep its stale registration forever.
+ *
+ * Every interpolated value is a constant or has been through
+ * `assertSafeSegment` in `workspace-layout`, so none can carry a metacharacter.
+ */
+export function reclaimThreadWorkspacesScript(threadIds: string[]): string {
+  if (threadIds.length === 0) throw new Error("reclaim script requires at least one thread");
+  const roots = threadIds.map((threadId) => shellQuote(threadWorkRoot(threadId))).join(" ");
+  return `# ${RECLAIM_MARKER} reclaim thread workspaces (marker word load-bearing: test fakes match it in the command string — don't remove)
+set -u
+for root in ${roots}; do
+  [ -d "$root" ] || continue
+  while IFS= read -r gitdir; do
+    [ -z "$gitdir" ] && continue
+    repo=$(dirname "$gitdir")
+    changes=$(git -C "$repo" status --porcelain 2>/dev/null | grep -c . || true)
+    if git -C "$repo" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' >/dev/null 2>&1; then
+      unpushed=$(git -C "$repo" rev-list --count '@{upstream}..HEAD' 2>/dev/null || echo 0)
+    else
+      unpushed=$(git -C "$repo" rev-list --count HEAD --not --remotes 2>/dev/null || echo 0)
+    fi
+    printf '${RECLAIM_MARKER}\\t%s\\t%s\\t%s\\t%s\\n' "$root" "$repo" "$changes" "$unpushed"
+  done <<EOF
+$(find "$root" -maxdepth ${THREAD_WORKTREE_GIT_SCAN_DEPTH} \\( -type d -o -type f \\) -name .git 2>/dev/null)
+EOF
+  rm -rf "$root" || exit 1
+done
+for clone in ${AGENT_REPOS_ROOT}/*/; do
+  [ -d "$clone" ] || continue
+  git -C "$clone" worktree prune >/dev/null 2>&1 || true
+done
+`;
+}
+
+/**
+ * Run {@link reclaimThreadWorkspacesScript} and report what it destroyed.
+ *
+ * SUCCESS IS THE EXIT CODE, never the output. Unrecognized stdout is IGNORED
+ * rather than treated as a failure — the opposite of the cleanliness probe, and
+ * deliberately so. The probe's output decides whether to destroy a filesystem,
+ * so anything it cannot parse must fail closed; here the destruction has
+ * already happened by the time the output is read, and failing on a line we
+ * could not parse would leave the pending row in place and re-run `rm -rf`
+ * against a directory that is already gone, on every turn, forever.
+ */
+export async function reclaimThreadWorkspaces(input: {
+  service: ReclaimExecService;
+  threadIds: string[];
+}): Promise<ReclaimOutcome> {
+  const requested = new Set(input.threadIds);
+  const result = await input.service.execRun({
+    command: reclaimThreadWorkspacesScript(input.threadIds),
+    timeoutMs: RECLAIM_TIMEOUT_MS,
+    label: "reclaim thread workspaces",
+  });
+  if (result.exitCode !== 0) {
+    return {
+      ok: false,
+      reason: `reclaim exited ${result.exitCode}: ${result.stderr || result.stdout || "no output"}`,
+    };
+  }
+  const discarded: DiscardedThreadWorktree[] = [];
+  for (const line of result.stdout.split("\n")) {
+    const fields = line.split("\t");
+    if (fields.length !== 5 || fields[0] !== RECLAIM_MARKER) continue;
+    const [, root, repoPath, changesRaw, unpushedRaw] = fields as [
+      string,
+      string,
+      string,
+      string,
+      string,
+    ];
+    // The thread id is the LAST SEGMENT of its work root — that is what
+    // `threadWorkRoot` builds, and `assertSafeSegment` guarantees the id holds
+    // no separator. Read back this way rather than matched against the absolute
+    // path we asked for, so the parser is a function of the id alone: a caller
+    // that runs the same command against a relocated root (the live-shell tests
+    // do exactly that) still gets attributed lines, instead of silently dropping
+    // every one and reporting that nothing was discarded.
+    const threadId = root.slice(root.lastIndexOf("/") + 1);
+    if (!requested.has(threadId)) continue;
+    discarded.push({
+      threadId,
+      path: repoPath,
+      changes: countField(changesRaw),
+      unpushed: countField(unpushedRaw),
+    });
+  }
+  return { ok: true, discarded, auditTruncated: result.stdoutTruncated };
+}
+
+/** An unparseable count becomes -1, which reads as "unknown" in the log. */
+function countField(value: string): number {
+  const parsed = Number.parseInt(value.trim(), 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : -1;
 }

@@ -8,6 +8,8 @@ import { runSandboxComputeAlarm } from "./sandbox-alarm";
 import {
   createRepositoryPreparation,
   currentPreparationSignature,
+  reclaimThreadWorkspaces,
+  type ReclaimExecService,
   type RepositoryPreparationResult,
 } from "../agent/repository-preparation";
 import { probeWorkspaceCleanliness } from "./workspace-cleanliness";
@@ -69,6 +71,51 @@ const SWEEP_ROSTER_PREFIX = "sb:sw:";
  * tool call of a turn.
  */
 const MAX_PREPARATION_ATTEMPTS = 3;
+
+/**
+ * Prefix for the PENDING-RECLAIM set: one tiny row per thread whose working
+ * directory this box still owes a removal, written when the thread ends and
+ * deleted when the box has actually removed it.
+ *
+ * A row rather than an immediate `rm`, because LAZINESS IS THE POINT. Removing
+ * a directory means an `exec`, and an `exec` WAKES the sprite. Auto-archive is
+ * a cron over many idle threads: doing the work eagerly would wake every idle
+ * agent's box nightly and bill them all awake, to delete a directory nobody is
+ * waiting on. The row costs nothing, survives eviction, and is swept the next
+ * time a turn has the box awake for its own reasons.
+ *
+ * Separate from {@link SWEEP_ROSTER_PREFIX} on purpose, and this is the one
+ * place the two must not be conflated: a reclaim target is precisely a thread
+ * LEAVING the roster (the alarm prunes a thread once its ledger is provably
+ * clean, and an archived thread's DO is destroyed), so keying the reclaim off
+ * the roster would both miss every already-pruned thread and require keeping
+ * archived threads rostered — resurrecting the DOs the prune exists to stop
+ * resurrecting.
+ *
+ * Kept SHORT for celld's 49-byte LIKE budget, exactly like the roster prefix.
+ */
+const PENDING_RECLAIM_PREFIX = "sb:rc:";
+
+/**
+ * How many thread workspaces one reclaim pass removes.
+ *
+ * The pass is ONE `exec` whose command names every root, so the cap bounds the
+ * command string rather than a round-trip count. An agent whose auto-archive
+ * cron retired hundreds of threads between two turns would otherwise build a
+ * command tens of kilobytes long on the first tool call of the next turn; what
+ * does not fit is simply reclaimed by the pass after it.
+ */
+const RECLAIM_BATCH_LIMIT = 25;
+
+/**
+ * Consecutive failed reclaim passes per DO wake before this box stops trying.
+ *
+ * Same shape and same reasoning as {@link MAX_PREPARATION_ATTEMPTS}, and IN
+ * MEMORY for the same reason: the cap exists so a permanently failing `rm`
+ * cannot stall the first tool call of every turn, and it must never become a
+ * reason a directory is never reclaimed. It dies with the wake.
+ */
+const MAX_RECLAIM_ATTEMPTS = 3;
 
 /**
  * The session inputs the alarm replays for its TICK. Written on every
@@ -140,6 +187,19 @@ export class AgentSandbox extends DurableObject<Env> {
 
   /** In-flight workspace preparations, keyed by thread — see {@link ensureThreadWorkspacePrepared}. */
   private readonly preparationInFlight = new Map<string, Promise<void>>();
+
+  /**
+   * The in-flight reclaim pass — see {@link reclaimPendingWorkspaces}.
+   *
+   * Not an optimisation, for the same reason the preparation latch is not: two
+   * `exec`s in one turn both reach `ensureWorkspaceRootOnce`, and two
+   * concurrent passes would each read the same pending rows and each issue
+   * `rm -rf` for them. Concurrent callers AWAIT the first pass.
+   */
+  private reclaimInFlight: Promise<void> | undefined;
+
+  /** Consecutive failed reclaim passes this wake — see {@link MAX_RECLAIM_ATTEMPTS}. */
+  private reclaimFailures = 0;
 
   /**
    * Consecutive failed preparations, per thread — see
@@ -370,6 +430,106 @@ export class AgentSandbox extends DurableObject<Env> {
       await run;
     } finally {
       this.preparationInFlight.delete(threadId);
+    }
+  }
+
+  /**
+   * Remove the working directories of threads that have ended, at most one pass
+   * per DO instance at a time.
+   *
+   * WHERE THIS RUNS IS THE DESIGN. It is called from the `ensureThreadWorkspace`
+   * hook — i.e. from `ensureWorkspaceRootOnce`, on the first `exec` of a turn —
+   * and from NOWHERE else. That is "the next acquire" in the plan's sense: the
+   * box is provisioned and awake because a user is using it, so the removal is
+   * free of any wake it did not already owe.
+   *
+   * IT IS DELIBERATELY NOT ON THE ALARM, and this is the one place the plan and
+   * the code differ. The plan's other trigger was "the alarm, if the box is
+   * already awake" — but nothing here can ask whether a sprite is awake without
+   * `exec`ing, which IS the wake. Worse, the alarm's only existing `exec` is the
+   * cleanliness probe, and `resolveIdleDisposition` short-circuits before it on
+   * every provider with `nativeIdleSuspend` (sprites, the provider this phase is
+   * for), so on exactly the deployment that matters an alarm-side reclaim could
+   * only ever be the thing that woke a hibernated box to delete a directory.
+   * The residual is bounded and cheap: an agent that is never used again keeps
+   * some directories until its box is released, which happens anyway.
+   *
+   * NEVER THROWS. Its caller is a hook whose throw would surface as a failed
+   * `ensureWorkspaceRootOnce`, and a bookkeeping removal must not fail a user's
+   * turn.
+   *
+   * `skipWorkspaceThreadId` is the directory the CALLING session is about to
+   * work in. Removing it mid-turn would delete the cwd out from under a live
+   * turn; it is unreachable today (an archived thread cannot open a socket and a
+   * deleted thread has no DO) but the guard is one comparison and the failure it
+   * prevents is silent data loss.
+   */
+  private async reclaimPendingWorkspaces(
+    resolveReclaimService: () => Promise<{ service: ReclaimExecService } | null>,
+    skipWorkspaceThreadId: string,
+  ): Promise<void> {
+    const inFlight = this.reclaimInFlight;
+    if (inFlight) return inFlight;
+    // Nothing may await between the read of `reclaimInFlight` above and the
+    // assignment below — see `ensureThreadWorkspacePrepared` for the same rule
+    // and the same reason.
+    const run = (async () => {
+      if (this.reclaimFailures >= MAX_RECLAIM_ATTEMPTS) return;
+      const rows = await this.ctx.storage.list<number>({ prefix: PENDING_RECLAIM_PREFIX });
+      const pending = [...rows]
+        .map(([key, stamp]) => ({ threadId: key.slice(PENDING_RECLAIM_PREFIX.length), stamp }))
+        .filter((entry) => entry.threadId !== skipWorkspaceThreadId)
+        // Oldest first, so a batch cap can never starve the thread that has
+        // been owed a removal longest.
+        .sort((left, right) => left.stamp - right.stamp)
+        .slice(0, RECLAIM_BATCH_LIMIT);
+      if (pending.length === 0) return;
+      const resolved = await resolveReclaimService();
+      // Compute is disabled or unresolvable: there is no box to remove anything
+      // from, and the rows stay for a turn that has one.
+      if (!resolved) return;
+      const threadIds = pending.map((entry) => entry.threadId);
+      const outcome = await reclaimThreadWorkspaces({ service: resolved.service, threadIds });
+      if (!outcome.ok) {
+        this.reclaimFailures += 1;
+        log.warn("compute.thread_workspace_reclaim_failed", {
+          threadIds,
+          reason: outcome.reason,
+          consecutiveFailures: this.reclaimFailures,
+        });
+        return;
+      }
+      this.reclaimFailures = 0;
+      // WARN, not info, and one line per worktree. The removal is unconditional
+      // by ruling, so this is the only record that a user's uncommitted or
+      // unpushed work was destroyed — it is what turns "where did my work go"
+      // into an answerable question.
+      for (const entry of outcome.discarded) {
+        log.warn("compute.thread_workspace_discarded", {
+          threadId: entry.threadId,
+          path: entry.path,
+          changes: entry.changes,
+          unpushed: entry.unpushed,
+        });
+      }
+      if (outcome.auditTruncated) {
+        log.warn("compute.thread_workspace_reclaim_audit_truncated", { threadIds });
+      }
+      // Deleted only after a reclaim that actually ran. A failed pass keeps
+      // every row, so the removal is owed until it happens.
+      await this.ctx.storage.delete(threadIds.map((threadId) => PENDING_RECLAIM_PREFIX + threadId));
+    })().catch((error) => {
+      this.reclaimFailures += 1;
+      log.warn("compute.thread_workspace_reclaim_failed", {
+        error: String(error),
+        consecutiveFailures: this.reclaimFailures,
+      });
+    });
+    this.reclaimInFlight = run;
+    try {
+      await run;
+    } finally {
+      this.reclaimInFlight = undefined;
     }
   }
 
@@ -628,13 +788,18 @@ export class AgentSandbox extends DurableObject<Env> {
     // `acquisitionInFlight` is undefined while the store already says `active`,
     // so its `readOrAcquireRuntime` returns at once rather than acquiring
     // anything of its own.
+    //
+    // The reclaim shares it, for exactly the same reason: it runs from the same
+    // hook, on the same `exec` path, and a reclaim issued on the caller's
+    // service would await the promise its own exec is settling.
+    const resolveHookService = async () => {
+      const prepared = await this.buildService(threadId, options, {});
+      return prepared ? { service: prepared.service } : null;
+    };
     const prepareRepositories = createRepositoryPreparation({
       env: this.env,
       threadId,
-      resolveComputeService: async () => {
-        const prepared = await this.buildService(threadId, options, {});
-        return prepared ? { service: prepared.service } : null;
-      },
+      resolveComputeService: resolveHookService,
     });
     const resolved = await this.buildService(threadId, options, {
       probeWorkspaceCleanliness: async () => {
@@ -658,9 +823,22 @@ export class AgentSandbox extends DurableObject<Env> {
       // (`createRepositoryPreparation`), where every event that destroys the
       // preparation destroys the record with it — so there is nothing left for
       // a fresh-acquire hook to invalidate.
+      //
+      // THE RECLAIM RIDES THE SAME GATE, and that is not incidental. It is
+      // `prepareWorkspace` that says "this service belongs to a turn, on a box
+      // a user is already using"; the ALARM's service says the opposite, and a
+      // reclaim there would be the thing that woke a hibernated sprite to
+      // delete a directory. See {@link reclaimPendingWorkspaces}.
+      //
+      // BEFORE preparation, so the disk a clone and a setup script are about to
+      // need is freed first. Either order is CORRECT — the reclaim only touches
+      // roots of threads that have ended, and `worktree prune` removes only
+      // registrations whose directory is already gone — so this is a preference,
+      // not an invariant.
       ...(options.prepareWorkspace
         ? {
             ensureThreadWorkspace: async () => {
+              await this.reclaimPendingWorkspaces(resolveHookService, options.workspaceThreadId);
               await this.ensureThreadWorkspacePrepared(threadId, prepareRepositories);
             },
           }
@@ -865,6 +1043,43 @@ export class AgentSandbox extends DurableObject<Env> {
       // anonymous error with its code buried in a `session_failed:`-prefixed
       // message, and `toErrorResult` would show the model a string it cannot
       // act on. Latent today — `resolveComputeService` has no throw of its own.
+      return { ok: false, error: encodeSandboxError(error) };
+    }
+  }
+
+  /**
+   * A thread has ENDED — archived or deleted — so this box owes the removal of
+   * its working directory. Records the debt; removes nothing.
+   *
+   * NO `exec`, NO alarm, NO wake. That is the whole method: the removal happens
+   * on the next turn that has this box awake anyway (see
+   * {@link reclaimPendingWorkspaces}). Arming an alarm here would defeat it —
+   * auto-archive is a cron over many idle threads, and an alarm per archived
+   * thread would wake every idle agent's box to delete a directory nobody is
+   * waiting on.
+   *
+   * A box that has never opened a session records NOTHING. `ALARM_PARAMS_KEY` is
+   * written before the resolve on every `session()` open, so its absence proves
+   * no session has ever run here, and a box no session has run on cannot have a
+   * `/workspace/threads/<id>` to remove. Without that check, archiving a thread
+   * of a compute-less agent would create — and permanently populate — a Durable
+   * Object that nothing else would ever read.
+   *
+   * IDEMPOTENT: a repeated call rewrites one row. Archive is terminal (there is
+   * no unarchive path) and delete is final, so the debt is never withdrawn.
+   */
+  async releaseThreadWorkspace(input: { threadId: string }): Promise<SandboxCallResult<null>> {
+    try {
+      if ((await this.ctx.storage.get(ALARM_PARAMS_KEY)) === undefined) {
+        return { ok: true, value: null };
+      }
+      await this.ctx.storage.put<number>(PENDING_RECLAIM_PREFIX + input.threadId, Date.now());
+      return { ok: true, value: null };
+    } catch (error) {
+      log.warn("agent_sandbox.release_thread_workspace_failed", {
+        threadId: input.threadId,
+        error: String(error),
+      });
       return { ok: false, error: encodeSandboxError(error) };
     }
   }

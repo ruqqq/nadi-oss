@@ -19,6 +19,7 @@ import { decodeThreadCursor, encodeThreadCursor, fingerprintThreadQuery } from "
 import { notifyWorkspaceMembers } from "../agent/notify-user";
 import { normalizeThreadRuntime } from "../agent/thread-runtime";
 import { archiveThreadCore } from "../agent/archive-thread";
+import { releaseThreadWorkspace } from "../compute/agent-sandbox-client";
 import { createThreadWithAgent } from "../agent/create-thread";
 import { AgentRepository } from "../db/repositories/agents";
 import { ArchivedMessageRepository } from "../db/repositories/archived-messages";
@@ -863,6 +864,12 @@ async function archiveThread(
     // user retry must be able to clear a stale empty row from active lists.
     // Mark it archived without destroying a possibly-unhydrated DO.
     await repo.archive(threadId, Date.now());
+    // The SECOND archive write in this system, and therefore the second place
+    // the thread's working directory becomes owed. `archiveThreadCore` marks it
+    // on its own paths and refuses this one, so a mark here is not a duplicate:
+    // without it a thread archived through the empty-snapshot escape keeps its
+    // directory in the box forever.
+    await releaseThreadWorkspace(env, { threadId, agentId: thread.agentId });
   }
 
   const archived = await repo.getById(threadId);
@@ -976,6 +983,12 @@ async function deleteThread(
       // Expected: destroy() aborts the isolate after deleting storage.
     }
   }
+
+  // The thread's working directory in the agent's shared box goes with it.
+  // Marked here rather than only on archive because a thread can be deleted
+  // while still active, and an unarchived delete would otherwise leave
+  // `/workspace/threads/<id>` behind with nothing left that names it.
+  await releaseThreadWorkspace(env, { threadId, agentId: thread.agentId });
 
   await new ArchivedMessageRepository(db).deleteForThread(threadId);
   // The summaries are archived alongside the raw transcript — delete them with it,

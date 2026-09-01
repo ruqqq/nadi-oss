@@ -132,6 +132,35 @@ export function threadWorktreeBranch(threadId: string): string {
 }
 
 /**
+ * A marker word carried by the thread-workspace RECLAIM command, and by nothing
+ * else.
+ *
+ * Same job as {@link PREPARED_GATE_MARKER} and `PROBE_SCRIPT`'s "PROBE": test
+ * fakes cannot run a shell, so they recognise the command by its text. It must
+ * not be a substring of either of those, and neither of those a substring of
+ * it, or a fake answering one would answer the other — which is exactly how the
+ * preparation gate once answered the cleanliness probe and turned a dirty
+ * workspace into "could not verify".
+ */
+export const RECLAIM_MARKER = "NADI-RECLAIM";
+
+/**
+ * How deep under a THREAD's work root that thread's `.git` sits — DERIVED from
+ * the layout, never written down as a number.
+ *
+ * `/workspace/threads/<id>` / `<checkoutPathName>` / `.git`: one segment plus
+ * the `.git` entry itself. The reclaim's pre-removal audit bounds its `find`
+ * with this, and a bound one level short reports NOTHING discarded for a
+ * worktree that was about to be deleted with uncommitted work in it — the log
+ * line that exists to make "where did my work go" answerable would be silently
+ * empty, and nothing else would notice.
+ */
+export const THREAD_WORKTREE_GIT_SCAN_DEPTH =
+  threadWorktreePath("thr_depth-probe", "repo")
+    .slice(threadWorkRoot("thr_depth-probe").length + 1)
+    .split("/").length + 1;
+
+/**
  * How deep under `WORKSPACE_ROOT` a repository's `.git` can sit — DERIVED from
  * the layout above, never written down as a number.
  *
