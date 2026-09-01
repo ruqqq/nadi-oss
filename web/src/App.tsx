@@ -88,7 +88,7 @@ import { purgeCachedHistory, writeCachedHistory } from "./lib/thread-history-cac
 import { shouldPersistSettledMessages } from "./lib/thread-history-cache-policy";
 import { OfflineProvider, useOffline } from "./lib/use-offline";
 import { ProjectPicker } from "./components/projects/ProjectPicker";
-import { WorkbenchPicker } from "./components/workbenches/WorkbenchPicker";
+import { AgentOverridePicker, AgentPicker } from "./components/agents/AgentPicker";
 import { AutomataPanel } from "./components/automata/AutomataPanel";
 import { InvitesPanel } from "./components/invites/InvitesPanel";
 import { ProjectsPanel } from "./components/projects/ProjectsPanel";
@@ -125,13 +125,13 @@ import {
   moveThreadToProject,
   renameThread,
   setThreadRecentDismissed,
-  switchThreadAgent as switchThreadWorkbench,
+  switchThreadAgent,
   updateThreadReasoningEffort,
   type ThreadSummary,
   fetchArchivedSummaries,
 } from "./threads-api";
 import { createProject, listProjects, type ProjectSummary } from "./projects-api";
-import { listAgents as listWorkbenches, type AgentSummary as WorkbenchSummary } from "./agents-api";
+import { listAgents, type AgentListItem } from "./agents-api";
 import {
   getBrowserNotifications,
   saveBrowserPushSubscription,
@@ -1464,6 +1464,7 @@ export function ChatApp({
   consentWorkspaceId,
   user,
   initialProjects,
+  initialAgents = [],
   initialThreads,
   initialThreadsNextCursor,
   onActiveWorkspaceChange,
@@ -1477,6 +1478,10 @@ export function ChatApp({
   consentWorkspaceId: string | null;
   user: SessionUser;
   initialProjects: ProjectSummary[];
+  /** Seeded from `/api/bootstrap` so the agent picker has its list at first
+   *  paint; still refreshed below, because Settings can add or remove one.
+   *  Optional: an empty seed just means the picker fills in on the refresh. */
+  initialAgents?: AgentListItem[];
   initialThreads: ThreadSummary[];
   initialThreadsNextCursor: string | null;
   onActiveWorkspaceChange: (workspaceId: string | null) => void;
@@ -1548,14 +1553,14 @@ export function ChatApp({
     [excludedThreadIds],
   );
   const [projects, setProjects] = useState<ProjectSummary[]>(initialProjects);
-  const [workbenches, setWorkbenches] = useState<WorkbenchSummary[]>([]);
+  const [agents, setAgents] = useState<AgentListItem[]>(initialAgents);
   const [inviteQuota, setInviteQuota] = useState<InviteQuota | null>(null);
   const [feedbackThread, setFeedbackThread] = useState<ThreadSummary | null>(null);
   const [feedbackThreadError, setFeedbackThreadError] = useState<Error | null>(null);
   const [newChatProjectId, setNewChatProjectId] = useState<"none" | string>("none");
-  // The new chat's workbench override. "none" = inherit the selected project's
-  // default workbench. Chosen here at start; frozen once the thread exists.
-  const [newChatWorkbenchId, setNewChatWorkbenchId] = useState<"none" | string>("none");
+  // The new chat's agent override. `null` = inherit the selected project's
+  // default agent. Chosen here at start; frozen once the thread exists.
+  const [newChatAgentId, setNewChatAgentId] = useState<string | null>(null);
   const [hubSocket, setHubSocket] = useState<ReturnType<typeof openUserHubSocket> | null>(null);
   const [browserNotifications, setBrowserNotifications] = useState<
     (BrowserNotificationsResponse & { deviceSubscribed: boolean }) | null
@@ -1823,19 +1828,31 @@ export function ChatApp({
     setNewChatProjectId("none");
   }, [newChatProjectId, projects]);
 
-  // Drop a workbench override that no longer exists (archived/removed) back to
+  // Drop an agent override that no longer exists (deleted/disabled) back to
   // "inherit", so the picker never points at a stale id.
   useEffect(() => {
-    if (newChatWorkbenchId === "none") return;
-    if (workbenches.some((workbench) => workbench.id === newChatWorkbenchId)) return;
-    setNewChatWorkbenchId("none");
-  }, [newChatWorkbenchId, workbenches]);
+    if (newChatAgentId === null) return;
+    if (agents.some((agent) => agent.id === newChatAgentId)) return;
+    setNewChatAgentId(null);
+  }, [newChatAgentId, agents]);
 
+  // Bootstrap already seeded the list; this refresh keeps it current with
+  // Settings, which can create, disable, or delete an agent. Narrowed to the
+  // lean shape on the way in, so nothing downstream can start reading a field
+  // the bootstrap payload does not carry.
   useEffect(() => {
     let active = true;
-    void listWorkbenches("active")
-      .then((listedWorkbenches) => {
-        if (active) setWorkbenches(listedWorkbenches);
+    void listAgents("active")
+      .then((listed) => {
+        if (!active) return;
+        setAgents(
+          listed.map(({ id, name, description, enabled }) => ({
+            id,
+            name,
+            description,
+            enabled,
+          })),
+        );
       })
       .catch(() => {});
     return () => {
@@ -2425,11 +2442,10 @@ export function ChatApp({
         newChatProjectId !== "none" && projects.some((project) => project.id === newChatProjectId)
           ? newChatProjectId
           : undefined;
-      // An explicit workbench overrides the project's default; "none" inherits it.
-      const selectedWorkbenchId =
-        newChatWorkbenchId !== "none" &&
-        workbenches.some((workbench) => workbench.id === newChatWorkbenchId)
-          ? newChatWorkbenchId
+      // An explicit agent overrides the project's default; null inherits it.
+      const selectedAgentId =
+        newChatAgentId !== null && agents.some((agent) => agent.id === newChatAgentId)
+          ? newChatAgentId
           : undefined;
       // Two phases. The pending projection covers the create POST. Once it
       // resolves the thread really exists, so the same message id is handed to
@@ -2441,7 +2457,7 @@ export function ChatApp({
         reasoningEffort: newChatReasoningEffort,
         modelSupportsReasoning: newChatModelSupportsReasoning,
         ...(selectedProjectId ? { projectId: selectedProjectId } : {}),
-        ...(selectedWorkbenchId ? { agentId: selectedWorkbenchId } : {}),
+        ...(selectedAgentId ? { agentId: selectedAgentId } : {}),
       })
         .then((thread) => {
           setThreads((current) => mergeThreadsExcluding(current, [thread], excludedThreadIds()));
@@ -2488,14 +2504,14 @@ export function ChatApp({
       navigateToThread,
       consentWorkspaceId,
       newChatProjectId,
-      newChatWorkbenchId,
+      newChatAgentId,
       newChatModel,
       newChatModelInputModalities,
       newChatProvider,
       newChatReasoningEffort,
       newChatModelSupportsReasoning,
       projects,
-      workbenches,
+      agents,
       setResolvedActiveThread,
     ],
   );
@@ -2769,18 +2785,18 @@ export function ChatApp({
       });
   }, []);
 
-  // Switching a thread's workbench is a plain column write server-side:
-  // configuration is live, so the response already carries the new workbench
+  // Switching a thread's agent is a plain column write server-side:
+  // configuration is live, so the response already carries the new agent
   // and its sandbox size, and the next turn picks it up.
-  const switchWorkbench = useCallback(async (threadId: string, workbenchId: string | null) => {
+  const switchAgent = useCallback(async (threadId: string, agentId: string) => {
     try {
-      const updated = await switchThreadWorkbench(threadId, workbenchId);
+      const updated = await switchThreadAgent(threadId, agentId);
       setActiveThread((current) => (current && current.threadId === threadId ? updated : current));
       setThreads((current) => mergeThreadsExcluding(current, [updated], excludedThreadIds()));
-      toast.success("Workbench switched");
+      toast.success("Agent switched");
     } catch (error) {
       setThreadError(error instanceof Error ? error : new Error(String(error)));
-      toast.error("Couldn't switch workbench");
+      toast.error("Couldn't switch agent");
     }
   }, []);
 
@@ -2868,7 +2884,7 @@ export function ChatApp({
     setRoutePath(path);
   }, []);
 
-  // Sub-routing within a Settings tab (e.g. the Workbenches master-detail).
+  // Sub-routing within a Settings tab (e.g. the Agents master-detail).
   // Settings.tsx owns the path computation; this just applies it.
   const navigateSettingsPath = useCallback((path: string, mode: "push" | "replace") => {
     if (mode === "push") pushPath(window.history, window.location, path);
@@ -3168,7 +3184,7 @@ export function ChatApp({
                 onSelect={(id, mode) => selectPanelItem("projects", id, mode)}
                 onBackToList={() => returnToPanelList("projects")}
                 onSelectThread={openThreadFromCurrentScreen}
-                onManageWorkbenches={() => openSettings("workbenches")}
+                onManageAgents={() => openSettings("agents")}
                 closeLabel={panelCloseLabel}
                 onClose={closePanel}
               />
@@ -3291,8 +3307,8 @@ export function ChatApp({
                   onCreateProjectForThread={createProjectForThread}
                   onArchiveThread={archiveThread}
                   onDeleteThread={deleteThread}
-                  workbenches={workbenches}
-                  onSwitchWorkbench={switchWorkbench}
+                  agents={agents}
+                  onSwitchAgent={switchAgent}
                   attachmentAccept={activeThreadAttachmentAccept}
                   voiceEnabled={voiceEnabled}
                   browserNotificationPrompt={
@@ -3392,10 +3408,10 @@ export function ChatApp({
                 modelReasoningControls={newChatReasoningControls}
                 onProjectChange={setNewChatProjectId}
                 onCreateProject={handleCreateProject}
-                workbenchId={newChatWorkbenchId}
-                workbenches={workbenches}
-                onWorkbenchChange={setNewChatWorkbenchId}
-                onManageWorkbenches={() => openSettings("workbenches")}
+                agentId={newChatAgentId}
+                agents={agents}
+                onAgentChange={setNewChatAgentId}
+                onManageAgents={() => openSettings("agents")}
                 attachmentAccept={newChatAttachmentAccept}
                 modelInputModalities={newChatModelInputModalities}
                 voiceEnabled={voiceEnabled}
@@ -3932,10 +3948,10 @@ export function NewChatView({
   modelReasoningControls,
   onProjectChange,
   onCreateProject,
-  workbenchId,
-  workbenches,
-  onWorkbenchChange,
-  onManageWorkbenches,
+  agentId,
+  agents,
+  onAgentChange,
+  onManageAgents,
   attachmentAccept,
   modelInputModalities,
   voiceEnabled,
@@ -3967,10 +3983,10 @@ export function NewChatView({
   modelReasoningControls: ReasoningControl[] | undefined;
   onProjectChange: (projectId: "none" | string) => void;
   onCreateProject: (name: string) => Promise<void>;
-  workbenchId: "none" | string;
-  workbenches: WorkbenchSummary[];
-  onWorkbenchChange: (workbenchId: "none" | string) => void;
-  onManageWorkbenches: () => void;
+  agentId: string | null;
+  agents: AgentListItem[];
+  onAgentChange: (agentId: string | null) => void;
+  onManageAgents: () => void;
   attachmentAccept?: string;
   modelInputModalities: ModelInputModality[];
   voiceEnabled?: boolean;
@@ -4085,12 +4101,12 @@ export function NewChatView({
             disabled={creating}
             compact
           />
-          <WorkbenchPicker
-            value={workbenchId}
-            workbenches={workbenches}
-            emptyLabel="Inherit"
-            onValueChange={onWorkbenchChange}
-            onManageWorkbenches={onManageWorkbenches}
+          <AgentOverridePicker
+            value={agentId}
+            agents={agents}
+            inheritLabel="Inherit"
+            onValueChange={onAgentChange}
+            onManageAgents={onManageAgents}
             disabled={creating}
             compact
           />
@@ -4450,8 +4466,8 @@ interface ThreadChatProps {
   onCreateProjectForThread?: (threadId: string, name: string) => Promise<void>;
   onArchiveThread?: (threadId: string) => void;
   onDeleteThread?: (threadId: string) => void;
-  workbenches?: WorkbenchSummary[];
-  onSwitchWorkbench?: (threadId: string, workbenchId: string | null) => Promise<void> | void;
+  agents?: AgentListItem[];
+  onSwitchAgent?: (threadId: string, agentId: string) => Promise<void> | void;
   attachmentAccept?: string;
   maxFiles?: number;
   composerPlaceholder?: string;
@@ -4561,8 +4577,8 @@ function ThreadChat({
   onCreateProjectForThread,
   onArchiveThread,
   onDeleteThread,
-  workbenches,
-  onSwitchWorkbench,
+  agents,
+  onSwitchAgent,
   attachmentAccept,
   maxFiles,
   composerPlaceholder,
@@ -5458,13 +5474,13 @@ function ThreadChat({
             onOpenChange={setDetailsOpen}
             thread={thread}
             projects={projects}
-            workbenches={workbenches}
+            agents={agents}
             onRename={onRename}
             onMoveThread={onMoveThread}
             onCreateProjectForThread={onCreateProjectForThread}
             onArchiveThread={onArchiveThread}
             onDeleteThread={onDeleteThread}
-            onSwitchWorkbench={onSwitchWorkbench}
+            onSwitchAgent={onSwitchAgent}
           />
           <ThreadArtifactsSheet
             open={artifactsOpen}
@@ -5827,6 +5843,9 @@ export default function App({
   const [bootstrapProjects, setBootstrapProjects] = useState<ProjectSummary[]>(
     cachedBootstrap?.projects ?? [],
   );
+  const [bootstrapAgents, setBootstrapAgents] = useState<AgentListItem[]>(
+    cachedBootstrap?.agents ?? [],
+  );
   const [bootstrapThreads, setBootstrapThreads] = useState<ThreadSummary[]>(
     cachedBootstrap?.threads ?? [],
   );
@@ -5910,6 +5929,7 @@ export default function App({
           void maybeRenewSession();
           writeCachedBootstrap(data);
           setBootstrapProjects(data.projects);
+          setBootstrapAgents(data.agents);
           setBootstrapThreads(data.threads);
           setBootstrapThreadsNextCursor(data.threadsNextCursor);
           setAppName(data.appName);
@@ -6183,6 +6203,7 @@ export default function App({
           consentWorkspaceId={consentWorkspaceId}
           user={session.user}
           initialProjects={bootstrapProjects}
+          initialAgents={bootstrapAgents}
           initialThreads={bootstrapThreads}
           initialThreadsNextCursor={bootstrapThreadsNextCursor}
           voiceEnabled={voiceEnabled}

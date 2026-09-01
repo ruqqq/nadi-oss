@@ -23,7 +23,12 @@ function formatWhen(ms: number): string {
   });
 }
 
-export function MemorySection() {
+/**
+ * Memories are per-agent. Rendered twice over the same body: as a whole tab
+ * (no `agentId`, the workspace's earliest agent — the pre-merge meaning), and
+ * as one band inside an agent's own page, which passes its id.
+ */
+export function MemorySection({ agentId = null }: { agentId?: string | null } = {}) {
   const [memories, setMemories] = useState<Memory[] | null>(null); // null = loading
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [showArchived, setShowArchived] = useState(false);
@@ -31,37 +36,43 @@ export function MemorySection() {
   const load = useCallback(() => {
     setMemories(null);
     setLoadError(null);
-    void listMemories(showArchived)
+    void listMemories(showArchived, agentId)
       .then(setMemories)
       .catch((err: unknown) => {
         setMemories([]);
         setLoadError(err instanceof Error ? err : new Error(String(err)));
       });
-  }, [showArchived]);
+  }, [showArchived, agentId]);
 
   useEffect(() => {
     load();
   }, [load]);
 
-  const onArchive = useCallback(async (memory: Memory) => {
-    try {
-      await archiveMemory(memory.id);
-      setMemories((cur) => cur?.filter((m) => m.id !== memory.id) ?? null);
-      toast.success("Memory archived");
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Could not archive memory");
-    }
-  }, []);
+  const onArchive = useCallback(
+    async (memory: Memory) => {
+      try {
+        await archiveMemory(memory.id, agentId);
+        setMemories((cur) => cur?.filter((m) => m.id !== memory.id) ?? null);
+        toast.success("Memory archived");
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Could not archive memory");
+      }
+    },
+    [agentId],
+  );
 
-  const onRestore = useCallback(async (memory: Memory) => {
-    try {
-      await restoreMemory(memory.id);
-      setMemories((cur) => cur?.filter((m) => m.id !== memory.id) ?? null);
-      toast.success("Memory restored");
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Could not restore memory");
-    }
-  }, []);
+  const onRestore = useCallback(
+    async (memory: Memory) => {
+      try {
+        await restoreMemory(memory.id, agentId);
+        setMemories((cur) => cur?.filter((m) => m.id !== memory.id) ?? null);
+        toast.success("Memory restored");
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Could not restore memory");
+      }
+    },
+    [agentId],
+  );
 
   return (
     <section aria-label="Memory" className="space-y-4">

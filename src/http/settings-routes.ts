@@ -335,59 +335,9 @@ async function updateDefaultAgentSettings(req: Request, env: Env): Promise<Respo
       modelSupportsReasoning?: unknown;
     };
   } | null;
-  const patch: AgentSettingsPatch = {};
-
-  if (body?.agent?.systemPrompt !== undefined) {
-    if (typeof body.agent.systemPrompt !== "string" || !body.agent.systemPrompt.trim()) {
-      return new Response("systemPrompt must be a non-empty string", { status: 400 });
-    }
-    patch.systemPrompt = body.agent.systemPrompt.trim();
-  }
-
-  if (body?.agent?.provider !== undefined) {
-    if (typeof body.agent.provider !== "string" || !isSupportedAgentProvider(body.agent.provider)) {
-      return new Response("unsupported provider", { status: 400 });
-    }
-    if (!canUseProvider(env, body.agent.provider, owner.session.user.email)) {
-      return new Response("provider not available", { status: 403 });
-    }
-    patch.provider = body.agent.provider;
-  }
-
-  if (body?.agent?.model !== undefined) {
-    if (typeof body.agent.model !== "string" || !body.agent.model.trim()) {
-      return new Response("model must be a non-empty string", { status: 400 });
-    }
-    patch.model = body.agent.model.trim();
-  }
-
-  if (body?.agent?.modelInputModalities !== undefined) {
-    const parsed = parseModelInputModalities(body.agent.modelInputModalities);
-    if (!parsed.ok) {
-      return new Response("modelInputModalities must be an array of supported modalities", {
-        status: 400,
-      });
-    }
-    patch.modelInputModalities = JSON.stringify(parsed.modalities);
-  }
-
-  if (body?.agent?.reasoningEffort !== undefined) {
-    const effort = parseReasoningEffort(body.agent.reasoningEffort);
-    if (effort === null) {
-      return new Response("reasoningEffort must be one of off, low, medium, high", { status: 400 });
-    }
-    patch.reasoningEffort = effort;
-  }
-
-  if (body?.agent?.modelSupportsReasoning !== undefined) {
-    // `null` is meaningful: it clears the capability back to UNKNOWN, which is
-    // what picking a model we know nothing about should record.
-    const value = body.agent.modelSupportsReasoning;
-    if (value !== null && typeof value !== "boolean") {
-      return new Response("modelSupportsReasoning must be a boolean or null", { status: 400 });
-    }
-    patch.modelSupportsReasoning = value;
-  }
+  const parsedPatch = parseAgentBehaviourPatch(env, owner.session.user.email, body?.agent);
+  if (!parsedPatch.ok) return parsedPatch.response;
+  const patch = parsedPatch.patch;
 
   if (Object.keys(patch).length === 0) {
     return new Response("No valid fields to update", { status: 400 });
@@ -863,7 +813,7 @@ async function verifySecret(req: Request, env: Env, providerInput: string): Prom
   );
 }
 
-function isSupportedAgentProvider(provider: string): boolean {
+export function isSupportedAgentProvider(provider: string): boolean {
   return parseProvider(provider) !== null || MOCK_AGENT_PROVIDERS.has(provider);
 }
 
@@ -885,7 +835,7 @@ function withNoStore(response: Response): Response {
   return response;
 }
 
-function parseModelInputModalities(
+export function parseModelInputModalities(
   value: unknown,
 ): { ok: true; modalities: string[] } | { ok: false } {
   if (!Array.isArray(value)) return { ok: false };
@@ -942,4 +892,98 @@ function serializeAgent(agent: {
     // "the field is missing because the Worker is old".
     modelSupportsReasoning: agent.modelSupportsReasoning ?? null,
   };
+}
+
+/**
+ * Validate the behaviour half of an agent — instructions, provider, model,
+ * reasoning. Shared by the workspace-default settings route and the per-agent
+ * `PATCH /api/agents/:id`, so both surfaces accept and reject exactly the same
+ * values instead of drifting apart.
+ */
+export function parseAgentBehaviourPatch(
+  env: Env,
+  email: string,
+  agent:
+    | {
+        systemPrompt?: unknown;
+        provider?: unknown;
+        model?: unknown;
+        modelInputModalities?: unknown;
+        reasoningEffort?: unknown;
+        modelSupportsReasoning?: unknown;
+      }
+    | undefined,
+): { ok: true; patch: AgentSettingsPatch } | { ok: false; response: Response } {
+  const patch: AgentSettingsPatch = {};
+
+  if (agent?.systemPrompt !== undefined) {
+    if (typeof agent.systemPrompt !== "string" || !agent.systemPrompt.trim()) {
+      return {
+        ok: false,
+        response: new Response("systemPrompt must be a non-empty string", { status: 400 }),
+      };
+    }
+    patch.systemPrompt = agent.systemPrompt.trim();
+  }
+
+  if (agent?.provider !== undefined) {
+    if (typeof agent.provider !== "string" || !isSupportedAgentProvider(agent.provider)) {
+      return { ok: false, response: new Response("unsupported provider", { status: 400 }) };
+    }
+    if (!canUseProvider(env, agent.provider, email)) {
+      return { ok: false, response: new Response("provider not available", { status: 403 }) };
+    }
+    patch.provider = agent.provider;
+  }
+
+  if (agent?.model !== undefined) {
+    if (typeof agent.model !== "string" || !agent.model.trim()) {
+      return {
+        ok: false,
+        response: new Response("model must be a non-empty string", { status: 400 }),
+      };
+    }
+    patch.model = agent.model.trim();
+  }
+
+  if (agent?.modelInputModalities !== undefined) {
+    const parsed = parseModelInputModalities(agent.modelInputModalities);
+    if (!parsed.ok) {
+      return {
+        ok: false,
+        response: new Response("modelInputModalities must be an array of supported modalities", {
+          status: 400,
+        }),
+      };
+    }
+    patch.modelInputModalities = JSON.stringify(parsed.modalities);
+  }
+
+  if (agent?.reasoningEffort !== undefined) {
+    const effort = parseReasoningEffort(agent.reasoningEffort);
+    if (effort === null) {
+      return {
+        ok: false,
+        response: new Response("reasoningEffort must be one of off, low, medium, high", {
+          status: 400,
+        }),
+      };
+    }
+    patch.reasoningEffort = effort;
+  }
+
+  if (agent?.modelSupportsReasoning !== undefined) {
+    // `null` is meaningful: it clears the capability back to UNKNOWN, which is
+    // what picking a model we know nothing about should record.
+    const value = agent.modelSupportsReasoning;
+    if (value !== null && typeof value !== "boolean") {
+      return {
+        ok: false,
+        response: new Response("modelSupportsReasoning must be a boolean or null", { status: 400 }),
+      };
+    }
+    patch.modelSupportsReasoning = value;
+  }
+
+  return { ok: true, patch };
 }

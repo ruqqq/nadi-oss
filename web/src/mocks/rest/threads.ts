@@ -187,7 +187,7 @@ export const threadHandlers = [
       const nextAgent = store.agents.find((w) => w.id === patch.agentId);
       // Configuration is live: the switch applies immediately and the sandbox
       // size moves with it, exactly as the server now does it. Unlike the
-      // retired `workbenchId`, `agentId` is never optional — a thread always
+      // retired per-thread override, `agentId` is never optional — a thread always
       // has an agent, so a `null` patch is refused the same way the real
       // route refuses it, by leaving the thread unchanged.
       if (nextAgent) {

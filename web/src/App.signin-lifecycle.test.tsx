@@ -117,7 +117,7 @@ describe("App sign-in lifecycle", () => {
 
     await waitFor(() => expect(mocks.getBootstrap).toHaveBeenCalledTimes(2));
 
-    window.history.pushState(null, "", "/settings/workbenches");
+    window.history.pushState(null, "", "/settings/agents");
     window.dispatchEvent(new PopStateEvent("popstate"));
 
     expect((await screen.findByTestId("allowlist-capability")).textContent).toBe("enabled");

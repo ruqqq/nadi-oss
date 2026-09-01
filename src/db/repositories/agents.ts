@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, isNotNull, isNull } from "drizzle-orm";
+import { and, asc, desc, eq, isNotNull, isNull, ne } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import type * as schema from "../schema";
@@ -6,6 +6,7 @@ import {
   agentRepositories,
   agents,
   agentSecretNames,
+  projects,
   type AgentConfig,
   type AgentRepositoryRow,
 } from "../schema";
@@ -71,6 +72,7 @@ export class AgentRepository {
         AgentConfig,
         | "name"
         | "description"
+        | "enabled"
         | "setupScript"
         | "resourceProfile"
         | "sandboxEnvVarsJson"
@@ -82,11 +84,45 @@ export class AgentRepository {
     await this.db.update(agents).set(patch).where(eq(agents.id, id));
   }
 
+  /**
+   * How many agents in the workspace would still be USABLE — active (not
+   * archived) and enabled — if `excludingId` stopped being one.
+   *
+   * This is the "last agent" guard's only input. A workspace with zero usable
+   * agents cannot start a thread at all, so disabling or archiving the last one
+   * is refused rather than allowed and later diagnosed as a broken workspace.
+   */
+  async countUsableExcluding(workspaceId: string, excludingId: string): Promise<number> {
+    const rows = await this.db
+      .select({ id: agents.id })
+      .from(agents)
+      .where(
+        and(
+          eq(agents.workspaceId, workspaceId),
+          isNull(agents.archivedAt),
+          eq(agents.enabled, true),
+          ne(agents.id, excludingId),
+        ),
+      )
+      .all();
+    return rows.length;
+  }
+
+  /**
+   * Soft-delete. Threads keep their `agent_id` (it is NOT NULL and the FK must
+   * hold), so an archived agent's threads stay readable; what goes away is the
+   * agent's availability for new work. Any project still naming it as its
+   * default is cleared in the same batch — a default pointing at an archived
+   * agent would silently hand new threads a dead agent.
+   */
   async archive(id: string, archivedAt: number): Promise<void> {
-    await this.db
-      .update(agents)
-      .set({ archivedAt })
-      .where(and(eq(agents.id, id), isNull(agents.archivedAt)));
+    await this.db.batch([
+      this.db
+        .update(agents)
+        .set({ archivedAt })
+        .where(and(eq(agents.id, id), isNull(agents.archivedAt))),
+      this.db.update(projects).set({ defaultAgentId: null }).where(eq(projects.defaultAgentId, id)),
+    ]);
   }
 
   async assertActiveAgentInWorkspace(agentId: string, workspaceId: string): Promise<AgentConfig> {

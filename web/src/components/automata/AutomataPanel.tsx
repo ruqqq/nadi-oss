@@ -45,8 +45,8 @@ import {
 import { SETTINGS_PROVIDER_MODEL_PLACEHOLDERS } from "../../settings-ui-config";
 import { ModelPicker } from "../model/ModelPicker";
 import type { ProjectSummary } from "../../projects-api";
-import { listAgents as listWorkbenches, type AgentSummary as WorkbenchSummary } from "../../agents-api";
-import { WorkbenchPicker } from "../workbenches/WorkbenchPicker";
+import { listAgents, type AgentListItem } from "../../agents-api";
+import { AgentOverridePicker } from "../agents/AgentPicker";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -145,7 +145,8 @@ type AutomatonFormState = {
   timezone: string;
   cronExpr: string;
   projectId: string; // "none" or a ProjectSummary id
-  workbenchId: string; // "inherit" or a WorkbenchSummary id
+  /** null = inherit the project's default agent; otherwise an agent id. */
+  agentId: string | null;
   enabled: boolean;
   notifyMode: "all" | "failures_only";
   // The model override. A null provider means "run on the workspace agent's
@@ -184,7 +185,7 @@ const EMPTY_FORM: AutomatonFormState = {
   timezone: defaultTimezone(),
   cronExpr: "",
   projectId: "none",
-  workbenchId: "inherit",
+  agentId: null,
   enabled: true,
   notifyMode: "all",
   modelProvider: null,
@@ -210,7 +211,7 @@ function formFromAutomaton(automaton: AutomatonSummary): AutomatonFormState {
     prompt: automaton.prompt,
     timezone: automaton.timezone,
     projectId: automaton.projectId ?? "none",
-    workbenchId: automaton.agentId ?? "inherit",
+    agentId: automaton.agentId,
     enabled: automaton.enabled,
     notifyMode: automaton.notifyMode,
     // A provider the workspace no longer offers is dropped back to the agent
@@ -432,14 +433,14 @@ export function AutomataPanel({
     };
   }, []);
 
-  // The workbench override picker needs the workspace's active workbenches;
+  // The agent override picker needs the workspace's active agents;
   // failing to load it only costs the picker (it renders empty), not the panel.
-  const [workbenches, setWorkbenches] = useState<WorkbenchSummary[]>([]);
+  const [agents, setAgents] = useState<AgentListItem[]>([]);
   useEffect(() => {
     let cancelled = false;
-    void listWorkbenches("active")
+    void listAgents("active")
       .then((list) => {
-        if (!cancelled) setWorkbenches(list);
+        if (!cancelled) setAgents(list.map(({ id, name, description, enabled }) => ({ id, name, description, enabled })));
       })
       .catch(() => {
         // Leave the picker's list empty rather than blocking the whole panel.
@@ -603,7 +604,7 @@ export function AutomataPanel({
         schedule: scheduleFromForm(form),
         timezone,
         projectId: form.projectId === "none" ? null : form.projectId,
-        agentId: form.workbenchId === "inherit" ? null : form.workbenchId,
+        agentId: form.agentId,
         enabled: form.enabled,
         notifyMode: form.notifyMode,
         // Half an override is no override: a provider with an empty model box
@@ -1089,18 +1090,19 @@ export function AutomataPanel({
                       </Select>
                     </Field>
                     <Field
-                      label="Workbench"
-                      htmlFor="automaton-workbench"
-                      hint="Inherit from project uses the project's default workbench; a workbench here overrides it."
+                      label="Agent"
+                      htmlFor="automaton-agent"
+                      hint="Inherit from project uses the project's default agent; an agent here overrides it."
                     >
-                      <WorkbenchPicker
-                        value={form.workbenchId === "inherit" ? "none" : form.workbenchId}
-                        workbenches={workbenches}
+                      <AgentOverridePicker
+                        value={form.agentId}
+                        agents={agents}
+                        inheritLabel="Inherit from project"
                         selectedName={
-                          workbenches.find((w) => w.id === form.workbenchId)?.name ?? undefined
+                          agents.find((agent) => agent.id === form.agentId)?.name ?? undefined
                         }
-                        onValueChange={(v) => handleField("workbenchId", v === "none" ? "inherit" : v)}
-                        // No "Manage workbenches" link here: Settings navigation
+                        onValueChange={(next) => handleField("agentId", next)}
+                        // No "Manage agents" link here: Settings navigation
                         // isn't threaded into this panel, and the picker's prop is
                         // optional — omitting it hides the row rather than showing
                         // a dead affordance.

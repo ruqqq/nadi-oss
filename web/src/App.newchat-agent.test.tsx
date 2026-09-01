@@ -4,7 +4,7 @@ import { render, screen, cleanup, fireEvent, waitFor, act } from "@testing-libra
 import type { ThreadSummary } from "./threads-api";
 
 const createNewThread = vi.fn();
-const listWorkbenches = vi.fn();
+const listAgentsMock = vi.fn();
 let resolveCreate: ((thread: ThreadSummary) => void) | null = null;
 let rejectCreate: ((error: Error) => void) | null = null;
 
@@ -15,7 +15,7 @@ vi.mock("./lib/new-thread-send", async (importOriginal) => ({
 
 vi.mock("./agents-api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./agents-api")>()),
-  listAgents: (...args: unknown[]) => listWorkbenches(...args),
+  listAgents: (...args: unknown[]) => listAgentsMock(...args),
 }));
 
 // Seeds the new-chat provider/model synchronously on mount, so the composer is
@@ -36,7 +36,7 @@ vi.mock("./lib/bootstrap-cache", async (importOriginal) => ({
 
 import { ChatApp } from "./App";
 
-const WORKBENCH = {
+const AGENT_FIXTURE = {
   id: "wb_1",
   workspaceId: "ws_1",
   name: "Nadi",
@@ -113,7 +113,7 @@ beforeEach(() => {
     "fetch",
     vi.fn(() => new Promise<Response>(() => {})),
   );
-  listWorkbenches.mockResolvedValue([WORKBENCH]);
+  listAgentsMock.mockResolvedValue([AGENT_FIXTURE]);
   createNewThread.mockReturnValue(
     new Promise<ThreadSummary>((resolve, reject) => {
       resolveCreate = resolve;
@@ -146,25 +146,25 @@ function renderApp() {
   );
 }
 
-describe("new-chat workbench selection", () => {
+describe("new-chat agent selection", () => {
   // Regression guard for a stale-closure bug: `createAndSend` listed
-  // `workbenches` in its dependency array but NOT `newChatWorkbenchId`, so on a
-  // fresh launch the callback kept the mount-time "none" and dropped the user's
+  // `agents` in its dependency array but NOT `newChatAgentId`, so on a
+  // fresh launch the callback kept the mount-time null and dropped the user's
   // choice from the POST. It self-healed once any other dependency changed,
-  // which is why only the FIRST thread of each launch lost its workbench —
+  // which is why only the FIRST thread of each launch lost its agent —
   // so this test must send on a freshly mounted app and never re-render first.
-  it("sends the picked workbench on the first thread after mount", async () => {
+  it("sends the picked agent on the first thread after mount", async () => {
     renderApp();
 
-    // Wait for the workbench list to land, so the picker can offer it.
-    await waitFor(() => expect(listWorkbenches).toHaveBeenCalled());
+    // Wait for the agent list to land, so the picker can offer it.
+    await waitFor(() => expect(listAgentsMock).toHaveBeenCalled());
 
     // Open the hero composer. This only flips draft state — it must not
     // recreate `createAndSend`, which is precisely what the bug relied on.
     fireEvent.click(screen.getAllByRole("button", { name: /new chat/i })[0]!);
 
     // Radix's popover trigger opens on pointerdown, not click.
-    const picker = await screen.findByRole("button", { name: /workbench: inherit/i });
+    const picker = await screen.findByRole("button", { name: /agent: inherit/i });
     fireEvent.pointerDown(picker, { button: 0, ctrlKey: false, pointerType: "mouse" });
     fireEvent.click(picker);
     // "Nadi" is also the app's brand heading — scope to the picker's list.

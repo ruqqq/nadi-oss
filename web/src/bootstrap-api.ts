@@ -1,3 +1,4 @@
+import type { AgentListItem } from "./agents-api";
 import type { AuthSession } from "./auth-api";
 import { appFetch } from "./lib/app-fetch";
 import type { ProjectSummary } from "./projects-api";
@@ -20,6 +21,7 @@ type BootstrapPayload = {
   threads?: ThreadSummary[];
   threadsNextCursor?: string | null;
   projects?: ProjectSummary[];
+  agents?: AgentListItem[];
   features?: {
     voiceInput?: boolean;
     workersAi?: boolean;
@@ -45,6 +47,13 @@ export interface BootstrapData {
   threads: ThreadSummary[];
   threadsNextCursor: string | null;
   projects: ProjectSummary[];
+  /**
+   * The workspace's active agents, in the LEAN shape a picker needs at first
+   * paint — id/name/description/enabled. Deliberately not `AgentSummary`: that
+   * costs a repositories + secret-names query per agent, for fields no picker
+   * reads. The drill-down fetches the full shape from `GET /api/agents`.
+   */
+  agents: AgentListItem[];
   voiceEnabled: boolean;
   workersAiEnabled: boolean;
   feedbackAdminEnabled: boolean;
@@ -75,6 +84,7 @@ export function parseBootstrap(data: BootstrapPayload): BootstrapData {
     threads: data.threads ?? [],
     threadsNextCursor: data.threadsNextCursor ?? null,
     projects: data.projects ?? [],
+    agents: data.agents ?? [],
     voiceEnabled: data.features?.voiceInput ?? false,
     workersAiEnabled: data.features?.workersAi ?? false,
     feedbackAdminEnabled: data.features?.feedbackAdmin ?? false,

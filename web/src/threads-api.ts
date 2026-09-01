@@ -66,7 +66,9 @@ export type CreateThreadInput = {
   /** `null` clears the capability back to unknown. */
   modelSupportsReasoning?: boolean | null;
   projectId?: string | null;
-  agentId?: string | null;
+  /** Omitted means "inherit the project's default agent". Never null: the
+   *  server refuses a non-string agentId outright. */
+  agentId?: string;
 };
 
 export type ThreadListStatus = "active" | "archived" | "all";
@@ -347,9 +349,16 @@ export async function moveThreadToProject(
   return body.thread;
 }
 
+/**
+ * Move a thread onto a different agent. `agentId` is a plain string, never
+ * null: a thread always has an agent, and the server refuses a non-string
+ * outright. The picker that feeds this cannot produce "none" either — see
+ * `components/agents/AgentPicker.tsx`, which splits the thread picker from the
+ * override picker precisely so this state is unrepresentable.
+ */
 export async function switchThreadAgent(
   threadId: string,
-  agentId: string | null,
+  agentId: string,
   fetchImpl: FetchLike = appFetch,
 ): Promise<ThreadSummary> {
   const res = await fetchImpl(`/api/threads/${encodeURIComponent(threadId)}`, {

@@ -28,6 +28,19 @@ export interface AgentSummary {
   workspaceId: string;
   name: string;
   description: string;
+  /** What the agent is told to be. Editable on the agent's own page. */
+  systemPrompt: string;
+  provider: string;
+  model: string;
+  modelInputModalities: string;
+  reasoningEffort: string;
+  /** null means UNKNOWN, not "cannot reason" — see the column's own note. */
+  modelSupportsReasoning: boolean | null;
+  /**
+   * Kept, hibernating. `false` refuses new turns; the machine and its files
+   * survive. Distinct from `archivedAt`, which is the delete.
+   */
+  enabled: boolean;
   setupScript: string;
   resourceProfile: AgentResourceProfile;
   repositories: AgentRepository[];
@@ -66,7 +79,20 @@ export type CreateAgentInput = {
   networkDomainAllowlist?: string;
 };
 
-export type UpdateAgentInput = Partial<CreateAgentInput>;
+/**
+ * Everything `PATCH /api/agents/:id` accepts. The behaviour half (instructions,
+ * provider, model, reasoning) is validated server-side by the same parser the
+ * workspace-default settings route uses, so the two surfaces cannot drift.
+ */
+export type UpdateAgentInput = Partial<CreateAgentInput> & {
+  enabled?: boolean;
+  systemPrompt?: string;
+  provider?: string;
+  model?: string;
+  modelInputModalities?: string[];
+  reasoningEffort?: string;
+  modelSupportsReasoning?: boolean | null;
+};
 
 /** Full repo entry accepted by `PUT /api/agents/:id/repositories`. */
 export type AgentRepositoryInput = {
@@ -124,7 +150,16 @@ export async function updateAgent(
   return body.agent;
 }
 
-export async function archiveAgent(
+/**
+ * Delete an agent. Soft server-side (`archived_at`), because `thread_index
+ * .agent_id` is a NOT NULL foreign key and the agent's threads must stay
+ * readable — but from the user's side this is the delete, and it is named that
+ * way everywhere the user can see it.
+ *
+ * Refused with 409 when it is the workspace's last usable agent; the server's
+ * message is shown verbatim.
+ */
+export async function deleteAgent(
   agentId: string,
   fetchImpl: FetchLike = appFetch,
 ): Promise<AgentSummary> {
@@ -132,7 +167,7 @@ export async function archiveAgent(
     method: "POST",
     credentials: "include",
   });
-  if (!res.ok) throw await errorFromResponse(res, "archive the agent");
+  if (!res.ok) throw await errorFromResponse(res, "delete the agent");
   const body = (await res.json()) as { agent: AgentSummary };
   return body.agent;
 }

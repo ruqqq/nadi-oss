@@ -454,6 +454,103 @@ describe("agent routes", () => {
     });
   });
 
+  // A workspace with no active, enabled agent cannot start a thread at all, so
+  // the last usable one is refused rather than allowed and later diagnosed as a
+  // broken workspace.
+  describe("the last usable agent", () => {
+    it("cannot be disabled", async () => {
+      const seeded = await seedUserWorkspace();
+
+      const res = await SELF.fetch(`https://nadi.test/api/agents/${seeded.agentId}`, {
+        method: "PATCH",
+        headers: { ...cookie(seeded.token), "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: false }),
+      });
+      expect(res.status).toBe(409);
+      expect(await res.text()).toContain("only agent");
+
+      const after = await SELF.fetch(`https://nadi.test/api/agents/${seeded.agentId}`, {
+        headers: cookie(seeded.token),
+      });
+      expect(((await after.json()) as { agent: { enabled: boolean } }).agent.enabled).toBe(true);
+    });
+
+    it("cannot be deleted", async () => {
+      const seeded = await seedUserWorkspace();
+
+      const res = await SELF.fetch(`https://nadi.test/api/agents/${seeded.agentId}/archive`, {
+        method: "POST",
+        headers: cookie(seeded.token),
+      });
+      expect(res.status).toBe(409);
+      expect(await res.text()).toContain("only agent");
+    });
+
+    // The guard counts USABLE agents, not rows: a second agent that is already
+    // disabled still leaves this one the last one that can do work. Counting
+    // rows would let a workspace switch its way to zero.
+    it("counts only enabled agents, not archived or disabled ones", async () => {
+      const seeded = await seedUserWorkspace();
+
+      const createRes = await SELF.fetch("https://nadi.test/api/agents", {
+        method: "POST",
+        headers: { ...cookie(seeded.token), "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "second" }),
+      });
+      expect(createRes.status).toBe(201);
+      const second = ((await createRes.json()) as { agent: { id: string } }).agent;
+
+      // With two enabled agents, disabling the second is allowed.
+      const disableSecond = await SELF.fetch(`https://nadi.test/api/agents/${second.id}`, {
+        method: "PATCH",
+        headers: { ...cookie(seeded.token), "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: false }),
+      });
+      expect(disableSecond.status).toBe(200);
+
+      // Now the first is the last USABLE one, even though two rows exist.
+      const disableFirst = await SELF.fetch(`https://nadi.test/api/agents/${seeded.agentId}`, {
+        method: "PATCH",
+        headers: { ...cookie(seeded.token), "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: false }),
+      });
+      expect(disableFirst.status).toBe(409);
+    });
+  });
+
+  it("saves an agent's instructions, model and reasoning", async () => {
+    const seeded = await seedUserWorkspace();
+
+    const res = await SELF.fetch(`https://nadi.test/api/agents/${seeded.agentId}`, {
+      method: "PATCH",
+      headers: { ...cookie(seeded.token), "Content-Type": "application/json" },
+      body: JSON.stringify({
+        systemPrompt: "  Be terse.  ",
+        model: "some-model",
+        reasoningEffort: "high",
+        modelSupportsReasoning: true,
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { agent: Record<string, unknown> }).agent).toMatchObject({
+      systemPrompt: "Be terse.",
+      model: "some-model",
+      reasoningEffort: "high",
+      modelSupportsReasoning: true,
+    });
+  });
+
+  it("rejects an empty system prompt rather than storing one", async () => {
+    const seeded = await seedUserWorkspace();
+
+    const res = await SELF.fetch(`https://nadi.test/api/agents/${seeded.agentId}`, {
+      method: "PATCH",
+      headers: { ...cookie(seeded.token), "Content-Type": "application/json" },
+      body: JSON.stringify({ systemPrompt: "   " }),
+    });
+    expect(res.status).toBe(400);
+  });
+
   it("returns 404 for a non-member accessing an agent", async () => {
     const owner = await seedUserWorkspace();
     const outsider = await seedUserWorkspace({

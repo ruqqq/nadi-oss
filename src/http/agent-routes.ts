@@ -14,6 +14,8 @@ import { ComputeEnvSecretsStore } from "../compute/env-secrets";
 import { createWorkspaceSecretsServices } from "../secrets";
 import type { AgentConfig, AgentRepositoryRow } from "../db/schema";
 import { resolveAgentScope } from "./agent-scope";
+import { AgentSettingsRepository } from "../db/repositories/agent-settings";
+import { parseAgentBehaviourPatch } from "./settings-routes";
 import {
   COMPUTE_RESOURCE_PROFILE_IDS,
   parseDomainList,
@@ -27,6 +29,15 @@ type AgentBody = {
   setupScript?: unknown;
   resourceProfile?: unknown;
   networkDomainAllowlist?: unknown;
+  /** Disable is an ordinary toggle: the agent stops taking new work, its
+   *  machine and files survive. Distinct from archiving, which is the delete. */
+  enabled?: unknown;
+  systemPrompt?: unknown;
+  provider?: unknown;
+  model?: unknown;
+  modelInputModalities?: unknown;
+  reasoningEffort?: unknown;
+  modelSupportsReasoning?: unknown;
 };
 
 export type AgentSummary = AgentConfig & {
@@ -212,13 +223,32 @@ async function updateAgent(req: Request, env: Env, agentId: string): Promise<Res
   const body = (await req.json().catch(() => null)) as AgentBody | null;
   const parsed = parsePatchPayload(body);
   if (!parsed.ok) return parsed.response;
+  const behaviour = parseAgentBehaviourPatch(env, session.user.email, body ?? undefined);
+  if (!behaviour.ok) return behaviour.response;
 
-  if (Object.keys(parsed.value).length === 0) {
+  if (Object.keys(parsed.value).length === 0 && Object.keys(behaviour.patch).length === 0) {
     return new Response("No valid fields to update", { status: 400 });
   }
 
+  // The last usable agent may not be switched off: a workspace with no active,
+  // enabled agent cannot start a thread at all.
+  if (parsed.value.enabled === false && agent.enabled) {
+    const remaining = await repo.countUsableExcluding(agent.workspaceId, agentId);
+    if (remaining === 0) return lastAgentRefusal("disabled");
+  }
+
   try {
+    // `updatedAt` is written even for a behaviour-only patch: the agent list
+    // orders by it, so a saved prompt that left the stamp alone would leave the
+    // agent sitting where it was, looking untouched.
     await repo.update(agentId, { ...parsed.value, updatedAt: Date.now() });
+    if (Object.keys(behaviour.patch).length > 0) {
+      await new AgentSettingsRepository(db).updateAgentSettings(
+        agent.workspaceId,
+        { kind: "id", agentId },
+        behaviour.patch,
+      );
+    }
   } catch (error) {
     return mapAgentError(error);
   }
@@ -240,6 +270,11 @@ async function archiveAgent(req: Request, env: Env, agentId: string): Promise<Re
 
   const membership = await assertMember(db, agent.workspaceId, session.user.id);
   if (!membership) return new Response("Not found", { status: 404 });
+
+  if (agent.archivedAt === null) {
+    const remaining = await repo.countUsableExcluding(agent.workspaceId, agentId);
+    if (remaining === 0) return lastAgentRefusal("deleted");
+  }
 
   await repo.archive(agentId, Date.now());
   const archived = await repo.getById(agentId);
@@ -542,6 +577,12 @@ function parsePatchPayload(
     // `value` is defined here because the key is present (not undefined).
     patch.sandboxNetworkDomainAllowlist = allowlist.value ?? "";
   }
+  if (body?.enabled !== undefined) {
+    if (typeof body.enabled !== "boolean") {
+      return { ok: false, response: new Response("enabled must be a boolean", { status: 400 }) };
+    }
+    patch.enabled = body.enabled;
+  }
 
   return { ok: true, value: patch };
 }
@@ -569,6 +610,7 @@ type CreateAgentInput = {
 
 type PatchAgentInput = Partial<CreateAgentInput> & {
   sandboxNetworkDomainAllowlist?: string;
+  enabled?: boolean;
 };
 
 /** Parses the `PUT /api/agents/:id/repositories` body: an array of full repo entries. */
@@ -730,4 +772,16 @@ function mapAgentError(error: unknown): Response {
     return new Response("Not found", { status: 404 });
   }
   throw error;
+}
+
+/**
+ * The refusal a workspace's last usable agent gets. 409 rather than 400: the
+ * request is well-formed, the workspace's state is what forbids it. The message
+ * is the one the UI shows verbatim, so it says what to do next.
+ */
+function lastAgentRefusal(verb: "disabled" | "deleted"): Response {
+  return new Response(
+    `This is the workspace's only agent, so it can't be ${verb}. Create another agent first.`,
+    { status: 409 },
+  );
 }

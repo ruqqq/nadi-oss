@@ -20,7 +20,7 @@ import {
   updateProject,
   type ProjectSummary,
 } from "../../projects-api";
-import { listAgents as listWorkbenches, type AgentSummary as WorkbenchSummary } from "../../agents-api";
+import { listAgents, type AgentListItem } from "../../agents-api";
 import { listThreads, type ThreadSummary } from "../../threads-api";
 import { isNetworkFailure } from "../../lib/offline-state";
 import { isThreadListEmpty, THREAD_PAGE_SIZE } from "../../lib/thread-list-state";
@@ -89,7 +89,7 @@ export function ProjectsPanel({
   onSelect,
   onBackToList,
   onSelectThread,
-  onManageWorkbenches,
+  onManageAgents,
   closeLabel,
   onClose,
 }: {
@@ -113,8 +113,8 @@ export function ProjectsPanel({
   onSelect: (id: string | null, mode: "push" | "replace") => void;
   onBackToList: () => void;
   onSelectThread: (threadId: string) => void;
-  /** Workbenches are workspace config, so they are managed in Settings. */
-  onManageWorkbenches: () => void;
+  /** Agents are workspace config, so they are managed in Settings. */
+  onManageAgents: () => void;
   closeLabel: string;
   onClose: () => void;
 }) {
@@ -132,15 +132,15 @@ export function ProjectsPanel({
   const showList = isDesktop || !inDetail;
   const showDetail = isDesktop || inDetail;
   const [projectForm, setProjectForm] = useState<ProjectFormState>(EMPTY_PROJECT_FORM);
-  // The workbench list is read-only here — it is what the default-workbench
-  // picker is made of. Workbenches themselves are created and edited in Settings.
-  const [workbenches, setWorkbenches] = useState<WorkbenchSummary[]>([]);
-  const [loadingWorkbenches, setLoadingWorkbenches] = useState(true);
+  // The agent list is read-only here — it is what the default-agent picker is
+  // made of. Agents themselves are created and edited in Settings.
+  const [agents, setAgents] = useState<AgentListItem[]>([]);
+  const [loadingAgents, setLoadingAgents] = useState(true);
   const [busyProject, setBusyProject] = useState(false);
   const [projectError, setProjectError] = useState<string | null>(null);
-  // A failed workbench load must not read as "no workbenches yet" — the
+  // A failed agent load must not read as "no agents yet" — the
   // picker says so plainly instead.
-  const [workbenchesError, setWorkbenchesError] = useState<string | null>(null);
+  const [agentsError, setAgentsError] = useState<string | null>(null);
 
   const selectedProject = useMemo(
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
@@ -219,29 +219,35 @@ export function ProjectsPanel({
     return nextProjects;
   }, [onProjectsChange]);
 
-  const refreshWorkbenches = useCallback(async () => {
-    const nextWorkbenches = await listWorkbenches("active");
-    setWorkbenches(nextWorkbenches);
-    return nextWorkbenches;
+  const refreshAgents = useCallback(async () => {
+    const next = await listAgents("active");
+    const listItems = next.map(({ id, name, description, enabled }) => ({
+      id,
+      name,
+      description,
+      enabled,
+    }));
+    setAgents(listItems);
+    return listItems;
   }, []);
 
   useEffect(() => {
     let active = true;
-    setLoadingWorkbenches(true);
-    void refreshWorkbenches()
+    setLoadingAgents(true);
+    void refreshAgents()
       .catch((error: unknown) => {
         if (!active) return;
-        setWorkbenchesError(
-          error instanceof Error ? error.message : "Could not load workbenches.",
+        setAgentsError(
+          error instanceof Error ? error.message : "Could not load agents.",
         );
       })
       .finally(() => {
-        if (active) setLoadingWorkbenches(false);
+        if (active) setLoadingAgents(false);
       });
     return () => {
       active = false;
     };
-  }, [refreshWorkbenches]);
+  }, [refreshAgents]);
 
   // Keep the URL's selection honest: land on the first item when nothing is
   // selected, and drop a selection whose item is gone (deleted, or a stale link).
@@ -309,7 +315,7 @@ export function ProjectsPanel({
     [],
   );
 
-  const handleDefaultWorkbenchChange = useCallback((value: string) => {
+  const handleDefaultAgentChange = useCallback((value: string) => {
     setProjectForm((current) => ({
       ...current,
       defaultAgentId: value === "none" ? null : value,
@@ -531,51 +537,51 @@ export function ProjectsPanel({
                   </FormCard>
 
                   <FormCard
-                    title="Default workbench"
-                    description="New chats in this project start with this workbench. You can change it per chat."
+                    title="Default agent"
+                    description="New chats in this project start with this agent. You can change it per chat."
                     action={
                       <Button
                         variant="ghost"
                         size="sm"
                         className="-mr-2 h-8 text-muted-foreground hover:text-foreground"
-                        onClick={onManageWorkbenches}
+                        onClick={onManageAgents}
                       >
                         Manage
                         <ArrowSquareOut aria-hidden />
                       </Button>
                     }
                   >
-                    <Field label="Workbench" htmlFor="project-default-workbench">
-                      {workbenchesError ? (
+                    <Field label="Agent" htmlFor="project-default-agent">
+                      {agentsError ? (
                         <div className="rounded-md border border-dashed border-border px-3 py-2 text-muted-foreground text-sm">
-                          {workbenchesError}
+                          {agentsError}
                         </div>
-                      ) : loadingWorkbenches ? (
+                      ) : loadingAgents ? (
                         <div className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-muted-foreground text-sm">
-                          <Spinner className="size-4" label="Loading workbenches" />
+                          <Spinner className="size-4" label="Loading agents" />
                           Loading
                         </div>
-                      ) : workbenches.length === 0 ? (
+                      ) : agents.length === 0 ? (
                         <button
                           type="button"
-                          onClick={onManageWorkbenches}
+                          onClick={onManageAgents}
                           className="rounded-md border border-dashed border-border px-3 py-2 text-left text-muted-foreground text-sm transition-colors hover:border-primary hover:text-foreground"
                         >
-                          No workbenches yet — add one in Settings.
+                          No agents yet — create one in Settings.
                         </button>
                       ) : (
                         <Select
                           value={projectForm.defaultAgentId ?? "none"}
-                          onValueChange={handleDefaultWorkbenchChange}
+                          onValueChange={handleDefaultAgentChange}
                         >
-                          <SelectTrigger id="project-default-workbench" className="w-full">
+                          <SelectTrigger id="project-default-agent" className="w-full">
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
                             <SelectItem value="none">None</SelectItem>
-                            {workbenches.map((workbench) => (
-                              <SelectItem key={workbench.id} value={workbench.id}>
-                                {workbench.name}
+                            {agents.map((agent) => (
+                              <SelectItem key={agent.id} value={agent.id}>
+                                {agent.name}
                               </SelectItem>
                             ))}
                           </SelectContent>

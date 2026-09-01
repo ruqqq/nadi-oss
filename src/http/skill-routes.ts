@@ -1,9 +1,9 @@
 import type { Env } from "../env";
-import { validateRequestSession } from "../auth/session";
+import { validateRequestSession, type ValidatedSession } from "../auth/session";
 import { registryDb } from "../db/client";
 import { AgentSkillDuplicateError, AgentSkillRepository } from "../db/repositories/agent-skills";
 import type { Skill } from "../db/schema";
-import { resolveAgentScope } from "./agent-scope";
+import { resolveAgentScope, resolveAgentScopeById } from "./agent-scope";
 
 export async function routeSkills(req: Request, env: Env): Promise<Response | null> {
   const url = new URL(req.url);
@@ -37,6 +37,28 @@ export async function routeSkills(req: Request, env: Env): Promise<Response | nu
   return null;
 }
 
+/**
+ * Which skills a request is about.
+ *
+ * With no `agentId`, this route is the workspace LIBRARY (`agentId: null`) —
+ * the shared skills every agent inherits, which is what the Skills settings tab
+ * manages. With `?agentId=`, it is that one agent's private skills, which is
+ * what an agent's own drill-down shows. Before two-scope skills existed this
+ * route resolved to "the workspace's earliest agent", which after the library
+ * promotion would have shown an almost empty list under a tab labelled as the
+ * workspace's skills.
+ */
+async function resolveSkillScope(
+  env: Env,
+  session: ValidatedSession,
+  url: URL,
+): Promise<{ workspaceId: string; agentId: string | null } | null> {
+  const agentId = url.searchParams.get("agentId");
+  if (agentId) return resolveAgentScopeById(env, session, agentId);
+  const scope = await resolveAgentScope(env, session);
+  return scope ? { workspaceId: scope.workspaceId, agentId: null } : null;
+}
+
 function serialize(s: Skill) {
   return {
     id: s.id,
@@ -53,7 +75,7 @@ function serialize(s: Skill) {
 async function listSkills(req: Request, env: Env, url: URL): Promise<Response> {
   const session = await validateRequestSession(env, req);
   if (!session) return new Response("Unauthorized", { status: 401 });
-  const scope = await resolveAgentScope(env, session);
+  const scope = await resolveSkillScope(env, session, url);
   if (!scope) return Response.json({ skills: [] });
   const repo = new AgentSkillRepository(registryDb(env));
   const rows =
@@ -69,7 +91,7 @@ async function setEnabled(req: Request, env: Env, id: string): Promise<Response>
   const body = (await req.json().catch(() => null)) as { enabled?: unknown } | null;
   if (typeof body?.enabled !== "boolean")
     return new Response("enabled must be a boolean", { status: 400 });
-  const scope = await resolveAgentScope(env, session);
+  const scope = await resolveSkillScope(env, session, new URL(req.url));
   if (!scope) return new Response("Not found", { status: 404 });
   const updated = await new AgentSkillRepository(registryDb(env)).setEnabled({
     ...scope,
@@ -83,7 +105,7 @@ async function setEnabled(req: Request, env: Env, id: string): Promise<Response>
 async function archiveSkill(req: Request, env: Env, id: string): Promise<Response> {
   const session = await validateRequestSession(env, req);
   if (!session) return new Response("Unauthorized", { status: 401 });
-  const scope = await resolveAgentScope(env, session);
+  const scope = await resolveSkillScope(env, session, new URL(req.url));
   if (!scope) return new Response("Not found", { status: 404 });
   const updated = await new AgentSkillRepository(registryDb(env)).archiveById({ ...scope, id });
   if (!updated) return new Response("Not found", { status: 404 });
@@ -93,7 +115,7 @@ async function archiveSkill(req: Request, env: Env, id: string): Promise<Respons
 async function restoreSkill(req: Request, env: Env, id: string): Promise<Response> {
   const session = await validateRequestSession(env, req);
   if (!session) return new Response("Unauthorized", { status: 401 });
-  const scope = await resolveAgentScope(env, session);
+  const scope = await resolveSkillScope(env, session, new URL(req.url));
   if (!scope) return new Response("Not found", { status: 404 });
   try {
     const updated = await new AgentSkillRepository(registryDb(env)).restore({ ...scope, id });

@@ -335,7 +335,7 @@ function WorkspaceSandboxCard({
       // `providerConfig` is built per branch so a Cloudflare save carries NO
       // Daytona fields (no image/snapshot/credentials), and vice versa.
       // Network restriction is intentionally omitted: its controls are hidden
-      // pending the move to workbench-level config, and the PUT merge-preserves
+      // pending the move to agent-level config, and the PUT merge-preserves
       // the stored values when the keys are absent.
       const shared = {
         enabled,

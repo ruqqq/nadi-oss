@@ -3,17 +3,22 @@
  * and survives the round trip through an MCP OAuth consent screen.
  */
 
+/**
+ * The old per-workspace `agent` tab and its separate machine tab are gone: one
+ * agent now carries both a mind and a machine, so there is one tab for both.
+ * `memory` is gone too — memories belong to an agent, and are reached from that
+ * agent's page. `skills` stays: it is the workspace LIBRARY every agent
+ * inherits, not one agent's property.
+ */
 export const SETTINGS_TABS = [
   "general",
-  "agent",
+  "agents",
   "providers",
   "sandbox",
-  "workbenches",
   // GitHub App connections (installations, connect/disconnect) live here.
   "connections",
   "tools",
   "skills",
-  "memory",
 ] as const;
 
 export type SettingsTab = (typeof SETTINGS_TABS)[number];
@@ -35,29 +40,29 @@ export function settingsPath(tab: SettingsTab): string {
 }
 
 /**
- * The Workbenches tab is a master-detail: a third path segment selects an item
- * (`/settings/workbenches/:id`), starts a create form (`.../new`), or is absent
- * for the list (`/settings/workbenches`).
+ * The Agents tab is a master-detail: a third path segment selects an agent
+ * (`/settings/agents/:id`), starts a create form (`.../new`), or is absent
+ * for the list (`/settings/agents`).
  */
-export type WorkbenchesRoute = {
-  tab: "workbenches";
+export type AgentsRoute = {
+  tab: "agents";
   selectedId: string | "new" | null;
 };
 
-/** null when the path isn't under the Workbenches tab at all. */
-export function parseWorkbenchesRoute(pathname: string): WorkbenchesRoute | null {
+/** null when the path isn't under the Agents tab at all. */
+export function parseAgentsRoute(pathname: string): AgentsRoute | null {
   const segments = pathname.split("/").filter(Boolean);
-  if (segments[1] !== "workbenches") return null;
+  if (segments[1] !== "agents") return null;
   const third = segments[2];
-  if (third === undefined) return { tab: "workbenches", selectedId: null };
-  if (third === "new") return { tab: "workbenches", selectedId: "new" };
-  return { tab: "workbenches", selectedId: decodeSegment(third) };
+  if (third === undefined) return { tab: "agents", selectedId: null };
+  if (third === "new") return { tab: "agents", selectedId: "new" };
+  return { tab: "agents", selectedId: decodeSegment(third) };
 }
 
-export function workbenchesPath(selectedId: string | "new" | null): string {
-  if (selectedId === null) return settingsPath("workbenches");
+export function agentsPath(selectedId: string | "new" | null): string {
+  if (selectedId === null) return settingsPath("agents");
   const segment = selectedId === "new" ? "new" : encodeURIComponent(selectedId);
-  return `${settingsPath("workbenches")}/${segment}`;
+  return `${settingsPath("agents")}/${segment}`;
 }
 
 /**

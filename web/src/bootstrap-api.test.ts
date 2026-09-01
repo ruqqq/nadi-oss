@@ -15,6 +15,15 @@ describe("getBootstrap", () => {
     expect(parseBootstrap({ features: { backgroundWork: false } }).backgroundWorkEnabled).toBe(false);
   });
 
+  // The agent picker reads this at first paint. A dropped field here would show
+  // an empty picker until the follow-up `GET /api/agents` landed — visible, but
+  // not an error anywhere.
+  it("carries the agent list, defaulting to empty when absent", () => {
+    const agents = [{ id: "env_1", name: "Nadi", description: "", enabled: true }];
+    expect(parseBootstrap({ agents }).agents).toEqual(agents);
+    expect(parseBootstrap({}).agents).toEqual([]);
+  });
+
   it("parses an authenticated payload into session + settings + threads", async () => {
     const data = await getBootstrap(
       mockFetch(200, {

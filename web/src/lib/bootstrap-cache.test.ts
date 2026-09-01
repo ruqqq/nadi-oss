@@ -19,6 +19,7 @@ function signedIn(): BootstrapData {
     threads: [],
     threadsNextCursor: null,
     projects: [],
+    agents: [],
     voiceEnabled: false,
     workersAiEnabled: true,
     feedbackAdminEnabled: false,

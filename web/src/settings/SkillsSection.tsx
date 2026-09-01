@@ -14,7 +14,13 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { SectionHeading } from "./section-ui";
 
-export function SkillsSection() {
+/**
+ * Skills have two scopes. With no `agentId` this is the workspace LIBRARY —
+ * the shared skills every agent inherits, which is what the Skills tab manages.
+ * With one, it is that agent's private skills, which shadow a library skill of
+ * the same name.
+ */
+export function SkillsSection({ agentId = null }: { agentId?: string | null } = {}) {
   const [skills, setSkills] = useState<Skill[] | null>(null); // null = loading
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [showArchived, setShowArchived] = useState(false);
@@ -22,13 +28,13 @@ export function SkillsSection() {
   const load = useCallback(() => {
     setSkills(null);
     setLoadError(null);
-    void listSkills(showArchived)
+    void listSkills(showArchived, agentId)
       .then(setSkills)
       .catch((err: unknown) => {
         setSkills([]);
         setLoadError(err instanceof Error ? err : new Error(String(err)));
       });
-  }, [showArchived]);
+  }, [showArchived, agentId]);
 
   useEffect(() => {
     load();
@@ -38,7 +44,7 @@ export function SkillsSection() {
     const next = !skill.enabled;
     setSkills((cur) => cur?.map((s) => (s.id === skill.id ? { ...s, enabled: next } : s)) ?? null);
     try {
-      const updated = await setSkillEnabled(skill.id, next);
+      const updated = await setSkillEnabled(skill.id, next, agentId);
       setSkills((cur) => cur?.map((s) => (s.id === updated.id ? updated : s)) ?? null);
     } catch (err) {
       setSkills(
@@ -50,7 +56,7 @@ export function SkillsSection() {
 
   const onArchive = useCallback(async (skill: Skill) => {
     try {
-      await archiveSkill(skill.id);
+      await archiveSkill(skill.id, agentId);
       setSkills((cur) => cur?.filter((s) => s.id !== skill.id) ?? null);
       toast.success(`Archived “${skill.name}”`);
     } catch (err) {
@@ -60,7 +66,7 @@ export function SkillsSection() {
 
   const onRestore = useCallback(async (skill: Skill) => {
     try {
-      await restoreSkill(skill.id);
+      await restoreSkill(skill.id, agentId);
       setSkills((cur) => cur?.filter((s) => s.id !== skill.id) ?? null);
       toast.success(`Restored “${skill.name}”`);
     } catch (err) {

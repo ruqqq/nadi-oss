@@ -24,7 +24,7 @@ import {
   listInstallationRepositories,
   type GithubRepo,
 } from "../github-api";
-import type { AgentRepositoryInput as WorkbenchRepositoryInput } from "../agents-api";
+import type { AgentRepositoryInput } from "../agents-api";
 
 // Mono config fields hold literal values (URLs, paths, branches, commands), so
 // the keyboard must not autocorrect, auto-capitalize, or spell-check them.
@@ -35,7 +35,7 @@ const monoFieldProps = {
   spellCheck: false,
 } as const;
 
-const BLANK_URL_REPO: WorkbenchRepositoryInput = {
+const BLANK_URL_REPO: AgentRepositoryInput = {
   source: "url",
   name: "",
   url: "",
@@ -55,20 +55,20 @@ function checkoutNameFromUrl(url: string): string {
 }
 
 /**
- * Repositories staged for a workbench, controlled by the parent form (create
- * stages locally; edit seeds from the loaded workbench and saves via
- * `setWorkbenchRepositories` on Save). Renders per-repo config cards plus an
+ * Repositories staged for an agent, controlled by the parent form (create
+ * stages locally; edit seeds from the loaded agent and saves via
+ * `setAgentRepositories` on Save). Renders per-repo config cards plus an
  * "Add a repository" picker (GitHub App repos + add-by-URL).
  */
-export function WorkbenchRepositories({
+export function AgentRepositories({
   value,
   onChange,
 }: {
-  value: WorkbenchRepositoryInput[];
-  onChange: (next: WorkbenchRepositoryInput[]) => void;
+  value: AgentRepositoryInput[];
+  onChange: (next: AgentRepositoryInput[]) => void;
 }) {
   const updateAt = useCallback(
-    (index: number, patch: Partial<WorkbenchRepositoryInput>) => {
+    (index: number, patch: Partial<AgentRepositoryInput>) => {
       onChange(value.map((repo, i) => (i === index ? { ...repo, ...patch } : repo)));
     },
     [value, onChange],
@@ -87,7 +87,7 @@ export function WorkbenchRepositories({
   );
 
   const addRepo = useCallback(
-    (repo: WorkbenchRepositoryInput) => {
+    (repo: AgentRepositoryInput) => {
       onChange([...value, repo]);
     },
     [value, onChange],
@@ -125,8 +125,8 @@ function RepoCard({
   onFieldChange,
   onRemove,
 }: {
-  repo: WorkbenchRepositoryInput;
-  onFieldChange: (patch: Partial<WorkbenchRepositoryInput>) => void;
+  repo: AgentRepositoryInput;
+  onFieldChange: (patch: Partial<AgentRepositoryInput>) => void;
   onRemove: () => void;
 }) {
   const idPrefix = useId();
@@ -277,7 +277,7 @@ function AddRepositoryPicker({
   onAddUrl,
 }: {
   excludedGithubIds: Set<number>;
-  onAddGithub: (repo: WorkbenchRepositoryInput) => void;
+  onAddGithub: (repo: AgentRepositoryInput) => void;
   onAddUrl: () => void;
 }) {
   const [open, setOpen] = useState(false);

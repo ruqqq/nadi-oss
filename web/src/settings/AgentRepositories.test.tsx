@@ -10,10 +10,10 @@ vi.mock("../github-api", () => ({
   listInstallationRepositories: (...a: unknown[]) => listInstallationRepositories(...a),
 }));
 
-import { WorkbenchRepositories } from "./WorkbenchRepositories";
+import { AgentRepositories } from "./AgentRepositories";
 
 // A GitHub installation carries BOTH a string row id (`id`, the FK target for
-// workbench_repositories.source_installation_id) and the numeric GitHub
+// agent_repositories.source_installation_id) and the numeric GitHub
 // `installationId`. The list-repositories endpoint keys on the NUMERIC id.
 const INSTALLATION = {
   id: "ghi_87df8deb-3739-4fee-bcc4-33a13b8c191e",
@@ -71,9 +71,9 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("WorkbenchRepositories add-repository picker", () => {
+describe("AgentRepositories add-repository picker", () => {
   it("lists installation repos by the NUMERIC installationId, not the string row id", async () => {
-    render(<WorkbenchRepositories value={[]} onChange={() => {}} />);
+    render(<AgentRepositories value={[]} onChange={() => {}} />);
 
     fireEvent.click(screen.getByRole("button", { name: /add a repository/i }));
 
@@ -89,7 +89,7 @@ describe("WorkbenchRepositories add-repository picker", () => {
 
   it("stages a selected GitHub repo with the string row id as sourceInstallationId", async () => {
     const onChange = vi.fn();
-    render(<WorkbenchRepositories value={[]} onChange={onChange} />);
+    render(<AgentRepositories value={[]} onChange={onChange} />);
 
     fireEvent.click(screen.getByRole("button", { name: /add a repository/i }));
     await waitFor(() => expect(screen.getByText("ruqqq/nadi")).toBeTruthy());
@@ -122,7 +122,7 @@ describe("WorkbenchRepositories add-repository picker", () => {
       ),
     );
 
-    render(<WorkbenchRepositories value={[]} onChange={() => {}} />);
+    render(<AgentRepositories value={[]} onChange={() => {}} />);
     fireEvent.click(screen.getByRole("button", { name: /add a repository/i }));
 
     await waitFor(() => expect(screen.getByText("ruqqq/late")).toBeTruthy());

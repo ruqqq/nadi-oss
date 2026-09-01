@@ -6,10 +6,10 @@ import { cn } from "../../lib/utils";
 import { useMediaQuery } from "../../lib/use-media-query";
 import { useVisualViewportInset } from "../../lib/use-visual-viewport-inset";
 import { formatCreatedAt, formatRelativeTime } from "../../lib/thread-time";
-import { WorkbenchPicker } from "../workbenches/WorkbenchPicker";
+import { AgentPicker } from "../agents/AgentPicker";
 import type { ProjectSummary } from "../../projects-api";
 import type { ThreadSummary } from "../../threads-api";
-import type { AgentSummary as WorkbenchSummary } from "../../agents-api";
+import type { AgentListItem } from "../../agents-api";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -42,32 +42,33 @@ export function ThreadDetailsSheet({
   onOpenChange,
   thread,
   projects,
-  workbenches = [],
+  agents = [],
   onRename,
   onMoveThread,
   onCreateProjectForThread,
   onArchiveThread,
   onDeleteThread,
-  onSwitchWorkbench,
+  onSwitchAgent,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   thread: ThreadSummary;
   projects: ProjectSummary[];
-  workbenches?: WorkbenchSummary[];
+  agents?: AgentListItem[];
   onRename?: (threadId: string, title: string) => void;
   onMoveThread?: (threadId: string, projectId: string | null) => void;
   onCreateProjectForThread?: (threadId: string, name: string) => Promise<void>;
   onArchiveThread?: (threadId: string) => void;
   onDeleteThread?: (threadId: string) => void;
-  onSwitchWorkbench?: (threadId: string, workbenchId: string | null) => Promise<void> | void;
+  onSwitchAgent?: (threadId: string, agentId: string) => Promise<void> | void;
 }) {
   const isMobile = useMediaQuery("(max-width: 640px)");
   const viewport = useVisualViewportInset(open && isMobile);
   const [draftTitle, setDraftTitle] = useState(thread.title);
   const [confirmArchive, setConfirmArchive] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [pendingWorkbenchId, setPendingWorkbenchId] = useState<"none" | string | null>(null);
+  // The agent a switch is waiting on confirmation for; null = no pending switch.
+  const [pendingAgentId, setPendingAgentId] = useState<string | null>(null);
 
   // Reseed the rename draft when the thread or its title changes.
   useEffect(() => {
@@ -91,19 +92,15 @@ export function ThreadDetailsSheet({
     onRename(thread.threadId, next);
   };
 
-  const pendingWorkbenchName =
-    pendingWorkbenchId == null
+  const pendingAgentName =
+    pendingAgentId === null
       ? null
-      : pendingWorkbenchId === "none"
-        ? "No workbench"
-        : (workbenches.find((workbench) => workbench.id === pendingWorkbenchId)?.name ??
-          pendingWorkbenchId);
+      : (agents.find((agent) => agent.id === pendingAgentId)?.name ?? pendingAgentId);
 
-  const confirmSwitchWorkbench = () => {
-    if (pendingWorkbenchId === null) return;
-    const nextWorkbenchId = pendingWorkbenchId === "none" ? null : pendingWorkbenchId;
-    void onSwitchWorkbench?.(thread.threadId, nextWorkbenchId);
-    setPendingWorkbenchId(null);
+  const confirmSwitchAgent = () => {
+    if (pendingAgentId === null) return;
+    void onSwitchAgent?.(thread.threadId, pendingAgentId);
+    setPendingAgentId(null);
   };
 
   const copyId = () => {
@@ -171,17 +168,17 @@ export function ThreadDetailsSheet({
         </section>
 
         <section className="space-y-2">
-          <Label>Workbench</Label>
-          {onSwitchWorkbench && !thread.readOnly ? (
-            <WorkbenchPicker
-              value={thread.agentId ?? "none"}
-              workbenches={workbenches}
+          <Label>Agent</Label>
+          {onSwitchAgent && !thread.readOnly ? (
+            <AgentPicker
+              value={thread.agentId}
+              agents={agents}
               selectedName={thread.agentName ?? undefined}
-              onValueChange={(next) => setPendingWorkbenchId(next)}
+              onValueChange={(next) => setPendingAgentId(next)}
             />
           ) : (
             <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-foreground text-sm">
-              {thread.agentName ?? "No workbench"}
+              {thread.agentName ?? "—"}
             </div>
           )}
           <p className="text-sm text-muted-foreground">
@@ -332,14 +329,14 @@ export function ThreadDetailsSheet({
       </AlertDialog>
 
       <AlertDialog
-        open={pendingWorkbenchId !== null}
+        open={pendingAgentId !== null}
         onOpenChange={(next) => {
-          if (!next) setPendingWorkbenchId(null);
+          if (!next) setPendingAgentId(null);
         }}
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Switch to {pendingWorkbenchName}?</AlertDialogTitle>
+            <AlertDialogTitle>Switch to {pendingAgentName}?</AlertDialogTitle>
             <AlertDialogDescription>
               This discards the current sandbox. Any uncommitted files will be discarded. The
               agent will be asked to save its work first.
@@ -347,9 +344,7 @@ export function ThreadDetailsSheet({
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={confirmSwitchWorkbench}>
-              Switch workbench
-            </AlertDialogAction>
+            <AlertDialogAction onClick={confirmSwitchAgent}>Switch agent</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

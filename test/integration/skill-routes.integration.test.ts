@@ -69,21 +69,50 @@ describe("skill routes", () => {
     expect(res.status).toBe(401);
   });
 
-  it("lists active skills (including disabled) and toggles enabled", async () => {
+  // The bare route is the workspace LIBRARY (agent_id IS NULL) — what the
+  // Skills settings tab manages. It used to resolve to "the workspace's
+  // earliest agent", which after the library promotion showed an almost empty
+  // list under a tab labelled as the workspace's skills.
+  it("lists the workspace library, not one agent's private skills", async () => {
     const { token, workspaceId, agentId } = await seedMemberWithAgent();
     const repo = new AgentSkillRepository(drizzle(env.REGISTRY_DB, { schema }));
-    const created = await repo.create({
+    const library = await repo.create({
       workspaceId,
-      agentId,
+      agentId: null,
       name: "review",
       description: "Review",
+      body: "Body",
+    });
+    const private_ = await repo.create({
+      workspaceId,
+      agentId,
+      name: "deploy",
+      description: "Deploy",
       body: "Body",
     });
 
     const listed = await SELF.fetch("https://nadi.test/api/skills", { headers: cookie(token) });
     expect(listed.status).toBe(200);
     const { skills } = (await listed.json()) as { skills: Array<{ id: string; enabled: boolean }> };
-    expect(skills).toMatchObject([{ id: created.id, enabled: true }]);
+    expect(skills).toMatchObject([{ id: library.id, enabled: true }]);
+
+    const scoped = await SELF.fetch(`https://nadi.test/api/skills?agentId=${agentId}`, {
+      headers: cookie(token),
+    });
+    const scopedBody = (await scoped.json()) as { skills: Array<{ id: string }> };
+    expect(scopedBody.skills.map((skill) => skill.id)).toEqual([private_.id]);
+  });
+
+  it("toggles a library skill's enabled flag", async () => {
+    const { token, workspaceId } = await seedMemberWithAgent();
+    const repo = new AgentSkillRepository(drizzle(env.REGISTRY_DB, { schema }));
+    const created = await repo.create({
+      workspaceId,
+      agentId: null,
+      name: "review",
+      description: "Review",
+      body: "Body",
+    });
 
     const toggled = await SELF.fetch(`https://nadi.test/api/skills/${created.id}/enabled`, {
       method: "POST",
@@ -94,12 +123,39 @@ describe("skill routes", () => {
     expect(((await toggled.json()) as { skill: { enabled: boolean } }).skill.enabled).toBe(false);
   });
 
-  it("archives, lists archived, and restores", async () => {
+  // An agent's own page archives its private skills through the same route,
+  // named by `?agentId=`. Without the parameter the route is looking in the
+  // library, where this skill is not.
+  it("archives an agent's private skill only when scoped to that agent", async () => {
     const { token, workspaceId, agentId } = await seedMemberWithAgent();
     const repo = new AgentSkillRepository(drizzle(env.REGISTRY_DB, { schema }));
     const created = await repo.create({
       workspaceId,
       agentId,
+      name: "deploy",
+      description: "Deploy",
+      body: "Body",
+    });
+
+    const unscoped = await SELF.fetch(`https://nadi.test/api/skills/${created.id}/archive`, {
+      method: "POST",
+      headers: cookie(token),
+    });
+    expect(unscoped.status).toBe(404);
+
+    const scoped = await SELF.fetch(
+      `https://nadi.test/api/skills/${created.id}/archive?agentId=${agentId}`,
+      { method: "POST", headers: cookie(token) },
+    );
+    expect(scoped.status).toBe(200);
+  });
+
+  it("archives, lists archived, and restores", async () => {
+    const { token, workspaceId } = await seedMemberWithAgent();
+    const repo = new AgentSkillRepository(drizzle(env.REGISTRY_DB, { schema }));
+    const created = await repo.create({
+      workspaceId,
+      agentId: null,
       name: "deploy",
       description: "Deploy",
       body: "Body",

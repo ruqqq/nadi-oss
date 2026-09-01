@@ -1,9 +1,9 @@
 import type { Env } from "../env";
-import { validateRequestSession } from "../auth/session";
+import { validateRequestSession, type ValidatedSession } from "../auth/session";
 import { registryDb } from "../db/client";
 import { AgentMemoryRepository } from "../db/repositories/agent-memories";
 import type { AgentMemory } from "../db/schema";
-import { resolveAgentScope } from "./agent-scope";
+import { resolveAgentScope, resolveAgentScopeById } from "./agent-scope";
 
 export async function routeMemories(req: Request, env: Env): Promise<Response | null> {
   const url = new URL(req.url);
@@ -31,6 +31,21 @@ export async function routeMemories(req: Request, env: Env): Promise<Response | 
   return null;
 }
 
+/**
+ * Memories belong to an AGENT, and a workspace now has several. `?agentId=`
+ * names which one — the agent drill-down passes it. Without it this falls back
+ * to the workspace's earliest agent, which is what every pre-merge caller meant.
+ */
+async function resolveMemoryScope(
+  env: Env,
+  session: ValidatedSession,
+  url: URL,
+): Promise<{ workspaceId: string; agentId: string } | null> {
+  const agentId = url.searchParams.get("agentId");
+  if (agentId) return resolveAgentScopeById(env, session, agentId);
+  return resolveAgentScope(env, session);
+}
+
 function serialize(m: AgentMemory) {
   return {
     id: m.id,
@@ -47,7 +62,7 @@ function serialize(m: AgentMemory) {
 async function listMemories(req: Request, env: Env, url: URL): Promise<Response> {
   const session = await validateRequestSession(env, req);
   if (!session) return new Response("Unauthorized", { status: 401 });
-  const scope = await resolveAgentScope(env, session);
+  const scope = await resolveMemoryScope(env, session, url);
   if (!scope) return Response.json({ memories: [] });
   const repo = new AgentMemoryRepository(registryDb(env));
   const rows =
@@ -60,7 +75,7 @@ async function listMemories(req: Request, env: Env, url: URL): Promise<Response>
 async function archiveMemory(req: Request, env: Env, id: string): Promise<Response> {
   const session = await validateRequestSession(env, req);
   if (!session) return new Response("Unauthorized", { status: 401 });
-  const scope = await resolveAgentScope(env, session);
+  const scope = await resolveMemoryScope(env, session, new URL(req.url));
   if (!scope) return new Response("Not found", { status: 404 });
   const repo = new AgentMemoryRepository(registryDb(env));
   const ok = await repo.archive({ ...scope, id });
@@ -74,7 +89,7 @@ async function archiveMemory(req: Request, env: Env, id: string): Promise<Respon
 async function restoreMemory(req: Request, env: Env, id: string): Promise<Response> {
   const session = await validateRequestSession(env, req);
   if (!session) return new Response("Unauthorized", { status: 401 });
-  const scope = await resolveAgentScope(env, session);
+  const scope = await resolveMemoryScope(env, session, new URL(req.url));
   if (!scope) return new Response("Not found", { status: 404 });
   const restored = await new AgentMemoryRepository(registryDb(env)).restore({ ...scope, id });
   if (!restored) return new Response("Not found", { status: 404 });

@@ -468,7 +468,7 @@ describe("SandboxSection network-restrictions gate", () => {
   });
 
   it("does not offer env vars or secrets at workspace or agent level", async () => {
-    // Both now live on workbenches. The Sandbox page must not present a second,
+    // Both now live on the agent. The Sandbox page must not present a second,
     // competing place to set them.
     await renderLoaded(
       response({
@@ -505,7 +505,7 @@ describe("SandboxSection network-restrictions gate", () => {
   });
 
   it("does not offer network-restriction controls at workspace or agent level", async () => {
-    // Network restriction is moving to workbench-level config; the Sandbox page
+    // Network restriction is moving to agent-level config; the Sandbox page
     // hides the controls but the backend keeps the stored values (the PUT
     // merge-preserves them), so nothing here may render or leak them.
     await renderLoaded(

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  archiveAgent,
+  deleteAgent,
   createAgent,
   deleteAgentSecret,
   listAgents,
@@ -83,10 +83,10 @@ describe("agents api helpers", () => {
     });
   });
 
-  it("archives an agent", async () => {
+  it("deletes an agent", async () => {
     const archived = { ...agent, archivedAt: 2 };
     const fetch = vi.fn(async () => Response.json({ agent: archived }));
-    await expect(archiveAgent("wb1", fetch)).resolves.toEqual(archived);
+    await expect(deleteAgent("wb1", fetch)).resolves.toEqual(archived);
     expect(fetch).toHaveBeenCalledWith("/api/agents/wb1/archive", {
       method: "POST",
       credentials: "include",

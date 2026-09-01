@@ -65,7 +65,7 @@ export const MEMORY_SETTINGS_HINT =
   "Memories are created and edited by the agent in chat. Here you can review what it remembers and archive anything that's out of date.";
 
 export const SANDBOX_SETTINGS_HINT =
-  "Let the agent run shell commands in an isolated compute environment. An agent can override whether execution is enabled and add allowed domains — leave it on “Inherit” to follow the workspace default. Sandbox size is set by the thread’s workbench, not here.";
+  "Where this workspace runs shell commands: the compute provider, its credentials, and the limits every machine inherits. What each agent runs on — machine size, repositories, setup script, secrets — is set on the agent itself.";
 
 export const SANDBOX_SPRITES_HINT =
   "Sprites (Fly.io) machines persist between turns and hibernate when idle. System mode uses this deployment's Sprites account; bring your own token to use your own.";

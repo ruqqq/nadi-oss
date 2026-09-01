@@ -5,7 +5,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ThreadSummary } from "../../threads-api";
-import type { AgentSummary as WorkbenchSummary } from "../../agents-api";
+import type { AgentListItem } from "../../agents-api";
 import { ThreadDetailsSheet } from "./ThreadDetailsSheet";
 
 // jsdom has no matchMedia; useMediaQuery reads it synchronously on mount.
@@ -81,47 +81,19 @@ function makeThread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
   };
 }
 
-const workbenches: WorkbenchSummary[] = [
-  {
-    id: "wb_nadi",
-    workspaceId: "ws_1",
-    name: "nadi",
-    description: "",
-    setupScript: "",
-    resourceProfile: "small",
-    repositories: [],
-    envVars: {},
-    secretEnvNames: [],
-    networkDomainAllowlist: "",
-    archivedAt: null,
-    createdAt: 1000,
-    updatedAt: 1000,
-  },
-  {
-    id: "wb_docs",
-    workspaceId: "ws_1",
-    name: "Docs",
-    description: "",
-    setupScript: "",
-    resourceProfile: "medium",
-    repositories: [],
-    envVars: {},
-    secretEnvNames: [],
-    networkDomainAllowlist: "",
-    archivedAt: null,
-    createdAt: 1000,
-    updatedAt: 1000,
-  },
+const agents: AgentListItem[] = [
+  { id: "wb_nadi", name: "Nadi", description: "", enabled: true },
+  { id: "wb_docs", name: "Docs", description: "", enabled: true },
 ];
 
 const baseProps = {
   open: true,
   onOpenChange: () => undefined,
   projects: [],
-  workbenches,
+  agents,
 };
 
-describe("ThreadDetailsSheet workbench switch", () => {
+describe("ThreadDetailsSheet agent switch", () => {
   it("shows the sandbox size implied by the frozen snapshot", () => {
     render(
       <ThreadDetailsSheet {...baseProps} thread={makeThread({ resourceProfile: "medium" })} />,
@@ -129,33 +101,33 @@ describe("ThreadDetailsSheet workbench switch", () => {
     expect(screen.getByText("medium")).toBeInTheDocument();
   });
 
-  it("confirming the switch calls onSwitchWorkbench with the thread and new workbench ids", async () => {
+  it("confirming the switch calls onSwitchAgent with the thread and new agent ids", async () => {
     const user = userEvent.setup();
-    const onSwitchWorkbench = vi.fn().mockResolvedValue(undefined);
+    const onSwitchAgent = vi.fn().mockResolvedValue(undefined);
     render(
-      <ThreadDetailsSheet {...baseProps} thread={makeThread()} onSwitchWorkbench={onSwitchWorkbench} />,
+      <ThreadDetailsSheet {...baseProps} thread={makeThread()} onSwitchAgent={onSwitchAgent} />,
     );
 
-    await user.click(screen.getByRole("button", { name: /workbench: nadi/i }));
+    await user.click(screen.getByRole("button", { name: /agent: nadi/i }));
     await user.click(screen.getByRole("option", { name: "Docs" }));
 
     // The dialog is up; the API must not be hit until confirmed.
     expect(screen.getByText(/uncommitted files will be discarded/i)).toBeInTheDocument();
-    expect(onSwitchWorkbench).not.toHaveBeenCalled();
+    expect(onSwitchAgent).not.toHaveBeenCalled();
 
-    await user.click(screen.getByRole("button", { name: /switch workbench/i }));
-    expect(onSwitchWorkbench).toHaveBeenCalledWith("thr_1", "wb_docs");
-    expect(onSwitchWorkbench).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("button", { name: /switch agent/i }));
+    expect(onSwitchAgent).toHaveBeenCalledWith("thr_1", "wb_docs");
+    expect(onSwitchAgent).toHaveBeenCalledTimes(1);
   });
 
-  it("dismissing the confirm dialog does not call onSwitchWorkbench", async () => {
+  it("dismissing the confirm dialog does not call onSwitchAgent", async () => {
     const user = userEvent.setup();
-    const onSwitchWorkbench = vi.fn().mockResolvedValue(undefined);
+    const onSwitchAgent = vi.fn().mockResolvedValue(undefined);
     render(
-      <ThreadDetailsSheet {...baseProps} thread={makeThread()} onSwitchWorkbench={onSwitchWorkbench} />,
+      <ThreadDetailsSheet {...baseProps} thread={makeThread()} onSwitchAgent={onSwitchAgent} />,
     );
 
-    await user.click(screen.getByRole("button", { name: /workbench: nadi/i }));
+    await user.click(screen.getByRole("button", { name: /agent: nadi/i }));
     await user.click(screen.getByRole("option", { name: "Docs" }));
     expect(screen.getByText(/uncommitted files will be discarded/i)).toBeInTheDocument();
 
@@ -164,10 +136,10 @@ describe("ThreadDetailsSheet workbench switch", () => {
     expect(
       screen.queryByText(/uncommitted files will be discarded/i),
     ).not.toBeInTheDocument();
-    expect(onSwitchWorkbench).not.toHaveBeenCalled();
+    expect(onSwitchAgent).not.toHaveBeenCalled();
   });
 
-  it("keeps the picker enabled for an assigned workbench: switching is immediate", () => {
+  it("keeps the picker enabled for an assigned agent: switching is immediate", () => {
     render(
       <ThreadDetailsSheet
         {...baseProps}
@@ -175,11 +147,11 @@ describe("ThreadDetailsSheet workbench switch", () => {
           agentId: "wb_docs",
           agentName: "Docs",
         })}
-        onSwitchWorkbench={vi.fn()}
+        onSwitchAgent={vi.fn()}
       />,
     );
     expect(screen.queryByText(/switching to docs/i)).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /workbench: docs/i })).not.toBeDisabled();
+    expect(screen.getByRole("button", { name: /agent: docs/i })).not.toBeDisabled();
   });
 
   it("does not offer the switch for a read-only thread", () => {
@@ -187,9 +159,9 @@ describe("ThreadDetailsSheet workbench switch", () => {
       <ThreadDetailsSheet
         {...baseProps}
         thread={makeThread({ readOnly: true, status: "archived" })}
-        onSwitchWorkbench={vi.fn()}
+        onSwitchAgent={vi.fn()}
       />,
     );
-    expect(screen.queryByRole("button", { name: /workbench:/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /agent:/i })).not.toBeInTheDocument();
   });
 });

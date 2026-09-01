@@ -5,10 +5,10 @@ import {
   isOnboardingPath,
   isSettingsPath,
   parseSettingsTab,
-  parseWorkbenchesRoute,
+  parseAgentsRoute,
   settingsPath,
   takeMcpReturnPath,
-  workbenchesPath,
+  agentsPath,
 } from "./settings-routes";
 
 describe("isSettingsPath", () => {
@@ -36,54 +36,63 @@ describe("parseSettingsTab", () => {
     expect(parseSettingsTab("/settings")).toBe("general");
     expect(parseSettingsTab("/settings/nope")).toBe("general");
   });
+
+  // The merge retired the singular `agent` tab next to the new plural `agents`
+  // one, and the `memory` tab. A bookmark to either must land somewhere real —
+  // and `agent` must NOT be matched by `agents`.
+  it("falls back to general for the retired tabs", () => {
+    expect(parseSettingsTab("/settings/agent")).toBe("general");
+    expect(parseSettingsTab("/settings/memory")).toBe("general");
+    expect(parseSettingsTab("/settings/agents")).toBe("agents");
+  });
 });
 
-describe("parseWorkbenchesRoute", () => {
+describe("parseAgentsRoute", () => {
   it("returns null selectedId for the bare tab (the list)", () => {
-    expect(parseWorkbenchesRoute("/settings/workbenches")).toEqual({
-      tab: "workbenches",
+    expect(parseAgentsRoute("/settings/agents")).toEqual({
+      tab: "agents",
       selectedId: null,
     });
   });
 
   it("returns \"new\" for the create form", () => {
-    expect(parseWorkbenchesRoute("/settings/workbenches/new")).toEqual({
-      tab: "workbenches",
+    expect(parseAgentsRoute("/settings/agents/new")).toEqual({
+      tab: "agents",
       selectedId: "new",
     });
   });
 
-  it("returns the id for a selected workbench", () => {
-    expect(parseWorkbenchesRoute("/settings/workbenches/wb_123")).toEqual({
-      tab: "workbenches",
+  it("returns the id for a selected agent", () => {
+    expect(parseAgentsRoute("/settings/agents/wb_123")).toEqual({
+      tab: "agents",
       selectedId: "wb_123",
     });
   });
 
-  it("returns null when the path is not under the workbenches tab", () => {
-    expect(parseWorkbenchesRoute("/settings/repositories")).toBeNull();
-    expect(parseWorkbenchesRoute("/settings")).toBeNull();
-    expect(parseWorkbenchesRoute("/projects/abc")).toBeNull();
+  it("returns null when the path is not under the agents tab", () => {
+    expect(parseAgentsRoute("/settings/repositories")).toBeNull();
+    expect(parseAgentsRoute("/settings")).toBeNull();
+    expect(parseAgentsRoute("/projects/abc")).toBeNull();
   });
 
   it("decodes an escaped id", () => {
-    expect(parseWorkbenchesRoute("/settings/workbenches/wb%20123")).toEqual({
-      tab: "workbenches",
+    expect(parseAgentsRoute("/settings/agents/wb%20123")).toEqual({
+      tab: "agents",
       selectedId: "wb 123",
     });
   });
 });
 
-describe("workbenchesPath", () => {
+describe("agentsPath", () => {
   it("round-trips list, new, and an id through the parser", () => {
     for (const selectedId of [null, "new", "wb_123"] as const) {
-      expect(parseWorkbenchesRoute(workbenchesPath(selectedId))?.selectedId).toBe(selectedId);
+      expect(parseAgentsRoute(agentsPath(selectedId))?.selectedId).toBe(selectedId);
     }
   });
 
-  it("still parses as the workbenches tab via parseSettingsTab", () => {
-    expect(parseSettingsTab(workbenchesPath("wb_1"))).toBe("workbenches");
-    expect(parseSettingsTab(workbenchesPath("new"))).toBe("workbenches");
+  it("still parses as the agents tab via parseSettingsTab", () => {
+    expect(parseSettingsTab(agentsPath("wb_1"))).toBe("agents");
+    expect(parseSettingsTab(agentsPath("new"))).toBe("agents");
   });
 });
 

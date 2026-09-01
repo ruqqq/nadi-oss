@@ -8,6 +8,7 @@ const agents = {
   __table: "agents",
   id: "id",
   workspaceId: "workspace_id",
+  enabled: "enabled",
   archivedAt: "archived_at",
   updatedAt: "updated_at",
   $inferInsert: {} as {
@@ -42,12 +43,21 @@ const agentSecretNames = {
   updatedAt: "updated_at",
 };
 
+// Archiving an agent clears any project still naming it as its default, so the
+// fake schema has to offer that table too.
+const projects = {
+  __table: "projects",
+  id: "id",
+  defaultAgentId: "default_agent_id",
+};
+
 vi.mock("drizzle-orm", () => ({
   eq: (column: string, value: unknown) => (row: Record<string, unknown>) => row[column] === value,
   and:
     (...conditions: Array<(row: Record<string, unknown>) => boolean>) =>
     (row: Record<string, unknown>) =>
       conditions.every((condition) => condition(row)),
+  ne: (column: string, value: unknown) => (row: Record<string, unknown>) => row[column] !== value,
   isNull: (column: string) => (row: Record<string, unknown>) => row[column] == null,
   isNotNull: (column: string) => (row: Record<string, unknown>) => row[column] != null,
   asc: (column: string) => ({ column, dir: "asc" }),
@@ -58,6 +68,7 @@ vi.mock("../../../src/db/schema", () => ({
   agents,
   agentRepositories,
   agentSecretNames,
+  projects,
 }));
 
 interface AgentRow {
@@ -67,9 +78,15 @@ interface AgentRow {
   description: string;
   setup_script: string;
   sandbox_env_vars_json: string;
+  enabled: boolean;
   archived_at: number | null;
   created_at: number;
   updated_at: number;
+}
+
+interface ProjectRow {
+  id: string;
+  default_agent_id: string | null;
 }
 
 interface AgentRepositoryRow {
@@ -88,13 +105,14 @@ interface AgentRepositoryRow {
   created_at: number;
 }
 
-type Row = AgentRow | AgentRepositoryRow;
+type Row = AgentRow | AgentRepositoryRow | ProjectRow;
 type Condition = (row: Record<string, any>) => boolean;
 type SortSpec = { column: string; dir: string };
 
 class AgentRepositoryTestDb {
   agentRows = new Map<string, AgentRow>();
   agentRepositories = new Map<string, AgentRepositoryRow>();
+  projectRows = new Map<string, ProjectRow>();
 
   select(projection?: Record<string, any>) {
     const self = this;
@@ -144,6 +162,9 @@ class AgentRepositoryTestDb {
       return denormalizeAgentRow(row as AgentRow);
     } else if (table.__table === "agent_repositories") {
       return denormalizeAgentRepositoryRow(row as AgentRepositoryRow);
+    } else if (table.__table === "projects") {
+      const project = row as ProjectRow;
+      return { id: project.id, defaultAgentId: project.default_agent_id };
     }
     return row;
   }
@@ -198,7 +219,20 @@ class AgentRepositoryTestDb {
                     normalizedPatch.setup_script = patch.setupScript;
                   if (patch.sandboxEnvVarsJson !== undefined)
                     normalizedPatch.sandbox_env_vars_json = patch.sandboxEnvVarsJson;
+                  if (patch.enabled !== undefined) normalizedPatch.enabled = patch.enabled;
                   self.agentRows.set(id, { ...row, ...normalizedPatch } as AgentRow);
+                }
+              }
+            } else if (table.__table === "projects") {
+              for (const [id, row] of self.projectRows.entries()) {
+                if (condition(row)) {
+                  self.projectRows.set(id, {
+                    ...row,
+                    default_agent_id:
+                      patch.defaultAgentId === undefined
+                        ? row.default_agent_id
+                        : patch.defaultAgentId,
+                  });
                 }
               }
             }
@@ -241,6 +275,8 @@ class AgentRepositoryTestDb {
       rows = [...this.agentRows.values()] as Row[];
     } else if (table.__table === "agent_repositories") {
       rows = [...this.agentRepositories.values()] as Row[];
+    } else if (table.__table === "projects") {
+      rows = [...this.projectRows.values()] as Row[];
     }
     return condition ? rows.filter((row) => condition(row)) : rows;
   }
@@ -283,6 +319,7 @@ function normalizeAgentRow(row: any): AgentRow {
     description: row.description,
     setup_script: row.setupScript || row.setup_script,
     sandbox_env_vars_json: row.sandboxEnvVarsJson || row.sandbox_env_vars_json,
+    enabled: (row.enabled ?? row.enabled) !== false,
     archived_at: row.archivedAt || row.archived_at,
     created_at: row.createdAt || row.created_at,
     updated_at: row.updatedAt || row.updated_at,
@@ -297,6 +334,7 @@ function denormalizeAgentRow(row: AgentRow): any {
     description: row.description,
     setupScript: row.setup_script,
     sandboxEnvVarsJson: row.sandbox_env_vars_json,
+    enabled: row.enabled,
     archivedAt: row.archived_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -397,6 +435,41 @@ describe("AgentRepository", () => {
     const active = await repo.listForWorkspace("workspace-1", "active");
     expect(active).toHaveLength(1);
     expect(active[0]?.id).toBe(wb1.id);
+  });
+
+  // A default pointing at a deleted agent would silently hand new threads a
+  // dead agent, so archiving clears it in the same batch.
+  it("clears any project default naming the archived agent", async () => {
+    const repo = new AgentRepository(db as never);
+    const kept = await repo.create(newAgentRow("workspace-1"));
+    const removed = await repo.create(newAgentRow("workspace-1"));
+    db.projectRows.set("prj_1", { id: "prj_1", default_agent_id: removed.id });
+    db.projectRows.set("prj_2", { id: "prj_2", default_agent_id: kept.id });
+
+    await repo.archive(removed.id, now + 1);
+
+    expect(db.projectRows.get("prj_1")?.default_agent_id).toBeNull();
+    expect(db.projectRows.get("prj_2")?.default_agent_id).toBe(kept.id);
+  });
+
+  // The last-agent guard's only input. It counts agents that could actually
+  // take work — counting rows instead would let a workspace disable its way to
+  // zero usable agents and then be unable to start a thread at all.
+  it("counts only other active, enabled agents as usable", async () => {
+    const repo = new AgentRepository(db as never);
+    const subject = await repo.create(newAgentRow("workspace-1"));
+    const archived = await repo.create(newAgentRow("workspace-1"));
+    const disabled = await repo.create(newAgentRow("workspace-1"));
+    const other = await repo.create(newAgentRow("workspace-2"));
+
+    expect(await repo.countUsableExcluding("workspace-1", subject.id)).toBe(2);
+
+    await repo.archive(archived.id, now + 1);
+    await repo.update(disabled.id, { enabled: false });
+
+    expect(await repo.countUsableExcluding("workspace-1", subject.id)).toBe(0);
+    // The subject itself is never counted, and another workspace never is.
+    expect(await repo.countUsableExcluding("workspace-2", other.id)).toBe(0);
   });
 
   it("throws when asserting an archived agent", async () => {

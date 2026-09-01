@@ -2,7 +2,7 @@
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
 import { render, screen, cleanup, waitFor, fireEvent } from "@testing-library/react";
 
-// Mock the automata + workbenches API layers so the test can assert exactly
+// Mock the automata + agents API layers so the test can assert exactly
 // what payload a submit sends, without a running Worker.
 const listAutomata = vi.fn();
 const createAutomaton = vi.fn();
@@ -20,9 +20,9 @@ vi.mock("../../automata-api", async () => {
   };
 });
 
-const listWorkbenches = vi.fn();
+const listAgentsMock = vi.fn();
 vi.mock("../../agents-api", () => ({
-  listAgents: (...a: unknown[]) => listWorkbenches(...a),
+  listAgents: (...a: unknown[]) => listAgentsMock(...a),
 }));
 
 const getDefaultAgentSettings = vi.fn();
@@ -37,7 +37,7 @@ vi.mock("../../settings-api", async () => {
 
 import { AutomataPanel } from "./AutomataPanel";
 
-const WORKBENCH = {
+const AGENT_FIXTURE = {
   id: "wbk_1",
   workspaceId: "ws",
   name: "Backend",
@@ -80,7 +80,7 @@ beforeEach(() => {
       dispatchEvent: () => false,
     }) as unknown as MediaQueryList;
   listAutomata.mockResolvedValue([]);
-  listWorkbenches.mockResolvedValue([WORKBENCH]);
+  listAgentsMock.mockResolvedValue([AGENT_FIXTURE]);
   getDefaultAgentSettings.mockResolvedValue({
     workspace: { id: "ws", name: "Workspace" },
     agent: {
@@ -173,13 +173,13 @@ async function fillRequiredFields() {
   });
 }
 
-describe("AutomataPanel workbench override", () => {
-  it("submits the selected workbench's id", async () => {
+describe("AutomataPanel agent override", () => {
+  it("submits the selected agent's id", async () => {
     renderPanel();
-    await waitFor(() => expect(listWorkbenches).toHaveBeenCalled());
+    await waitFor(() => expect(listAgentsMock).toHaveBeenCalled());
     await fillRequiredFields();
 
-    fireEvent.click(screen.getByRole("button", { name: /workbench/i }));
+    fireEvent.click(screen.getByRole("button", { name: /agent/i }));
     fireEvent.click(await screen.findByText("Backend"));
 
     fireEvent.click(screen.getByRole("button", { name: /create automaton/i }));
@@ -191,7 +191,7 @@ describe("AutomataPanel workbench override", () => {
 
   it("submits null when left on Inherit from project", async () => {
     renderPanel();
-    await waitFor(() => expect(listWorkbenches).toHaveBeenCalled());
+    await waitFor(() => expect(listAgentsMock).toHaveBeenCalled());
     await fillRequiredFields();
 
     fireEvent.click(screen.getByRole("button", { name: /create automaton/i }));

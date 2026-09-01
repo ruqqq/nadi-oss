@@ -110,7 +110,7 @@ function baseProps(overrides: Partial<React.ComponentProps<typeof ProjectsPanel>
     onSelect: vi.fn(),
     onBackToList: vi.fn(),
     onSelectThread: vi.fn(),
-    onManageWorkbenches: vi.fn(),
+    onManageAgents: vi.fn(),
     closeLabel: "Close",
     onClose: vi.fn(),
     ...overrides,

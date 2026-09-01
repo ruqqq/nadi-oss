@@ -3,10 +3,10 @@ import { toast } from "sonner";
 import {
   MCP_RETURN_PATH_KEY,
   parseProvidersRoute,
-  parseWorkbenchesRoute,
+  agentsPath,
+  parseAgentsRoute,
   providersPath,
   settingsPath,
-  workbenchesPath,
   type SettingsTab,
 } from "./lib/settings-routes";
 import {
@@ -62,7 +62,7 @@ import { SkillsSection } from "./settings/SkillsSection";
 import { MemorySection } from "./settings/MemorySection";
 import { PrivacySection } from "./settings/PrivacySection";
 import { ConnectionsSection } from "./settings/ConnectionsSection";
-import { WorkbenchesSection } from "./settings/WorkbenchesSection";
+import { AgentsSection } from "./settings/AgentsSection";
 import { ProvidersSection } from "./settings/ProvidersSection";
 import { SandboxSection } from "./settings/SandboxSection";
 import { ReasoningDisplaySection } from "./settings/ReasoningDisplaySection";
@@ -125,11 +125,11 @@ export function Settings({
   /** The tab in the URL — so it can be linked to, and survives an OAuth redirect. */
   tab: SettingsTab;
   onTabChange: (tab: SettingsTab) => void;
-  /** The full path under /settings — sub-routing within a tab (Workbenches'
+  /** The full path under /settings — sub-routing within a tab (the Agents
    *  master-detail) is parsed from this rather than from `tab` alone. */
   routePath: string;
-  /** Navigates within Settings below the tab level, e.g. selecting a
-   *  workbench. Tab switches themselves still go through `onTabChange`. */
+  /** Navigates within Settings below the tab level, e.g. selecting an
+   *  agent. Tab switches themselves still go through `onTabChange`. */
   onNavigate: (path: string, mode: "push" | "replace") => void;
 }) {
   const [servers, setServers] = useState<McpServer[] | null>(null); // null = loading
@@ -179,14 +179,14 @@ export function Settings({
     setSettings(nextSettings);
   }, []);
 
-  const workbenchesSelectedId = parseWorkbenchesRoute(routePath)?.selectedId ?? null;
-  const onSelectWorkbench = useCallback(
-    (id: string) => onNavigate(workbenchesPath(id), "push"),
+  const agentsSelectedId = parseAgentsRoute(routePath)?.selectedId ?? null;
+  const onSelectAgent = useCallback(
+    (id: string) => onNavigate(agentsPath(id), "push"),
     [onNavigate],
   );
-  const onNewWorkbench = useCallback(() => onNavigate(workbenchesPath("new"), "push"), [onNavigate]);
-  const onBackToWorkbenchesList = useCallback(
-    () => onNavigate(workbenchesPath(null), "replace"),
+  const onNewAgent = useCallback(() => onNavigate(agentsPath("new"), "push"), [onNavigate]);
+  const onBackToAgentsList = useCallback(
+    () => onNavigate(agentsPath(null), "replace"),
     [onNavigate],
   );
 
@@ -201,7 +201,7 @@ export function Settings({
   );
 
   // The tab strip scrolls horizontally on narrow screens. Keep the active tab
-  // in view when it changes, so landing on a right-hand tab (e.g. Workbenches)
+  // in view when it changes, so landing on a right-hand tab (e.g. Skills)
   // doesn't leave its own label clipped at the edge. No-op where the strip fits.
   const tabsListRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -262,17 +262,14 @@ export function Settings({
               <TabsTrigger value="general" className="flex-none px-3">
                 General
               </TabsTrigger>
-              <TabsTrigger value="agent" className="flex-none px-3">
-                Agent
+              <TabsTrigger value="agents" className="flex-none px-3">
+                Agents
               </TabsTrigger>
               <TabsTrigger value="providers" className="flex-none px-3">
                 Providers
               </TabsTrigger>
               <TabsTrigger value="sandbox" className="flex-none px-3">
                 Sandbox
-              </TabsTrigger>
-              <TabsTrigger value="workbenches" className="flex-none px-3">
-                Workbenches
               </TabsTrigger>
               <TabsTrigger value="connections" className="flex-none px-3">
                 Connections
@@ -282,9 +279,6 @@ export function Settings({
               </TabsTrigger>
               <TabsTrigger value="skills" className="flex-none px-3">
                 Skills
-              </TabsTrigger>
-              <TabsTrigger value="memory" className="flex-none px-3">
-                Memory
               </TabsTrigger>
             </TabsList>
 
@@ -298,13 +292,14 @@ export function Settings({
               />
             </TabsContent>
 
-            <TabsContent value="agent">
-              <AgentSection
-                consentWorkspaceId={consentWorkspaceId}
-                settings={settings}
-                loadError={settingsLoadError}
-                onRetry={loadSettings}
-                onSaved={onAgentSaved}
+            <TabsContent value="agents">
+              <AgentsSection
+                providers={settings?.providers ?? []}
+                networkAllowlistEnabled={agentNetworkAllowlistEnabled}
+                selectedId={agentsSelectedId}
+                onSelectAgent={onSelectAgent}
+                onNewAgent={onNewAgent}
+                onBackToList={onBackToAgentsList}
               />
             </TabsContent>
 
@@ -337,23 +332,11 @@ export function Settings({
               />
             </TabsContent>
 
-            <TabsContent value="workbenches">
-              <WorkbenchesSection
-                networkAllowlistEnabled={agentNetworkAllowlistEnabled}
-                selectedId={workbenchesSelectedId}
-                onSelectWorkbench={onSelectWorkbench}
-                onNewWorkbench={onNewWorkbench}
-                onBackToList={onBackToWorkbenchesList}
-              />
-            </TabsContent>
             <TabsContent value="connections">
               <ConnectionsSection />
             </TabsContent>
             <TabsContent value="skills">
               <SkillsSection />
-            </TabsContent>
-            <TabsContent value="memory">
-              <MemorySection />
             </TabsContent>
           </Tabs>
         </div>
@@ -652,298 +635,6 @@ function AppearanceSection() {
           </SelectContent>
         </Select>
       </Card>
-    </section>
-  );
-}
-
-function AgentSection({
-  consentWorkspaceId,
-  settings,
-  loadError,
-  onRetry,
-  onSaved,
-}: {
-  consentWorkspaceId: string | null;
-  settings: AgentSettingsResponse | null;
-  loadError: Error | null;
-  onRetry: () => void;
-  onSaved: (settings: AgentSettingsResponse) => void;
-}) {
-  if (loadError) {
-    return <SettingsLoadError message={loadError.message} onRetry={onRetry} />;
-  }
-
-  if (settings === null) {
-    return (
-      <section aria-label={AGENT_SETTINGS_TITLE} className="space-y-4">
-        <SectionHeading title={AGENT_SETTINGS_TITLE} description="System prompt, provider, and model." />
-        <Card className="flex flex-col gap-4 p-4" aria-busy="true">
-          <Skeleton className="h-5 w-40" />
-          <Skeleton className="h-32 w-full" />
-          <div className="grid gap-3 sm:grid-cols-2">
-            <Skeleton className="h-10 w-full" />
-            <Skeleton className="h-10 w-full" />
-          </div>
-        </Card>
-      </section>
-    );
-  }
-
-  return (
-    <AgentSettingsForm
-      consentWorkspaceId={consentWorkspaceId}
-      settings={settings}
-      onSaved={onSaved}
-    />
-  );
-}
-
-function AgentSettingsForm({
-  consentWorkspaceId,
-  settings,
-  onSaved,
-}: {
-  consentWorkspaceId: string | null;
-  settings: AgentSettingsResponse;
-  onSaved: (settings: AgentSettingsResponse) => void;
-}) {
-  const selectedProvider = isSettingsProvider(settings.agent.provider)
-    ? settings.agent.provider
-    : DEFAULT_PROVIDER;
-  const [systemPrompt, setSystemPrompt] = useState(settings.agent.systemPrompt);
-  const [provider, setProvider] = useState<SettingsProvider>(selectedProvider);
-  const [providerChanged, setProviderChanged] = useState(false);
-  const [model, setModel] = useState(settings.agent.model);
-  const [modelInputModalities, setModelInputModalities] = useState<ModelInputModality[]>(
-    settings.agent.modelInputModalities,
-  );
-  const [reasoningEffort, setReasoningEffort] = useState(settings.agent.reasoningEffort);
-  const [modelSupportsReasoning, setModelSupportsReasoning] = useState(
-    settings.agent.modelSupportsReasoning,
-  );
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const hasUnknownProvider = !isSettingsProvider(settings.agent.provider);
-  const selectedProviderSettings = settings.providers.find((entry) => entry.provider === provider);
-  const selectedProviderUsable = selectedProviderSettings?.usable ?? false;
-  const usableProviderOptions = SETTINGS_PROVIDER_OPTIONS.filter((option) =>
-    settings.providers.some((entry) => entry.provider === option.value && entry.usable),
-  ).map((option) => ({
-    ...option,
-    whitelistModels:
-      settings.providers.find((entry) => entry.provider === option.value)?.whitelistModels ?? null,
-  }));
-
-  useEffect(() => {
-    setSystemPrompt(settings.agent.systemPrompt);
-    setProvider(
-      isSettingsProvider(settings.agent.provider) ? settings.agent.provider : DEFAULT_PROVIDER,
-    );
-    setProviderChanged(false);
-    setModel(settings.agent.model);
-    setModelInputModalities(settings.agent.modelInputModalities);
-    setReasoningEffort(settings.agent.reasoningEffort);
-    setModelSupportsReasoning(settings.agent.modelSupportsReasoning);
-    setError(null);
-  }, [
-    settings.agent.systemPrompt,
-    settings.agent.provider,
-    settings.agent.model,
-    settings.agent.modelInputModalities,
-    settings.agent.reasoningEffort,
-    settings.agent.modelSupportsReasoning,
-  ]);
-
-  const submit = useCallback(
-    (event: FormEvent) => {
-      event.preventDefault();
-      if (saving || !systemPrompt.trim() || !model.trim() || !selectedProviderUsable) return;
-      setSaving(true);
-      setError(null);
-      void saveDefaultAgentSettings(
-        buildDefaultAgentSettingsSaveInput({
-          systemPrompt,
-          model,
-          modelInputModalities,
-          currentProvider: settings.agent.provider,
-          selectedProvider: provider,
-          providerChanged,
-          reasoningEffort,
-          modelSupportsReasoning,
-        }),
-      )
-        .then((nextSettings) => {
-          onSaved(nextSettings);
-          toast.success("Saved default agent settings");
-          if (
-            canUseWorkspaceTelemetry({
-              consentWorkspaceId,
-              workspaceId: nextSettings.workspace.id,
-            })
-          ) {
-            track("settings_saved", {
-              section: "agent",
-              provider: nextSettings.agent.provider,
-              model: nextSettings.agent.model,
-            });
-          }
-        })
-        .catch((err: unknown) => {
-          const status = err instanceof Error ? err.message.match(/\((\d+)\)/)?.[1] : null;
-          setError(
-            status === "400" ? "Check the prompt, provider, and model." : "Couldn’t save settings.",
-          );
-          toast.error("Couldn’t save default agent settings.");
-        })
-        .finally(() => setSaving(false));
-    },
-    [
-      saving,
-      systemPrompt,
-      providerChanged,
-      settings.agent.provider,
-      provider,
-      model,
-      modelInputModalities,
-      reasoningEffort,
-      modelSupportsReasoning,
-      selectedProviderUsable,
-      consentWorkspaceId,
-      onSaved,
-    ],
-  );
-
-  return (
-    <section aria-label={AGENT_SETTINGS_TITLE} className="space-y-4">
-      <SectionHeading title={AGENT_SETTINGS_TITLE} description="System prompt, provider, and model." />
-
-      <Card className="p-4">
-        <form id="agent-settings-form" className="space-y-4" onSubmit={submit}>
-          <div className="space-y-1.5">
-            <Label htmlFor="agent-system-prompt">System prompt</Label>
-            <Textarea
-              id="agent-system-prompt"
-              value={systemPrompt}
-              onChange={(event) => setSystemPrompt(event.target.value)}
-              className="min-h-40 resize-y"
-              disabled={saving}
-            />
-          </div>
-
-          <div className="min-w-0 space-y-1.5">
-            <Label htmlFor="agent-model">Provider &amp; model</Label>
-            <ModelPicker
-              variant="field"
-              triggerId="agent-model"
-              triggerLabel="Agent provider and model"
-              providers={usableProviderOptions}
-              provider={provider}
-              model={model}
-              placeholder={SETTINGS_PROVIDER_MODEL_PLACEHOLDERS[provider]}
-              disabled={saving}
-              onProviderChange={(nextProvider) => {
-                setProvider(nextProvider);
-                setProviderChanged(true);
-                if (!model.trim()) {
-                  setModel(defaultModelForProvider(nextProvider));
-                  setModelInputModalities(["text"]);
-                }
-              }}
-              onModelChange={(next) => {
-                setModel(next);
-                setModelInputModalities(["text"]);
-                // A typed model id is a model we know nothing about.
-                setModelSupportsReasoning(null);
-              }}
-              onModelSelected={(selectedModel) => {
-                setModelInputModalities(selectedModel.inputModalities);
-                setModelSupportsReasoning(selectedModel.reasoning ?? null);
-              }}
-            />
-            {hasUnknownProvider && (
-              <p className="break-words text-muted-foreground text-xs">
-                Current provider: {settings.agent.provider}
-              </p>
-            )}
-          </div>
-
-          {!selectedProviderUsable && (
-            <Alert role="status">
-              <AlertDescription>
-                {formatProvider(provider)} is not fully configured. Save endpoint and secret details
-                in the Providers tab before sending messages with this provider.
-              </AlertDescription>
-            </Alert>
-          )}
-
-          {/* Hidden on the same rule as the composer, so the two never disagree
-              about whether this provider can be told how hard to think. A form
-              field, so it IS labelled — the icon-only rule is about the composer
-              footer, where space is scarce and the gauge does the work. */}
-          {shouldOfferEffortControl({ provider, modelSupportsReasoning }) && (
-          <div className="flex items-center justify-between gap-3">
-            <div className="space-y-0.5">
-              <Label htmlFor="agent-reasoning-effort">Thinking effort</Label>
-              <p className="text-muted-foreground text-sm">
-                How hard new chats think by default. Separate from showing the thinking.
-              </p>
-            </div>
-            <Select
-              value={reasoningEffort}
-              onValueChange={(next) => {
-                if (isReasoningEffort(next)) setReasoningEffort(next);
-              }}
-              disabled={saving}
-            >
-              <SelectTrigger
-                id="agent-reasoning-effort"
-                className="w-36"
-                aria-label="Thinking effort"
-              >
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {REASONING_EFFORTS.map((level) => (
-                  <SelectItem key={level} value={level}>
-                    <EffortGauge
-                      level={level}
-                      className={cn(
-                        "size-4",
-                        level === reasoningEffort ? "text-primary" : "text-muted-foreground",
-                      )}
-                    />
-                    {EFFORT_LABELS[level]}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          )}
-
-          {error && (
-            <Alert variant="destructive" role="alert">
-              <AlertDescription>{error}</AlertDescription>
-            </Alert>
-          )}
-        </form>
-      </Card>
-
-      <SettingsFooterPortal>
-        <PaneFooter contentClassName="max-w-4xl">
-          <FormActions>
-            <Button
-              type="submit"
-              form="agent-settings-form"
-              className={FORM_ACTION_BUTTON}
-              disabled={saving || !systemPrompt.trim() || !model.trim() || !selectedProviderUsable}
-              aria-busy={saving}
-            >
-              {saving ? <Spinner /> : null}
-              Save agent
-            </Button>
-          </FormActions>
-        </PaneFooter>
-      </SettingsFooterPortal>
     </section>
   );
 }

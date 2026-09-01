@@ -1,4 +1,4 @@
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import type { Env } from "../env";
 import type { ValidatedSession } from "../auth/session";
 import { registryDb } from "../db/client";
@@ -22,4 +22,30 @@ export async function resolveAgentScope(
     .orderBy(asc(workspaceMembers.createdAt), asc(agents.createdAt))
     .get();
   return row ?? null;
+}
+
+/**
+ * The same scope, but for an EXPLICITLY named agent — the drill-down surfaces
+ * (`/settings/agents/:id`) address one agent, not "the workspace's earliest".
+ * Returns null when the agent does not exist or the caller is not a member of
+ * its workspace, so a caller cannot distinguish the two.
+ */
+export async function resolveAgentScopeById(
+  env: Env,
+  session: ValidatedSession,
+  agentId: string,
+): Promise<{ workspaceId: string; agentId: string } | null> {
+  const row = await registryDb(env)
+    .select({ workspaceId: agents.workspaceId })
+    .from(agents)
+    .innerJoin(
+      workspaceMembers,
+      and(
+        eq(workspaceMembers.workspaceId, agents.workspaceId),
+        eq(workspaceMembers.userId, session.user.id),
+      ),
+    )
+    .where(eq(agents.id, agentId))
+    .get();
+  return row ? { workspaceId: row.workspaceId, agentId } : null;
 }

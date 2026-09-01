@@ -48,6 +48,13 @@ const authHandlers = [
   }),
 ];
 
+/**
+ * The mock store keeps ONE flat list of skills and one of memories, so
+ * `?agentId=` (which on the real server picks between the workspace library and
+ * one agent's private items) is accepted and ignored here. The store's `Skill`
+ * and `Memory` are the WIRE types, and neither carries a scope field to filter
+ * on. Give them one before writing a mock test that depends on the difference.
+ */
 const skillHandlers = [
   http.get("/api/skills", ({ request }) => {
     const archived = new URL(request.url).searchParams.get("archived") === "1";

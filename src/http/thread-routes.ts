@@ -1161,7 +1161,18 @@ async function selectThreadTarget(env: Env, session: ValidatedSession) {
       })
       .from(workspaceMembers)
       .innerJoin(agents, eq(agents.workspaceId, workspaceMembers.workspaceId))
-      .where(eq(workspaceMembers.userId, session.user.id))
+      // Archived and disabled agents are excluded HERE, at the data source,
+      // rather than by whoever happens to call this: a thread started on an
+      // archived agent would clone a deleted agent's repositories, and a
+      // disabled one refuses work anyway. The last-agent guard on archive and
+      // disable is what guarantees a row still matches.
+      .where(
+        and(
+          eq(workspaceMembers.userId, session.user.id),
+          isNull(agents.archivedAt),
+          eq(agents.enabled, true),
+        ),
+      )
       // The id tie-break is load-bearing now that a workspace really does have
       // more than one agent: without it two agents created in the same
       // millisecond make "the workspace's agent" a coin flip, and that agent
