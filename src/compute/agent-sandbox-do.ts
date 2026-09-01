@@ -231,9 +231,15 @@ export class AgentSandbox extends DurableObject<Env> {
    * `runSandboxComputeAlarm`'s fallback: an open row whose horizon is already
    * past means the sweep is overdue, and the next alarm is what closes it.
    */
-  private async cancelEvictionKeepingOwedWork(): Promise<void> {
+  private async cancelEvictionKeepingOwedWork(now: number): Promise<void> {
     await this.ctx.storage.deleteAlarm();
-    const horizon = await this.rosterWorkHorizon();
+    // The CALLER's clock, threaded the whole way. This is the third
+    // arm-adjacent fold of the roster and it was the only one omitting `now` —
+    // correct in production solely because `resolveComputeService` defaults
+    // `deps.now` to `Date.now()`, i.e. by coincidence rather than by
+    // construction, which is precisely the shape `getSandboxWorkHorizon`'s doc
+    // warns about.
+    const horizon = await this.rosterWorkHorizon(now);
     if (horizon !== null) await this.ctx.storage.setAlarm(horizon);
   }
 
@@ -495,7 +501,7 @@ export class AgentSandbox extends DurableObject<Env> {
       // writes THIS DO's store, and routing its wake through another DO only
       // added a hop that could fail.
       scheduleEviction: (timestampMs) => this.ctx.storage.setAlarm(timestampMs),
-      cancelEviction: () => this.cancelEvictionKeepingOwedWork(),
+      cancelEviction: (now) => this.cancelEvictionKeepingOwedWork(now),
       supportsProcessMonitor: options.supportsProcessMonitor,
       // NOT on the plan's list of thread-bound deps, and it had to be: the
       // thread DO supplies `processMonitorEnabled && !attachedRuntime`, while

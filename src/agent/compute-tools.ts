@@ -112,7 +112,7 @@ export interface ComputeServiceHostDeps {
    */
   scheduleEviction: (timestampMs: number) => Promise<void>;
   /** Cancels the outstanding idle-eviction alarm; used by `exec_shutdown` after teardown. */
-  cancelEviction: () => Promise<void>;
+  cancelEviction: (now: number) => Promise<void>;
   /**
    * Delivers a hidden system-reminder to the model. `"deferred"` appends it to
    * the thread's transcript history so the model sees it on the next turn
@@ -494,7 +494,7 @@ export async function resolveComputeService(hostDeps: ComputeServiceHostDeps): P
     appBaseUrl: deps.env.APP_BASE_URL,
     betterAuthSecret: deps.env.BETTER_AUTH_SECRET,
     setAlarm: (timestamp) => deps.scheduleEviction(timestamp),
-    clearAlarm: () => deps.cancelEviction(),
+    clearAlarm: (alarmNow) => deps.cancelEviction(alarmNow),
     now,
     deliverSystemReminder: deps.deliverSystemReminder,
     supportsProcessMonitor: deps.supportsProcessMonitor,

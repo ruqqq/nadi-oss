@@ -170,9 +170,18 @@ describe("admitWatcher", () => {
    * filled its own eight should be told to unwatch one of ITS processes, not
    * told to wait for a sibling.
    */
-  it("names the thread's own limit first when both are reached", () => {
+  /**
+   * Reversed in fix round 3, and the assertion below is the old order's
+   * headstone. It read `thread_limit`, which was chosen so the refusal message
+   * could tell the model to unwatch one of its OWN processes — advice round 2
+   * deleted, because no `exec_unwatch` tool exists. With nothing left arguing
+   * for thread-first, the diagnostic wins: a full box admits nothing whoever
+   * owns the row, and calling that a per-thread limit misdirects the one log
+   * line anybody reads when this bites.
+   */
+  it("names the BOX's limit when both are reached", () => {
     expect(
       admitWatcher({ threadCount: MAX_WATCHERS_PER_THREAD, boxCount: MAX_WATCHERS_PER_BOX }),
-    ).toBe("thread_limit");
+    ).toBe("box_limit");
   });
 });

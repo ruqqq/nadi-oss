@@ -298,7 +298,20 @@ export interface ThreadComputeServiceDeps {
   appBaseUrl?: string;
   betterAuthSecret?: string;
   setAlarm: (timestamp: number) => Promise<void>;
-  clearAlarm?: () => Promise<void>;
+  /**
+   * Cancel the idle-eviction schedule.
+   *
+   * `now` is REQUIRED, and not because this call needs a clock of its own: the
+   * sandbox DO's implementation re-arms against the roster's work horizon
+   * before returning (a teardown must not drop the wake an owed row is relying
+   * on), and that fold is the same one `getWorkHorizon` performs. A fold that
+   * takes a clock on one arm path and invents `Date.now()` on another is the
+   * shape this codebase keeps paying for — see `getSandboxWorkHorizon`'s doc.
+   * Stating it here makes the omission a compile error rather than a
+   * coincidence that holds only while `resolveComputeService` defaults `now`
+   * to `Date.now()`.
+   */
+  clearAlarm?: (now: number) => Promise<void>;
   now: () => number;
   /**
    * Raise a system reminder in ONE thread's conversation.
@@ -2493,7 +2506,7 @@ export class ThreadComputeService {
     this.deps.store.markAbsent(now);
     await this.deps.quota?.release();
     await this.clearLifecycleState();
-    await this.deps.clearAlarm?.();
+    await this.deps.clearAlarm?.(this.deps.now());
     await this.deps.deliverSystemReminder?.({
       threadId: this.deps.threadId,
       body: "The thread compute environment was shut down on request. Files and running processes are gone; previous command output remains available.",
@@ -2665,7 +2678,7 @@ export class ThreadComputeService {
     });
     this.clearWatchers();
     await this.clearLifecycleState();
-    await this.deps.clearAlarm?.();
+    await this.deps.clearAlarm?.(this.deps.now());
   }
 
   async cleanupExpiredRecoverableCompute(): Promise<void> {
@@ -3479,7 +3492,7 @@ export class ThreadComputeService {
     this.clearWatchers();
     this.deps.store.markAbsent(now);
     await this.clearLifecycleState();
-    await this.deps.clearAlarm?.();
+    await this.deps.clearAlarm?.(this.deps.now());
     this.emitLifecycleEvent("recovery_expiry", "recoverable_to_absent", "success");
     await this.deps.deliverSystemReminder?.({
       threadId: this.deps.threadId,
@@ -3501,7 +3514,7 @@ export class ThreadComputeService {
     // slot for the rest of its TTL.
     await this.deps.quota?.release();
     await this.clearLifecycleState();
-    await this.deps.clearAlarm?.();
+    await this.deps.clearAlarm?.(this.deps.now());
     await this.deps.deliverSystemReminder?.({
       threadId: this.deps.threadId,
       body: LOST_COMPUTE_REMINDER,

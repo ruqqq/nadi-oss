@@ -18,6 +18,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { drizzle } from "drizzle-orm/d1";
 import * as schema from "../../src/db/schema";
 import { applyRegistryTestSchema } from "./helpers/registry";
+import { WORK_DELIVERY_RETRY_MS } from "../../src/agent/work-ledger";
 
 const runInThinkDo = runInDurableObject as any;
 const runInSandboxDo = runInDurableObject as any;
@@ -353,6 +354,7 @@ describe("a teardown speaks only for the thread it is talking to", () => {
     await startUnwatchedProcess(agentId, owner);
 
     const shutterSession = await openSession(agentId, shutter);
+    const before = Date.now();
     const result = await shutterSession.session.execShutdown({ confirm: true });
     if (!result.ok) throw new Error(`execShutdown failed: ${result.error.code}`);
 
@@ -364,6 +366,19 @@ describe("a teardown speaks only for the thread it is talking to", () => {
       "the owed row's only sweep trigger is this alarm; clearing it strands the row " +
         "AND the notice the owner was promised",
     ).not.toBeNull();
+
+    // ...and armed at a time that can actually redeem it. `!== null` alone
+    // passes for an alarm set to 0, to a stale past timestamp, or to the idle
+    // release half an hour out — none of which is "the owed row's retry".
+    // Bounded rather than equated: the owner's row is terminal-but-undelivered,
+    // so `workHorizon` folds to the OWED component, `now + WORK_DELIVERY_RETRY_MS`.
+    // Asserting the window keeps this a statement about behaviour rather than a
+    // copy of the arithmetic.
+    expect(armed, "an alarm in the past is a hot-refire, not a wake").toBeGreaterThan(before);
+    expect(
+      armed,
+      "and one an idle-release away is the owner waiting ~30 minutes for a card it is owed",
+    ).toBeLessThanOrEqual(Date.now() + WORK_DELIVERY_RETRY_MS);
   });
 
   /**

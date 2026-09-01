@@ -156,7 +156,19 @@ export function admitWatcher(input: {
   /** Watchers already held by every thread of this box, the new owner included. */
   boxCount: number;
 }): WatcherAdmission {
-  if (input.threadCount >= MAX_WATCHERS_PER_THREAD) return "thread_limit";
+  // BOX FIRST, and the order is diagnostic rather than behavioural. A full box
+  // admits nothing whoever owns the row, so reporting `thread_limit` for a row
+  // whose owner merely also happens to be at eight tells the reader — and the
+  // `compute.auto_watch_refused` log line — that ONE conversation is busy when
+  // the truth is the whole agent is saturated. That is the wrong first move in
+  // the only incident where this line matters.
+  //
+  // Round 1 ordered these the other way round to make the refusal MESSAGE
+  // actionable ("unwatch one of yours"). Round 2 deleted that advice — there is
+  // no `exec_unwatch` tool to act on — so nothing is left arguing for
+  // thread-first, and the caller's `continue`/`break` choice reads correctly
+  // too: `box_limit` ends the walk, which a saturated box should.
   if (input.boxCount >= MAX_WATCHERS_PER_BOX) return "box_limit";
+  if (input.threadCount >= MAX_WATCHERS_PER_THREAD) return "thread_limit";
   return "ok";
 }
