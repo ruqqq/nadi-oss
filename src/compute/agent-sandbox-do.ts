@@ -14,7 +14,7 @@ import {
   encodeSandboxError,
   type SandboxCallResult,
 } from "./agent-sandbox-session";
-import type { EffectiveComputeConfig } from "./types";
+import type { ComputeResolvePurpose, EffectiveComputeConfig } from "./types";
 import { log } from "../log";
 
 /**
@@ -123,6 +123,8 @@ export class AgentSandbox extends DurableObject<Env> {
     threadId: string,
     options: {
       supportsProcessMonitor: boolean;
+      /** See {@link ComputeResolvePurpose}. Only the deletion teardown sets it. */
+      purpose?: ComputeResolvePurpose;
       attachedRuntime?: BackendReference;
       /**
        * The caller's own workspace/agent. Supplied by `session()`, whose caller
@@ -207,6 +209,7 @@ export class AgentSandbox extends DurableObject<Env> {
     threadId: string,
     options: {
       supportsProcessMonitor: boolean;
+      purpose?: ComputeResolvePurpose;
       attachedRuntime?: BackendReference;
       runtimeConfig?: { workspaceId: string; agentId: string };
     },
@@ -241,6 +244,7 @@ export class AgentSandbox extends DurableObject<Env> {
       // function of the two values the caller already states, rather than a
       // third input a caller could get wrong.
       backgroundLongRunningExec: options.supportsProcessMonitor && !options.attachedRuntime,
+      ...(options.purpose ? { purpose: options.purpose } : {}),
       // Plain serializable data, not a capability: an attached subagent's
       // parent runtime reference travels as an RPC INPUT. Nothing to relocate.
       ...(options.attachedRuntime ? { attachedRuntime: options.attachedRuntime } : {}),
@@ -284,6 +288,13 @@ export class AgentSandbox extends DurableObject<Env> {
      * and configure it against the wrong workspace. The caller knows.
      */
     runtimeConfig: { workspaceId: string; agentId: string };
+    /**
+     * Why the session is being opened. Plain data, so it crosses the RPC
+     * boundary unchanged. Only `"teardown"` behaves differently, and only by
+     * lifting the two AGENT-availability gates — see
+     * {@link ComputeResolvePurpose}.
+     */
+    purpose?: ComputeResolvePurpose;
     /** An attached subagent's parent runtime, when this thread shares a machine. */
     attachedRuntime?: BackendReference;
   }): Promise<
@@ -314,6 +325,7 @@ export class AgentSandbox extends DurableObject<Env> {
       const resolved = await this.resolveService(input.threadId, {
         supportsProcessMonitor: input.supportsProcessMonitor,
         runtimeConfig: input.runtimeConfig,
+        ...(input.purpose ? { purpose: input.purpose } : {}),
         ...(input.attachedRuntime ? { attachedRuntime: input.attachedRuntime } : {}),
       });
       if (!resolved) return { ok: true, value: null };

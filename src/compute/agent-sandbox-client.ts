@@ -1,6 +1,6 @@
 import type { Env } from "../env";
 import type { BackendReference } from "./backend";
-import type { EffectiveComputeConfig } from "./types";
+import type { ComputeResolvePurpose, EffectiveComputeConfig } from "./types";
 import {
   decodeSandboxError,
   unwrapSandboxCall,
@@ -141,6 +141,12 @@ export async function openSandboxSession(
      * config is its parent's. See `AgentSandbox.session`.
      */
     runtimeConfig: { workspaceId: string; agentId: string };
+    /**
+     * Why the session is being opened. Omit for ordinary work. `"teardown"`
+     * is the agent-deletion path, which must reach the machine of an agent
+     * that is disabled or already archived — see {@link ComputeResolvePurpose}.
+     */
+    purpose?: ComputeResolvePurpose;
     attachedRuntime?: BackendReference;
   },
 ): Promise<SandboxSessionResolution | null> {
@@ -149,6 +155,7 @@ export async function openSandboxSession(
     threadId,
     supportsProcessMonitor: options.supportsProcessMonitor,
     runtimeConfig: options.runtimeConfig,
+    ...(options.purpose ? { purpose: options.purpose } : {}),
     ...(options.attachedRuntime ? { attachedRuntime: options.attachedRuntime } : {}),
   });
   if (!opened.ok) throw decodeSandboxError(opened.error);

@@ -35,7 +35,7 @@ import {
 } from "../compute/config";
 import type { ComputeResourceProfile } from "../compute/backend";
 import type { BackendReference, ComputeBackend } from "../compute/backend";
-import type { EffectiveComputeConfig } from "../compute/types";
+import type { ComputeResolvePurpose, EffectiveComputeConfig } from "../compute/types";
 import type { WatcherCompletionInfo } from "./system-reminder";
 import type { WorkLedgerSink } from "./work-ledger-store";
 import { getGithubAppConfig } from "../github/config";
@@ -171,6 +171,13 @@ export interface ComputeServiceHostDeps {
    */
   backgroundLongRunningExec: boolean;
   /**
+   * Why this service is being resolved. Omitted (i.e. `"work"`) everywhere
+   * except the agent-deletion teardown, which must be able to reach a machine
+   * belonging to an agent that is disabled or already archived — see
+   * {@link ComputeResolvePurpose} and `resolveEffectiveComputeConfig`.
+   */
+  purpose?: ComputeResolvePurpose;
+  /**
    * When set, the resolved service ATTACHES to this backend environment (a
    * subagent sharing its parent's machine) instead of provisioning its own.
    */
@@ -305,7 +312,7 @@ export async function resolveComputeService(hostDeps: ComputeServiceHostDeps): P
   // itself depends on the profile) never consults the profile — see
   // `needsAgentResourceProfile`. This is what keeps a compute-DISABLED
   // workspace from paying an extra D1 round-trip for a value it will never use.
-  const preliminary = computeConfigFromInputs(inputs, null);
+  const preliminary = computeConfigFromInputs(inputs, null, deps.purpose);
   if (!needsAgentResourceProfile(preliminary)) return null;
 
   // `threadAgentId` is the thread's AGENT — what used to be a separate
@@ -331,7 +338,7 @@ export async function resolveComputeService(hostDeps: ComputeServiceHostDeps): P
       ? agentRow.resourceProfile
       : null;
 
-  const config = computeConfigFromInputs(inputs, agentResourceProfile);
+  const config = computeConfigFromInputs(inputs, agentResourceProfile, deps.purpose);
   if (!config.enabled) return null;
 
   const skillDomains = await new AgentSkillRepository(registryDb(deps.env)).listEnabledSkillDomains(

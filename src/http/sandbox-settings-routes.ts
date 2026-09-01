@@ -1,4 +1,4 @@
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq, isNull } from "drizzle-orm";
 import { validateRequestSession } from "../auth/session";
 import { registryDb } from "../db/client";
 import { agents, workspaceSandboxSettings } from "../db/schema";
@@ -114,6 +114,19 @@ export async function routeSandboxSettings(req: Request, env: Env): Promise<Resp
   return new Response("Not found", { status: 404 });
 }
 
+/**
+ * The workspace, plus the agent whose settings this page speaks for.
+ *
+ * Archived and disabled agents are excluded, matching `resolveAgentScope` and
+ * `selectThreadTarget`. Without the filter this page picks the workspace's
+ * literal earliest agent, and the effective config it renders now bails with
+ * `reason: "disabled"` for a disabled or deleted agent — which the UI maps to
+ * "Sandbox execution is turned off." So disabling ONE agent made the page claim
+ * the WORKSPACE's sandbox was off. Two different "off"s, one sentence.
+ *
+ * The last-agent guard on disable and archive is what guarantees a row still
+ * matches.
+ */
 async function resolveDefaultAgentTarget(
   req: Request,
   env: Env,
@@ -126,8 +139,16 @@ async function resolveDefaultAgentTarget(
   const agent = await db
     .select({ id: agents.id })
     .from(agents)
-    .where(eq(agents.workspaceId, workspace.id))
-    .orderBy(asc(agents.createdAt))
+    .where(
+      and(
+        eq(agents.workspaceId, workspace.id),
+        isNull(agents.archivedAt),
+        eq(agents.enabled, true),
+      ),
+    )
+    // Same tie-break as the other two selectors, so all three name the same
+    // agent rather than differing by a coin flip on equal `created_at`.
+    .orderBy(asc(agents.createdAt), asc(agents.id))
     .get();
   if (!agent) return { ok: false, response: new Response("Not found", { status: 404 }) };
   return { ok: true, workspaceId: workspace.id, agentId: agent.id };

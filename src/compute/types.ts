@@ -86,6 +86,17 @@ export interface AgentComputeSettings {
   envVars: Record<string, string> | null;
 }
 
+/**
+ * Why a compute session is being resolved.
+ *
+ * `"work"` (the default) is every ordinary resolve: a turn, a tool, the idle
+ * alarm. `"teardown"` is the one caller that is DESTROYING the machine rather
+ * than using it, and it lifts exactly the two gates that describe the AGENT's
+ * availability rather than the machine's existence — see
+ * `resolveEffectiveComputeConfig`.
+ */
+export type ComputeResolvePurpose = "work" | "teardown";
+
 export interface EffectiveComputeConfig {
   provider: ComputeProviderId;
   providerConfig: ProviderConfig;

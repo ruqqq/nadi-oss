@@ -4,6 +4,7 @@ import { DEFAULT_MONITOR_POLL_INTERVAL_MS } from "./watchers";
 import type {
   AgentComputeSettings,
   ComputeConfigResult,
+  ComputeResolvePurpose,
   ComputeOutputLimits,
   ComputeResourceProfile,
   EnvironmentSource,
@@ -131,28 +132,42 @@ export function resolveEffectiveComputeConfig(input: {
   agentSecretEnvNames?: string[];
   /** The thread's agent's resource profile, read live. */
   agentResourceProfile?: ComputeResourceProfile | null | undefined;
+  /** Defaults to `"work"`. See {@link ComputeResolvePurpose}. */
+  purpose?: ComputeResolvePurpose | undefined;
 }): ComputeConfigResult {
   const { workspace, agent } = input;
   if (!workspace) return { enabled: false, reason: "missing_workspace_settings" };
   // FOUR separate switches, all of which mean "no machine", and none of which
-  // implies another:
-  //  - the workspace's master compute toggle;
-  //  - `agents.sandbox_enabled` — this agent works without a machine;
-  //  - `agents.enabled` — this agent is turned off entirely, so it gets no
-  //    machine either. This one was MISSING: the check read `agent.enabled`,
-  //    but that field carried `sandbox_enabled`, so disabling an agent left its
-  //    live threads holding a full sandbox while the UI said "Turn this off to
-  //    stop the agent from running";
-  //  - `agents.archived_at` — the user deleted the agent. Its machine goes.
-  // They are collapsed to one `reason` deliberately: the wire type is consumed
-  // by the settings UI, and a disabled agent's user-facing explanation comes
-  // from the send-path refusal (`assertThreadWritable`), not from here.
-  if (
-    !workspace.enabled ||
-    agent?.sandboxEnabled === false ||
-    agent?.agentEnabled === false ||
-    (agent != null && agent.archivedAt !== null)
-  ) {
+  // implies another. They split cleanly into two kinds, and the split is what
+  // `purpose` turns on:
+  //
+  // DOES A MACHINE EXIST TO REACH — always enforced, teardown included:
+  //  - the workspace's master compute toggle. Off means there is no configured
+  //    provider to issue a destroy against at all;
+  //  - `agents.sandbox_enabled === false` — this agent works without a machine,
+  //    so there has never been one to destroy.
+  //
+  // MAY THIS AGENT USE A MACHINE — lifted for `purpose: "teardown"`:
+  //  - `agents.enabled` — the agent is turned off. This gate was MISSING
+  //    entirely: the check read `agent.enabled`, but that field carried
+  //    `sandbox_enabled`, so disabling an agent left its live threads holding a
+  //    full sandbox while the UI said "Turn this off to stop the agent from
+  //    running";
+  //  - `agents.archived_at` — the user deleted the agent.
+  //
+  // Lifting those two for teardown is not a loophole, it is the point: "you may
+  // not WORK here" must never become "your machine is now unreachable, and
+  // therefore undeletable". Without it, disable-then-delete — the ordinary way
+  // people behave — would leave a sprite billing until its idle TTL while the
+  // dialog said "Its files are destroyed."
+  //
+  // The four are collapsed to one `reason` deliberately: the wire type is
+  // consumed by the settings UI, and a disabled agent's user-facing explanation
+  // comes from the send-path refusal (`assertThreadWritable`), not from here.
+  const agentMayUseCompute =
+    input.purpose === "teardown" ||
+    (agent?.agentEnabled !== false && (agent == null || agent.archivedAt === null));
+  if (!workspace.enabled || agent?.sandboxEnabled === false || !agentMayUseCompute) {
     return { enabled: false, reason: "disabled" };
   }
   if (workspace.provider !== workspace.providerConfig.kind) {

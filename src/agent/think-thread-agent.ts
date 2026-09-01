@@ -159,6 +159,7 @@ import {
   type SandboxSessionClient,
   type SandboxSessionResolution,
 } from "../compute/agent-sandbox-client";
+import type { ComputeResolvePurpose } from "../compute/types";
 import {
   createSubagentTools,
   deriveRunLabel,
@@ -3279,13 +3280,23 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
    * every live sandbox belonging to its threads, and the delete route fans out
    * to one of these per thread.
    *
+   * Opened with `purpose: "teardown"`, which is LOAD-BEARING and not a
+   * formality. `resolveEffectiveComputeConfig` withholds compute from an agent
+   * that is disabled or archived — correctly, for work — and this method runs
+   * on exactly such an agent. Resolving it as ordinary work returns null, and
+   * "delete an agent you turned off first", which is how people actually
+   * behave, would destroy nothing and say nothing. `"teardown"` lifts those two
+   * gates and only those two; a `sandbox_enabled: false` agent or a
+   * compute-disabled workspace still resolves to null, because in those cases
+   * there is genuinely no machine to reach.
+   *
    * NEVER THROWS. A DO RPC rejection is awkward to attribute at the caller (see
    * `docs`/`memory` on phantom rejections), and a single unreachable thread
    * must not fail the whole delete: the outcome is reported, not raised.
    */
   async shutdownComputeForAgentDeletion(): Promise<{ shutdown: boolean; reason?: string }> {
     try {
-      const resolved = await this.openSandbox();
+      const resolved = await this.openSandbox(false, "teardown");
       if (!resolved) return { shutdown: false, reason: "compute_disabled" };
       await resolved.service.execShutdown({ confirm: true });
       return { shutdown: true };
@@ -4856,6 +4867,8 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
    */
   private async openSandbox(
     backgroundWorkAdmission?: boolean,
+    /** See {@link ComputeResolvePurpose}. Only the deletion teardown sets it. */
+    purpose?: ComputeResolvePurpose,
   ): Promise<SandboxSessionResolution | null> {
     const attachedRuntime = this.attachedRuntimeForThisAgent();
     // THIS agent's answer, not a D1 lookup on `this.name`: `SubAgent` overrides
@@ -4867,6 +4880,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
       // exit reminders are surfaced instead of silently dropped.
       supportsProcessMonitor: backgroundWorkAdmission ?? this.processMonitorEnabled(),
       runtimeConfig: { workspaceId, agentId },
+      ...(purpose ? { purpose } : {}),
       ...(attachedRuntime ? { attachedRuntime } : {}),
     });
   }

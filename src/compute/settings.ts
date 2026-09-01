@@ -28,6 +28,7 @@ import type {
   AgentComputeSettings,
   ComputeOutputLimits,
   ComputeProviderId,
+  ComputeResolvePurpose,
   ComputeResourceProfile,
   ProviderConfig,
   WorkspaceComputeSettings,
@@ -353,10 +354,12 @@ export async function loadComputeConfigInputs(input: {
 export function computeConfigFromInputs(
   inputs: ComputeConfigInputs,
   agentResourceProfile?: ComputeResourceProfile | null,
+  purpose?: ComputeResolvePurpose,
 ) {
   return resolveEffectiveComputeConfig({
     workspace: inputs.workspace,
     agent: inputs.agent,
+    ...(purpose ? { purpose } : {}),
     daytonaCredentialPresent: inputs.daytonaConfiguration?.apiKey != null,
     daytonaProfiles: inputs.daytonaConfiguration?.profiles ?? { small: null, medium: null },
     spritesCredentialPresent: inputs.spritesConfiguration?.apiKey != null,
@@ -373,9 +376,10 @@ export async function resolveComputeConfigForAgent(input: {
   agentId: string;
   /** The thread's agent's resource profile; forwarded as-is, undefined included. */
   agentResourceProfile?: ComputeResourceProfile | null;
+  purpose?: ComputeResolvePurpose;
 }) {
   const inputs = await loadComputeConfigInputs(input);
-  return computeConfigFromInputs(inputs, input.agentResourceProfile);
+  return computeConfigFromInputs(inputs, input.agentResourceProfile, input.purpose);
 }
 
 /**

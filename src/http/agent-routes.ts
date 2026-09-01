@@ -308,7 +308,14 @@ async function destroyAgentSandboxes(env: Env, agentId: string): Promise<void> {
             threadId,
           )) as unknown as AgentDeletionShutdownStub;
           const result = await stub.shutdownComputeForAgentDeletion();
-          if (!result.shutdown && result.reason !== "compute_disabled") {
+          // EVERY non-shutdown is logged, `compute_disabled` included. That
+          // reason used to be filtered out as uninteresting, and filtering it
+          // is precisely what would have made "delete an agent you disabled
+          // first destroys nothing" ship in silence: the teardown resolved as
+          // ordinary work, the disabled-agent gate returned null, and the one
+          // line that would have said so was suppressed. A teardown that
+          // decides to do nothing must say that it decided to do nothing.
+          if (!result.shutdown) {
             log.warn("agent_routes.delete_sandbox_not_shutdown", {
               agentId,
               threadId,

@@ -110,6 +110,41 @@ describe("resolveEffectiveComputeConfig (resource profile)", () => {
     expect(result).toEqual({ enabled: false, reason: "disabled" });
   });
 
+  // `purpose: "teardown"` lifts the two gates that describe the AGENT's
+  // AVAILABILITY, and only those. "You may not work here" must never become
+  // "your machine is unreachable, and therefore undeletable".
+  it.each([
+    ["the agent's own switch is off", { agentEnabled: false }],
+    ["the agent is deleted", { archivedAt: 1_800_000_000_000 }],
+  ])("still resolves for teardown when %s", (_label, patch) => {
+    const result = resolveEffectiveComputeConfig({
+      ...baseInput,
+      agent: { ...baseInput.agent, ...patch },
+      agentResourceProfile: "small",
+      purpose: "teardown",
+    });
+    expect(result.enabled).toBe(true);
+  });
+
+  // The other two gates say a machine does not EXIST to reach, so teardown
+  // must not lift them: there is nothing to destroy, and on a compute-disabled
+  // workspace no provider to issue a destroy against.
+  it.each([
+    ["the agent works without a machine", { agent: { sandboxEnabled: false } }],
+    ["the workspace has compute off", { workspace: { enabled: false } }],
+  ])("still refuses teardown when %s", (_label, patch) => {
+    const result = resolveEffectiveComputeConfig({
+      ...baseInput,
+      ...("agent" in patch ? { agent: { ...baseInput.agent, ...patch.agent } } : {}),
+      ...("workspace" in patch
+        ? { workspace: { ...baseInput.workspace, ...patch.workspace } }
+        : {}),
+      agentResourceProfile: "small",
+      purpose: "teardown",
+    });
+    expect(result).toEqual({ enabled: false, reason: "disabled" });
+  });
+
   it("still gives compute to an enabled, undeleted agent with sandbox on", () => {
     const result = resolveEffectiveComputeConfig({
       ...baseInput,

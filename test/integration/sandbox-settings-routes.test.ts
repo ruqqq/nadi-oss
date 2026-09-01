@@ -1,6 +1,7 @@
 import { SELF, env } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { drizzle } from "drizzle-orm/d1";
+import { eq } from "drizzle-orm";
 import * as schema from "../../src/db/schema";
 import type { Env } from "../../src/env";
 import type { BackendReference, ComputeBackend } from "../../src/compute/backend";
@@ -746,6 +747,51 @@ describe("sandbox settings routes", () => {
     // resource profile, read live, drives resolution (Task 3). This settings
     // view has no thread context, so the effective profile is the bare default.
     expect(view.effective).toMatchObject({ enabled: true, value: { resourceProfile: "small" } });
+  });
+
+  // Two different "off"s. `reason: "disabled"` renders as "Sandbox execution is
+  // turned off" — a WORKSPACE-level claim. Picking the literal earliest agent
+  // made one disabled agent produce that sentence for the whole workspace.
+  it("skips a DISABLED agent when choosing the agent this page speaks for", async () => {
+    const { token, workspaceId } = await seedUserWorkspace();
+    const db = drizzle(env.REGISTRY_DB, { schema });
+    await db.insert(schema.agents).values({
+      id: "agent-later-usable",
+      workspaceId,
+      name: "Later",
+      systemPrompt: "You are Nadi.",
+      provider: "mock",
+      model: "mock",
+      createdAt: now + 1_000,
+    });
+    // Workspace compute ON, seeded directly (the PUT refuses `mock` unless the
+    // deployment opted in) — so a `disabled` verdict below could only come from
+    // the AGENT.
+    await env.REGISTRY_DB.prepare(
+      `INSERT OR REPLACE INTO workspace_sandbox_settings
+        (workspace_id, enabled, provider, provider_config_json,
+         image, idle_timeout_ms, recovery_ttl_ms, max_process_runtime_ms, limits_json,
+         network_restriction_enabled, network_domain_allowlist)
+       VALUES (?, 1, 'mock', ?, '', 900000, 86400000, 600000, '{}', 0, '')`,
+    )
+      .bind(workspaceId, JSON.stringify({ kind: "mock" }))
+      .run();
+
+    await db
+      .update(schema.agents)
+      .set({ enabled: false })
+      .where(eq(schema.agents.id, "agent-default"));
+
+    const res = await SELF.fetch("https://nadi.test/api/settings/sandbox", {
+      headers: cookie(token),
+    });
+    expect(res.status).toBe(200);
+    const view = (await res.json()) as {
+      agent: { agentEnabled: boolean };
+      effective: { enabled: boolean };
+    };
+    expect(view.agent.agentEnabled).toBe(true);
+    expect(view.effective.enabled).toBe(true);
   });
 
   it("clears an agent enabled override back to inherit on an explicit null", async () => {
