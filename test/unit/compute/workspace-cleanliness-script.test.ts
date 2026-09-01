@@ -292,6 +292,71 @@ describe("PROBE_SCRIPT against the P3 per-thread worktree layout", () => {
     expect(collision.status).not.toBe(0);
   });
 
+  /**
+   * H2, against a REAL git: `worktree prune` clears the REGISTRATION and leaves
+   * the BRANCH. Task 4's documented reclaim (remove the directory, then prune)
+   * therefore leaves `nadi/thread-<id>` behind, and so does a provider restore
+   * that brings `repos/` back without `threads/`.
+   *
+   * The first assertion is the failure that made this a work-loss seam and not
+   * merely an annoyance: `add -b` on a surviving branch is a hard error, so the
+   * thread would never get its checkout back — including any commit it had made
+   * on that branch and not pushed. The second is the fix, and the third is why
+   * `-B` (which WOULD have worked) is not it.
+   */
+  it("re-attaches a branch that outlived its worktree, keeping its commits", () => {
+    const root = layout([THREAD_A]);
+    const clone = join(root, "repos", "nadi");
+    const worktree = join(root, "threads", THREAD_A, "nadi");
+    const branch = threadWorktreeBranch(THREAD_A);
+
+    // A commit that exists only on this thread's branch — the thing at stake.
+    sh("echo work > only-here.txt", worktree);
+    git(worktree, "add", "-A");
+    git(worktree, "commit", "-qm", "thread-local");
+    const head = spawnSync("git", ["rev-parse", branch], {
+      cwd: clone,
+      encoding: "utf8",
+    }).stdout.trim();
+
+    // The reclaim: the directory goes, the registration is pruned, the branch
+    // stays. `git worktree remove` is NOT used here on purpose — this models
+    // the plain `rm -rf` + `prune` the reclaim performs.
+    sh(`rm -rf "${worktree}"`, root);
+    git(clone, "worktree", "prune");
+    expect(
+      spawnSync("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], {
+        cwd: clone,
+      }).status,
+      "the branch must survive prune for this test to be about anything",
+    ).toBe(0);
+
+    // What the pre-fix command did.
+    const recreate = spawnSync("git", ["worktree", "add", "-b", branch, worktree, "origin/main"], {
+      cwd: clone,
+      encoding: "utf8",
+    });
+    expect(recreate.status, "add -b must fail — that is the permanent skip").not.toBe(0);
+
+    // What it does now.
+    const reattach = spawnSync("git", ["worktree", "add", worktree, branch], {
+      cwd: clone,
+      encoding: "utf8",
+    });
+    expect(reattach.status, reattach.stderr).toBe(0);
+    // The commit came back with it. `-B` would have reset the branch to
+    // origin/main and lost exactly this.
+    expect(
+      spawnSync("git", ["rev-parse", "HEAD"], { cwd: worktree, encoding: "utf8" }).stdout.trim(),
+    ).toBe(head);
+    expect(
+      spawnSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+        cwd: worktree,
+        encoding: "utf8",
+      }).stdout.trim(),
+    ).toBe(branch);
+  });
+
   it("sees uncommitted work in a thread's worktree at the layout's depth", async () => {
     const root = layout([THREAD_A]);
     sh("echo edited >> f1.txt", join(root, "threads", THREAD_A, "nadi"));

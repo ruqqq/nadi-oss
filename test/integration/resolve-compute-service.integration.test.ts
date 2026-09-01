@@ -53,8 +53,14 @@ function baseDeps(
   return {
     env: env as unknown as Env,
     threadId,
+    // A top-level thread owns its own working directory; only a subagent's
+    // differs. See `ComputeServiceHostDeps.workspaceThreadId`.
+    workspaceThreadId: threadId,
     storage,
     resolveRuntimeConfig: async () => ({ workspaceId, agentId }),
+    // These cases are about the RESOLVE, not about repository preparation; the
+    // sandbox DO's real implementation is exercised in its own suites.
+    ensureThreadWorkspace: async () => {},
     scheduleEviction: async () => {},
     cancelEviction: async () => {},
     deliverSystemReminder: async () => {},

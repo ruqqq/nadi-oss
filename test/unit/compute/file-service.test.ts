@@ -614,15 +614,21 @@ describe("applyPatch does not clobber when inspectPath fails open", () => {
  * The `workspaceRoot` dep is what makes each thread's `src/app.ts` its OWN
  * file. Nothing else in this suite would notice if it were ignored: every other
  * case seeds and reads under `/workspace`, which is also what the old hardcoded
- * root was. Mutating `workspaceRoot` back to `/workspace` in `file-service.ts`
- * turns this one red and leaves the rest green.
+ * root was.
+ *
+ * ALL THREE mutating/reading entry points, not just one. They resolve paths
+ * through three separate `assertPathContained` call sites, so a partial
+ * regression — one of them reverted to `/workspace` — is exactly the shape a
+ * single-operation test cannot see. (It is the shape the first mutation pass on
+ * this change actually produced.)
  */
 describe("ComputeFileService workspaceRoot", () => {
-  it("resolves relative paths against the root it is given", async () => {
+  const THREAD_ROOT = threadWorkRoot("thr_00000000-0000-4000-8000-0000000000aa");
+
+  async function rootedService() {
     const backend = new FakeComputeBackend();
     const runtime = await acquireRuntime(backend);
-    const root = threadWorkRoot("thr_00000000-0000-4000-8000-0000000000aa");
-    await backend.createDirectory(runtime, root);
+    await backend.createDirectory(runtime, THREAD_ROOT);
     const service = new ComputeFileService({
       backend,
       readMaxBytes: 64_000,
@@ -631,18 +637,70 @@ describe("ComputeFileService workspaceRoot", () => {
       maxUploadBytes: 25_000_000,
       provider: backend.id,
       profile: "small",
-      workspaceRoot: root,
+      workspaceRoot: THREAD_ROOT,
       resolveRuntime: async () => runtime,
       refreshLease: async () => {},
       now: () => 1_000,
     });
+    return { backend, runtime, service };
+  }
+
+  it("writeFile resolves relative paths against the root it is given", async () => {
+    const { backend, runtime, service } = await rootedService();
 
     const written = await service.writeFile({ path: "notes.md", content: "hello" });
     expect(written.path).toBe("notes.md");
 
     // The bytes landed under the THREAD's root, not `/workspace`.
-    const { bytes } = await backend.readFile(runtime, `${root}/notes.md`, 1_000_000);
+    const { bytes } = await backend.readFile(runtime, `${THREAD_ROOT}/notes.md`, 1_000_000);
     expect(new TextDecoder().decode(bytes)).toBe("hello");
     await expect(backend.readFile(runtime, "/workspace/notes.md", 1_000_000)).rejects.toThrow();
+  });
+
+  it("readFile reads from the root it is given, not /workspace", async () => {
+    const { backend, runtime, service } = await rootedService();
+    // Two files at the SAME relative path, one under each candidate root. A
+    // service reading the wrong one still succeeds — it just returns the other
+    // thread's file, which is the whole failure mode.
+    backend.seedFile(
+      runtime,
+      `${THREAD_ROOT}/note.txt`,
+      new TextEncoder().encode("mine"),
+      "text/plain",
+    );
+    backend.seedFile(
+      runtime,
+      "/workspace/note.txt",
+      new TextEncoder().encode("someone else"),
+      "text/plain",
+    );
+
+    const read = await service.readFile({ path: "note.txt" });
+    expect(read.content).toContain("mine");
+    expect(read.content).not.toContain("someone else");
+  });
+
+  it("applyPatch resolves every operation against the root it is given", async () => {
+    const { backend, runtime, service } = await rootedService();
+    const original = "keep\nold\n";
+    backend.seedFile(
+      runtime,
+      `${THREAD_ROOT}/a.txt`,
+      new TextEncoder().encode(original),
+      "text/plain",
+    );
+    backend.seedFile(runtime, "/workspace/a.txt", new TextEncoder().encode(original), "text/plain");
+    const hash = await sha256Hex(new TextEncoder().encode(original).buffer as ArrayBuffer);
+
+    await service.applyPatch({
+      patch: "*** Begin Patch\n*** Update File: a.txt\n@@\n keep\n-old\n+new\n*** End Patch",
+      expectedHashes: { "a.txt": hash },
+    });
+
+    const mine = await backend.readFile(runtime, `${THREAD_ROOT}/a.txt`, 1_000_000);
+    expect(new TextDecoder().decode(mine.bytes)).toContain("new");
+    // The identically-named file under the old root is untouched.
+    const other = await backend.readFile(runtime, "/workspace/a.txt", 1_000_000);
+    expect(new TextDecoder().decode(other.bytes)).toBe(original);
   });
 });

@@ -95,6 +95,7 @@ const runtimeConfigFor = (threadId: string) => ({
 async function openSession(threadId: string, supportsProcessMonitor = true) {
   const opened = await stub(threadId).session({
     threadId,
+    workspaceThreadId: threadId,
     supportsProcessMonitor,
     runtimeConfig: runtimeConfigFor(threadId),
   });

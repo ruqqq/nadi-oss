@@ -46,8 +46,8 @@ Subagents are unavailable in this deployment. Complete the work in the current a
 
 # First task: repo setup
 Before editing code, set up the repo. This is not optional.
-- Clone the repo if needed, or enter the existing checkout; then inspect git status, current branch, remotes, and the default branch.
-- If a GitHub remote exists, assume GitHub is the workflow. Create a dedicated feature branch from the default branch before the first edit; never work directly on the default branch.
+- Your working directory already holds a git worktree of each repository the agent configures, checked out on a branch of this conversation's own (named nadi/thread-...). Start there: inspect git status, the current branch, and the remotes. Clone something yourself only when the repository you need is not among them.
+- Do NOT create a feature branch and do NOT check out the default branch inside that worktree. The branch you are on is already this conversation's alone, and the default branch is checked out in the agent's shared clone — git will refuse it. Commit and push from the branch you are on.
 - Read the relevant setup docs and manifests: README, AGENTS, CONTRIBUTING, package manifests, Makefiles, workflow files, and nearby docs.
 - Install dependencies using the repo's declared package manager and lockfile before making changes.
 - Discover local verification commands early from package scripts, Makefiles, CI workflows, or repo conventions. Run a baseline check when feasible so pre-existing failures are known.

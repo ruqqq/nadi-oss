@@ -668,6 +668,29 @@ describe("the alarm's sweep primes a rehydrated SubAgent facet (H2)", () => {
     attachedRuntime: { provider: "cloudflare", version: 1, payload: { id: "parent-machine" } },
   };
 
+  /**
+   * A subagent works in its PARENT's checkout, and nothing else can tell you so.
+   *
+   * Its facet name is a RUN id: no `thread_index` row, no repositories, no
+   * worktree. Left to resolve its own id it would exec in
+   * `/workspace/threads/<runId>` — a directory `ensureWorkspaceRootOnce`
+   * dutifully CREATES, that repository preparation then declines to fill (the
+   * run id has no agent), and that therefore stays empty. No error, no log, a
+   * subagent that cannot see a single file of the repository it was spawned to
+   * look at.
+   *
+   * RED IF: `SubAgent` stops overriding `workspaceThreadId`, or the base stops
+   * being the identity.
+   */
+  it("workspaceThreadId() is the PARENT's thread, not this run", async () => {
+    const facet = Object.create(SubAgent.prototype) as any;
+    Object.defineProperty(facet, "name", { value: "sub_workspace" });
+    facet._testSubagentContext = CONTEXT;
+
+    await expect(facet.workspaceThreadId()).resolves.toBe(CONTEXT.parentThreadId);
+    expect(await facet.workspaceThreadId()).not.toBe(facet.name);
+  });
+
   it("attachedRuntimeForThisAgent() is set BY THE TIME the sweep runs", async () => {
     // Prototyped off the REAL SubAgent, so `primeAttachedContext` and
     // `attachedRuntimeForThisAgent` are the real overrides (and the private

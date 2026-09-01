@@ -138,6 +138,7 @@ const runtimeConfigFor = (threadId: string) => ({
 async function openSession(threadId: string, supportsProcessMonitor = true) {
   const opened = await stub(threadId).session({
     threadId,
+    workspaceThreadId: threadId,
     supportsProcessMonitor,
     runtimeConfig: runtimeConfigFor(threadId),
   });
@@ -175,6 +176,7 @@ describe("AgentSandbox.session", () => {
     await seedComputeDisabledThread(threadId);
     const opened = await stub(threadId).session({
       threadId,
+      workspaceThreadId: threadId,
       supportsProcessMonitor: true,
       runtimeConfig: { workspaceId: DISABLED_WORKSPACE_ID, agentId: agentIdFor(threadId) },
     });
@@ -199,6 +201,7 @@ describe("AgentSandbox.session", () => {
     try {
       const opened = await stub(threadId).session({
         threadId,
+        workspaceThreadId: threadId,
         supportsProcessMonitor: true,
         runtimeConfig: runtimeConfigFor(threadId),
       });
@@ -227,6 +230,7 @@ describe("AgentSandbox.session", () => {
       const threadId = "thr_sess_err_code";
       await seedComputeEnabledThread(threadId);
       const resolved = await openSandboxSession(env, threadId, {
+        workspaceThreadId: threadId,
         supportsProcessMonitor: true,
         runtimeConfig: runtimeConfigFor(threadId),
       });
@@ -243,6 +247,7 @@ describe("AgentSandbox.session", () => {
       const threadId = "thr_sess_err_stale";
       await seedComputeEnabledThread(threadId);
       const resolved = await openSandboxSession(env, threadId, {
+        workspaceThreadId: threadId,
         supportsProcessMonitor: true,
         runtimeConfig: runtimeConfigFor(threadId),
       });
@@ -288,6 +293,7 @@ describe("AgentSandbox.session", () => {
     expect(wrote.ok).toBe(true);
 
     const resolved = await openSandboxSession(env, threadId, {
+      workspaceThreadId: threadId,
       supportsProcessMonitor: true,
       runtimeConfig: runtimeConfigFor(threadId),
     });
@@ -398,6 +404,7 @@ describe("AgentSandbox.session", () => {
       // still a separate RPC invocation — the property this test needs.
       await stub(threadId).session({
         threadId: "thr_sess_lifetime_other",
+        workspaceThreadId: "thr_sess_lifetime_other",
         supportsProcessMonitor: true,
         runtimeConfig: runtimeConfigFor(threadId),
       });
@@ -456,6 +463,7 @@ describe("AgentSandbox.session", () => {
       await runInDurableObject(holder, async (instance) => {
         (instance as unknown as { __pending?: unknown }).__pending = stub(threadId).session({
           threadId,
+          workspaceThreadId: threadId,
           supportsProcessMonitor: true,
           runtimeConfig: runtimeConfigFor(threadId),
         });

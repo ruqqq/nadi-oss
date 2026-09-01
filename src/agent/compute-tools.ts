@@ -101,6 +101,27 @@ export function guessMimeFromFilename(filename: string): string | null {
 export interface ComputeServiceHostDeps {
   env: Env;
   threadId: string;
+  /**
+   * WHOSE working directory this service runs in.
+   *
+   * Distinct from `threadId`, which is the ROUTING id — the thread a completion
+   * reminder is delivered to, the thread a ledger row is stamped with, the
+   * thread a completion token is scoped to. A `SubAgent` runs under a facet name
+   * that is a RUN id: it has no `thread_index` row, no repositories of its own,
+   * and no directory of its own. It is a second worker inside its PARENT's
+   * checkout, so its working directory is the parent's — and reading `threadId`
+   * for it would put every subagent in `/workspace/threads/<runId>`, a directory
+   * `ensureWorkspaceRootOnce` dutifully CREATES and nothing ever puts code in.
+   * An empty cwd, no error, no log.
+   */
+  workspaceThreadId: string;
+  /**
+   * Prepare this thread's working directory before its first command. REQUIRED
+   * — see the dep of the same name on `ThreadComputeServiceDeps` for why the
+   * trigger cannot be `onFreshRuntimeAcquired`, and why omission here would be
+   * invisible rather than loud.
+   */
+  ensureThreadWorkspace: () => Promise<void>;
   /** The `AgentSandbox` DO's own SQLite. See the type's doc: nothing else may supply this. */
   storage: DurableObjectStorage;
   resolveRuntimeConfig: () => Promise<{ workspaceId: string; agentId: string }>;
@@ -517,6 +538,8 @@ export async function resolveComputeService(hostDeps: ComputeServiceHostDeps): P
     ...(deps.workLedgerFor ? { workLedgerFor: deps.workLedgerFor } : {}),
     ...(deps.getWorkHorizon ? { getWorkHorizon: deps.getWorkHorizon } : {}),
     ...(deps.onFreshRuntimeAcquired ? { onFreshRuntimeAcquired: deps.onFreshRuntimeAcquired } : {}),
+    ensureThreadWorkspace: deps.ensureThreadWorkspace,
+    workspaceThreadId: deps.workspaceThreadId,
   });
   return { service, workspaceId, config: effectiveConfig };
 }

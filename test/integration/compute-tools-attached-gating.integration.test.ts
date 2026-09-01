@@ -64,6 +64,7 @@ async function toolsFor(
   });
   try {
     const session = await openSandboxSession(env as unknown as Env, threadId, {
+      workspaceThreadId: threadId,
       supportsProcessMonitor: false,
       runtimeConfig,
       ...(attachedRuntime ? { attachedRuntime } : {}),

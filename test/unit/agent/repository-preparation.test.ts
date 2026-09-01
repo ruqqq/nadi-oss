@@ -1,3 +1,7 @@
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentRepositoryRow } from "../../../src/db/schema";
 
@@ -81,11 +85,34 @@ function makeService(execResults: ExecResult[], execOutputResults: ExecResult[] 
   return { exec, execOutput };
 }
 
-function prepare(service: { exec: unknown; execOutput: unknown }) {
+/**
+ * The preparation gate, as the sandbox DO implements it: one marker per thread
+ * holding the configuration signature it was last prepared for. Returned so a
+ * test can inspect what was written and replay it into a second preparation.
+ */
+function markerStore(initial?: string) {
+  const state: { signature: string | undefined; marks: string[] } = {
+    signature: initial,
+    marks: [],
+  };
+  return {
+    state,
+    gate: {
+      isPrepared: async (signature: string) => state.signature === signature,
+      markPrepared: async (signature: string) => {
+        state.signature = signature;
+        state.marks.push(signature);
+      },
+    },
+  };
+}
+
+function prepare(service: { exec: unknown; execOutput: unknown }, gate = markerStore().gate) {
   return createRepositoryPreparation({
     env: {} as never,
     threadId: THREAD_ID,
     resolveComputeService: async () => ({ service }) as never,
+    ...gate,
   });
 }
 
@@ -117,6 +144,7 @@ describe("createRepositoryPreparation", () => {
       { status: "exited", processId: "clone-exists", exitCode: 1 },
       { status: "exited", processId: "clone", exitCode: 0 },
       { status: "exited", processId: "worktree-exists", exitCode: 1 },
+      { status: "exited", processId: "branch-probe", exitCode: 1 },
       { status: "exited", processId: "worktree", exitCode: 0 },
     ]);
 
@@ -162,6 +190,7 @@ describe("createRepositoryPreparation", () => {
       { status: "exited", processId: "clone", exitCode: 0 },
       { status: "exited", processId: "checkout", exitCode: 0 },
       { status: "exited", processId: "worktree-exists", exitCode: 1 },
+      { status: "exited", processId: "branch-probe", exitCode: 1 },
       { status: "exited", processId: "worktree", exitCode: 0 },
     ]);
 
@@ -229,6 +258,7 @@ describe("createRepositoryPreparation", () => {
         { status: "exited", processId: "rev-parse", exitCode: 0 },
         { status: "exited", processId: "remote", exitCode: 0 },
         { status: "exited", processId: "worktree-exists", exitCode: 1 },
+        { status: "exited", processId: "branch-probe", exitCode: 1 },
         { status: "exited", processId: "worktree", exitCode: 0 },
       ],
       [
@@ -272,6 +302,7 @@ describe("createRepositoryPreparation", () => {
       { status: "failed", processId: "clone-exists", exitCode: 1 },
       { status: "exited", processId: "clone", exitCode: 0 },
       { status: "failed", processId: "worktree-exists", exitCode: 1 },
+      { status: "failed", processId: "branch-probe", exitCode: 1 },
       { status: "exited", processId: "worktree", exitCode: 0 },
     ]);
 
@@ -348,11 +379,216 @@ describe("createRepositoryPreparation", () => {
       { status: "exited", processId: "clone-exists", exitCode: 1 },
       { status: "exited", processId: "clone", exitCode: 0 },
       { status: "exited", processId: "worktree-exists", exitCode: 1 },
+      { status: "exited", processId: "branch-probe", exitCode: 1 },
       { status: "exited", processId: "worktree", exitCode: 128 },
     ]);
 
     await expect(prepare(service)()).resolves.toMatchObject({
       skipped: [{ name: "nadi", reason: "worktree add failed with exit code 128" }],
+    });
+  });
+
+  /**
+   * H2, the second work-loss seam. `worktree prune` clears a worktree's
+   * REGISTRATION and never its branch, so a branch outliving its worktree is
+   * both reachable and permanent — Task 4's reclaim removes the directory and
+   * prunes, and a provider restore can bring `repos/` back without `threads/`.
+   * `add -b` on an existing branch is exit 128 forever, which is a thread that
+   * never gets its code back AND loses whatever it had committed on that branch.
+   */
+  it("re-attaches an existing branch instead of trying to create it again", async () => {
+    listRepositoriesMock.mockResolvedValue([makeRepository({ defaultBranch: "main" })]);
+    const service = makeService(
+      [
+        { status: "exited", processId: "mkdir", exitCode: 0 },
+        { status: "exited", processId: "clone-exists", exitCode: 0 },
+        { status: "exited", processId: "rev-parse", exitCode: 0 },
+        { status: "exited", processId: "remote", exitCode: 0 },
+        { status: "exited", processId: "worktree-exists", exitCode: 1 },
+        // The branch is still there — its worktree is not.
+        { status: "exited", processId: "branch-probe", exitCode: 0 },
+        { status: "exited", processId: "worktree", exitCode: 0 },
+      ],
+      [
+        {
+          status: "exited",
+          processId: "remote",
+          exitCode: 0,
+          text: "https://github.com/acme/nadi.git",
+        },
+      ],
+    );
+
+    await expect(prepare(service)()).resolves.toMatchObject({
+      prepared: [{ name: "nadi", status: "cloned", checkoutPath: WORKTREE_PATH }],
+    });
+
+    const worktreeCommand = commandsOf(service).find((command) =>
+      command.includes("worktree add"),
+    ) as string;
+    // Re-attach: the path then the branch, and NO start point.
+    expect(worktreeCommand).toContain(`worktree add '${WORKTREE_PATH}' '${BRANCH}'`);
+    expect(worktreeCommand).not.toContain("-b ");
+    // `-B` would have worked too, and would have reset the branch to
+    // origin/main — silently dropping every commit the thread never pushed.
+    expect(worktreeCommand).not.toContain("-B ");
+    expect(worktreeCommand).not.toContain("origin/main");
+  });
+
+  it("probes the branch by its exact ref", async () => {
+    listRepositoriesMock.mockResolvedValue([makeRepository()]);
+    const service = makeService([
+      { status: "exited", processId: "mkdir", exitCode: 0 },
+      { status: "exited", processId: "clone-exists", exitCode: 1 },
+      { status: "exited", processId: "clone", exitCode: 0 },
+      { status: "exited", processId: "worktree-exists", exitCode: 1 },
+      { status: "exited", processId: "branch-probe", exitCode: 1 },
+      { status: "exited", processId: "worktree", exitCode: 0 },
+    ]);
+
+    await prepare(service)();
+
+    expect(service.exec).toHaveBeenCalledWith(
+      expect.objectContaining({
+        command: `git -C '${CLONE_PATH}' show-ref --verify --quiet 'refs/heads/${BRANCH}'`,
+      }),
+    );
+  });
+
+  it("skips when the branch probe fails indeterminately, rather than guessing", async () => {
+    listRepositoriesMock.mockResolvedValue([makeRepository()]);
+    const service = makeService([
+      { status: "exited", processId: "mkdir", exitCode: 0 },
+      { status: "exited", processId: "clone-exists", exitCode: 1 },
+      { status: "exited", processId: "clone", exitCode: 0 },
+      { status: "exited", processId: "worktree-exists", exitCode: 1 },
+      { status: "stopped", processId: "branch-probe" },
+    ]);
+
+    await expect(prepare(service)()).resolves.toMatchObject({
+      skipped: [{ name: "nadi", reason: "thread branch probe failed (status: stopped)" }],
+    });
+    expect(service.exec).not.toHaveBeenCalledWith(
+      expect.objectContaining({ command: expect.stringContaining("worktree add") }),
+    );
+  });
+
+  /**
+   * The gate that makes preparing on every turn affordable. It is the reason
+   * H1's fix could move the trigger onto the per-turn path at all — without it
+   * every turn would re-run each repository's setup command and the agent's
+   * setup script.
+   */
+  describe("the preparation gate", () => {
+    it("marks the thread prepared, and a second run then does nothing at all", async () => {
+      listRepositoriesMock.mockResolvedValue([makeRepository()]);
+      const marker = markerStore();
+      const first = makeService([
+        { status: "exited", processId: "mkdir", exitCode: 0 },
+        { status: "exited", processId: "clone-exists", exitCode: 1 },
+        { status: "exited", processId: "clone", exitCode: 0 },
+        { status: "exited", processId: "worktree-exists", exitCode: 1 },
+        { status: "exited", processId: "branch-probe", exitCode: 1 },
+        { status: "exited", processId: "worktree", exitCode: 0 },
+      ]);
+      await expect(prepare(first, marker.gate)()).resolves.toMatchObject({
+        prepared: [{ name: "nadi", status: "cloned" }],
+      });
+      expect(marker.state.marks).toHaveLength(1);
+
+      // Second turn, same configuration: not one exec, and compute is never
+      // even resolved.
+      const second = makeService([]);
+      const resolveComputeService = vi.fn();
+      await expect(
+        createRepositoryPreparation({
+          env: {} as never,
+          threadId: THREAD_ID,
+          resolveComputeService,
+          ...marker.gate,
+        })(),
+      ).resolves.toEqual({ summary: "Repositories were already prepared for this thread." });
+      expect(resolveComputeService).not.toHaveBeenCalled();
+      expect(second.exec).not.toHaveBeenCalled();
+    });
+
+    /**
+     * The signature covers the agent's declared configuration, so ADDING a
+     * repository re-opens preparation. Without this a repository added after the
+     * box came up would never be cloned for a thread already marked prepared —
+     * the same invisible-empty-directory shape, one config edit away.
+     */
+    it("re-prepares when the agent's repository list changes", async () => {
+      listRepositoriesMock.mockResolvedValue([makeRepository()]);
+      const marker = markerStore();
+      await prepare(
+        makeService([
+          { status: "exited", processId: "mkdir", exitCode: 0 },
+          { status: "exited", processId: "clone-exists", exitCode: 1 },
+          { status: "exited", processId: "clone", exitCode: 0 },
+          { status: "exited", processId: "worktree-exists", exitCode: 1 },
+          { status: "exited", processId: "branch-probe", exitCode: 1 },
+          { status: "exited", processId: "worktree", exitCode: 0 },
+        ]),
+        marker.gate,
+      )();
+
+      listRepositoriesMock.mockResolvedValue([
+        makeRepository(),
+        makeRepository({ id: "repo-2", name: "other", checkoutPathName: "other" }),
+      ]);
+      const second = makeService(
+        [
+          { status: "exited", processId: "mkdir", exitCode: 0 },
+          { status: "exited", processId: "clone-exists", exitCode: 0 },
+          { status: "exited", processId: "rev-parse", exitCode: 0 },
+          { status: "exited", processId: "remote", exitCode: 0 },
+          { status: "exited", processId: "worktree-exists", exitCode: 0 },
+          { status: "exited", processId: "clone-exists-2", exitCode: 1 },
+          { status: "exited", processId: "clone-2", exitCode: 0 },
+          { status: "exited", processId: "worktree-exists-2", exitCode: 1 },
+          { status: "exited", processId: "branch-probe-2", exitCode: 1 },
+          { status: "exited", processId: "worktree-2", exitCode: 0 },
+        ],
+        [
+          {
+            status: "exited",
+            processId: "remote",
+            exitCode: 0,
+            text: "https://github.com/acme/nadi.git",
+          },
+        ],
+      );
+      await expect(prepare(second, marker.gate)()).resolves.toMatchObject({
+        prepared: [
+          { name: "nadi", status: "already_cloned" },
+          { name: "other", status: "cloned" },
+        ],
+      });
+      expect(marker.state.marks).toHaveLength(2);
+      expect(marker.state.marks[0]).not.toBe(marker.state.marks[1]);
+    });
+
+    /**
+     * A skip means something the agent declares is NOT in the box. Marking that
+     * prepared freezes the thread in that state until its configuration
+     * changes — the permanent-empty-directory failure, self-inflicted.
+     */
+    it("does NOT mark prepared when anything was skipped", async () => {
+      listRepositoriesMock.mockResolvedValue([makeRepository()]);
+      const marker = markerStore();
+      await expect(
+        prepare(
+          makeService([
+            { status: "exited", processId: "mkdir", exitCode: 0 },
+            { status: "exited", processId: "clone-exists", exitCode: 1 },
+            { status: "exited", processId: "clone", exitCode: 128 },
+          ]),
+          marker.gate,
+        )(),
+      ).resolves.toMatchObject({ skipped: [{ name: "nadi" }] });
+      expect(marker.state.marks).toEqual([]);
+      expect(marker.state.signature).toBeUndefined();
     });
   });
 
@@ -480,6 +716,7 @@ describe("createRepositoryPreparation", () => {
       { status: "exited", processId: "clone-exists", exitCode: 1 },
       { status: "exited", processId: "clone", exitCode: 0 },
       { status: "exited", processId: "worktree-exists", exitCode: 1 },
+      { status: "exited", processId: "branch-probe", exitCode: 1 },
       { status: "exited", processId: "worktree", exitCode: 0 },
     ]);
 
@@ -494,6 +731,17 @@ describe("createRepositoryPreparation", () => {
     // directories that ARE the new layout.
     expect(rootPrepCommand).toContain("for d in /workspace/*/");
     expect(rootPrepCommand).toContain('case "$name" in repos|threads) continue;; esac');
+
+    // ORDER. Both migrations claim `/workspace/repos/<name>` and both move only
+    // when the destination is absent, so on a box carrying BOTH an old
+    // `/home/exedev/work/<name>` and a live `/workspace/<name>` the loop that
+    // runs first wins. The live one must. Running legacy first installs a copy
+    // nothing has touched since before the /workspace move as the agent's
+    // clone, and orphans the checkout the user was actually editing —
+    // unreferenced, with nothing failing.
+    expect(rootPrepCommand.indexOf("for d in /workspace/*/")).toBeLessThan(
+      rootPrepCommand.indexOf("for d in /home/exedev/work/*/"),
+    );
   });
 
   it("runs multi-line per-repo setup as a single bash-wrapped call and the environment script once, after all repos", async () => {
@@ -523,12 +771,14 @@ describe("createRepositoryPreparation", () => {
       { status: "exited", processId: "clone-exists-a", exitCode: 1 },
       { status: "exited", processId: "clone-a", exitCode: 0 },
       { status: "exited", processId: "wt-exists-a", exitCode: 1 },
+      { status: "exited", processId: "branch-a", exitCode: 1 },
       { status: "exited", processId: "wt-a", exitCode: 0 },
       { status: "exited", processId: "setup-a", exitCode: 0 },
       // repo-b: same
       { status: "exited", processId: "clone-exists-b", exitCode: 1 },
       { status: "exited", processId: "clone-b", exitCode: 0 },
       { status: "exited", processId: "wt-exists-b", exitCode: 1 },
+      { status: "exited", processId: "branch-b", exitCode: 1 },
       { status: "exited", processId: "wt-b", exitCode: 0 },
       { status: "exited", processId: "setup-b", exitCode: 0 },
       // environment setup script
@@ -558,7 +808,7 @@ describe("createRepositoryPreparation", () => {
     const envSetupIndex = calls.length - 1;
     expect(envSetupIndex).toBeGreaterThan(setupACallIndex);
     expect(calls[envSetupIndex]).toContain("| base64 -d | bash");
-    expect(service.exec).toHaveBeenCalledTimes(12);
+    expect(service.exec).toHaveBeenCalledTimes(14);
 
     // And it runs in the THREAD's working directory — the cwd every later exec
     // defaults to — not `/workspace`.
@@ -631,6 +881,7 @@ describe("createRepositoryPreparation", () => {
       env: {} as never,
       threadId: THREAD_ID,
       resolveComputeService,
+      ...markerStore().gate,
     });
 
     await expect(prepareRepositories()).resolves.toEqual({
@@ -648,6 +899,7 @@ describe("createRepositoryPreparation", () => {
       env: {} as never,
       threadId: THREAD_ID,
       resolveComputeService,
+      ...markerStore().gate,
     });
 
     await expect(prepareRepositories()).resolves.toEqual({
@@ -665,6 +917,7 @@ describe("createRepositoryPreparation", () => {
       env: {} as never,
       threadId: THREAD_ID,
       resolveComputeService,
+      ...markerStore().gate,
     });
 
     await expect(prepareRepositories()).resolves.toEqual({
@@ -672,5 +925,101 @@ describe("createRepositoryPreparation", () => {
     });
     expect(listRepositoriesMock).toHaveBeenCalledWith("env-1");
     expect(resolveComputeService).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The root-preparation command, run by a REAL `/bin/sh` (dash, as in the
+ * sandbox) against real directories.
+ *
+ * Two things only a shell can answer. The `case ... esac` and the two globs are
+ * POSIX constructs that a string assertion cannot execute — and the ORDER of the
+ * two migrations decides which of two checkouts becomes the agent's clone, which
+ * no assertion about substrings can decide either.
+ *
+ * Per `nadi-live-shell-test-eval-template` the command is used VERBATIM apart
+ * from repointing its two absolute roots at temp directories, and that
+ * substitution is asserted so a rename cannot quietly turn this into a no-op.
+ */
+describe("rootPreparationCommand against a real shell", () => {
+  function rootedCommand(command: string, workspace: string, legacy: string) {
+    const rooted = command
+      .split("/home/exedev/work")
+      .join(legacy)
+      .split("/workspace")
+      .join(workspace);
+    expect(rooted).not.toBe(command);
+    return rooted;
+  }
+
+  function sh(script: string): void {
+    const result = spawnSync("/bin/sh", ["-c", script], { encoding: "utf8" });
+    if (result.status !== 0) {
+      throw new Error(`shell failed (${result.status}): ${script}\n${result.stderr}`);
+    }
+  }
+
+  /** Runs the real command against a fixture built by `build`. */
+  async function runRootPreparation(build: (workspace: string, legacy: string) => void) {
+    listRepositoriesMock.mockResolvedValue([makeRepository()]);
+    const service = makeService([{ status: "exited", processId: "mkdir", exitCode: 0 }]);
+    // The probe after root prep gets no mocked result, so preparation throws
+    // after issuing the ONE command this test is about. That is fine and is
+    // asserted rather than swallowed.
+    await prepare(service)().catch(() => undefined);
+    const command = commandsOf(service)[0] as string;
+    expect(command).toContain("mkdir -p");
+
+    const base = mkdtempSync(join(tmpdir(), "nadi-rootprep-"));
+    const workspace = join(base, "workspace");
+    const legacy = join(base, "legacy");
+    sh(`mkdir -p "${workspace}" "${legacy}"`);
+    build(workspace, legacy);
+    sh(rootedCommand(command, workspace, legacy));
+    return { workspace, legacy };
+  }
+
+  it("creates the layout and moves a pre-P3 top-level checkout into repos/", async () => {
+    const { workspace } = await runRootPreparation((ws) => {
+      sh(`mkdir -p "${ws}/nadi" && echo live > "${ws}/nadi/marker.txt"`);
+    });
+
+    expect(readdirSync(join(workspace, "repos"))).toContain("nadi");
+    expect(readFileSync(join(workspace, "repos", "nadi", "marker.txt"), "utf8")).toBe("live\n");
+    // The layout's own directories are not swept into themselves.
+    expect(readdirSync(join(workspace, "repos"))).not.toContain("repos");
+    expect(readdirSync(join(workspace, "repos"))).not.toContain("threads");
+    expect(readdirSync(workspace).sort()).toEqual(["repos", "threads"]);
+  });
+
+  /**
+   * M1. A box can carry BOTH roots — the pre-change command moved
+   * `/home/exedev/work/<name>` only when `/workspace/<name>` was absent, so a
+   * stale legacy copy survives beside the live one. Both migrations claim
+   * `repos/<name>` and both move only when the destination is absent, so the
+   * loop that runs first wins.
+   *
+   * The live copy must win. Running legacy first installs a directory nothing
+   * has touched since before the /workspace move as the agent's clone, and
+   * orphans the checkout the user was actually editing — unreferenced, with
+   * nothing failing anywhere.
+   */
+  it("prefers the live /workspace checkout over a stale legacy one of the same name", async () => {
+    const { workspace, legacy } = await runRootPreparation((ws, lg) => {
+      sh(`mkdir -p "${ws}/nadi" && echo live > "${ws}/nadi/marker.txt"`);
+      sh(`mkdir -p "${lg}/nadi" && echo stale > "${lg}/nadi/marker.txt"`);
+    });
+
+    expect(readFileSync(join(workspace, "repos", "nadi", "marker.txt"), "utf8")).toBe("live\n");
+    // The loser is left where it was rather than deleted — never clobbered.
+    expect(readFileSync(join(legacy, "nadi", "marker.txt"), "utf8")).toBe("stale\n");
+  });
+
+  it("still migrates the legacy root when nothing at /workspace claims the name", async () => {
+    const { workspace } = await runRootPreparation((_ws, lg) => {
+      sh(`mkdir -p "${lg}/nadi" && echo legacy > "${lg}/nadi/marker.txt"`);
+    });
+
+    expect(readFileSync(join(workspace, "repos", "nadi", "marker.txt"), "utf8")).toBe("legacy\n");
   });
 });

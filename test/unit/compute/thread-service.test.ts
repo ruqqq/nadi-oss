@@ -1008,6 +1008,33 @@ describe("ThreadComputeService execRun", () => {
   });
 
   /**
+   * The cwd default lives at TWO call sites — `exec`'s blocking-runCommand path
+   * and `startAndStoreProcess` — and the tests above only reach the second. One
+   * of them reverting to `/workspace` is a partial regression a
+   * `startProcess`-only assertion cannot see; it is the one the first mutation
+   * pass on this change actually produced.
+   */
+  it("the blocking runCommand path defaults to the thread's directory too", async () => {
+    const now = { value: 1_000 };
+    const { service, backend } = createService({
+      now,
+      backgroundLongRunningExec: false,
+      execForegroundTimeoutMs: 1,
+      execForegroundPollIntervalMs: 1,
+      sleep: async (ms) => void (now.value += ms),
+    });
+
+    await service.exec({ command: "pwd" });
+    await service.exec({ command: "pwd", cwd: "/tmp" });
+
+    expect(backend.runCommandCalls.map((call) => call.cwd)).toEqual([
+      threadWorkRoot("thread_test"),
+      "/tmp",
+    ]);
+    expect(backend.runCommandCalls[0]?.cwd).not.toBe("/workspace");
+  });
+
+  /**
    * DATA LOSS GUARD (companion to workspace-cleanliness.test.ts). A backend
    * without `runCommand` falls back to start-and-poll, which returns
    * `buildPreview`'s TAIL. `execRun` must say so — a caller that decides from
@@ -1218,6 +1245,40 @@ describe("ThreadComputeService workspace root provisioning", () => {
     const [first, second] = backend.startProcessCalls.slice(-2);
     expect(first?.cwd).toBe(threadWorkRoot("thr_aaaaaaaa"));
     expect(second?.cwd).toBe(threadWorkRoot("thr_bbbbbbbb"));
+  });
+
+  /**
+   * The subagent shape: a service whose ROUTING thread and whose WORKING
+   * DIRECTORY are different threads.
+   *
+   * `threadId` is a run id — it stamps ledger rows and routes reminders. The
+   * directory belongs to the parent, because that is where the checkout is.
+   * Nothing else in this file would notice the two being conflated: every other
+   * service here routes and works as the same thread.
+   */
+  it("works in workspaceThreadId's directory while still routing as threadId", async () => {
+    const backend = new FakeComputeBackend();
+    const service = new ThreadComputeService({
+      backend,
+      store: createMemoryComputeStore(),
+      config: CONFIG,
+      environmentId: "agent_shared_box",
+      threadId: "run_abcdef",
+      workspaceThreadId: "thr_parent_of_run",
+      env: {},
+      setAlarm: async () => {},
+      now: () => 1_000,
+    });
+
+    await service.exec({ command: "pwd" });
+
+    expect(backend.startProcessCalls.at(-1)?.cwd).toBe(threadWorkRoot("thr_parent_of_run"));
+    expect(backend.startProcessCalls.at(-1)?.cwd).not.toBe(threadWorkRoot("run_abcdef"));
+    // And the file tools resolve there too — `read_file("src/x.ts")` and
+    // `exec("cat src/x.ts")` must still name one file for a subagent.
+    expect(
+      (service.files as unknown as { deps: { workspaceRoot: string } }).deps.workspaceRoot,
+    ).toBe(threadWorkRoot("thr_parent_of_run"));
   });
 
   /**

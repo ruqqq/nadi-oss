@@ -23,6 +23,19 @@ import {
  * thread actually issues `git clone`. Nothing is mocked below the repository
  * layer except the sandbox's shell.
  */
+/**
+ * The gate the sandbox DO supplies, in its "this thread has never been
+ * prepared" state — these cases are about what preparation DOES, and a gate
+ * that reported "already prepared" would turn every one of them into a no-op
+ * that still passed its summary assertion.
+ */
+function neverPreparedGate() {
+  return {
+    isPrepared: async () => false,
+    markPrepared: async () => {},
+  };
+}
+
 describe("repository preparation against real D1", () => {
   beforeEach(async () => {
     await applyRegistryTestSchema(env.REGISTRY_DB);
@@ -40,6 +53,11 @@ describe("repository preparation against real D1", () => {
         // Cloudflare's shape for a missing path: non-zero comes back as
         // `failed`, never `exited`.
         return { status: "failed" as const, processId: "probe", exitCode: 1 };
+      }
+      if (input.command.includes("show-ref")) {
+        // A freshly cloned repository has no `nadi/thread-*` branch — same
+        // Cloudflare shape for the negative answer.
+        return { status: "failed" as const, processId: "branch", exitCode: 1 };
       }
       return { status: "exited" as const, processId: "cmd", exitCode: 0 };
     });
@@ -69,6 +87,7 @@ describe("repository preparation against real D1", () => {
       env: env as never,
       threadId,
       resolveComputeService: async () => ({ service: service as never }),
+      ...neverPreparedGate(),
     });
 
     // The AGENT gets the clone; the THREAD gets a worktree of it, and the
@@ -128,6 +147,7 @@ describe("repository preparation against real D1", () => {
       env: env as never,
       threadId,
       resolveComputeService: async () => ({ service: service as never }),
+      ...neverPreparedGate(),
     });
 
     await expect(prepareRepositories()).resolves.toEqual({
@@ -152,6 +172,7 @@ describe("repository preparation against real D1", () => {
       env: env as never,
       threadId,
       resolveComputeService: async () => ({ service: service as never }),
+      ...neverPreparedGate(),
     });
 
     await expect(prepareRepositories()).resolves.toEqual({
@@ -185,6 +206,7 @@ describe("repository preparation against real D1", () => {
       env: env as never,
       threadId,
       resolveComputeService,
+      ...neverPreparedGate(),
     });
 
     await expect(prepareRepositories()).resolves.toEqual({

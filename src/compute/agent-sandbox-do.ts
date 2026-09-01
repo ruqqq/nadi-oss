@@ -5,7 +5,10 @@ import { ThreadRepository } from "../db/repositories/threads";
 import { resolveComputeService, type ComputeServiceHostDeps } from "../agent/compute-tools";
 import { createSandboxThreadHostDeps, type SandboxSweepResolution } from "./sandbox-thread-host";
 import { runSandboxComputeAlarm } from "./sandbox-alarm";
-import { createRepositoryPreparation } from "../agent/repository-preparation";
+import {
+  createRepositoryPreparation,
+  type RepositoryPreparationResult,
+} from "../agent/repository-preparation";
 import { probeWorkspaceCleanliness } from "./workspace-cleanliness";
 import type { ThreadComputeService } from "./thread-service";
 import type { BackendReference } from "./backend";
@@ -56,6 +59,27 @@ const ALARM_PARAMS_KEY = "sandbox:alarm-params";
 const SWEEP_ROSTER_PREFIX = "sb:sw:";
 
 /**
+ * Prefix for the PREPARATION MARKERS: one row per thread whose working
+ * directory has been prepared, valued with the configuration signature it was
+ * prepared for (see `createRepositoryPreparation`).
+ *
+ * Two things invalidate a marker, and they are invalidated in different places
+ * because they are different questions:
+ *
+ *  - the agent's repositories or setup script CHANGED — the signature no longer
+ *    matches, handled by the comparison itself;
+ *  - the box's filesystem is GONE — no signature can see that, so
+ *    {@link AgentSandbox.resolveService}'s `onFreshRuntimeAcquired` clears every
+ *    marker on the one event that means it: a genuinely fresh acquire, i.e. an
+ *    empty `/workspace`. A RESTORE deliberately does not clear, because a
+ *    restore brings `/workspace` back from backup — clearing there would re-run
+ *    every repository's setup command on every wake.
+ *
+ * Same six-byte budget reasoning as the roster prefix above.
+ */
+const PREP_MARKER_PREFIX = "sb:pr:";
+
+/**
  * The session inputs the alarm replays for its TICK. Written on every
  * `session()` open, so they track the owning agent's current answers rather
  * than the first ones.
@@ -70,6 +94,15 @@ interface SandboxAlarmParams {
    * The alarm has no fallback for a missing record; it simply does not tick.
    */
   threadId: string;
+  /**
+   * The thread whose working directory the tick's service uses — the parent's,
+   * for a subagent. Optional ONLY to keep a record written by the previous
+   * deployment replayable (see the two-adjacent-versions rule in CLAUDE.md);
+   * a session open rewrites it. The fallback is safe here specifically: the
+   * alarm's service polls process status and arms alarms, and never issues a
+   * command that takes the default cwd.
+   */
+  workspaceThreadId?: string;
   supportsProcessMonitor: boolean;
   runtimeConfig: { workspaceId: string; agentId: string };
   attachedRuntime?: BackendReference;
@@ -113,6 +146,9 @@ export class AgentSandbox extends DurableObject<Env> {
 
   /** Last stamp this instance wrote — see {@link touchSweepRoster}. */
   private lastRosterStamp = 0;
+
+  /** In-flight workspace preparations, keyed by thread — see {@link ensureThreadWorkspacePrepared}. */
+  private readonly preparationInFlight = new Map<string, Promise<void>>();
 
   /**
    * The capabilities that stayed on the thread DO — transcript reminders, the
@@ -187,6 +223,74 @@ export class AgentSandbox extends DurableObject<Env> {
     this.lastRosterStamp = Math.max(Date.now(), this.lastRosterStamp + 1);
     await this.ctx.storage.put<number>(SWEEP_ROSTER_PREFIX + threadId, this.lastRosterStamp);
     this.rosterWritten.add(threadId);
+  }
+
+  /**
+   * Prepare `threadId`'s working directory, at most once per DO instance per
+   * thread while a run is outstanding.
+   *
+   * The in-flight map is not an optimisation. Two `exec`s in one turn both reach
+   * `ensureWorkspaceRootOnce` on the SAME service, and its own latch is set
+   * before the await — so without this the second would proceed against a
+   * directory the first is still cloning into. Concurrent callers AWAIT the
+   * first run rather than skipping it, which is the difference between "someone
+   * is preparing this" and "someone prepared this".
+   *
+   * Re-entrancy is handled elsewhere and deliberately: preparation's own service
+   * is built with no `ensureThreadWorkspace` at all (see {@link resolveService}),
+   * so its `exec` never arrives here. Were it to, awaiting the in-flight promise
+   * would deadlock — the promise is waiting on that very `exec`.
+   *
+   * Never throws. A preparation failure must not fail the turn, and the caller
+   * ({@link ThreadComputeService.ensureWorkspaceRootOnce}) already logs a throw;
+   * SKIPS are the outcome that does not throw, and they are logged here.
+   */
+  private async ensureThreadWorkspacePrepared(
+    threadId: string,
+    prepare: () => Promise<RepositoryPreparationResult>,
+  ): Promise<void> {
+    const inFlight = this.preparationInFlight.get(threadId);
+    if (inFlight) return inFlight;
+    const run = (async () => {
+      const result = await prepare();
+      // A SKIP is not an error, so nothing throws and no `catch` anywhere fires
+      // — which is exactly how a provider-contract mismatch left every fresh
+      // agent sandbox with an empty /workspace while the logs stayed clean.
+      // Skips are the interesting outcome here; say so, or the next such break
+      // is invisible too.
+      if (result.skipped?.length) {
+        log.warn("compute.repository_preparation_skipped", {
+          threadId,
+          skipped: result.skipped.map((entry) => `${entry.name}: ${entry.reason}`),
+        });
+      }
+    })();
+    this.preparationInFlight.set(threadId, run);
+    try {
+      await run;
+    } finally {
+      this.preparationInFlight.delete(threadId);
+    }
+  }
+
+  /**
+   * Forget that any thread of this box was prepared.
+   *
+   * Called on one event only: a genuinely fresh acquire, where `/workspace` is
+   * empty by construction. Every marker describes a directory that no longer
+   * exists, so keeping one would let the thread that owns it skip preparation
+   * and work in an empty directory — the failure this whole path exists to
+   * remove, reintroduced through the back door.
+   *
+   * A `list` of a six-byte prefix, not a single map value: an agent with a few
+   * hundred threads would exceed the 128KB per-value cap, and celld compiles a
+   * prefix scan into a SQL LIKE pattern with a 49-byte budget.
+   */
+  private async clearPreparationMarkers(): Promise<void> {
+    const markers = await this.ctx.storage.list<string>({ prefix: PREP_MARKER_PREFIX });
+    if (markers.size === 0) return;
+    await this.ctx.storage.delete([...markers.keys()]);
+    log.info("compute.preparation_markers_cleared", { count: markers.size });
   }
 
   /**
@@ -356,6 +460,11 @@ export class AgentSandbox extends DurableObject<Env> {
   private async resolveService(
     threadId: string,
     options: {
+      /**
+       * Whose working directory. Required on every path, never defaulted to
+       * `threadId` — see `ComputeServiceHostDeps.workspaceThreadId`.
+       */
+      workspaceThreadId: string;
       supportsProcessMonitor: boolean;
       /** See {@link ComputeResolvePurpose}. Only the deletion teardown sets it. */
       purpose?: ComputeResolvePurpose;
@@ -421,7 +530,17 @@ export class AgentSandbox extends DurableObject<Env> {
     const prepareRepositories = createRepositoryPreparation({
       env: this.env,
       threadId,
+      isPrepared: async (signature) =>
+        (await this.ctx.storage.get<string>(`${PREP_MARKER_PREFIX}${threadId}`)) === signature,
+      markPrepared: async (signature) => {
+        await this.ctx.storage.put(`${PREP_MARKER_PREFIX}${threadId}`, signature);
+      },
       resolveComputeService: async () => {
+        // A SECOND service, still — and now for a second reason as well. It is
+        // built with EMPTY hooks, so it carries no `ensureThreadWorkspace`:
+        // preparation's own `exec` therefore cannot re-enter the preparation it
+        // is running from. (The first reason, the acquisition deadlock, is
+        // documented at length above and still applies on the cold path.)
         const prepared = await this.buildService(threadId, options, {});
         return prepared ? { service: prepared.service } : null;
       },
@@ -433,19 +552,23 @@ export class AgentSandbox extends DurableObject<Env> {
           local.service!.execRun({ command, timeoutMs, label: "workspace cleanliness" }),
         );
       },
+      // NOT "prepare this thread's repositories" any more. That was the whole
+      // of H1: this hook fires only on `absent -> active`, and the compute store
+      // is the AGENT's, so it fires once per BOX. Thread A woke the sprite and
+      // got its worktree; every later thread of the same agent reached an
+      // already-active runtime, ran no preparation at all, and got a working
+      // directory that existed and was empty.
+      //
+      // What this event honestly knows is narrower and is exactly what a
+      // signature cannot: `/workspace` is empty right now, so nothing anyone
+      // prepared is still there. Preparation itself moved to
+      // `ensureThreadWorkspace`, which every thread reaches on its own first
+      // command.
       onFreshRuntimeAcquired: async () => {
-        const result = await prepareRepositories();
-        // A SKIP is not an error, so nothing throws and the `catch` around this
-        // call never fires — which is exactly how a provider-contract mismatch
-        // left every fresh agent sandbox with an empty /workspace while the logs
-        // stayed clean. Skips are the interesting outcome here; say so, or the
-        // next such break is invisible too.
-        if (result.skipped?.length) {
-          log.warn("compute.repository_preparation_skipped", {
-            threadId,
-            skipped: result.skipped.map((entry) => `${entry.name}: ${entry.reason}`),
-          });
-        }
+        await this.clearPreparationMarkers();
+      },
+      ensureThreadWorkspace: async () => {
+        await this.ensureThreadWorkspacePrepared(threadId, prepareRepositories);
       },
     });
     local.service = resolved?.service ?? null;
@@ -462,6 +585,8 @@ export class AgentSandbox extends DurableObject<Env> {
   private async buildService(
     threadId: string,
     options: {
+      /** See {@link resolveService}'s option of the same name. */
+      workspaceThreadId: string;
       supportsProcessMonitor: boolean;
       purpose?: ComputeResolvePurpose;
       attachedRuntime?: BackendReference;
@@ -472,12 +597,19 @@ export class AgentSandbox extends DurableObject<Env> {
     hooks: {
       probeWorkspaceCleanliness?: ComputeServiceHostDeps["probeWorkspaceCleanliness"];
       onFreshRuntimeAcquired?: ComputeServiceHostDeps["onFreshRuntimeAcquired"];
+      /**
+       * Omitted for the service repository preparation runs ON — see
+       * {@link resolveService}. Its absence is what makes preparation's own
+       * `exec` non-re-entrant, so this is load-bearing, not a convenience.
+       */
+      ensureThreadWorkspace?: ComputeServiceHostDeps["ensureThreadWorkspace"];
     },
   ) {
     const host = this.threadHostDeps(threadId);
     return resolveComputeService({
       env: this.env,
       threadId,
+      workspaceThreadId: options.workspaceThreadId,
       storage: this.ctx.storage,
       resolveRuntimeConfig: async () => options.runtimeConfig ?? this.runtimeConfigFor(threadId),
       ...host,
@@ -523,6 +655,10 @@ export class AgentSandbox extends DurableObject<Env> {
       ...(hooks.onFreshRuntimeAcquired
         ? { onFreshRuntimeAcquired: hooks.onFreshRuntimeAcquired }
         : {}),
+      // Required on `ComputeServiceHostDeps`, so the no-op has to be spelled
+      // out here rather than omitted — and spelling it out is the point: a
+      // service built without preparation says so.
+      ensureThreadWorkspace: hooks.ensureThreadWorkspace ?? (async () => {}),
     });
   }
 
@@ -547,6 +683,13 @@ export class AgentSandbox extends DurableObject<Env> {
    */
   async session(input: {
     threadId: string;
+    /**
+     * The thread whose working directory this session works in. REQUIRED and
+     * never inferred: a `SubAgent`'s `threadId` is a run id, and it works inside
+     * its PARENT's checkout. Inferring would give every subagent an empty
+     * directory of its own — created, never populated, and silent.
+     */
+    workspaceThreadId: string;
     /** Required — see {@link resolveService}. The caller states it; no default. */
     supportsProcessMonitor: boolean;
     /**
@@ -582,6 +725,7 @@ export class AgentSandbox extends DurableObject<Env> {
       // `resolveService` returns `null` for it too.
       const params: SandboxAlarmParams = {
         threadId: input.threadId,
+        workspaceThreadId: input.workspaceThreadId,
         supportsProcessMonitor: input.supportsProcessMonitor,
         runtimeConfig: input.runtimeConfig,
         ...(input.attachedRuntime ? { attachedRuntime: input.attachedRuntime } : {}),
@@ -598,6 +742,7 @@ export class AgentSandbox extends DurableObject<Env> {
       // see {@link threadHostDeps}.
       await this.touchSweepRoster(input.threadId);
       const resolved = await this.resolveService(input.threadId, {
+        workspaceThreadId: input.workspaceThreadId,
         supportsProcessMonitor: input.supportsProcessMonitor,
         runtimeConfig: input.runtimeConfig,
         // A turn arms ~25 times; the roster fold is one cross-DO RPC per
@@ -685,6 +830,7 @@ export class AgentSandbox extends DurableObject<Env> {
         // that is the half that must keep happening when compute is gone.
         if (!params) return null;
         return this.resolveService(params.threadId, {
+          workspaceThreadId: params.workspaceThreadId ?? params.threadId,
           supportsProcessMonitor: params.supportsProcessMonitor,
           runtimeConfig: params.runtimeConfig,
           // FINDING 1. The fallback `workHorizon` below only runs when the

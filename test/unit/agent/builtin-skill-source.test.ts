@@ -7,6 +7,7 @@ vi.mock("@cloudflare/think", () => ({
 }));
 
 import { softwareEngineeringBody } from "../../../src/agent/skills/builtin-skill-source";
+import { composeSystemPrompt } from "../../../src/agent/system-prompt";
 
 describe("softwareEngineeringBody", () => {
   it("keeps proactive subagent guidance when both capabilities are enabled", () => {
@@ -21,6 +22,30 @@ describe("softwareEngineeringBody", () => {
     expect(body).toContain("Subagents are unavailable in this deployment");
     expect(body).toContain("never backgrounded");
     expect(body).not.toContain("Use subagents proactively");
+  });
+
+  /**
+   * The skill body and the system prompt reach the model TOGETHER, and they
+   * used to contradict each other: the prompt says the thread's worktree is
+   * already on its own branch and to leave it alone, while this body said
+   * "create a dedicated feature branch from the default branch before the first
+   * edit". A model following the body runs `git checkout <default>` inside its
+   * worktree and gets git's "already checked out at /workspace/repos/<name>",
+   * with no context for the error and no instruction that covers it.
+   *
+   * Nothing typechecks two prose blocks against each other, so this asserts the
+   * agreement directly.
+   */
+  it("agrees with the system prompt about branching in the thread's worktree", () => {
+    const body = softwareEngineeringBody({ backgroundExec: true, subagents: true });
+    const prompt = composeSystemPrompt({ systemPrompt: "You are Nadi.", sandboxAvailable: true });
+
+    expect(prompt).toContain("do not create another branch to work on");
+    expect(body).toContain("Do NOT create a feature branch");
+    expect(body).toContain("worktree");
+    // The instruction the two used to disagree on, gone from the body.
+    expect(body).not.toContain("Create a dedicated feature branch");
+    expect(body).not.toContain("never work directly on the default branch");
   });
 
   it("follows each capability independently", () => {

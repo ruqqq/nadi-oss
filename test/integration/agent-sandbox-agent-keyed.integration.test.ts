@@ -132,6 +132,7 @@ async function ledgerRow(threadId: string, rowId: string) {
 async function openSession(agentId: string, threadId: string) {
   const opened = await sandboxStub(agentId).session({
     threadId,
+    workspaceThreadId: threadId,
     supportsProcessMonitor: true,
     runtimeConfig: { workspaceId: WORKSPACE_ID, agentId },
   });

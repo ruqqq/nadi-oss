@@ -281,6 +281,20 @@ export interface ThreadComputeServiceDeps {
    * `undefined`, so omission is a compile error.
    */
   threadId: string;
+  /**
+   * WHOSE working directory this service runs in.
+   *
+   * Distinct from `threadId`, which is the ROUTING id — the thread a completion
+   * reminder is delivered to, the thread a ledger row is stamped with, the
+   * thread a completion token is scoped to. A `SubAgent` runs under a facet name
+   * that is a RUN id: it has no `thread_index` row, no repositories of its own,
+   * and no directory of its own. It is a second worker inside its PARENT's
+   * checkout, so its working directory is the parent's — and reading `threadId`
+   * for it would put every subagent in `/workspace/threads/<runId>`, a directory
+   * `ensureWorkspaceRootOnce` dutifully CREATES and nothing ever puts code in.
+   * An empty cwd, no error, no log.
+   */
+  workspaceThreadId?: string;
   env: Record<string, string>;
   /**
    * The origin the sandbox wrapper's own completion callback posts back to
@@ -439,6 +453,29 @@ export interface ThreadComputeServiceDeps {
    * logged, the sandbox is still usable and the model can prepare it itself.
    */
   onFreshRuntimeAcquired?: () => Promise<void>;
+  /**
+   * Ensure THIS thread's working directory holds what the agent declares —
+   * clones, worktrees, setup — before the service's first command runs.
+   *
+   * Called from {@link ensureWorkspaceRootOnce}, i.e. once per service instance
+   * on EVERY path that reaches a runtime: a fresh acquire, a restore, an
+   * already-active box, an attached subagent. That breadth is the whole point.
+   * `onFreshRuntimeAcquired` fires only on `absent -> active`, and the compute
+   * store belongs to the AGENT's sandbox DO, so "active" is BOX-wide: the first
+   * thread to wake the box got its worktree and every later thread of the same
+   * agent got a working directory that existed and was empty — no clone, no
+   * skip entry, no log line. Exactly the silent-zero-repository shape this
+   * whole path is written to make impossible.
+   *
+   * Optional here and REQUIRED on `ComputeServiceHostDeps`, the one entry point
+   * production constructs a service through. A unit test that builds a service
+   * directly wants no repository preparation at all; the sandbox DO must not be
+   * able to forget it.
+   *
+   * The implementation is responsible for being cheap when there is nothing to
+   * do — see `createRepositoryPreparation`'s `isPrepared`.
+   */
+  ensureThreadWorkspace?: () => Promise<void>;
 }
 
 export class ThreadComputeService {
@@ -2725,7 +2762,11 @@ export class ThreadComputeService {
    * the path is built.
    */
   private threadWorkRoot(): string {
-    return threadWorkRoot(this.deps.threadId);
+    // `workspaceThreadId` when the caller states one — see the dep's doc. It is
+    // optional ONLY because unit tests construct this class directly and their
+    // routing thread IS the owner; every production path comes through
+    // `ComputeServiceHostDeps`, where it is required.
+    return threadWorkRoot(this.deps.workspaceThreadId ?? this.deps.threadId);
   }
 
   /**
@@ -2748,6 +2789,20 @@ export class ThreadComputeService {
     // also covers `/workspace/threads` on a box whose first thread this is.
     await this.deps.backend.createDirectory(runtime, this.threadWorkRoot());
     this.workspaceRootEnsured = true;
+    // AFTER the latch, and inside it: preparation runs `exec`, every `exec`
+    // comes back through here, and the latch is what stops that from recursing.
+    //
+    // A failure must not fail the turn — the sandbox is still usable and the
+    // model can still work — but it must not be silent either. The result's own
+    // skips are logged by the implementation; this catches the throw.
+    try {
+      await this.deps.ensureThreadWorkspace?.();
+    } catch (error) {
+      log.warn("compute.thread_workspace_preparation_failed", {
+        threadId: this.deps.threadId,
+        error: String(error),
+      });
+    }
     return runtime;
   }
 

@@ -145,6 +145,12 @@ export async function openSandboxSession(
   env: Env,
   threadId: string,
   options: {
+    /**
+     * The thread whose working directory the session works in — the caller's
+     * own thread, or a subagent's PARENT thread. Required; see
+     * `AgentSandbox.session`.
+     */
+    workspaceThreadId: string;
     supportsProcessMonitor: boolean;
     /**
      * The CALLER's workspace/agent. Required, because `threadId` does not
@@ -168,6 +174,7 @@ export async function openSandboxSession(
   const sandbox = agentSandboxFor(env, options.runtimeConfig.agentId);
   const opened = await sandbox.session({
     threadId,
+    workspaceThreadId: options.workspaceThreadId,
     supportsProcessMonitor: options.supportsProcessMonitor,
     runtimeConfig: options.runtimeConfig,
     ...(options.purpose ? { purpose: options.purpose } : {}),

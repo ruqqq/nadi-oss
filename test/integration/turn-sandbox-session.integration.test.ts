@@ -28,7 +28,7 @@ import {
   setComputeHostTestOverrides,
 } from "../../src/compute/host-test-overrides";
 import { applyRegistryTestSchema, seedRegistryThread } from "./helpers/registry";
-import { agentClonePath } from "../../src/compute/workspace-layout";
+import { agentClonePath, threadWorktreePath } from "../../src/compute/workspace-layout";
 
 const NOW = 1_800_000_000_000;
 
@@ -131,6 +131,168 @@ describe("the turn's sandbox session", () => {
       result.staleCalls,
       "beforeStep called the PREVIOUS turn's session — post-cutover that stub is disposed",
     ).toEqual([]);
+  });
+
+  /**
+   * H1: EVERY thread of the agent gets a worktree, not just the one that woke
+   * the box.
+   *
+   * Preparation used to hang off `onFreshRuntimeAcquired`, which fires only on
+   * `absent -> active`. The compute store belongs to the AGENT's sandbox DO, so
+   * "active" is BOX-wide: the second thread of an agent found the runtime
+   * already up, ran no preparation at all, and got a working directory that
+   * `ensureWorkspaceRootOnce` had dutifully created and nothing had put code in.
+   * No error, no skip entry, no log line — the swallowed-zero-repository shape
+   * this whole path exists to make impossible, reachable on the happy path.
+   *
+   * Both threads are asserted, and thread A's assertions are the anti-vacuity
+   * half: if the wiring broke such that NOBODY prepared, A goes red too and the
+   * result reads as a broken test rather than a passing one.
+   */
+  it("prepares EVERY thread of one agent, not only the one that woke the box", async () => {
+    const workspaceId = "ws_turn_session_two_threads";
+    const agentId = "agent_turn_session_two_threads";
+    const threadA = "thr_turn_two_a";
+    const threadB = "thr_turn_two_b";
+    for (const threadId of [threadA, threadB]) {
+      await seedRegistryThread(env.REGISTRY_DB, {
+        threadId,
+        workspaceId,
+        agentId,
+        runtime: "think",
+      });
+    }
+    await seedComputeEnabledWorkspace(workspaceId);
+    await env.REGISTRY_DB.prepare(
+      `INSERT INTO agent_repositories
+        (id, agent_id, source, name, url, default_branch, checkout_path_name, created_at)
+       VALUES (?, ?, 'url', 'nadi', 'https://example.test/nadi.git', 'main', 'nadi', ?)`,
+    )
+      .bind(`agr_${agentId}`, agentId, NOW)
+      .run();
+
+    // ONE backend for both threads — one agent, one box. This is what makes the
+    // second thread's runtime already-active by the time it opens.
+    const backend = new FakeComputeBackend();
+    const commandsFor = async (threadId: string) => {
+      const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
+      return runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
+        const agent = instance as unknown as TestableAgent;
+        await agent.__unsafe_ensureInitialized();
+        setComputeHostTestOverrides(threadId, { buildBackend: async () => backend });
+        try {
+          const before = backend.startProcessCalls.length + backend.runCommandCalls.length;
+          const session = await agent.resolveComputeServiceForTest();
+          expect(session, "compute must be enabled for this thread").not.toBeNull();
+          await session!.service.ensureRuntimeReference();
+          return [
+            ...backend.startProcessCalls.map((call) => call.command),
+            ...backend.runCommandCalls.map((call) => call.command),
+          ].slice(before);
+        } finally {
+          clearComputeHostTestOverrides(threadId);
+        }
+      });
+    };
+
+    // WHAT IS ASSERTED, and why it stops here. `FakeComputeBackend` answers every
+    // command with exit 0 and empty stdout, so `remote get-url origin` comes back
+    // blank and preparation skips this repository as "remote does not match"
+    // before it reaches `worktree add`. The clone/worktree COMMANDS are pinned in
+    // `test/unit/agent/repository-preparation.test.ts`, against a scripted shell.
+    // What only this test can see is whether preparation RUNS AT ALL for a thread
+    // that did not wake the box — and before the fix, thread B issued not one
+    // command.
+    const first = await commandsFor(threadA);
+    expect(
+      first.some((command) => command.includes(`/workspace/threads/${threadA}`)),
+      `thread A must prepare its own directory; commands were ${JSON.stringify(first)}`,
+    ).toBe(true);
+    expect(first.some((command) => command.includes(agentClonePath("nadi")))).toBe(true);
+
+    const second = await commandsFor(threadB);
+    // The runtime is ALREADY ACTIVE here — no second acquire, so
+    // `onFreshRuntimeAcquired` cannot fire and cannot be what prepares this one.
+    expect(
+      second.some((command) => command.includes(`/workspace/threads/${threadB}`)),
+      `thread B must prepare its own directory off the already-active box; commands were ${JSON.stringify(second)}`,
+    ).toBe(true);
+    expect(
+      second.some((command) => command.includes(agentClonePath("nadi"))),
+      `thread B must probe the agent's clone; commands were ${JSON.stringify(second)}`,
+    ).toBe(true);
+    // Thread A's own preparation must not be what thread B is reading: B's
+    // commands name B's directory and never A's.
+    expect(second.some((command) => command.includes(threadWorktreePath(threadA, "nadi")))).toBe(
+      false,
+    );
+  });
+
+  /**
+   * The gate that makes "prepare on every turn" affordable, and the one event
+   * that must defeat it.
+   *
+   * Preparation now runs from the first `exec` of every session, so without a
+   * marker every turn would re-run each repository's `setupCommand` and the
+   * agent's `setupScript`. With a marker that never cleared, a box that was
+   * DESTROYED (fresh `/workspace`, nothing in it) would be read as prepared and
+   * the thread would work in an empty directory — the same failure, arrived at
+   * from the other side. Both halves are asserted here because each one alone
+   * looks correct.
+   */
+  it("prepares once per box, and again after the box is destroyed", async () => {
+    const threadId = "thr_turn_prep_gate";
+    // Explicit workspace AND agent ids: `integration-fast` runs `isolate: false`
+    // and `seedRegistryThread` defaults every thread onto `agent-workspace-test`
+    // — one AgentSandbox DO, one compute store, shared with every other case in
+    // the project. This test DESTROYS its box, which would strand any neighbour
+    // sharing it on a runtime reference the backend no longer knows.
+    const workspaceId = "ws_turn_prep_gate";
+    const agentId = "agent_turn_prep_gate";
+    await seedRegistryThread(env.REGISTRY_DB, {
+      threadId,
+      workspaceId,
+      agentId,
+      runtime: "think",
+    });
+    await seedComputeEnabledWorkspace(workspaceId);
+    // A SETUP SCRIPT rather than a repository, and that choice is the test's
+    // one compromise. `FakeComputeBackend` answers every command with exit 0 and
+    // empty stdout, so a repository's `remote get-url origin` comes back blank
+    // and preparation SKIPS it — and a skipped run is deliberately never marked
+    // prepared, so a repository fixture could never reach the gate at all. The
+    // setup-script path completes cleanly and marks, which is what the gate is.
+    await env.REGISTRY_DB.prepare("UPDATE agents SET setup_script = ? WHERE id = ?")
+      .bind("echo prepared", agentId)
+      .run();
+
+    const backend = new FakeComputeBackend();
+    const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
+    const openAndCount = async (shutdownAfter = false) =>
+      runInDurableObject(stub, async (instance: ThinkThreadAgent) => {
+        const agent = instance as unknown as TestableAgent;
+        await agent.__unsafe_ensureInitialized();
+        setComputeHostTestOverrides(threadId, { buildBackend: async () => backend });
+        try {
+          const before = backend.runCommandCalls.length + backend.startProcessCalls.length;
+          const session = await agent.resolveComputeServiceForTest();
+          await session!.service.ensureRuntimeReference();
+          const after = backend.runCommandCalls.length + backend.startProcessCalls.length;
+          if (shutdownAfter) await session!.service.execShutdown();
+          return after - before;
+        } finally {
+          clearComputeHostTestOverrides(threadId);
+        }
+      });
+
+    // First session on a fresh box: preparation runs.
+    expect(await openAndCount()).toBeGreaterThan(0);
+    // Second session, same box, same configuration: not one command. This is
+    // what a per-turn trigger costs without the marker.
+    expect(await openAndCount(true)).toBe(0);
+    // The box is gone — `/workspace` is empty on the next acquire, so every
+    // marker describes a directory that no longer exists.
+    expect(await openAndCount()).toBeGreaterThan(0);
   });
 
   it("acquiring a fresh runtime through AgentSandbox runs repository preparation", async () => {

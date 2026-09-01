@@ -137,6 +137,15 @@ export class SubAgent extends ThinkThreadAgent {
   }
 
   /** Cached pull of the parent's trusted context via the SDK facet parent stub. */
+  /**
+   * The PARENT's directory, not this run's. See the base implementation: a
+   * subagent works inside the parent's checkout, and `this.name` is a run id
+   * whose `/workspace/threads/<runId>` would be created empty and stay empty.
+   */
+  protected override async workspaceThreadId(): Promise<string> {
+    return (await this.subagentContext()).parentThreadId;
+  }
+
   private async subagentContext(forceRefresh = false): Promise<SubagentContext> {
     if (this._testSubagentContext) {
       this._attachedRuntime = this._testSubagentContext.attachedRuntime;

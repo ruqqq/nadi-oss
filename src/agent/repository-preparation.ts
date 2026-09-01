@@ -4,6 +4,7 @@ import { ThreadRepository } from "../db/repositories/threads";
 import { AgentRepository } from "../db/repositories/agents";
 import type { Env } from "../env";
 import type { ThreadComputeService } from "../compute/thread-service";
+import { sha256Hex } from "../compute/files/hash";
 import {
   AGENT_REPOS_ROOT,
   LEGACY_WORKSPACE_ROOT,
@@ -49,6 +50,29 @@ export function createRepositoryPreparation(input: {
   env: Env;
   threadId: string;
   resolveComputeService: () => Promise<{ service: RepositoryExecService } | null>;
+  /**
+   * Has this thread already been prepared, for THIS exact configuration?
+   *
+   * REQUIRED, both of them, and there is no default. Preparation runs on every
+   * turn's first `exec` now — that is the only trigger that reaches the second
+   * and third thread of a shared box, because the runtime is already active by
+   * the time they open a session. Without a gate that would re-run every
+   * repository's `setupCommand` and the agent's `setupScript` on every turn; a
+   * gate that defaulted to "already prepared" would restore the very bug this
+   * replaced. So the caller must state both halves.
+   *
+   * The signature covers everything preparation acts on — each repository's
+   * name, url, default branch, root directory and setup command, plus the
+   * agent's setup script — so ADDING a repository invalidates it and the new
+   * one is cloned on the next turn.
+   *
+   * The caller owns invalidation for the other direction, the one a signature
+   * cannot see: the box's filesystem being destroyed. See
+   * `AgentSandbox.onFreshRuntimeAcquired`.
+   */
+  isPrepared: (signature: string) => Promise<boolean>;
+  /** Record that this thread is prepared for `signature`. */
+  markPrepared: (signature: string) => Promise<void>;
 }): () => Promise<RepositoryPreparationResult> {
   return async () => {
     const db = registryDb(input.env);
@@ -81,6 +105,14 @@ export function createRepositoryPreparation(input: {
     // not start acquiring compute just to discover that.
     if (repositories.length === 0 && setupScript === "") {
       return { summary: "No project repositories are configured for this thread." };
+    }
+
+    // BEFORE compute is resolved, and before a single exec: the steady-state
+    // cost of preparing on every turn has to be the two D1 reads above and
+    // nothing else.
+    const signature = await preparationSignature(repositories, setupScript);
+    if (await input.isPrepared(signature)) {
+      return { summary: "Repositories were already prepared for this thread." };
     }
 
     const resolved = await input.resolveComputeService();
@@ -146,6 +178,15 @@ export function createRepositoryPreparation(input: {
       threadWorkRoot(input.threadId),
     );
 
+    // ONLY on a clean run. A skip means something the agent declares is not in
+    // the box — an unreachable clone, a path that is not a checkout, a worktree
+    // that could not be added — and marking that prepared would freeze the
+    // thread in that state until the agent's configuration changed. Retrying
+    // every turn costs a clone attempt per turn for a genuinely broken
+    // repository, and that is the trade taken deliberately: the failure is
+    // logged on every one of those turns instead of exactly once.
+    if (skipped.length === 0) await input.markPrepared(signature);
+
     return {
       summary:
         repositories.length === 0
@@ -156,6 +197,41 @@ export function createRepositoryPreparation(input: {
       ...(environmentSetup !== null ? { environmentSetup } : {}),
     };
   };
+}
+
+/**
+ * A stable fingerprint of everything preparation would act on.
+ *
+ * Order comes from `listRepositories` (by id), which is the order preparation
+ * itself iterates, so two agents cannot collide by declaring the same set in a
+ * different order — and one agent cannot appear unchanged after a reorder that
+ * changes nothing. Hashed rather than stored raw so an agent with many
+ * repositories cannot grow the stored value without bound.
+ */
+async function preparationSignature(
+  repositories: Array<{
+    name: string;
+    url: string;
+    defaultBranch: string;
+    checkoutPathName: string;
+    rootDirectory: string;
+    setupCommand: string;
+  }>,
+  setupScript: string,
+): Promise<string> {
+  const payload = JSON.stringify({
+    v: 1,
+    repositories: repositories.map((repository) => [
+      repository.name,
+      repository.url,
+      repository.defaultBranch,
+      repository.checkoutPathName,
+      repository.rootDirectory,
+      repository.setupCommand,
+    ]),
+    setupScript,
+  });
+  return sha256Hex(new TextEncoder().encode(payload).buffer as ArrayBuffer);
 }
 
 type EnsureResult<T> = ({ kind: "ok" } & T) | { kind: "skip"; reason: string };
@@ -236,6 +312,20 @@ async function ensureAgentClone(
  * clone's `HEAD` — which a fresh clone leaves on the remote's default branch.
  * NOT a bare `-b` with no start point: that would branch from whatever the
  * clone's main worktree happens to be sitting on.
+ *
+ * AND `-b` only when the branch does not already exist. `worktree prune` clears
+ * the worktree REGISTRATION; it never deletes the branch. So a branch outliving
+ * its worktree is reachable and permanent: the reclaim of an archived thread
+ * removes `/workspace/threads/<id>` and prunes, and a provider restore can bring
+ * `repos/` back without `threads/`. Either way the next turn probes the worktree
+ * as missing, runs `add -b`, and git answers "branch already exists" with exit
+ * 128 — a skip, forever, for a thread whose code is simply never checked out
+ * again. Re-attaching the existing branch restores the thread's own commits
+ * instead.
+ *
+ * `-B` is NOT the alternative. It force-resets the branch to the start point,
+ * which silently discards every commit the thread made and never pushed — the
+ * one outcome this whole design exists to prevent.
  */
 async function ensureThreadWorktree(input: {
   service: RepositoryExecService;
@@ -248,13 +338,24 @@ async function ensureThreadWorktree(input: {
   if (pathProbe.kind === "error") return { kind: "skip", reason: pathProbe.reason };
   if (pathProbe.kind === "exists") return { kind: "ok", status: "already_cloned" };
 
+  const branchProbe = await branchExists(input.service, input.clonePath, input.branch);
+  if (branchProbe.kind === "error") return { kind: "skip", reason: branchProbe.reason };
+
   const declared = input.defaultBranch.trim();
   const startPoint = declared === "" ? "HEAD" : `origin/${declared}`;
+  // Re-attach an orphaned branch; create one only when there is none. Stated as
+  // two whole command tails rather than a flag toggle so the two shapes are
+  // readable side by side: create takes a start point, re-attach must NOT (a
+  // start point applied to an existing branch is what `-B` does, and that drops
+  // commits).
+  const addTail =
+    branchProbe.kind === "exists"
+      ? `${shellQuote(input.worktreePath)} ${shellQuote(input.branch)}`
+      : `-b ${shellQuote(input.branch)} ${shellQuote(input.worktreePath)} ${shellQuote(startPoint)}`;
   const result = await runCommand(
     input.service,
     `git -C ${shellQuote(input.clonePath)} worktree prune && ` +
-      `git -C ${shellQuote(input.clonePath)} worktree add -b ${shellQuote(input.branch)} ` +
-      `${shellQuote(input.worktreePath)} ${shellQuote(startPoint)}`,
+      `git -C ${shellQuote(input.clonePath)} worktree add ${addTail}`,
     undefined,
     "add thread worktree",
   );
@@ -262,6 +363,32 @@ async function ensureThreadWorktree(input: {
     return { kind: "skip", reason: formatFailedCommandReason("worktree add", result) };
   }
   return { kind: "ok", status: "cloned" };
+}
+
+/**
+ * Does `refs/heads/<branch>` exist in the agent's clone?
+ *
+ * `show-ref --verify --quiet` is exact-ref, not a glob: `--verify` refuses an
+ * abbreviated name, so `nadi/thread-a` cannot match `nadi/thread-abc`. Exit 0
+ * means present, non-zero means absent — read through `terminalExitCode` for
+ * the same reason every other probe here does (Cloudflare reports any non-zero
+ * exit as `failed`, Daytona as `exited`; classifying on status would read every
+ * "absent" on Cloudflare as a broken probe).
+ */
+async function branchExists(
+  service: RepositoryExecService,
+  clonePath: string,
+  branch: string,
+): Promise<{ kind: "exists" } | { kind: "missing" } | { kind: "error"; reason: string }> {
+  const result = await service.exec({
+    command: `git -C ${shellQuote(clonePath)} show-ref --verify --quiet ${shellQuote(`refs/heads/${branch}`)}`,
+    timeoutMs: REPOSITORY_SETUP_TIMEOUT_MS,
+    label: "check thread branch",
+  });
+  const code = terminalExitCode(result);
+  if (code === 0) return { kind: "exists" };
+  if (code !== null) return { kind: "missing" };
+  return { kind: "error", reason: formatProbeFailureReason("thread branch probe", result) };
 }
 
 // Runs the agent's setup script exactly once, after every repo has been cloned
@@ -534,14 +661,24 @@ function parseGithubHttpsUrl(value: string): URL | null {
  * Two migrations, both "move only when the destination is absent" so a fresh
  * checkout is never clobbered:
  *
- * 1. `/home/exedev/work/<name>` (pre-/workspace) into the agent's repo root.
- * 2. `/workspace/<name>` (pre-P3, one clone per box at the top level) into the
+ * 1. `/workspace/<name>` (pre-P3, one clone per box at the top level) into the
  *    agent's repo root. Skipped for the two names that ARE the new layout.
+ * 2. `/home/exedev/work/<name>` (pre-/workspace) into the agent's repo root.
  *
- * The second is not cosmetic. Those checkouts can hold uncommitted work, and
+ * The first is not cosmetic. Those checkouts can hold uncommitted work, and
  * this preparation would otherwise clone a second copy alongside them and hand
  * the thread the empty one, leaving the user's work in a directory nothing ever
  * looks at again.
+ *
+ * ORDER IS LOAD-BEARING, and it is the reverse of the order the two roots were
+ * introduced in. A box can carry BOTH — the pre-change command moved
+ * `/home/exedev/work/<name>` only when `/workspace/<name>` was absent, so a
+ * legacy copy survives beside a live one. Both migrations claim the SAME
+ * destination and both are move-only-when-absent, so whichever runs first wins.
+ * The `/workspace` copy is the one the user has been editing; the legacy copy
+ * is the stale one nothing has touched since before that move. Running legacy
+ * first would install the stale copy as the agent's clone and orphan the live
+ * one, unreferenced, with nothing failing.
  *
  * Every interpolated path is a fixed constant or has been through
  * `assertSafeSegment`, so none can carry a metacharacter; the body uses only
@@ -551,16 +688,16 @@ function rootPreparationCommand(threadId: string): string {
   const workRoot = threadWorkRoot(threadId);
   return (
     `sh -lc 'mkdir -p ${AGENT_REPOS_ROOT} ${workRoot} && ` +
-    `if [ -d ${LEGACY_WORKSPACE_ROOT} ]; then ` +
-    `for d in ${LEGACY_WORKSPACE_ROOT}/*/; do ` +
-    `[ -d "$d" ] || continue; name="$(basename "$d")"; ` +
-    `[ -e "${AGENT_REPOS_ROOT}/$name" ] || mv "$d" "${AGENT_REPOS_ROOT}/$name"; ` +
-    `done; fi; ` +
     `for d in ${WORKSPACE_ROOT}/*/; do ` +
     `[ -d "$d" ] || continue; name="$(basename "$d")"; ` +
     `case "$name" in ${RESERVED_WORKSPACE_DIR_NAMES.join("|")}) continue;; esac; ` +
     `[ -e "${AGENT_REPOS_ROOT}/$name" ] || mv "$d" "${AGENT_REPOS_ROOT}/$name"; ` +
-    `done'`
+    `done; ` +
+    `if [ -d ${LEGACY_WORKSPACE_ROOT} ]; then ` +
+    `for d in ${LEGACY_WORKSPACE_ROOT}/*/; do ` +
+    `[ -d "$d" ] || continue; name="$(basename "$d")"; ` +
+    `[ -e "${AGENT_REPOS_ROOT}/$name" ] || mv "$d" "${AGENT_REPOS_ROOT}/$name"; ` +
+    `done; fi'`
   );
 }
 

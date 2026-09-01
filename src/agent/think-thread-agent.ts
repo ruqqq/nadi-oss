@@ -2284,6 +2284,18 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
     return undefined;
   }
 
+  /**
+   * The thread whose sandbox working directory this agent works in.
+   *
+   * A top-level thread owns its own. Overridden by {@link SubAgent} to its
+   * PARENT's thread id: a subagent shares the parent's box AND its checkout —
+   * it exists to help with the parent's task, and its own facet name is a run
+   * id with no repositories, no worktree, and nothing to put in one.
+   */
+  protected async workspaceThreadId(): Promise<string> {
+    return this.name;
+  }
+
   /** Whether process watchers + the turn-end auto-watch backstop are available.
    *  Overridden to false in SubAgent to avoid subagent-owned watchers. */
   protected processMonitorEnabled(): boolean {
@@ -4890,6 +4902,7 @@ export class ThinkThreadAgent extends Think<Env> implements SandboxThreadHost {
     // own facet name has no `thread_index` row at all. Cached per DO wake.
     const { workspaceId, agentId } = await this.resolveRuntimeConfigForThink();
     return openSandboxSession(this.env, this.name, {
+      workspaceThreadId: await this.workspaceThreadId(),
       // Think can drive a proactive turn (see `raiseSystemReminder`), so watcher
       // exit reminders are surfaced instead of silently dropped.
       supportsProcessMonitor: backgroundWorkAdmission ?? this.processMonitorEnabled(),
