@@ -1006,13 +1006,14 @@ async function createThread(req: Request, env: Env, ctx: ExecutionContext): Prom
   const body = await parseOptionalJsonBody(req);
   if (!body.ok) return body.response;
 
-  const snapshot = await resolveThreadModelSnapshot(
-    env,
-    target,
-    body.body === null ? {} : body.body,
-    session.user.email,
-  );
-  if (!snapshot.ok) return snapshot.response;
+  // ORDER IS LOAD-BEARING: the agent is resolved BEFORE the model snapshot,
+  // because the agent is where the snapshot's defaults come from. `target` is
+  // only the workspace's EARLIEST usable agent — a fallback — while the thread
+  // may be routed onto an explicitly-picked agent or a project's default. Take
+  // defaults from `target` and a user who picks "Docs" in the new-chat picker
+  // gets Docs' repositories and secrets running on the DEFAULT agent's provider,
+  // model and reasoning effort. `automata/fire-due.ts` has always read the
+  // resolved agent's own provider/model; this is the same rule.
   const projectId = await resolveThreadProjectId(
     db,
     target.workspaceId,
@@ -1028,11 +1029,30 @@ async function createThread(req: Request, env: Env, ctx: ExecutionContext): Prom
   );
   if (!agentId.ok) return agentId.response;
 
+  // No extra query on the common path, where the resolved agent IS the target.
+  const snapshotTarget =
+    agentId.value === target.agentId
+      ? target
+      : await selectThreadModelSnapshotTarget(db, target.workspaceId, agentId.value);
+  if (!snapshotTarget) return new Response("Workspace agent not found", { status: 404 });
+
+  const snapshot = await resolveThreadModelSnapshot(
+    env,
+    snapshotTarget,
+    body.body === null ? {} : body.body,
+    session.user.email,
+  );
+  if (!snapshot.ok) return snapshot.response;
+
   const createdAt = Date.now();
   const thread = {
     id: `thr_${crypto.randomUUID()}`,
     workspaceId: target.workspaceId,
-    agentId: target.agentId,
+    // The resolved agent, not the fallback. `createThreadWithAgent` overrides
+    // this field anyway, but the two must not be able to disagree here either —
+    // a stored agent that differs from the resolved one is exactly the bug this
+    // whole ordering fixes.
+    agentId: agentId.value,
     projectId: projectId.value,
     modelProvider: snapshot.value.provider,
     model: snapshot.value.model,
@@ -1180,6 +1200,35 @@ async function selectThreadTarget(env: Env, session: ValidatedSession) {
       .orderBy(asc(workspaceMembers.createdAt), asc(agents.createdAt), asc(agents.id))
       .get()
   );
+}
+
+/**
+ * The model-snapshot defaults of ONE named agent.
+ *
+ * {@link selectThreadTarget} answers "which agent does this workspace fall back
+ * to"; this answers "what does THIS agent run on", for the thread that resolved
+ * onto an explicitly-picked agent or a project's default. Not filtered on
+ * `archivedAt`/`enabled` — `resolveThreadAgentId` has already refused an
+ * unusable agent by the time this is reached, and re-deciding usability here
+ * would put the rule in two places.
+ */
+async function selectThreadModelSnapshotTarget(
+  db: ReturnType<typeof registryDb>,
+  workspaceId: string,
+  agentId: string,
+): Promise<ThreadModelSnapshotTarget | null> {
+  const row = await db
+    .select({
+      provider: agents.provider,
+      model: agents.model,
+      modelInputModalities: agents.modelInputModalities,
+      reasoningEffort: agents.reasoningEffort,
+      modelSupportsReasoning: agents.modelSupportsReasoning,
+    })
+    .from(agents)
+    .where(eq(agents.id, agentId))
+    .get();
+  return row ? { workspaceId, ...row } : null;
 }
 
 const THREAD_MODEL_SNAPSHOT_MESSAGES: Record<ThreadModelSnapshotError, string> = {

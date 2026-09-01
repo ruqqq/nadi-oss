@@ -139,6 +139,23 @@ export async function listAgents(
   return body.agents;
 }
 
+/**
+ * One agent by id. The new-chat picker needs it: an agent carries its OWN
+ * provider, model and reasoning effort, and the bootstrap agent list is the
+ * lean {@link AgentListItem} shape that deliberately does not.
+ */
+export async function getAgent(
+  agentId: string,
+  fetchImpl: FetchLike = appFetch,
+): Promise<AgentSummary> {
+  const res = await fetchImpl(`/api/agents/${encodeURIComponent(agentId)}`, {
+    credentials: "include",
+  });
+  if (!res.ok) throw await errorFromResponse(res, "load the agent");
+  const body = (await res.json()) as { agent: AgentSummary };
+  return body.agent;
+}
+
 export async function createAgent(
   input: CreateAgentInput,
   fetchImpl: FetchLike = appFetch,

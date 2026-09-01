@@ -131,7 +131,7 @@ import {
   fetchArchivedSummaries,
 } from "./threads-api";
 import { createProject, listProjects, type ProjectSummary } from "./projects-api";
-import { listAgents, type AgentListItem } from "./agents-api";
+import { getAgent, listAgents, type AgentListItem } from "./agents-api";
 import {
   getBrowserNotifications,
   saveBrowserPushSubscription,
@@ -259,10 +259,12 @@ import {
   canStartNewChat,
   deriveNewChatModelState,
   emptyNewChatModelState,
+  selectNewChatAgentModel,
   selectNewChatModelModalities,
   selectNewChatModelReasoning,
   selectNewChatProvider,
   typeNewChatModel,
+  type NewChatModelState,
 } from "./lib/new-chat-model";
 import {
   availableEffortOptions,
@@ -1745,6 +1747,17 @@ export function ChatApp({
     newChatProviderRef.current = newChatProvider;
   }, [newChatProvider]);
 
+  // Same reason, for the agent re-seed below: it must fire when the AGENT
+  // changes, not whenever the provider list is refreshed.
+  const newChatProvidersRef = useRef(newChatProviders);
+  useEffect(() => {
+    newChatProvidersRef.current = newChatProviders;
+  }, [newChatProviders]);
+
+  // The composer's "no agent picked" state, kept current with the settings
+  // fetch below so returning the picker to "inherit" restores it.
+  const defaultNewChatStateRef = useRef(newChatSeed);
+
   // Re-read on mount and every time Settings closes. The model whitelist is
   // edited in Settings but consumed here, and Settings is a route rather than a
   // page load — without this the composer keeps offering the pre-edit list until
@@ -1759,6 +1772,7 @@ export function ChatApp({
       .then((settings) => {
         if (!active) return;
         const state = deriveNewChatModelState(settings);
+        defaultNewChatStateRef.current = state;
         setNewChatProviders(state.providers);
         setNewChatAnyUsable(state.anyUsableProvider);
         setNewChatReasoningEffort(state.reasoningEffort);
@@ -1835,6 +1849,69 @@ export function ChatApp({
     if (agents.some((agent) => agent.id === newChatAgentId)) return;
     setNewChatAgentId(null);
   }, [newChatAgentId, agents]);
+
+  // Which agent this new chat will ACTUALLY run as — the client's mirror of the
+  // server's `resolveThreadAgentId`: an explicit pick wins, else the selected
+  // project's default, else the workspace's own agent (`null` here, which is
+  // what the composer is already seeded from).
+  const effectiveNewChatAgentId = useMemo(() => {
+    if (newChatAgentId !== null && agents.some((agent) => agent.id === newChatAgentId)) {
+      return newChatAgentId;
+    }
+    if (newChatProjectId === "none") return null;
+    return projects.find((project) => project.id === newChatProjectId)?.defaultAgentId ?? null;
+  }, [newChatAgentId, newChatProjectId, agents, projects]);
+
+  const applyNewChatModelState = useCallback((state: NewChatModelState) => {
+    setNewChatProvider(state.provider);
+    setNewChatModel(state.model);
+    setNewChatModelInputModalities(state.modelInputModalities);
+    setNewChatReasoningEffort(state.reasoningEffort);
+    setNewChatModelSupportsReasoning(state.modelSupportsReasoning);
+    setNewChatReasoningControls(state.modelReasoningControls);
+  }, []);
+
+  // An agent carries its OWN provider, model and reasoning effort now (Task 1),
+  // and the composer sends provider/model explicitly — so without this, picking
+  // "Docs" started a thread on Docs' repositories and secrets running the
+  // DEFAULT agent's model. The server half of this fix
+  // (`selectThreadModelSnapshotTarget`) only covers a request that omits them;
+  // this is the half that stops the browser asserting the wrong one.
+  //
+  // `newChatProvidersRef` rather than a dependency: this must re-seed when the
+  // AGENT changes, not every time the provider list is refreshed.
+  useEffect(() => {
+    if (effectiveNewChatAgentId === null) {
+      // Back to "the workspace's agent", which is exactly what the settings
+      // fetch seeds — so restore that rather than leaving the last-picked
+      // agent's model asserted over it.
+      const fallback = defaultNewChatStateRef.current;
+      if (fallback.provider !== null) applyNewChatModelState(fallback);
+      return;
+    }
+    let active = true;
+    void getAgent(effectiveNewChatAgentId)
+      .then((agent) => {
+        if (!active) return;
+        const next = selectNewChatAgentModel(agent, {
+          ...emptyNewChatModelState(),
+          providers: newChatProvidersRef.current,
+        });
+        // `null` means the agent's provider is not offerable here (no
+        // credentials, or curated to zero models). Leave the composer alone —
+        // see `selectNewChatAgentModel` for why there is nothing better.
+        if (next.provider === null) return;
+        applyNewChatModelState(next);
+      })
+      .catch(() => {
+        // The agent's model is unreachable; the composer keeps what it has and
+        // the server still resolves the snapshot from the agent for anything
+        // the body omits.
+      });
+    return () => {
+      active = false;
+    };
+  }, [effectiveNewChatAgentId, applyNewChatModelState]);
 
   // Bootstrap already seeded the list; this refresh keeps it current with
   // Settings, which can create, disable, or delete an agent. Narrowed to the

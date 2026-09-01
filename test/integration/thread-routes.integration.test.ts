@@ -211,6 +211,9 @@ async function insertEnvironment(input: {
   createdAt: number;
   archivedAt?: number | null;
   enabled?: boolean;
+  model?: string;
+  reasoningEffort?: string;
+  modelInputModalities?: string[];
 }) {
   const db = drizzle(env.REGISTRY_DB, { schema });
   await db.insert(schema.agents).values({
@@ -221,7 +224,11 @@ async function insertEnvironment(input: {
     // `agents` requires.
     systemPrompt: "You are Nadi.",
     provider: "mock",
-    model: "mock",
+    model: input.model ?? "mock",
+    ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
+    ...(input.modelInputModalities
+      ? { modelInputModalities: JSON.stringify(input.modelInputModalities) }
+      : {}),
     description: "",
     setupScript: input.setupScript ?? "",
     sandboxEnvVarsJson: "{}",
@@ -1022,6 +1029,139 @@ describe("thread routes", () => {
       .get();
     expect(row?.projectId).toBe("project-create");
     expect(row?.agentId).toBe("env-create");
+  });
+
+  // The model snapshot's DEFAULTS come from an agent. Before the fix they came
+  // from `selectThreadTarget` — the workspace's earliest agent — while the
+  // thread itself was routed onto whichever agent `resolveThreadAgentId`
+  // resolved. Picking "Docs" therefore gave you Docs' repositories and secrets
+  // running on the DEFAULT agent's model. Invisible while the model was
+  // workspace-wide; per-agent since Task 1.
+  it("snapshots the EXPLICITLY PICKED agent's model, not the workspace's earliest agent's", async () => {
+    const seeded = await seedUserWorkspace({
+      userId: "user-thread-create-model-explicit",
+      token: "thread-create-model-explicit-token",
+      workspaceId: "workspace-thread-create-model-explicit",
+    });
+    await insertEnvironment({
+      id: "env-model-docs",
+      workspaceId: seeded.workspaceId,
+      name: "Docs",
+      createdAt: now,
+      model: "mock-docs",
+      reasoningEffort: "high",
+      modelInputModalities: ["text", "image"],
+    });
+
+    const res = await SELF.fetch("https://nadi.test/api/threads", {
+      method: "POST",
+      headers: {
+        cookie: `better-auth.session_token=${seeded.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ agentId: "env-model-docs" }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { thread: { threadId: string } };
+
+    const db = drizzle(env.REGISTRY_DB, { schema });
+    const row = await db
+      .select()
+      .from(schema.threadIndex)
+      .where(eq(schema.threadIndex.id, body.thread.threadId))
+      .get();
+    expect(row?.agentId).toBe("env-model-docs");
+    expect(row?.model).toBe("mock-docs");
+    expect(row?.reasoningEffort).toBe("high");
+    expect(row?.modelInputModalities).toBe(JSON.stringify(["text", "image"]));
+    // The earliest agent — the one the snapshot used to come from — is still
+    // "mock"/"medium", so a green assertion above cannot be a coincidence.
+    const fallback = await db
+      .select()
+      .from(schema.agents)
+      .where(eq(schema.agents.id, seeded.agentId))
+      .get();
+    expect(fallback?.model).toBe("mock");
+    expect(fallback?.reasoningEffort).toBe("medium");
+  });
+
+  it("snapshots the PROJECT DEFAULT agent's model when no agentId is given", async () => {
+    const seeded = await seedUserWorkspace({
+      userId: "user-thread-create-model-default",
+      token: "thread-create-model-default-token",
+      workspaceId: "workspace-thread-create-model-default",
+    });
+    await insertEnvironment({
+      id: "env-model-project-default",
+      workspaceId: seeded.workspaceId,
+      name: "Project default",
+      createdAt: now,
+      model: "mock-project",
+    });
+    await insertProject({
+      id: "project-model-default",
+      workspaceId: seeded.workspaceId,
+      name: "Model Default Project",
+      defaultAgentId: "env-model-project-default",
+      createdAt: now,
+    });
+
+    const res = await SELF.fetch("https://nadi.test/api/threads", {
+      method: "POST",
+      headers: {
+        cookie: `better-auth.session_token=${seeded.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ projectId: "project-model-default" }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { thread: { threadId: string } };
+
+    const db = drizzle(env.REGISTRY_DB, { schema });
+    const row = await db
+      .select()
+      .from(schema.threadIndex)
+      .where(eq(schema.threadIndex.id, body.thread.threadId))
+      .get();
+    expect(row?.agentId).toBe("env-model-project-default");
+    expect(row?.model).toBe("mock-project");
+  });
+
+  it("an explicit model in the body still overrides the resolved agent's", async () => {
+    const seeded = await seedUserWorkspace({
+      userId: "user-thread-create-model-override",
+      token: "thread-create-model-override-token",
+      workspaceId: "workspace-thread-create-model-override",
+    });
+    await insertEnvironment({
+      id: "env-model-override",
+      workspaceId: seeded.workspaceId,
+      name: "Docs",
+      createdAt: now,
+      model: "mock-docs",
+    });
+
+    const res = await SELF.fetch("https://nadi.test/api/threads", {
+      method: "POST",
+      headers: {
+        cookie: `better-auth.session_token=${seeded.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ agentId: "env-model-override", model: "mock-chosen" }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { thread: { threadId: string } };
+
+    const db = drizzle(env.REGISTRY_DB, { schema });
+    const row = await db
+      .select()
+      .from(schema.threadIndex)
+      .where(eq(schema.threadIndex.id, body.thread.threadId))
+      .get();
+    expect(row?.model).toBe("mock-chosen");
   });
 
   it("an explicit agentId overrides the project's defaultAgentId", async () => {

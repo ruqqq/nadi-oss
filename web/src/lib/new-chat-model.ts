@@ -1,6 +1,7 @@
 import { hasOfferableModels } from "./model-picker";
 import { defaultModelForProvider } from "../settings-ui-config";
 import {
+  isReasoningEffort,
   isSettingsProvider,
   type AgentSettingsResponse,
   type ModelInputModality,
@@ -83,6 +84,64 @@ export function emptyNewChatModelState(): NewChatModelState {
     modelInputModalities: ["text"],
     reasoningEffort: "medium",
     modelSupportsReasoning: null,
+    modelReasoningControls: undefined,
+  };
+}
+
+const MODEL_INPUT_MODALITIES: ModelInputModality[] = ["text", "image", "audio", "video", "file"];
+
+/** `agents.model_input_modalities` is a JSON array stored as TEXT. Anything
+ *  unparseable or empty falls back to text-only rather than throwing. */
+function parseStoredModalities(raw: string): ModelInputModality[] {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return ["text"];
+    const modalities = parsed.filter((entry): entry is ModelInputModality =>
+      MODEL_INPUT_MODALITIES.includes(entry as ModelInputModality),
+    );
+    return modalities.length > 0 ? modalities : ["text"];
+  } catch {
+    return ["text"];
+  }
+}
+
+/**
+ * Re-seed the composer from the agent the user just picked.
+ *
+ * An agent carries its OWN provider, model and reasoning effort. Without this,
+ * picking "Docs" in the new-chat picker sent the workspace default agent's
+ * model with the POST — and the server honours an explicit model, so the thread
+ * really did run on the wrong one. The server half of the same fix
+ * (`selectThreadModelSnapshotTarget`) only covers a request that omits them.
+ *
+ * Returns `current` UNCHANGED when the agent's provider is not one this
+ * composer can offer (no credentials, or curated down to zero models). Nothing
+ * better is available: forcing an unusable provider into the composer would
+ * make the send button refuse, and silently substituting a usable one is the
+ * very substitution this fix exists to stop.
+ */
+export function selectNewChatAgentModel(
+  agent: {
+    provider: string;
+    model: string;
+    modelInputModalities: string;
+    reasoningEffort: string;
+    modelSupportsReasoning: boolean | null;
+  },
+  current: NewChatModelState,
+): NewChatModelState {
+  if (!isSettingsProvider(agent.provider)) return current;
+  if (!current.providers.some((entry) => entry.provider === agent.provider)) return current;
+  return {
+    ...current,
+    provider: agent.provider,
+    model: agent.model,
+    modelInputModalities: parseStoredModalities(agent.modelInputModalities),
+    reasoningEffort: isReasoningEffort(agent.reasoningEffort)
+      ? agent.reasoningEffort
+      : current.reasoningEffort,
+    modelSupportsReasoning: agent.modelSupportsReasoning,
+    // The picker has not reported on THIS model yet; unknown, not "none".
     modelReasoningControls: undefined,
   };
 }

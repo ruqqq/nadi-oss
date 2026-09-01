@@ -3,6 +3,7 @@ import {
   canStartNewChat,
   deriveNewChatModelState,
   emptyNewChatModelState,
+  selectNewChatAgentModel,
   selectNewChatModelModalities,
   selectNewChatProvider,
   typeNewChatModel,
@@ -186,5 +187,58 @@ describe("openai-compatible has no default model", () => {
     const state = selectNewChatProvider("anthropic", emptyNewChatModelState());
     expect(state.model).not.toBe("");
     expect(canStartNewChat(state)).toBe(true);
+  });
+});
+
+describe("re-seeding from the picked agent", () => {
+  const base = { ...emptyNewChatModelState(), providers: [provider("openai-oauth", true)] };
+
+  it("takes provider, model, modalities and effort from the agent", () => {
+    const next = selectNewChatAgentModel(
+      {
+        provider: "openai-oauth",
+        model: "gpt-5.5-docs",
+        modelInputModalities: '["text","image"]',
+        reasoningEffort: "high",
+        modelSupportsReasoning: true,
+      },
+      base,
+    );
+    expect(next).toMatchObject({
+      provider: "openai-oauth",
+      model: "gpt-5.5-docs",
+      modelInputModalities: ["text", "image"],
+      reasoningEffort: "high",
+      modelSupportsReasoning: true,
+      modelReasoningControls: undefined,
+    });
+  });
+
+  it("leaves the composer alone when the agent's provider is not offerable here", () => {
+    const next = selectNewChatAgentModel(
+      {
+        provider: "anthropic",
+        model: "claude-sonnet-4-6",
+        modelInputModalities: '["text"]',
+        reasoningEffort: "high",
+        modelSupportsReasoning: true,
+      },
+      base,
+    );
+    expect(next).toBe(base);
+  });
+
+  it("falls back to text-only on unparseable stored modalities", () => {
+    const next = selectNewChatAgentModel(
+      {
+        provider: "openai-oauth",
+        model: "gpt-5.5",
+        modelInputModalities: "not json",
+        reasoningEffort: "medium",
+        modelSupportsReasoning: null,
+      },
+      base,
+    );
+    expect(next.modelInputModalities).toEqual(["text"]);
   });
 });

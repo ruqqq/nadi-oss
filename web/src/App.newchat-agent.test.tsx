@@ -5,6 +5,7 @@ import type { ThreadSummary } from "./threads-api";
 
 const createNewThread = vi.fn();
 const listAgentsMock = vi.fn();
+const getAgentMock = vi.fn();
 let resolveCreate: ((thread: ThreadSummary) => void) | null = null;
 let rejectCreate: ((error: Error) => void) | null = null;
 
@@ -16,6 +17,7 @@ vi.mock("./lib/new-thread-send", async (importOriginal) => ({
 vi.mock("./agents-api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./agents-api")>()),
   listAgents: (...args: unknown[]) => listAgentsMock(...args),
+  getAgent: (...args: unknown[]) => getAgentMock(...args),
 }));
 
 // Seeds the new-chat provider/model synchronously on mount, so the composer is
@@ -43,6 +45,15 @@ const AGENT_FIXTURE = {
   description: "",
   // Mirrors AgentListItem: the pickers offer only ENABLED agents.
   enabled: true,
+  // An agent carries its OWN model — the whole point of the merge, and what
+  // `GET /api/agents/:id` answers for the composer.
+  systemPrompt: "You are Nadi.",
+  provider: "openai-oauth",
+  model: "gpt-5.5-docs",
+  modelInputModalities: '["text","image"]',
+  reasoningEffort: "high",
+  modelSupportsReasoning: true,
+  resourceProfile: "small",
   setupScript: "",
   repositories: [],
   envVars: {},
@@ -116,6 +127,7 @@ beforeEach(() => {
     vi.fn(() => new Promise<Response>(() => {})),
   );
   listAgentsMock.mockResolvedValue([AGENT_FIXTURE]);
+  getAgentMock.mockResolvedValue(AGENT_FIXTURE);
   createNewThread.mockReturnValue(
     new Promise<ThreadSummary>((resolve, reject) => {
       resolveCreate = resolve;
@@ -180,6 +192,40 @@ describe("new-chat agent selection", () => {
 
     await waitFor(() => expect(createNewThread).toHaveBeenCalled());
     expect(createNewThread.mock.calls[0]?.[1]).toMatchObject({ agentId: "wb_1" });
+  });
+
+  // The client half of the wrong-model defect. The composer is seeded ONCE from
+  // the workspace default agent's settings (gpt-5.5 here) and then asserts that
+  // provider/model on every create — so picking an agent that runs a different
+  // model silently started the thread on the default agent's model, on the
+  // picked agent's repositories and secrets.
+  it("re-seeds the model from the picked agent", async () => {
+    renderApp();
+    await waitFor(() => expect(listAgentsMock).toHaveBeenCalled());
+
+    fireEvent.click(screen.getAllByRole("button", { name: /new chat/i })[0]!);
+    const picker = await screen.findByRole("button", { name: /agent: inherit/i });
+    fireEvent.pointerDown(picker, { button: 0, ctrlKey: false, pointerType: "mouse" });
+    fireEvent.click(picker);
+    fireEvent.click(await screen.findByRole("option", { name: /Nadi/ }));
+
+    await waitFor(() => expect(getAgentMock).toHaveBeenCalledWith("wb_1"));
+
+    const input = screen.getByPlaceholderText(/message/i);
+    fireEvent.change(input, { target: { value: "hello" } });
+    const form = input.closest("form");
+    if (!form) throw new Error("composer form not found");
+    fireEvent.submit(form);
+
+    await waitFor(() => expect(createNewThread).toHaveBeenCalled());
+    expect(createNewThread.mock.calls[0]?.[1]).toMatchObject({
+      agentId: "wb_1",
+      // NOT the "gpt-5.5" the bootstrap cache seeded the composer with.
+      model: "gpt-5.5-docs",
+      modelInputModalities: ["text", "image"],
+      reasoningEffort: "high",
+      modelSupportsReasoning: true,
+    });
   });
 });
 

@@ -39,6 +39,14 @@ export const agentHandlers = [
     return HttpResponse.json({ agents });
   }),
 
+  // Declared BEFORE `PATCH /:agentId` only for readability; msw matches on
+  // method as well as path, so the order does not matter.
+  http.get("/api/agents/:agentId", ({ params }) => {
+    const agent = find(pathParam(params, "agentId"));
+    if (!agent) return notFound("That agent");
+    return HttpResponse.json({ agent });
+  }),
+
   http.post("/api/agents", async ({ request }) => {
     const store = getStore();
     const input = (await request.json().catch(() => ({}))) as {
