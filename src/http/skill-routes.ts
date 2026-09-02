@@ -164,14 +164,15 @@ async function listSkills(req: Request, env: Env, url: URL): Promise<Response> {
   const scope = await resolveSkillScope(env, session, url);
   if (!scope) return Response.json({ skills: [] });
   const repo = new AgentSkillRepository(registryDb(env));
-  const rows =
-    url.searchParams.get("archived") === "1"
-      ? await repo.listArchived(scope)
-      : await repo.listActive(scope, { includeDisabled: true });
-  // LIBRARY scope only. One shared copy means one edit reaches every agent that
-  // has it, so the count is what makes that blast radius visible at the moment
-  // of editing. On an agent's own skills it would always read 1 — noise.
-  if (scope.agentId !== null) return Response.json({ skills: rows.map(serialize) });
+  const archived = url.searchParams.get("archived") === "1";
+  const rows = archived
+    ? await repo.listArchived(scope)
+    : await repo.listActive(scope, { includeDisabled: true });
+  // LIBRARY scope only, and never on the archived tab: `countAgentsLiveOn`
+  // requires `archived_at IS NULL`, so every answer there is zero and the query
+  // is a D1 round-trip that cannot say anything. On an agent's own skills the
+  // number would always read 1 - noise.
+  if (scope.agentId !== null || archived) return Response.json({ skills: rows.map(serialize) });
   const counts = await repo.countAgentsLiveOn(rows.map((row) => row.id));
   return Response.json({
     skills: rows.map((row) => ({ ...serialize(row), liveOnAgentCount: counts.get(row.id) ?? 0 })),

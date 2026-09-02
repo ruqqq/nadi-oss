@@ -679,4 +679,40 @@ describe("skills have two scopes", () => {
       }),
     ).resolves.toBeUndefined();
   });
+
+  // The destination is checked in the repository as well as at the route, the
+  // way `setSkillExclusion` checks both of its ids. Without it a caller who is a
+  // member of both workspaces writes a row carrying THIS workspace's id under
+  // the other workspace's agent — which no listing in either workspace returns.
+  it("refuses to copy onto an agent in another workspace", async () => {
+    await insertSkill({ id: "lib-deploy", agentId: null, name: "deploy" });
+    await seedRegistryThread(env.REGISTRY_DB, {
+      workspaceId: "workspace-elsewhere",
+      agentId: "agent-elsewhere",
+      threadId: "thread-elsewhere-copy",
+    });
+
+    await expect(
+      repo().copyToAgent({
+        workspaceId: WORKSPACE,
+        agentId: null,
+        id: "lib-deploy",
+        targetAgentId: "agent-elsewhere",
+      }),
+    ).resolves.toBeUndefined();
+    const rows = await drizzle(env.REGISTRY_DB, { schema }).select().from(schema.skills).all();
+    expect(rows.map((r) => r.id)).toEqual(["lib-deploy"]);
+  });
+
+  it("refuses to copy onto an agent that does not exist", async () => {
+    await insertSkill({ id: "lib-deploy", agentId: null, name: "deploy" });
+    await expect(
+      repo().copyToAgent({
+        workspaceId: WORKSPACE,
+        agentId: null,
+        id: "lib-deploy",
+        targetAgentId: "agent-nowhere",
+      }),
+    ).resolves.toBeUndefined();
+  });
 });

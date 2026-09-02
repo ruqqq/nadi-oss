@@ -792,4 +792,68 @@ describe("skill routes", () => {
       expect(res.status).toBe(405);
     }
   });
+
+  // The sibling half of the guard above. `seedOtherWorkspace` makes user-1 a
+  // NON-member of ws-2, so only `!target` ever fired there; this is the case the
+  // guard's own comment describes — a member of two workspaces. Without the
+  // workspace-equality check the insert succeeds and writes a row carrying ws-1's
+  // `workspace_id` under a ws-2 agent: invisible to BOTH workspaces, because
+  // `listActive` filters on workspace and the library listing on `agent_id IS NULL`.
+  it("404s a copy onto an agent in another workspace the session IS a member of", async () => {
+    const { token, workspaceId } = await seedMemberWithAgent();
+    const foreign = await seedOtherWorkspace();
+    const db = drizzle(env.REGISTRY_DB, { schema });
+    await db.insert(schema.workspaceMembers).values({
+      workspaceId: foreign.workspaceId,
+      userId: "user-1",
+      role: "member",
+      // Later than the ws-1 membership, so the un-targeted source scope still
+      // resolves to ws-1 (`resolveAgentScope` takes the earliest membership).
+      createdAt: now + 1,
+    });
+    const repo = new AgentSkillRepository(db);
+    const library = await repo.create({
+      workspaceId,
+      agentId: null,
+      name: "deploy",
+      description: "Deploy",
+      body: "Body",
+    });
+
+    const res = await SELF.fetch(`https://nadi.test/api/skills/${library.id}/copy-to-agent`, {
+      method: "POST",
+      headers: { ...cookie(token), "Content-Type": "application/json" },
+      body: JSON.stringify({ agentId: foreign.agentId }),
+    });
+    expect(res.status).toBe(404);
+    await expect(
+      repo.listActive({ workspaceId: foreign.workspaceId, agentId: foreign.agentId }),
+    ).resolves.toEqual([]);
+    // Nothing anywhere: an orphan row would show up here and in no listing.
+    const rows = await db.select().from(schema.skills).all();
+    expect(rows.map((row) => row.id)).toEqual([library.id]);
+  });
+
+  // `countAgentsLiveOn` requires `archived_at IS NULL`, so on the archived tab it
+  // can only ever answer zero. Omitting the field keeps that from being a D1
+  // round-trip nobody can observe.
+  it("does not count on the archived tab", async () => {
+    const { token, workspaceId } = await seedMemberWithAgent();
+    const repo = new AgentSkillRepository(drizzle(env.REGISTRY_DB, { schema }));
+    const created = await repo.create({
+      workspaceId,
+      agentId: null,
+      name: "deploy",
+      description: "Deploy",
+      body: "Body",
+    });
+    await repo.archiveById({ workspaceId, agentId: null, id: created.id });
+
+    const res = await SELF.fetch("https://nadi.test/api/skills?archived=1", {
+      headers: cookie(token),
+    });
+    const { skills } = (await res.json()) as { skills: Array<Record<string, unknown>> };
+    expect(skills.map((s) => s.id)).toEqual([created.id]);
+    expect(skills[0]).not.toHaveProperty("liveOnAgentCount");
+  });
 });

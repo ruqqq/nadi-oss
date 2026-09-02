@@ -117,14 +117,24 @@ const skillHandlers = [
   http.post("/api/skills/:skillId/archive", ({ params, request }) => {
     const skill = skillScope(request.url).list.find((s) => s.id === pathParam(params, "skillId"));
     if (!skill) return notFound("That skill");
+    // `archiveById` writes archivedAt and updatedAt ONLY. Clearing `enabled`
+    // here made an archive->restore round trip come back disabled, which the
+    // real app cannot produce.
     skill.archivedAt = Date.now();
-    skill.enabled = false;
+    skill.updatedAt = Date.now();
     return HttpResponse.json({ skill });
   }),
   http.post("/api/skills/:skillId/restore", ({ params, request }) => {
-    const skill = skillScope(request.url).list.find((s) => s.id === pathParam(params, "skillId"));
+    const { list } = skillScope(request.url);
+    const skill = list.find((s) => s.id === pathParam(params, "skillId"));
     if (!skill) return notFound("That skill");
+    // The partial unique index is on ACTIVE names, so restoring onto a name
+    // something else has taken since is the server's 409 - the one failure this
+    // route has, and it was undrivable in the mocked app.
+    if (list.some((s) => s.id !== skill.id && s.name === skill.name && !s.archivedAt))
+      return HttpResponse.text("A skill with this name is already active", { status: 409 });
     skill.archivedAt = null;
+    skill.updatedAt = Date.now();
     return HttpResponse.json({ skill });
   }),
 

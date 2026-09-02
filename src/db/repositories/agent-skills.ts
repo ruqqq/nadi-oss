@@ -634,6 +634,19 @@ export class AgentSkillRepository {
   }): Promise<Skill | undefined> {
     const source = await this.getOwnedById(input);
     if (!source || source.archivedAt !== null) return undefined;
+    // The DESTINATION is checked here as well as at the route, matching
+    // `setSkillExclusion`, the other write that takes two ids with one of them
+    // off a request body. Without it a caller who is a member of two
+    // workspaces can write a row carrying THIS workspace's `workspace_id` under
+    // the other workspace's agent - a row no listing in either workspace can
+    // see, because `listActive` filters on workspace and the library listing on
+    // `agent_id IS NULL`.
+    const target = await this.db
+      .select({ id: agents.id })
+      .from(agents)
+      .where(and(eq(agents.id, input.targetAgentId), eq(agents.workspaceId, input.workspaceId)))
+      .get();
+    if (!target) return undefined;
     await this.assertActiveNameAvailable({
       workspaceId: input.workspaceId,
       agentId: input.targetAgentId,
