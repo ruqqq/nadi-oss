@@ -436,6 +436,8 @@ describe("thread routes", () => {
       title: "Serialize",
       source: "manual" as const,
       lastMessagePreview: "",
+      agentArchivedAt: null,
+      agentEnabled: true,
       createdAt: now,
       updatedAt: now,
     };
@@ -534,6 +536,7 @@ describe("thread routes", () => {
           lastMessagePreview: "newer preview",
           archivedAt: null,
           readOnly: true,
+          readOnlyReason: "legacy_runtime",
           status: "active",
           projectId: null,
           projectName: null,
@@ -560,6 +563,7 @@ describe("thread routes", () => {
           lastMessagePreview: "older preview",
           archivedAt: null,
           readOnly: true,
+          readOnlyReason: "legacy_runtime",
           status: "active",
           projectId: null,
           projectName: null,
@@ -2948,6 +2952,99 @@ describe("thread routes", () => {
         body: JSON.stringify({ threadIds: ["active"] }),
       });
       expect(response.status).toBe(401);
+    });
+  });
+
+  // The serializer is a pure function, so a unit test proves only the RULE. What
+  // has to be proven here is the WIRING: both places that build a serializer
+  // input — the list query in this file and `ThreadRepository.getSummaryRowById`
+  // — must carry `agents.archived_at` and `agents.enabled`. A missing column on
+  // either one renders a working composer for an agent that refuses the turn,
+  // and nothing else fails.
+  describe("read-only reason from the agent's live state", () => {
+    it("carries the agent state through the list query and the single-thread query", async () => {
+      const seeded = await seedUserWorkspace({
+        userId: "user-agent-readonly",
+        token: "agent-readonly-token",
+        workspaceId: "workspace-agent-readonly",
+      });
+      await insertEnvironment({
+        id: "agent-readonly-off",
+        workspaceId: seeded.workspaceId,
+        name: "Off",
+        createdAt: now,
+        enabled: false,
+      });
+      await insertEnvironment({
+        id: "agent-readonly-gone",
+        workspaceId: seeded.workspaceId,
+        name: "Gone",
+        createdAt: now,
+        archivedAt: now,
+      });
+      for (const [id, agentId] of [
+        ["thr-agent-live", seeded.agentId],
+        ["thr-agent-off", "agent-readonly-off"],
+        ["thr-agent-gone", "agent-readonly-gone"],
+      ] as const) {
+        await insertThread({
+          id,
+          workspaceId: seeded.workspaceId,
+          agentId: seeded.agentId,
+          threadAgentId: agentId,
+          title: id,
+          runtime: "think",
+          updatedAt: now,
+        });
+      }
+
+      const list = await routeThreads(
+        new Request("https://nadi.test/api/threads?status=all", {
+          headers: { cookie: `better-auth.session_token=${seeded.token}` },
+        }),
+        env,
+        makeExecutionContext(),
+      );
+      expect(list?.status).toBe(200);
+      const body = (await list?.json()) as {
+        threads: { threadId: string; readOnly: boolean; readOnlyReason?: string }[];
+      };
+      const byId = new Map(body.threads.map((t) => [t.threadId, t]));
+      expect(byId.get("thr-agent-live")).toMatchObject({ readOnly: false });
+      expect(byId.get("thr-agent-live")).not.toHaveProperty("readOnlyReason");
+      expect(byId.get("thr-agent-off")).toMatchObject({
+        readOnly: true,
+        readOnlyReason: "agent_disabled",
+      });
+      expect(byId.get("thr-agent-gone")).toMatchObject({
+        readOnly: true,
+        readOnlyReason: "agent_deleted",
+      });
+
+      // The other builder: getSummaryRowById, behind GET /api/threads/:id.
+      for (const [threadId, reason] of [
+        ["thr-agent-live", null],
+        ["thr-agent-off", "agent_disabled"],
+        ["thr-agent-gone", "agent_deleted"],
+      ] as const) {
+        const res = await routeThreads(
+          new Request(`https://nadi.test/api/threads/${threadId}`, {
+            headers: { cookie: `better-auth.session_token=${seeded.token}` },
+          }),
+          env,
+          makeExecutionContext(),
+        );
+        expect(res?.status).toBe(200);
+        const single = (await res?.json()) as {
+          thread: { readOnly: boolean; readOnlyReason?: string };
+        };
+        if (reason === null) {
+          expect(single.thread.readOnly).toBe(false);
+          expect(single.thread).not.toHaveProperty("readOnlyReason");
+        } else {
+          expect(single.thread).toMatchObject({ readOnly: true, readOnlyReason: reason });
+        }
+      }
     });
   });
 });

@@ -218,7 +218,11 @@ export const threadHandlers = [
     }
     thread.status = "archived";
     thread.archivedAt = Date.now();
+    // Set here as well as derived in `getStore`: this response is built AFTER
+    // that derivation ran, so leaving it to the store would answer this one
+    // request with `readOnly: false` and only agree from the next read on.
     thread.readOnly = true;
+    thread.readOnlyReason = "thread_archived";
     thread.updatedAt = Date.now();
     return HttpResponse.json({ thread });
   }),

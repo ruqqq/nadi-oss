@@ -5,6 +5,14 @@ import type { ModelInputModality, ReasoningEffort, SettingsProvider } from "./se
 export type ThreadActivityStatus = "idle" | "running" | "attention_required" | "failed";
 export type ThreadUnreadOutcome = "completed" | "failed" | null;
 
+/** Why the server refuses new turns on this thread. Mirrors
+ *  `ThreadReadOnlyReason` in `src/http/thread-serialize.ts`. */
+export type ThreadReadOnlyReason =
+  | "thread_archived"
+  | "legacy_runtime"
+  | "agent_deleted"
+  | "agent_disabled";
+
 export interface ThreadSummary {
   threadId: string;
   kind: "regular" | "feedback";
@@ -28,6 +36,10 @@ export interface ThreadSummary {
   lastSeenAt?: number | null;
   archivedAt: number | null;
   readOnly: boolean;
+  /** OPTIONAL on purpose: a tab still holding a payload serialized before this
+   *  field existed has `readOnly` and no reason, and must render. Never switch
+   *  on it without a default. */
+  readOnlyReason?: ThreadReadOnlyReason;
   status: "active" | "archived";
   projectId: string | null;
   projectName: string | null;

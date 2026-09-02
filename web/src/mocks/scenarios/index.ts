@@ -1456,6 +1456,51 @@ function dismissedThreadsStore(): MockStore {
 }
 
 /**
+ * The two states a thread inherits from its AGENT rather than from itself: the
+ * agent turned off (reversible) and the agent deleted (soft-deleted, gone). The
+ * store derives `readOnly` / `readOnlyReason` from these agent rows on every
+ * read — see `applyLiveReadOnly` — so toggling an agent in Settings flips its
+ * chats here too, exactly as the live join does in production.
+ */
+function agentGoneStore(): MockStore {
+  const base = defaultStore();
+  const agents = [
+    ...base.agents,
+    makeAgent({
+      id: "wb_paused",
+      name: "paused-agent",
+      description: "Turned off; the machine and its files survive.",
+      enabled: false,
+    }),
+    makeAgent({
+      id: "wb_retired",
+      name: "retired-agent",
+      description: "Deleted; the sprite is gone.",
+      archivedAt: NOW - 2 * DAY,
+    }),
+  ];
+  const threads: ThreadSummary[] = [
+    makeThread({
+      threadId: "thr_agent_off",
+      title: "Staging rollback checklist",
+      agentId: "wb_paused",
+      agentName: "paused-agent",
+      lastMessagePreview: "Held here until someone turns the agent back on.",
+      updatedAt: NOW - MINUTE,
+    }),
+    makeThread({
+      threadId: "thr_agent_deleted",
+      title: "Terraform module split",
+      agentId: "wb_retired",
+      agentName: "retired-agent",
+      lastMessagePreview: "The agent that ran this is gone; the chat is not.",
+      updatedAt: NOW - 2 * MINUTE,
+    }),
+  ];
+  return { ...base, agents, threads: [...threads, ...base.threads] };
+}
+
+/**
  * One assistant turn that touches every branch of the run log — a passing and a
  * failing command, a read, a patch, a search, an MCP text result, an MCP
  * `isError`, a denied call, a plain-string memory return, and a call still
@@ -1583,6 +1628,7 @@ export const SCENARIOS: Record<string, () => MockStore> = {
   "onboarding-empower-composio-no-calendar": onboardingEmpowerComposioNoCalendarStore,
   "busy-workspace": busyWorkspaceStore,
   "dismissed-threads": dismissedThreadsStore,
+  "agent-gone": agentGoneStore,
   // Seeded like `default`; the interesting part is the live traffic that
   // mocks/thread-activity-demo.ts pushes at it a couple of seconds in.
   "thread-activity": defaultStore,

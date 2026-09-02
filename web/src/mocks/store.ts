@@ -24,7 +24,7 @@ import type { ProjectSummary } from "../projects-api";
 import type { SandboxSettingsResponse } from "../sandbox-settings-api";
 import type { AgentSettingsResponse, PrivacySettings, WebToolsSettings } from "../settings-api";
 import type { Skill } from "../skills-api";
-import type { ThreadSummary } from "../threads-api";
+import type { ThreadReadOnlyReason, ThreadSummary } from "../threads-api";
 import type { VoiceSettingsResponse } from "../voice-settings-api";
 import type { UserPreferences } from "../user-preferences-api";
 import type { AgentSummary } from "../agents-api";
@@ -141,7 +141,41 @@ let store: MockStore | null = null;
  *  silently serves an empty database is indistinguishable from a broken one. */
 export function getStore(): MockStore {
   if (!store) throw new Error("Mock store not seeded. Call seedStore(name) first.");
+  // Every handler enters through here, so this is the one place that has to
+  // mirror the server's LIVE derivation. Deriving per read rather than at seed
+  // time is what makes disabling an agent in Settings turn its chats read-only
+  // in the mocked app, exactly as the join does in production.
+  applyLiveReadOnly(store);
   return store;
+}
+
+/**
+ * Mirrors `serializeThread` (`src/http/thread-serialize.ts`): `readOnly` and
+ * `readOnlyReason` are DERIVED from the thread's own state and its agent's,
+ * never stored. Precedence matches the server — the thread's own state first.
+ *
+ * A thread whose agent is not in the store (feedback threads, scenarios that
+ * seed no agents) is left alone: an unknown agent is not a disabled one.
+ */
+function applyLiveReadOnly(current: MockStore): void {
+  for (const thread of current.threads) {
+    const agent = current.agents.find((candidate) => candidate.id === thread.agentId);
+    const reason: ThreadReadOnlyReason | undefined =
+      thread.archivedAt !== null
+        ? "thread_archived"
+        : thread.runtime === "legacy"
+          ? "legacy_runtime"
+          : agent === undefined
+            ? undefined
+            : agent.archivedAt !== null
+              ? "agent_deleted"
+              : !agent.enabled
+                ? "agent_disabled"
+                : undefined;
+    thread.readOnly = reason !== undefined;
+    if (reason === undefined) delete thread.readOnlyReason;
+    else thread.readOnlyReason = reason;
+  }
 }
 
 export function resetStore(): void {

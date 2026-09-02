@@ -410,6 +410,9 @@ export async function selectThreadSummariesForUser(
       projectName: projects.name,
       agentName: agents.name,
       snapshotResourceProfile: agents.resourceProfile,
+      // Live agent state, same two columns the turn gate reads from D1.
+      agentArchivedAt: agents.archivedAt,
+      agentEnabled: agents.enabled,
       automatonId: threadIndex.automatonId,
       automatonName: automata.name,
       outcomeDismissedAt: threadIndex.outcomeDismissedAt,
@@ -458,7 +461,15 @@ export async function selectThreadSummariesForUser(
         ),
       ),
     )
-    .groupBy(threadIndex.id, projects.name, agents.name, agents.resourceProfile, automata.name)
+    .groupBy(
+      threadIndex.id,
+      projects.name,
+      agents.name,
+      agents.resourceProfile,
+      agents.archivedAt,
+      agents.enabled,
+      automata.name,
+    )
     // The tie-break must be in the ORDER BY too, or the cursor's idea of "next"
     // disagrees with the order rows actually come back in.
     .orderBy(desc(sortColumn), desc(threadIndex.id));

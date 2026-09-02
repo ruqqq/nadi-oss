@@ -10,6 +10,20 @@ import type { ComputeResourceProfile } from "../compute/types";
 export type ThreadActivityStatus = "idle" | "running" | "attention_required" | "failed";
 export type ThreadUnreadOutcome = "completed" | "failed" | null;
 
+/**
+ * Why a thread refuses new turns. The thread's OWN state outranks its agent's:
+ * an archived thread is read-only for a reason the reader chose and can undo,
+ * and naming the agent instead would send them to fix the wrong thing.
+ * `thread_archived` and `legacy_runtime` never co-occur with a user-visible
+ * difference — both render today's wording — so their relative order is
+ * cosmetic; the agent reasons are the ones that carry new copy.
+ */
+export type ThreadReadOnlyReason =
+  | "thread_archived"
+  | "legacy_runtime"
+  | "agent_deleted"
+  | "agent_disabled";
+
 export interface ThreadSummary {
   threadId: string;
   kind: "regular" | "feedback";
@@ -34,6 +48,10 @@ export interface ThreadSummary {
   lastSeenAt: number | null;
   archivedAt: number | null;
   readOnly: boolean;
+  /** Absent when `readOnly` is false, and absent from any payload written
+   *  before this field existed — a client MUST treat it as optional and fall
+   *  back to generic read-only copy. */
+  readOnlyReason?: ThreadReadOnlyReason;
   status: "active" | "archived";
   projectId: string | null;
   projectName: string | null;
@@ -80,6 +98,16 @@ export function serializeThread(input: {
   unreadOutcomeAt?: number | null;
   lastSeenAt?: number | null;
   archivedAt?: number | null;
+  /**
+   * The AGENT's live state, read from the joined `agents` row — deliberately
+   * REQUIRED, unlike the other join-supplied fields above. A caller that omits
+   * them is a compile error, because a thread serialized without them renders a
+   * working composer for an agent that will refuse the turn, and nothing else
+   * would fail. `agentEnabled: null` is "no agent row joined" (unknown), not
+   * "disabled".
+   */
+  agentArchivedAt: number | null;
+  agentEnabled: boolean | null;
   projectId?: string | null;
   projectName?: string | null;
   agentName?: string | null;
@@ -99,6 +127,7 @@ export function serializeThread(input: {
   createdAt: number;
   updatedAt: number;
 }): ThreadSummary {
+  const readOnlyReason = resolveReadOnlyReason(input);
   return {
     threadId: input.id,
     kind: input.kind ?? "regular",
@@ -120,7 +149,10 @@ export function serializeThread(input: {
     unreadOutcomeAt: input.unreadOutcomeAt ?? null,
     lastSeenAt: input.lastSeenAt ?? null,
     archivedAt: input.archivedAt ?? null,
-    readOnly: input.runtime === "legacy" || input.archivedAt != null,
+    readOnly: readOnlyReason !== undefined,
+    // Spread rather than assigned: `exactOptionalPropertyTypes` rejects
+    // `{ readOnlyReason: undefined }` against an optional property.
+    ...(readOnlyReason === undefined ? {} : { readOnlyReason }),
     status: input.archivedAt == null ? "active" : "archived",
     projectId: input.projectId ?? null,
     projectName: input.projectName ?? null,
@@ -142,6 +174,26 @@ export function serializeThread(input: {
     createdAt: input.createdAt,
     updatedAt: input.updatedAt,
   };
+}
+
+/**
+ * The single source of `readOnly`. It is an EXPLANATION, not the enforcement
+ * point: the turn is still refused server-side in `think-thread-agent.ts` (read
+ * live from D1) and in `AgentSandbox.acquire`. Both gates stay.
+ */
+function resolveReadOnlyReason(input: {
+  runtime: ThreadRuntime;
+  archivedAt?: number | null;
+  agentArchivedAt: number | null;
+  agentEnabled: boolean | null;
+}): ThreadReadOnlyReason | undefined {
+  if (input.archivedAt != null) return "thread_archived";
+  if (input.runtime === "legacy") return "legacy_runtime";
+  if (input.agentArchivedAt != null) return "agent_deleted";
+  // `null` is "no agent row joined", which is unknown — only an explicit
+  // `false` is the disable.
+  if (input.agentEnabled === false) return "agent_disabled";
+  return undefined;
 }
 
 const MODEL_INPUT_MODALITIES = new Set(["text", "image", "audio", "video", "file"]);

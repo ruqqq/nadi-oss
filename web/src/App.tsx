@@ -147,6 +147,7 @@ import {
   type FeedbackDraftView,
 } from "./feedback-api";
 import { historyFetchTargetForThread, isReadOnlyThread } from "./thread-runtime-routing";
+import { ThreadReadOnlyNotice } from "./components/chat/ThreadReadOnlyNotice";
 import {
   useRealThreadChat,
   useThreadAgent,
@@ -4300,6 +4301,9 @@ function PendingNewThreadView({
   );
 }
 
+/** The read-only thread view. Named for the two states it was built for, but it
+ *  now also serves a thread whose AGENT is deleted or turned off — anything the
+ *  server marks `readOnly`. The footer says which. */
 function LegacyArchiveThread({
   thread,
   projects,
@@ -4392,7 +4396,7 @@ function LegacyArchiveThread({
             className="flex flex-1 items-center justify-center p-6"
             role="log"
             aria-live="polite"
-            aria-label="Archived conversation"
+            aria-label="Read-only conversation"
           >
             <Spinner className="size-5 text-muted-foreground" label="Loading chat" />
           </main>
@@ -4407,15 +4411,13 @@ function LegacyArchiveThread({
               error={error}
               servers={toolServers}
               showReasoning={showReasoning}
-              emptyTitle="No archived messages"
+              emptyTitle="No messages"
               emptyDescription="This thread has no persisted messages."
             />
           </Suspense>
         )}
 
-        <div className="shrink-0 border-border border-t bg-card px-4 py-3 text-center text-muted-foreground text-sm standalone:pb-[calc(0.75rem_+_env(safe-area-inset-bottom))]">
-          Archived thread
-        </div>
+        <ThreadReadOnlyNotice thread={thread} />
       </div>
     </div>
   );

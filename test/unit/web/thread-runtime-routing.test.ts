@@ -3,8 +3,9 @@ import {
   agentConnectionOptionsForThread,
   historyFetchTargetForThread,
   isReadOnlyThread,
+  readOnlyNoticeForThread,
 } from "../../../web/src/thread-runtime-routing";
-import type { ThreadSummary } from "../../../web/src/threads-api";
+import type { ThreadReadOnlyReason, ThreadSummary } from "../../../web/src/threads-api";
 
 function thread(runtime: ThreadSummary["runtime"], threadId = "thr/a b"): ThreadSummary {
   return {
@@ -80,5 +81,69 @@ describe("thread runtime routing", () => {
         repositoryCount: 0,
       } as ThreadSummary),
     ).toEqual({ kind: "archived", path: "/api/threads/thr%2Fa%20b/messages" });
+  });
+
+  it("sends a thread whose agent is gone down the read-only route", () => {
+    // The routing gate is the server's `readOnly`, which now accounts for the
+    // agent. Nothing about the agent is re-derived on the client.
+    const gone: ThreadSummary = {
+      ...thread("think"),
+      readOnly: true,
+      readOnlyReason: "agent_deleted",
+    };
+    expect(isReadOnlyThread(gone)).toBe(true);
+    expect(() => agentConnectionOptionsForThread(gone)).toThrow("thread_read_only");
+    // Not archived and not legacy, so its transcript still comes from the live
+    // DO's snapshot endpoint — the agent being gone does not move the history.
+    expect(historyFetchTargetForThread(gone)).toEqual({
+      kind: "think",
+      path: "/think-agents/think-thread-agent/thr%2Fa%20b/get-messages",
+    });
+  });
+});
+
+describe("readOnlyNoticeForThread", () => {
+  it("explains a deleted agent", () => {
+    expect(readOnlyNoticeForThread({ ...thread("think"), readOnlyReason: "agent_deleted" })).toEqual(
+      { fact: "This chat's agent was deleted.", fix: "The chat stays here to read." },
+    );
+  });
+
+  it("explains a disabled agent and names the fix", () => {
+    expect(
+      readOnlyNoticeForThread({ ...thread("think"), readOnlyReason: "agent_disabled" }),
+    ).toEqual({
+      fact: "This chat's agent is turned off.",
+      fix: "Turn it back on in Settings → Agents to keep working here.",
+    });
+  });
+
+  it.each([
+    ["thread_archived" as const],
+    ["legacy_runtime" as const],
+  ])("keeps today's wording for %s", (readOnlyReason) => {
+    expect(readOnlyNoticeForThread({ ...thread("think"), readOnlyReason })).toEqual({
+      fact: "Archived thread",
+      fix: null,
+    });
+  });
+
+  it("falls back to today's wording when the field is absent", () => {
+    // A payload serialized before `readOnlyReason` existed. The switch must not
+    // be exhaustive, or such a tab renders nothing at all.
+    expect(readOnlyNoticeForThread(thread("legacy"))).toEqual({
+      fact: "Archived thread",
+      fix: null,
+    });
+  });
+
+  it("falls back for a reason this build does not know", () => {
+    // The inverse case: a NEWER server sends a reason this bundle predates.
+    expect(
+      readOnlyNoticeForThread({
+        ...thread("think"),
+        readOnlyReason: "agent_evicted" as ThreadReadOnlyReason,
+      }),
+    ).toEqual({ fact: "Archived thread", fix: null });
   });
 });

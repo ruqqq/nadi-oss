@@ -117,6 +117,11 @@ export class ThreadRepository {
         automatonNotifyMode: automata.notifyMode,
         repositoryCount: sql<number>`count(${agentRepositories.id})`,
         agentResourceProfile: agents.resourceProfile,
+        // Read LIVE, like the resource profile: a deleted or disabled agent
+        // makes every one of its threads read-only, and the turn gate reads
+        // these same two columns from D1.
+        agentArchivedAt: agents.archivedAt,
+        agentEnabled: agents.enabled,
       })
       .from(threadIndex)
       .leftJoin(projects, eq(projects.id, threadIndex.projectId))
@@ -129,7 +134,15 @@ export class ThreadRepository {
       // direction reports zero repositories with no error anywhere.
       .leftJoin(agentRepositories, eq(agentRepositories.agentId, threadIndex.agentId))
       .where(eq(threadIndex.id, threadId))
-      .groupBy(threadIndex.id, projects.name, agents.name, agents.resourceProfile, automata.name)
+      .groupBy(
+        threadIndex.id,
+        projects.name,
+        agents.name,
+        agents.resourceProfile,
+        agents.archivedAt,
+        agents.enabled,
+        automata.name,
+      )
       .get();
     return {
       ...base,
@@ -139,6 +152,10 @@ export class ThreadRepository {
       automatonNotifyMode: enrichment?.automatonNotifyMode ?? null,
       repositoryCount: enrichment?.repositoryCount ?? 0,
       snapshotResourceProfile: enrichment?.agentResourceProfile ?? null,
+      agentArchivedAt: enrichment?.agentArchivedAt ?? null,
+      // `undefined` (no agent row joined) collapses to null = unknown, never
+      // to false: an unknown agent must not read as a disabled one.
+      agentEnabled: enrichment?.agentEnabled ?? null,
     };
   }
 
