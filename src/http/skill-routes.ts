@@ -35,6 +35,21 @@ export async function routeSkills(req: Request, env: Env): Promise<Response | nu
     return new Response("Method not allowed", { status: 405 });
   }
 
+  // Both scope moves live under /api/skills/ (not /api/agents/): the SKILL is
+  // what is being moved, and `routeAgents` — which runs first and catch-all
+  // 404s /api/agents/ — never sees these.
+  const moveId = matchId(url.pathname, /^\/api\/skills\/([^/]+)\/move-to-library$/);
+  if (moveId !== null) {
+    if (req.method === "POST") return moveSkillToLibrary(req, env, moveId);
+    return new Response("Method not allowed", { status: 405 });
+  }
+
+  const copyId = matchId(url.pathname, /^\/api\/skills\/([^/]+)\/copy-to-agent$/);
+  if (copyId !== null) {
+    if (req.method === "POST") return copySkillToAgent(req, env, copyId);
+    return new Response("Method not allowed", { status: 405 });
+  }
+
   if (url.pathname.startsWith("/api/skills")) {
     return new Response("Not found", { status: 404 });
   }
@@ -153,7 +168,85 @@ async function listSkills(req: Request, env: Env, url: URL): Promise<Response> {
     url.searchParams.get("archived") === "1"
       ? await repo.listArchived(scope)
       : await repo.listActive(scope, { includeDisabled: true });
-  return Response.json({ skills: rows.map(serialize) });
+  // LIBRARY scope only. One shared copy means one edit reaches every agent that
+  // has it, so the count is what makes that blast radius visible at the moment
+  // of editing. On an agent's own skills it would always read 1 — noise.
+  if (scope.agentId !== null) return Response.json({ skills: rows.map(serialize) });
+  const counts = await repo.countAgentsLiveOn(rows.map((row) => row.id));
+  return Response.json({
+    skills: rows.map((row) => ({ ...serialize(row), liveOnAgentCount: counts.get(row.id) ?? 0 })),
+  });
+}
+
+/**
+ * Promote one agent's private skill into the shared workspace library.
+ *
+ * The skill is agent-private, so the request must name its scope with
+ * `?agentId=` — the same query parameter every other write on this route uses.
+ * Without it `resolveSkillScope` resolves the LIBRARY, where a private id does
+ * not exist, and the caller would get an unexplained 404.
+ */
+async function moveSkillToLibrary(req: Request, env: Env, id: string): Promise<Response> {
+  const session = await validateRequestSession(env, req);
+  if (!session) return new Response("Unauthorized", { status: 401 });
+  const scope = await resolveSkillScope(env, session, new URL(req.url));
+  if (!scope) return new Response("Not found", { status: 404 });
+  if (scope.agentId === null)
+    return new Response("Name the agent this skill belongs to with ?agentId=", { status: 400 });
+  const repo = new AgentSkillRepository(registryDb(env));
+  try {
+    const updated = await repo.moveToLibrary({
+      workspaceId: scope.workspaceId,
+      agentId: scope.agentId,
+      id,
+    });
+    if (!updated) return new Response("Not found", { status: 404 });
+    return Response.json({ skill: serialize(updated) });
+  } catch (error) {
+    if (error instanceof AgentSkillDuplicateError)
+      return new Response("A library skill with this name is already active", { status: 409 });
+    throw error;
+  }
+}
+
+/**
+ * Copy a skill onto one agent as its own — normally a library skill an agent
+ * wants to fork and customise.
+ *
+ * BOTH ends are authorized against the session: the source through
+ * `resolveSkillScope` (library by default, `?agentId=` for another agent's
+ * private one) and the destination through `resolveAgentScopeById`. Trusting
+ * the body's `agentId` alone would let a member drop a skill onto an agent in a
+ * workspace they are not in.
+ */
+async function copySkillToAgent(req: Request, env: Env, id: string): Promise<Response> {
+  const session = await validateRequestSession(env, req);
+  if (!session) return new Response("Unauthorized", { status: 401 });
+  const body = (await req.json().catch(() => null)) as { agentId?: unknown } | null;
+  if (typeof body?.agentId !== "string" || body.agentId.length === 0)
+    return new Response("agentId must be a string", { status: 400 });
+  const scope = await resolveSkillScope(env, session, new URL(req.url));
+  if (!scope) return new Response("Not found", { status: 404 });
+  const target = await resolveAgentScopeById(env, session, body.agentId);
+  // Same workspace as the skill: a member of two workspaces must not be able to
+  // carry one workspace's skill into the other.
+  if (!target || target.workspaceId !== scope.workspaceId)
+    return new Response("Not found", { status: 404 });
+  const repo = new AgentSkillRepository(registryDb(env));
+  try {
+    const created = await repo.copyToAgent({
+      workspaceId: scope.workspaceId,
+      agentId: scope.agentId,
+      id,
+      targetAgentId: target.agentId,
+    });
+    if (!created) return new Response("Not found", { status: 404 });
+    return Response.json({ skill: serialize(created) });
+  } catch (error) {
+    if (error instanceof AgentSkillDuplicateError)
+      return new Response("That agent already has a skill with this name", { status: 409 });
+    throw error;
+  }
 }
 
 async function setEnabled(req: Request, env: Env, id: string): Promise<Response> {

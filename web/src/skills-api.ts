@@ -9,6 +9,13 @@ export interface Skill {
   createdAt: number;
   updatedAt: number;
   archivedAt: number | null;
+  /**
+   * How many agents this skill is live on — one copy, one edit, N agents. The
+   * server sends it on LIBRARY-scope listings only (`GET /api/skills` with no
+   * `agentId`), so it is optional here: on an agent's own skills it would
+   * always read 1, and an older server sends it nowhere.
+   */
+  liveOnAgentCount?: number;
 }
 
 /**
@@ -99,6 +106,48 @@ export async function restoreSkill(
     credentials: "include",
   });
   if (!res.ok) throw await errorFromResponse(res, "restore skill");
+  return ((await res.json()) as { skill: Skill }).skill;
+}
+
+/**
+ * Promote one agent's private skill into the shared workspace library.
+ *
+ * `agentId` is the scope the skill lives in TODAY and is required: without it
+ * the server looks in the library, where a private skill is not.
+ */
+export async function moveSkillToLibrary(
+  id: string,
+  agentId: string,
+  fetchImpl: FetchLike = appFetch,
+): Promise<Skill> {
+  const res = await fetchImpl(
+    `/api/skills/${encodeURIComponent(id)}/move-to-library${scopeQuery(agentId)}`,
+    { method: "POST", credentials: "include" },
+  );
+  if (!res.ok) throw await errorFromResponse(res, "move skill to the library");
+  return ((await res.json()) as { skill: Skill }).skill;
+}
+
+/**
+ * Copy a skill onto one agent as its own. `agentId` names the SOURCE scope
+ * (omit for the library); `targetAgentId` is where the copy lands.
+ */
+export async function copySkillToAgent(
+  id: string,
+  targetAgentId: string,
+  agentId: SkillScope = null,
+  fetchImpl: FetchLike = appFetch,
+): Promise<Skill> {
+  const res = await fetchImpl(
+    `/api/skills/${encodeURIComponent(id)}/copy-to-agent${scopeQuery(agentId)}`,
+    {
+      method: "POST",
+      credentials: "include",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ agentId: targetAgentId }),
+    },
+  );
+  if (!res.ok) throw await errorFromResponse(res, "copy skill to the agent");
   return ((await res.json()) as { skill: Skill }).skill;
 }
 

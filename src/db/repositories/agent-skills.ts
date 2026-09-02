@@ -1,7 +1,19 @@
-import { and, asc, desc, eq, isNotNull, isNull, notExists, or, type SQL } from "drizzle-orm";
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  notExists,
+  or,
+  type SQL,
+} from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import type * as schema from "../schema";
-import { agentSkillExclusions, agentSkillResources, skills, type Skill } from "../schema";
+import { agents, agentSkillExclusions, agentSkillResources, skills, type Skill } from "../schema";
 import { alias } from "drizzle-orm/sqlite-core";
 import { assertValidSkillScriptPath } from "../../agent/skills/script-path";
 
@@ -501,6 +513,164 @@ export class AgentSkillRepository {
         ),
       )
       .get();
+  }
+
+  /**
+   * How many agents each library skill is actually live on — the blast radius
+   * of editing it, which is the whole point of one shared copy.
+   *
+   * Counted: unarchived agents in the skill's workspace, MINUS those that
+   * excluded it, MINUS those whose own skill of that name shadows it. A
+   * DISABLED agent is counted: it still carries the skill and recovers on
+   * re-enable, so a number that dropped when an agent was paused would
+   * understate the radius.
+   *
+   * The exclusion and shadow rules are exactly `listEffective`'s, deliberately:
+   * a count that disagreed with what the model loads is worse than no count.
+   * The one divergence is the skill's OWN `enabled` flag, which is not applied
+   * here — a workspace-disabled skill still reports its carriers, because it
+   * reaches all of them the moment it is switched back on, and the row already
+   * carries `enabled` for the view to say it is off. Archived and agent-private
+   * skills count zero: nothing resolves them from the library.
+   *
+   * One statement for the whole batch, grouped by `skill_id`. A per-skill query
+   * in a loop would put N round-trips on a settings page load.
+   */
+  async countAgentsLiveOn(skillIds: string[]): Promise<Map<string, number>> {
+    const counts = new Map<string, number>(skillIds.map((id) => [id, 0]));
+    // `inArray` with an empty list compiles to a always-false predicate on some
+    // drivers and to invalid SQL on others; either way there is nothing to ask.
+    if (skillIds.length === 0) return counts;
+    const rows = await this.db
+      .select({ skillId: skills.id, agents: count(agents.id) })
+      .from(skills)
+      .innerJoin(agents, and(eq(agents.workspaceId, skills.workspaceId), isNull(agents.archivedAt)))
+      .leftJoin(exclusion, and(eq(exclusion.skillId, skills.id), eq(exclusion.agentId, agents.id)))
+      .where(
+        and(
+          inArray(skills.id, skillIds),
+          isNull(skills.agentId),
+          isNull(skills.archivedAt),
+          isNull(exclusion.agentId),
+          notExists(
+            this.db
+              .select({ shadowed: shadowing.id })
+              .from(shadowing)
+              .where(
+                and(
+                  eq(shadowing.workspaceId, skills.workspaceId),
+                  eq(shadowing.agentId, agents.id),
+                  eq(shadowing.name, skills.name),
+                  isNull(shadowing.archivedAt),
+                ),
+              ),
+          ),
+        ),
+      )
+      .groupBy(skills.id)
+      .all();
+    for (const row of rows) counts.set(row.skillId, row.agents);
+    return counts;
+  }
+
+  /**
+   * Promote one agent's private skill into the workspace library.
+   *
+   * The EXISTING row is re-pointed (`agent_id = NULL`) rather than copied: the
+   * id, its resources and its network domains all travel with it, which is the
+   * point — sharing a skill must not mean retyping it, and a delete+insert
+   * would strand every `agent_skill_resources` row on the old id.
+   *
+   * Refuses (throws `AgentSkillDuplicateError`) when an active library skill
+   * already owns the name. Agents that have their own skill of that name are
+   * NOT disturbed: the promoted skill simply arrives shadowed for them, exactly
+   * as any other library skill would.
+   */
+  async moveToLibrary(input: {
+    workspaceId: string;
+    agentId: string;
+    id: string;
+  }): Promise<Skill | undefined> {
+    const current = await this.getOwnedById(input);
+    // Archived is not "in a scope you can move out of" — restore it first.
+    if (!current || current.archivedAt !== null) return undefined;
+    await this.assertActiveNameAvailable({
+      workspaceId: input.workspaceId,
+      agentId: null,
+      name: current.name,
+    });
+    try {
+      await this.db
+        .update(skills)
+        .set({ agentId: null, updatedAt: Date.now() })
+        .where(eq(skills.id, current.id));
+    } catch (error) {
+      // The partial unique index is the real authority; the check above only
+      // buys a nicer message when it is not a race.
+      if (isUniqueConstraintError(error)) throw new AgentSkillDuplicateError(current.name);
+      throw error;
+    }
+    return this.db.select().from(skills).where(eq(skills.id, current.id)).get();
+  }
+
+  /**
+   * Copy a skill (normally a library one) onto one agent as its own.
+   *
+   * A COPY, never a move: the source row keeps its scope and its resources, and
+   * the new skill gets a fresh id and fresh `agent_skill_resources` rows, so
+   * editing the copy's script cannot reach back into the original's. Re-pointing
+   * the resource rows would make "customise this for one agent" silently edit
+   * every agent's copy — the exact hazard the live-on count exists to warn about.
+   *
+   * The copy lands as a shadow of the library row for that agent (own beats
+   * library by name), which is what makes "fork it here" work.
+   */
+  async copyToAgent(input: {
+    workspaceId: string;
+    /** The scope the source lives in: `null` for the workspace library. */
+    agentId: string | null;
+    id: string;
+    targetAgentId: string;
+  }): Promise<Skill | undefined> {
+    const source = await this.getOwnedById(input);
+    if (!source || source.archivedAt !== null) return undefined;
+    await this.assertActiveNameAvailable({
+      workspaceId: input.workspaceId,
+      agentId: input.targetAgentId,
+      name: source.name,
+    });
+    const now = Date.now();
+    const row = {
+      ...source,
+      id: crypto.randomUUID(),
+      agentId: input.targetAgentId,
+      createdAt: now,
+      updatedAt: now,
+      archivedAt: null,
+    };
+    try {
+      await this.db.insert(skills).values(row);
+    } catch (error) {
+      if (isUniqueConstraintError(error)) throw new AgentSkillDuplicateError(source.name);
+      throw error;
+    }
+    const resources = await this.db
+      .select()
+      .from(agentSkillResources)
+      .where(eq(agentSkillResources.skillId, source.id))
+      .all();
+    if (resources.length > 0) {
+      await this.db.insert(agentSkillResources).values(
+        resources.map((resource) => ({
+          ...resource,
+          id: crypto.randomUUID(),
+          skillId: row.id,
+          createdAt: now,
+          updatedAt: now,
+        })),
+      );
+    }
+    return row;
   }
 
   /** Opt this agent OUT of one workspace-library skill. */

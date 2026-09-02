@@ -815,6 +815,10 @@ function defaultStore(): MockStore {
       ],
     }),
     makeAgent({ id: "wb_docs", name: "docs-site", description: "Marketing + docs." }),
+    // A third agent with no opinion about the library, so `liveOnAgentCount`
+    // has a middle value to show: `software_engineering` is shadowed on one
+    // agent and excluded on another, and reaches only this one.
+    makeAgent({ id: "wb_infra", name: "infra", description: "Terraform and deploy pipelines." }),
   ];
 
   const threads: ThreadSummary[] = [];

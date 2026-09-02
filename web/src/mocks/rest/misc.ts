@@ -10,6 +10,7 @@
 import { http, HttpResponse } from "msw";
 import { FEATURED_CONNECTIONS, findFeaturedServer } from "../../lib/featured-connections";
 import type { McpServer, McpToolView, ToolPolicy } from "../../mcp-api";
+import type { Skill } from "../../skills-api";
 import { getStore } from "../store";
 import {
   TOOL_RUN_THREAD_ID,
@@ -49,37 +50,121 @@ const authHandlers = [
 ];
 
 /**
- * The mock store keeps ONE flat list of skills and one of memories, so
- * `?agentId=` (which on the real server picks between the workspace library and
- * one agent's private items) is accepted and ignored here. The store's `Skill`
- * and `Memory` are the WIRE types, and neither carries a scope field to filter
- * on. Give them one before writing a mock test that depends on the difference.
+ * `?agentId=` picks the SCOPE, exactly as the server does: absent means the
+ * workspace library (`store.skills`), present means that one agent's private
+ * skills (`store.agentSkills[agentId]`). Every handler on this route resolves
+ * it the same way — a lookup that searched only the library would 404 an
+ * agent's own skill, and a listing that ignored the parameter would render a
+ * state the real app cannot produce (the agent's Skills panel and
+ * `/api/agents/:id/skills` disagreeing about the same agent).
+ *
+ * Memories still keep ONE flat list; `Memory` carries no scope field to filter
+ * on. Give it one before writing a mock test that depends on the difference.
  */
+function skillScope(requestUrl: string): { list: Skill[]; agentId: string | null } {
+  const agentId = new URL(requestUrl).searchParams.get("agentId");
+  const store = getStore();
+  if (!agentId) return { list: store.skills, agentId: null };
+  // Materialise the bucket so a later write into it mutates the store.
+  const own = (store.agentSkills[agentId] ??= []);
+  return { list: own, agentId };
+}
+
+/**
+ * How many agents a library skill is live on — the server's rule: unarchived
+ * agents, minus those that excluded it, minus those whose own skill of that
+ * name shadows it. A DISABLED agent still counts. An archived or agent-private
+ * skill is live on nobody.
+ */
+function liveOnAgentCount(skill: Skill): number {
+  const store = getStore();
+  if (skill.archivedAt) return 0;
+  if (!store.skills.some((s) => s.id === skill.id)) return 0;
+  return store.agents.filter((agent) => {
+    if (agent.archivedAt) return false;
+    if ((store.skillExclusions[agent.id] ?? []).includes(skill.id)) return false;
+    return !(store.agentSkills[agent.id] ?? []).some(
+      (own) => own.name === skill.name && !own.archivedAt,
+    );
+  }).length;
+}
+
+/** Library rows come back name-ordered and count-annotated, as the server's do. */
+function byName(a: Skill, b: Skill) {
+  return a.name.localeCompare(b.name);
+}
+
 const skillHandlers = [
   http.get("/api/skills", ({ request }) => {
     const archived = new URL(request.url).searchParams.get("archived") === "1";
-    const skills = getStore().skills.filter((s) => (archived ? s.archivedAt : !s.archivedAt));
-    return HttpResponse.json({ skills });
+    const { list, agentId } = skillScope(request.url);
+    const scoped = list.filter((s) => (archived ? s.archivedAt : !s.archivedAt)).sort(byName);
+    // The count is a LIBRARY-scope field: on an agent's own skills it would
+    // always read 1, and its presence would imply the skill is shared.
+    if (agentId) return HttpResponse.json({ skills: scoped });
+    return HttpResponse.json({
+      skills: scoped.map((s) => ({ ...s, liveOnAgentCount: liveOnAgentCount(s) })),
+    });
   }),
   http.post("/api/skills/:skillId/enabled", async ({ params, request }) => {
-    const skill = getStore().skills.find((s) => s.id === pathParam(params, "skillId"));
+    const skill = skillScope(request.url).list.find((s) => s.id === pathParam(params, "skillId"));
     if (!skill) return notFound("That skill");
     const input = (await request.json().catch(() => ({}))) as { enabled?: boolean };
     skill.enabled = input.enabled ?? skill.enabled;
     skill.updatedAt = Date.now();
     return HttpResponse.json({ skill });
   }),
-  http.post("/api/skills/:skillId/archive", ({ params }) => {
-    const skill = getStore().skills.find((s) => s.id === pathParam(params, "skillId"));
+  http.post("/api/skills/:skillId/archive", ({ params, request }) => {
+    const skill = skillScope(request.url).list.find((s) => s.id === pathParam(params, "skillId"));
     if (!skill) return notFound("That skill");
     skill.archivedAt = Date.now();
     skill.enabled = false;
     return HttpResponse.json({ skill });
   }),
-  http.post("/api/skills/:skillId/restore", ({ params }) => {
-    const skill = getStore().skills.find((s) => s.id === pathParam(params, "skillId"));
+  http.post("/api/skills/:skillId/restore", ({ params, request }) => {
+    const skill = skillScope(request.url).list.find((s) => s.id === pathParam(params, "skillId"));
     if (!skill) return notFound("That skill");
     skill.archivedAt = null;
+    return HttpResponse.json({ skill });
+  }),
+
+  // Promote an agent's private skill into the library: the SAME row moves, so
+  // it keeps its id — a copy here would let the mock disagree with the server
+  // about whether the id in hand still resolves.
+  http.post("/api/skills/:skillId/move-to-library", ({ params, request }) => {
+    const store = getStore();
+    const { list, agentId } = skillScope(request.url);
+    if (!agentId)
+      return HttpResponse.text("Name the agent this skill belongs to with ?agentId=", {
+        status: 400,
+      });
+    const index = list.findIndex(
+      (s) => s.id === pathParam(params, "skillId") && !s.archivedAt,
+    );
+    const skill = list[index];
+    if (!skill) return notFound("That skill");
+    if (store.skills.some((s) => s.name === skill.name && !s.archivedAt))
+      return HttpResponse.text("A library skill with this name is already active", { status: 409 });
+    list.splice(index, 1);
+    skill.updatedAt = Date.now();
+    store.skills.push(skill);
+    return HttpResponse.json({ skill });
+  }),
+
+  // Fork a skill onto one agent: a NEW id, and the source stays where it was.
+  http.post("/api/skills/:skillId/copy-to-agent", async ({ params, request }) => {
+    const store = getStore();
+    const { list } = skillScope(request.url);
+    const input = (await request.json().catch(() => ({}))) as { agentId?: string };
+    if (!input.agentId) return HttpResponse.text("agentId must be a string", { status: 400 });
+    if (!store.agents.some((a) => a.id === input.agentId)) return notFound("That agent");
+    const source = list.find((s) => s.id === pathParam(params, "skillId") && !s.archivedAt);
+    if (!source) return notFound("That skill");
+    const own = (store.agentSkills[input.agentId] ??= []);
+    if (own.some((s) => s.name === source.name && !s.archivedAt))
+      return HttpResponse.text("That agent already has a skill with this name", { status: 409 });
+    const skill: Skill = { ...source, id: mockId("skl"), createdAt: Date.now(), updatedAt: Date.now() };
+    own.push(skill);
     return HttpResponse.json({ skill });
   }),
 
@@ -94,13 +179,14 @@ const skillHandlers = [
     const excluded = store.skillExclusions[agentId] ?? [];
     const library = store.skills
       .filter((s) => !s.archivedAt)
+      .sort(byName)
       .map((s) => ({
         ...s,
         excluded: excluded.includes(s.id),
         shadowedByOwnSkillId:
           own.find((o) => o.name === s.name && !o.archivedAt)?.id ?? null,
       }));
-    return HttpResponse.json({ library, own: own.filter((s) => !s.archivedAt) });
+    return HttpResponse.json({ library, own: own.filter((s) => !s.archivedAt).sort(byName) });
   }),
   http.post("/api/agents/:agentId/skills/:skillId/exclusion", async ({ params, request }) => {
     const store = getStore();

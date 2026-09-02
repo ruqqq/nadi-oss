@@ -1,7 +1,11 @@
 import { env } from "cloudflare:test";
 import { drizzle } from "drizzle-orm/d1";
+import { eq } from "drizzle-orm";
 import { beforeEach, describe, expect, it } from "vitest";
-import { AgentSkillRepository } from "../../src/db/repositories/agent-skills";
+import {
+  AgentSkillDuplicateError,
+  AgentSkillRepository,
+} from "../../src/db/repositories/agent-skills";
 import * as schema from "../../src/db/schema";
 import { applyRegistryTestSchema, seedRegistryThread } from "./helpers/registry";
 
@@ -55,6 +59,50 @@ async function insertSkill(input: {
       updatedAt: 1,
       archivedAt: input.archivedAt ?? null,
     });
+}
+
+/** An extra agent in the same workspace. `seed()` already made AGENT and OTHER_AGENT. */
+async function insertAgent(input: { id: string; enabled?: boolean; archivedAt?: number | null }) {
+  await drizzle(env.REGISTRY_DB, { schema })
+    .insert(schema.agents)
+    .values({
+      id: input.id,
+      workspaceId: WORKSPACE,
+      name: input.id,
+      systemPrompt: "You are Nadi.",
+      provider: "mock",
+      model: "mock",
+      enabled: input.enabled ?? true,
+      archivedAt: input.archivedAt ?? null,
+      createdAt: 1,
+    });
+}
+
+async function insertResource(input: {
+  id: string;
+  skillId: string;
+  path: string;
+  content: string;
+}) {
+  await drizzle(env.REGISTRY_DB, { schema }).insert(schema.agentSkillResources).values({
+    id: input.id,
+    skillId: input.skillId,
+    path: input.path,
+    kind: "script",
+    encoding: "text",
+    mimeType: null,
+    content: input.content,
+    createdAt: 1,
+    updatedAt: 1,
+  });
+}
+
+async function resourcesOf(skillId: string) {
+  return drizzle(env.REGISTRY_DB, { schema })
+    .select()
+    .from(schema.agentSkillResources)
+    .where(eq(schema.agentSkillResources.skillId, skillId))
+    .all();
 }
 
 /**
@@ -383,5 +431,252 @@ describe("skills have two scopes", () => {
     await expect(
       repo().listEffective({ workspaceId: "workspace-elsewhere", agentId: "agent-elsewhere" }),
     ).resolves.toEqual([]);
+  });
+
+  it("counts agents the library skill is live on, excluding opt-outs and shadows", async () => {
+    await insertSkill({ id: "lib-deploy", agentId: null, name: "deploy" });
+    // AGENT: plain. OTHER_AGENT: excluded. agent-shadow: owns the name.
+    // agent-paused: disabled but still carries it. agent-gone: archived.
+    await insertAgent({ id: "agent-shadow" });
+    await insertAgent({ id: "agent-paused", enabled: false });
+    await insertAgent({ id: "agent-gone", archivedAt: 5 });
+    await repo().excludeLibrarySkill({ agentId: OTHER_AGENT, skillId: "lib-deploy" });
+    await insertSkill({ id: "shadow-deploy", agentId: "agent-shadow", name: "deploy" });
+
+    const counts = await repo().countAgentsLiveOn(["lib-deploy"]);
+    // AGENT + agent-paused. A paused agent still carries the skill and recovers
+    // on re-enable; dropping it would understate the blast radius of an edit.
+    expect(counts.get("lib-deploy")).toBe(2);
+
+    // The count has to agree with what resolution actually loads, agent by agent.
+    const live: string[] = [];
+    for (const agentId of [AGENT, OTHER_AGENT, "agent-shadow", "agent-paused"]) {
+      const effective = await repo().listEffective({ workspaceId: WORKSPACE, agentId });
+      if (effective.some((row) => row.id === "lib-deploy")) live.push(agentId);
+    }
+    expect(live).toEqual([AGENT, "agent-paused"]);
+  });
+
+  it("answers for a batch of ids in one map, zero included", async () => {
+    await insertSkill({ id: "lib-a", agentId: null, name: "alpha" });
+    await insertSkill({ id: "lib-b", agentId: null, name: "beta" });
+    await repo().excludeLibrarySkill({ agentId: AGENT, skillId: "lib-b" });
+    await repo().excludeLibrarySkill({ agentId: OTHER_AGENT, skillId: "lib-b" });
+
+    const counts = await repo().countAgentsLiveOn(["lib-a", "lib-b", "lib-missing"]);
+    // Every requested id gets an entry: a caller reading `.get(id)` must not
+    // have to tell "nobody" apart from "I forgot to ask".
+    expect([...counts.entries()].sort()).toEqual([
+      ["lib-a", 2],
+      ["lib-b", 0],
+      ["lib-missing", 0],
+    ]);
+  });
+
+  it("returns an empty map for no ids without touching the database", async () => {
+    await expect(repo().countAgentsLiveOn([])).resolves.toEqual(new Map());
+  });
+
+  it("counts the carriers of a DISABLED library skill", async () => {
+    await insertSkill({ id: "lib-off", agentId: null, name: "off", enabled: false });
+    // Deliberate divergence from `listEffective`, which returns nothing for a
+    // disabled skill: the count answers "who does an edit to this reach", and a
+    // workspace-disabled skill reaches both agents the moment it is switched
+    // back on. The row carries `enabled: false` for the view to say so.
+    expect((await repo().countAgentsLiveOn(["lib-off"])).get("lib-off")).toBe(2);
+    await expect(repo().listEffective({ workspaceId: WORKSPACE, agentId: AGENT })).resolves.toEqual(
+      [],
+    );
+  });
+
+  it("counts nobody for an archived or agent-private skill", async () => {
+    await insertSkill({ id: "lib-gone", agentId: null, name: "gone", archivedAt: 9 });
+    await insertSkill({ id: "own-notes", agentId: AGENT, name: "notes" });
+    const counts = await repo().countAgentsLiveOn(["lib-gone", "own-notes"]);
+    expect([...counts.values()]).toEqual([0, 0]);
+  });
+
+  it("does not count agents from another workspace", async () => {
+    await insertSkill({ id: "lib-deploy", agentId: null, name: "deploy" });
+    await seedRegistryThread(env.REGISTRY_DB, {
+      workspaceId: "workspace-elsewhere",
+      agentId: "agent-elsewhere",
+      threadId: "thread-elsewhere-count",
+    });
+    expect((await repo().countAgentsLiveOn(["lib-deploy"])).get("lib-deploy")).toBe(2);
+  });
+
+  it("moving to the library carries the skill's id, script resource and network domains", async () => {
+    await insertSkill({
+      id: "own-deploy",
+      agentId: AGENT,
+      name: "deploy",
+      networkDomains: ["deploy.example.com"],
+    });
+    await insertResource({
+      id: "res-own",
+      skillId: "own-deploy",
+      path: "scripts/run.sh",
+      content: "echo hi",
+    });
+
+    const moved = await repo().moveToLibrary({
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      id: "own-deploy",
+    });
+
+    // The SAME row travels: promoting must not mean retyping it, and a
+    // delete+insert would strand every resource on the old id.
+    expect(moved).toMatchObject({ id: "own-deploy", agentId: null, name: "deploy" });
+    expect(moved?.networkDomains).toBe(JSON.stringify(["deploy.example.com"]));
+    expect((await resourcesOf("own-deploy")).map((r) => r.path)).toEqual(["scripts/run.sh"]);
+    // ...and it now reaches the agent that never had it.
+    await expect(
+      repo().listEffective({ workspaceId: WORKSPACE, agentId: OTHER_AGENT }),
+    ).resolves.toMatchObject([{ id: "own-deploy" }]);
+  });
+
+  it("refuses a move when an active library skill already has that name", async () => {
+    await insertSkill({ id: "lib-deploy", agentId: null, name: "deploy" });
+    await insertSkill({ id: "own-deploy", agentId: AGENT, name: "deploy" });
+    await expect(
+      repo().moveToLibrary({ workspaceId: WORKSPACE, agentId: AGENT, id: "own-deploy" }),
+    ).rejects.toBeInstanceOf(AgentSkillDuplicateError);
+    // The source is untouched — a refused move must not half-apply.
+    const rows = await drizzle(env.REGISTRY_DB, { schema }).select().from(schema.skills).all();
+    expect(rows.find((r) => r.id === "own-deploy")?.agentId).toBe(AGENT);
+  });
+
+  it("moving to the library does not silently un-shadow: agents with their own copy keep theirs", async () => {
+    await insertSkill({ id: "own-deploy", agentId: AGENT, name: "deploy" });
+    await insertSkill({ id: "other-deploy", agentId: OTHER_AGENT, name: "deploy" });
+
+    await repo().moveToLibrary({ workspaceId: WORKSPACE, agentId: AGENT, id: "own-deploy" });
+
+    // OTHER_AGENT owns the name `deploy`; the newly-shared skill must not
+    // displace its copy, and the model must still see exactly one `deploy`.
+    await expect(
+      repo().listEffective({ workspaceId: WORKSPACE, agentId: OTHER_AGENT }),
+    ).resolves.toMatchObject([{ id: "other-deploy" }]);
+    const [row] = await repo().listLibraryForAgent({
+      workspaceId: WORKSPACE,
+      agentId: OTHER_AGENT,
+    });
+    expect(row?.shadowedByOwnSkillId).toBe("other-deploy");
+    // ...so the promoted skill is live on ONE agent, not two.
+    expect((await repo().countAgentsLiveOn(["own-deploy"])).get("own-deploy")).toBe(1);
+  });
+
+  it("refuses to move an archived skill, another agent's, or another workspace's", async () => {
+    await insertSkill({ id: "own-gone", agentId: AGENT, name: "gone", archivedAt: 4 });
+    await insertSkill({ id: "own-notes", agentId: AGENT, name: "notes" });
+    await expect(
+      repo().moveToLibrary({ workspaceId: WORKSPACE, agentId: AGENT, id: "own-gone" }),
+    ).resolves.toBeUndefined();
+    await expect(
+      repo().moveToLibrary({ workspaceId: WORKSPACE, agentId: OTHER_AGENT, id: "own-notes" }),
+    ).resolves.toBeUndefined();
+    await expect(
+      repo().moveToLibrary({ workspaceId: "workspace-elsewhere", agentId: AGENT, id: "own-notes" }),
+    ).resolves.toBeUndefined();
+    const rows = await drizzle(env.REGISTRY_DB, { schema }).select().from(schema.skills).all();
+    expect(rows.find((r) => r.id === "own-notes")?.agentId).toBe(AGENT);
+  });
+
+  it("copying to an agent creates NEW resource rows, not shared ones", async () => {
+    await insertSkill({
+      id: "lib-deploy",
+      agentId: null,
+      name: "deploy",
+      networkDomains: ["deploy.example.com"],
+    });
+    await insertResource({
+      id: "res-lib",
+      skillId: "lib-deploy",
+      path: "scripts/run.sh",
+      content: "echo original",
+    });
+
+    const copy = await repo().copyToAgent({
+      workspaceId: WORKSPACE,
+      agentId: null,
+      id: "lib-deploy",
+      targetAgentId: AGENT,
+    });
+
+    expect(copy?.id).not.toBe("lib-deploy");
+    expect(copy).toMatchObject({ agentId: AGENT, name: "deploy" });
+    expect(copy?.networkDomains).toBe(JSON.stringify(["deploy.example.com"]));
+
+    const copied = await resourcesOf(copy?.id ?? "");
+    expect(copied.map((r) => [r.path, r.content])).toEqual([["scripts/run.sh", "echo original"]]);
+    expect(copied[0]?.id).not.toBe("res-lib");
+
+    // Editing the copy's script must not edit the original's.
+    await repo().setScript({
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      name: "deploy",
+      path: "scripts/run.sh",
+      source: "echo edited",
+    });
+    expect((await resourcesOf(copy?.id ?? "")).map((r) => r.content)).toEqual(["echo edited"]);
+    expect((await resourcesOf("lib-deploy")).map((r) => r.content)).toEqual(["echo original"]);
+  });
+
+  it("refuses a copy when that agent already has an active skill of that name", async () => {
+    await insertSkill({ id: "lib-deploy", agentId: null, name: "deploy" });
+    await insertSkill({ id: "own-deploy", agentId: AGENT, name: "deploy" });
+    await expect(
+      repo().copyToAgent({
+        workspaceId: WORKSPACE,
+        agentId: null,
+        id: "lib-deploy",
+        targetAgentId: AGENT,
+      }),
+    ).rejects.toBeInstanceOf(AgentSkillDuplicateError);
+    // Nothing was inserted on the failed path.
+    const rows = await drizzle(env.REGISTRY_DB, { schema }).select().from(schema.skills).all();
+    expect(rows.map((r) => r.id).sort()).toEqual(["lib-deploy", "own-deploy"]);
+  });
+
+  it("leaves the source in the library when it is copied to an agent", async () => {
+    await insertSkill({ id: "lib-deploy", agentId: null, name: "deploy" });
+    await repo().copyToAgent({
+      workspaceId: WORKSPACE,
+      agentId: null,
+      id: "lib-deploy",
+      targetAgentId: AGENT,
+    });
+    const rows = await drizzle(env.REGISTRY_DB, { schema }).select().from(schema.skills).all();
+    expect(rows.find((r) => r.id === "lib-deploy")?.agentId).toBeNull();
+    // The copy shadows the library row here, so the model still sees one
+    // `deploy` — and the library skill is now live on one fewer agent.
+    await expect(
+      repo().listEffective({ workspaceId: WORKSPACE, agentId: AGENT }),
+    ).resolves.toHaveLength(1);
+    expect((await repo().countAgentsLiveOn(["lib-deploy"])).get("lib-deploy")).toBe(1);
+  });
+
+  it("refuses to copy an archived skill or one from another workspace", async () => {
+    await insertSkill({ id: "lib-gone", agentId: null, name: "gone", archivedAt: 3 });
+    await insertSkill({ id: "lib-live", agentId: null, name: "live" });
+    await expect(
+      repo().copyToAgent({
+        workspaceId: WORKSPACE,
+        agentId: null,
+        id: "lib-gone",
+        targetAgentId: AGENT,
+      }),
+    ).resolves.toBeUndefined();
+    await expect(
+      repo().copyToAgent({
+        workspaceId: "workspace-elsewhere",
+        agentId: null,
+        id: "lib-live",
+        targetAgentId: AGENT,
+      }),
+    ).resolves.toBeUndefined();
   });
 });

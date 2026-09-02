@@ -503,4 +503,293 @@ describe("skill routes", () => {
     });
     expect(res.status).toBe(400);
   });
+
+  // The count is the whole point of one shared copy: it says how far an edit
+  // reaches BEFORE it is made.
+  it("annotates each library skill with how many agents it is live on", async () => {
+    const { token, workspaceId, agentId } = await seedMemberWithAgent();
+    const second = await seedAgent(workspaceId, "agent-second");
+    const third = await seedAgent(workspaceId, "agent-third");
+    const repo = new AgentSkillRepository(drizzle(env.REGISTRY_DB, { schema }));
+    const shared = await repo.create({
+      workspaceId,
+      agentId: null,
+      name: "review",
+      description: "Review",
+      body: "Body",
+    });
+    const narrow = await repo.create({
+      workspaceId,
+      agentId: null,
+      name: "deploy",
+      description: "Deploy",
+      body: "Body",
+    });
+    await repo.excludeLibrarySkill({ agentId: second, skillId: narrow.id });
+    await repo.create({
+      workspaceId,
+      agentId: third,
+      name: "deploy",
+      description: "Shadow",
+      body: "Body",
+    });
+
+    const res = await SELF.fetch("https://nadi.test/api/skills", { headers: cookie(token) });
+    expect(res.status).toBe(200);
+    const { skills } = (await res.json()) as {
+      skills: Array<{ id: string; liveOnAgentCount: number }>;
+    };
+    expect(Object.fromEntries(skills.map((skill) => [skill.id, skill.liveOnAgentCount]))).toEqual({
+      [shared.id]: 3,
+      [narrow.id]: 1,
+    });
+    expect(agentId).toBeTruthy();
+  });
+
+  // On an agent's own skills the number would always be 1 — noise, and a field
+  // whose presence would imply the skill is shared.
+  it("omits the count on an agent-scoped listing", async () => {
+    const { token, workspaceId, agentId } = await seedMemberWithAgent();
+    const repo = new AgentSkillRepository(drizzle(env.REGISTRY_DB, { schema }));
+    await repo.create({
+      workspaceId,
+      agentId,
+      name: "deploy",
+      description: "Deploy",
+      body: "Body",
+    });
+    const res = await SELF.fetch(`https://nadi.test/api/skills?agentId=${agentId}`, {
+      headers: cookie(token),
+    });
+    const { skills } = (await res.json()) as { skills: Array<Record<string, unknown>> };
+    expect(skills).toHaveLength(1);
+    expect(skills[0]).not.toHaveProperty("liveOnAgentCount");
+  });
+
+  it("moves an agent's private skill into the library", async () => {
+    const { token, workspaceId, agentId } = await seedMemberWithAgent();
+    const other = await seedAgent(workspaceId, "agent-other");
+    const repo = new AgentSkillRepository(drizzle(env.REGISTRY_DB, { schema }));
+    const created = await repo.create({
+      workspaceId,
+      agentId,
+      name: "deploy",
+      description: "Deploy",
+      body: "Body",
+    });
+
+    const res = await SELF.fetch(
+      `https://nadi.test/api/skills/${created.id}/move-to-library?agentId=${agentId}`,
+      { method: "POST", headers: cookie(token) },
+    );
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { skill: { id: string } }).skill.id).toBe(created.id);
+
+    // It is now the library's, and it reaches the agent that never had it.
+    const listed = await SELF.fetch("https://nadi.test/api/skills", { headers: cookie(token) });
+    const { skills } = (await listed.json()) as {
+      skills: Array<{ id: string; liveOnAgentCount: number }>;
+    };
+    expect(skills).toMatchObject([{ id: created.id, liveOnAgentCount: 2 }]);
+    await expect(repo.listEffective({ workspaceId, agentId: other })).resolves.toMatchObject([
+      { id: created.id },
+    ]);
+  });
+
+  // Without `?agentId=` the route is looking in the LIBRARY, where a private
+  // skill is not — a bare 404 there reads as "no such skill" and hides the
+  // real problem, which is that the caller never named the scope.
+  it("400s a move that does not name the agent the skill belongs to", async () => {
+    const { token, workspaceId, agentId } = await seedMemberWithAgent();
+    const repo = new AgentSkillRepository(drizzle(env.REGISTRY_DB, { schema }));
+    const created = await repo.create({
+      workspaceId,
+      agentId,
+      name: "deploy",
+      description: "Deploy",
+      body: "Body",
+    });
+    const res = await SELF.fetch(`https://nadi.test/api/skills/${created.id}/move-to-library`, {
+      method: "POST",
+      headers: cookie(token),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.text()).toMatch(/agentId/);
+    // ...and nothing moved.
+    const row = await repo.listActive({ workspaceId, agentId }, { includeDisabled: true });
+    expect(row.map((s) => s.id)).toEqual([created.id]);
+  });
+
+  it("refuses a move when an active library skill already has that name", async () => {
+    const { token, workspaceId, agentId } = await seedMemberWithAgent();
+    const repo = new AgentSkillRepository(drizzle(env.REGISTRY_DB, { schema }));
+    await repo.create({
+      workspaceId,
+      agentId: null,
+      name: "deploy",
+      description: "Library",
+      body: "Body",
+    });
+    const created = await repo.create({
+      workspaceId,
+      agentId,
+      name: "deploy",
+      description: "Private",
+      body: "Body",
+    });
+
+    const res = await SELF.fetch(
+      `https://nadi.test/api/skills/${created.id}/move-to-library?agentId=${agentId}`,
+      { method: "POST", headers: cookie(token) },
+    );
+    expect(res.status).toBe(409);
+    // Human-readable, never a bare status code.
+    expect(await res.text()).toMatch(/already active/i);
+  });
+
+  it("404s a move of a skill belonging to another workspace's agent", async () => {
+    const { token } = await seedMemberWithAgent();
+    const foreign = await seedOtherWorkspace();
+    const repo = new AgentSkillRepository(drizzle(env.REGISTRY_DB, { schema }));
+    const created = await repo.create({
+      workspaceId: foreign.workspaceId,
+      agentId: foreign.agentId,
+      name: "deploy",
+      description: "Deploy",
+      body: "Body",
+    });
+
+    const res = await SELF.fetch(
+      `https://nadi.test/api/skills/${created.id}/move-to-library?agentId=${foreign.agentId}`,
+      { method: "POST", headers: cookie(token) },
+    );
+    expect(res.status).toBe(404);
+    const still = await drizzle(env.REGISTRY_DB, { schema }).select().from(schema.skills).all();
+    expect(still.find((s) => s.id === created.id)?.agentId).toBe(foreign.agentId);
+  });
+
+  it("copies a library skill onto an agent as its own", async () => {
+    const { token, workspaceId, agentId } = await seedMemberWithAgent();
+    const repo = new AgentSkillRepository(drizzle(env.REGISTRY_DB, { schema }));
+    const library = await repo.create({
+      workspaceId,
+      agentId: null,
+      name: "deploy",
+      description: "Deploy",
+      body: "Body",
+    });
+
+    const res = await SELF.fetch(`https://nadi.test/api/skills/${library.id}/copy-to-agent`, {
+      method: "POST",
+      headers: { ...cookie(token), "Content-Type": "application/json" },
+      body: JSON.stringify({ agentId }),
+    });
+    expect(res.status).toBe(200);
+    const { skill } = (await res.json()) as { skill: { id: string; name: string } };
+    expect(skill.name).toBe("deploy");
+    expect(skill.id).not.toBe(library.id);
+
+    // The source stays in the library, and the copy shadows it here — so the
+    // library skill is live on nobody once this is the only agent.
+    const listed = await SELF.fetch("https://nadi.test/api/skills", { headers: cookie(token) });
+    const { skills } = (await listed.json()) as {
+      skills: Array<{ id: string; liveOnAgentCount: number }>;
+    };
+    expect(skills).toMatchObject([{ id: library.id, liveOnAgentCount: 0 }]);
+    await expect(repo.listEffective({ workspaceId, agentId })).resolves.toMatchObject([
+      { id: skill.id },
+    ]);
+  });
+
+  it("refuses a copy when that agent already has an active skill of that name", async () => {
+    const { token, workspaceId, agentId } = await seedMemberWithAgent();
+    const repo = new AgentSkillRepository(drizzle(env.REGISTRY_DB, { schema }));
+    const library = await repo.create({
+      workspaceId,
+      agentId: null,
+      name: "deploy",
+      description: "Library",
+      body: "Body",
+    });
+    await repo.create({
+      workspaceId,
+      agentId,
+      name: "deploy",
+      description: "Private",
+      body: "Body",
+    });
+
+    const res = await SELF.fetch(`https://nadi.test/api/skills/${library.id}/copy-to-agent`, {
+      method: "POST",
+      headers: { ...cookie(token), "Content-Type": "application/json" },
+      body: JSON.stringify({ agentId }),
+    });
+    expect(res.status).toBe(409);
+    expect(await res.text()).toMatch(/already has a skill/i);
+  });
+
+  it("400s a copy with no target agent", async () => {
+    const { token, workspaceId } = await seedMemberWithAgent();
+    const repo = new AgentSkillRepository(drizzle(env.REGISTRY_DB, { schema }));
+    const library = await repo.create({
+      workspaceId,
+      agentId: null,
+      name: "deploy",
+      description: "Deploy",
+      body: "Body",
+    });
+    const res = await SELF.fetch(`https://nadi.test/api/skills/${library.id}/copy-to-agent`, {
+      method: "POST",
+      headers: { ...cookie(token), "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  // The destination is taken off the BODY, so it is authorized separately: a
+  // member of two workspaces must not be able to carry one's skill into the
+  // other, and a stranger's agent id must not be writable at all.
+  it("404s a copy onto an agent the session does not own", async () => {
+    const { token, workspaceId } = await seedMemberWithAgent();
+    const foreign = await seedOtherWorkspace();
+    const repo = new AgentSkillRepository(drizzle(env.REGISTRY_DB, { schema }));
+    const library = await repo.create({
+      workspaceId,
+      agentId: null,
+      name: "deploy",
+      description: "Deploy",
+      body: "Body",
+    });
+
+    const res = await SELF.fetch(`https://nadi.test/api/skills/${library.id}/copy-to-agent`, {
+      method: "POST",
+      headers: { ...cookie(token), "Content-Type": "application/json" },
+      body: JSON.stringify({ agentId: foreign.agentId }),
+    });
+    expect(res.status).toBe(404);
+    await expect(
+      repo.listActive({ workspaceId: foreign.workspaceId, agentId: foreign.agentId }),
+    ).resolves.toEqual([]);
+  });
+
+  it("401s both scope moves without a session", async () => {
+    for (const path of ["move-to-library", "copy-to-agent"]) {
+      const res = await SELF.fetch(`https://nadi.test/api/skills/skl_1/${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agentId: "agent-1" }),
+      });
+      expect(res.status).toBe(401);
+    }
+  });
+
+  it("405s a GET on either scope move", async () => {
+    const { token } = await seedMemberWithAgent();
+    for (const path of ["move-to-library", "copy-to-agent"]) {
+      const res = await SELF.fetch(`https://nadi.test/api/skills/skl_1/${path}`, {
+        headers: cookie(token),
+      });
+      expect(res.status).toBe(405);
+    }
+  });
 });
