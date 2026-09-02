@@ -111,8 +111,10 @@ async function expand(scope: HTMLElement, name: RegExp) {
   await userEvent.click(within(scope).getByRole("button", { name }));
 }
 
-async function renderSection(agentId = "wb_one") {
-  const view = render(<AgentSkillsSection agentId={agentId} />);
+async function renderSection(agentId = "wb_one", otherAgentCount = 3) {
+  const view = render(
+    <AgentSkillsSection agentId={agentId} otherAgentCount={otherAgentCount} />,
+  );
   await screen.findByText("code_review");
   return view;
 }
@@ -273,7 +275,7 @@ describe("AgentSkillsSection", () => {
     );
 
     const { rerender } = await renderSection("wb_one");
-    rerender(<AgentSkillsSection agentId="wb_two" />);
+    rerender(<AgentSkillsSection agentId="wb_two" otherAgentCount={3} />);
     await screen.findByText("two_only");
 
     await userEvent.click(screen.getByRole("button", { name: "Archive skill two_only" }));
@@ -314,8 +316,63 @@ describe("AgentSkillsSection", () => {
     await userEvent.click(
       screen.getByRole("button", { name: "Move release_notes to the workspace library" }),
     );
+    // The move is confirmed, not fired: it hands the skill to every other agent
+    // and there is no way back.
+    expect(api.moveSkillToLibrary).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Move to library" }));
 
     expect(api.moveSkillToLibrary).toHaveBeenCalledWith("own_notes", "wb_one");
+  });
+
+  /**
+   * The confirm has to say what the click DOES, not merely ask twice. Three
+   * facts, each one a consequence the button's own label hides: the reach, the
+   * egress the row carries with it, and that nothing moves a skill back out of
+   * the library.
+   */
+  it("states the reach, the egress and the irreversibility before moving", async () => {
+    await renderSection("wb_one", 3);
+
+    await expand(ownGroup(), /^release_notes/);
+    await userEvent.click(
+      screen.getByRole("button", { name: "Move release_notes to the workspace library" }),
+    );
+
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText(/All 3 other agents in this workspace will load it/))
+      .toBeInTheDocument();
+    expect(within(dialog).getByText(/already has its own skill called .release_notes./))
+      .toBeInTheDocument();
+    expect(within(dialog).getByText(/sandbox hosts it opens open for those agents too/))
+      .toBeInTheDocument();
+    expect(within(dialog).getByText(/no move back/)).toBeInTheDocument();
+
+    // Cancelling leaves the skill where it was.
+    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(api.moveSkillToLibrary).not.toHaveBeenCalled();
+  });
+
+  it("counts one other agent in the singular, and says what an empty workspace gains", async () => {
+    const { unmount } = await renderSection("wb_one", 1);
+    await expand(ownGroup(), /^release_notes/);
+    await userEvent.click(
+      screen.getByRole("button", { name: "Move release_notes to the workspace library" }),
+    );
+    expect(
+      within(await screen.findByRole("alertdialog")).getByText(/The 1 other agent/),
+    ).toBeInTheDocument();
+    unmount();
+
+    await renderSection("wb_one", 0);
+    await expand(ownGroup(), /^release_notes/);
+    await userEvent.click(
+      screen.getByRole("button", { name: "Move release_notes to the workspace library" }),
+    );
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText(/no other agents yet/)).toBeInTheDocument();
+    // Never "0 other agents will load it" - the library is what every agent
+    // added LATER inherits, so a zero here would read as "this does nothing".
+    expect(within(dialog).queryByText(/0 other agents/)).not.toBeInTheDocument();
   });
 
   it("copies a library skill onto this agent, and offers no copy where one already shadows", async () => {
@@ -360,7 +417,7 @@ describe("AgentSkillsSection", () => {
 
   it("explains a failed load and offers a retry", async () => {
     api.listAgentSkills.mockRejectedValueOnce(new Error("The workspace is unreachable"));
-    render(<AgentSkillsSection agentId="wb_one" />);
+    render(<AgentSkillsSection agentId="wb_one" otherAgentCount={3} />);
 
     await screen.findByRole("alert");
     expect(screen.getByText(/The workspace is unreachable/)).toBeInTheDocument();

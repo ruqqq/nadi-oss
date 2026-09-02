@@ -834,6 +834,258 @@ describe("skill routes", () => {
     expect(rows.map((row) => row.id)).toEqual([library.id]);
   });
 
+  /**
+   * Library CRUD. Before this, a skill in the library was editable by NOTHING:
+   * the chat tools scope every write to `thread.agentId`
+   * (`src/agent/skill-management-tools.ts`), which cannot match
+   * `agent_id IS NULL`, and this route had no create and no edit. The one
+   * recovery a model reaches for — `create_skill` with the same name —
+   * succeeds and forks a PRIVATE shadow, leaving every other agent on the
+   * stale body.
+   */
+  describe("library CRUD", () => {
+    it("creates a library skill, and lists it as shared", async () => {
+      const { token, workspaceId, agentId } = await seedMemberWithAgent();
+
+      const res = await SELF.fetch("https://nadi.test/api/skills", {
+        method: "POST",
+        headers: { ...cookie(token), "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Deploy Notes", description: "Ship it", body: "# Deploy" }),
+      });
+      expect(res.status).toBe(201);
+      const { skill } = (await res.json()) as { skill: { id: string; name: string } };
+      // Normalised on the way in, exactly as the chat tool's name is.
+      expect(skill.name).toBe("deploy-notes");
+
+      const repo = new AgentSkillRepository(drizzle(env.REGISTRY_DB, { schema }));
+      // Library scope, so it resolves for an agent that did nothing to get it.
+      await expect(repo.listEffective({ workspaceId, agentId })).resolves.toMatchObject([
+        { id: skill.id },
+      ]);
+      // ...and it reports its blast radius on the listing that offers the edit.
+      const listed = await SELF.fetch("https://nadi.test/api/skills", { headers: cookie(token) });
+      const { skills } = (await listed.json()) as {
+        skills: Array<{ id: string; liveOnAgentCount: number }>;
+      };
+      expect(skills).toMatchObject([{ id: skill.id, liveOnAgentCount: 1 }]);
+    });
+
+    it("creates into an agent's private scope when one is named", async () => {
+      const { token, workspaceId, agentId } = await seedMemberWithAgent();
+
+      const res = await SELF.fetch(`https://nadi.test/api/skills?agentId=${agentId}`, {
+        method: "POST",
+        headers: { ...cookie(token), "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "deploy", description: "d", body: "b" }),
+      });
+      expect(res.status).toBe(201);
+      const repo = new AgentSkillRepository(drizzle(env.REGISTRY_DB, { schema }));
+      await expect(repo.listActive({ workspaceId, agentId: null })).resolves.toEqual([]);
+      await expect(repo.listActive({ workspaceId, agentId })).resolves.toHaveLength(1);
+    });
+
+    it("edits a library skill's body, name and description in place", async () => {
+      const { token, workspaceId, agentId } = await seedMemberWithAgent();
+      const repo = new AgentSkillRepository(drizzle(env.REGISTRY_DB, { schema }));
+      const created = await repo.create({
+        workspaceId,
+        agentId: null,
+        name: "deploy",
+        description: "Deploy",
+        body: "old",
+      });
+
+      const res = await SELF.fetch(`https://nadi.test/api/skills/${created.id}`, {
+        method: "PATCH",
+        headers: { ...cookie(token), "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "release", description: "Release", body: "new" }),
+      });
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { skill: unknown }).skill).toMatchObject({
+        id: created.id,
+        name: "release",
+        description: "Release",
+        body: "new",
+      });
+      // The SAME row: one copy, one edit, every agent.
+      await expect(repo.listEffective({ workspaceId, agentId })).resolves.toMatchObject([
+        { id: created.id, body: "new" },
+      ]);
+    });
+
+    it("leaves untouched fields alone on a partial edit", async () => {
+      const { token, workspaceId } = await seedMemberWithAgent();
+      const repo = new AgentSkillRepository(drizzle(env.REGISTRY_DB, { schema }));
+      const created = await repo.create({
+        workspaceId,
+        agentId: null,
+        name: "deploy",
+        description: "Deploy",
+        body: "old",
+      });
+
+      const res = await SELF.fetch(`https://nadi.test/api/skills/${created.id}`, {
+        method: "PATCH",
+        headers: { ...cookie(token), "Content-Type": "application/json" },
+        body: JSON.stringify({ body: "new" }),
+      });
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { skill: unknown }).skill).toMatchObject({
+        name: "deploy",
+        description: "Deploy",
+        body: "new",
+      });
+    });
+
+    it("409s a create or a rename onto a name the library already has", async () => {
+      const { token, workspaceId } = await seedMemberWithAgent();
+      const repo = new AgentSkillRepository(drizzle(env.REGISTRY_DB, { schema }));
+      await repo.create({
+        workspaceId,
+        agentId: null,
+        name: "deploy",
+        description: "Deploy",
+        body: "b",
+      });
+      const other = await repo.create({
+        workspaceId,
+        agentId: null,
+        name: "review",
+        description: "Review",
+        body: "b",
+      });
+
+      const created = await SELF.fetch("https://nadi.test/api/skills", {
+        method: "POST",
+        headers: { ...cookie(token), "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "deploy", description: "d", body: "b" }),
+      });
+      expect(created.status).toBe(409);
+
+      const renamed = await SELF.fetch(`https://nadi.test/api/skills/${other.id}`, {
+        method: "PATCH",
+        headers: { ...cookie(token), "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "deploy" }),
+      });
+      expect(renamed.status).toBe(409);
+      // The collided write left the row exactly as it was.
+      await expect(
+        repo.getActiveByName({ workspaceId, agentId: null, name: "review" }),
+      ).resolves.toMatchObject({ id: other.id });
+    });
+
+    it("400s a name normalisation cannot rescue, and a non-string field", async () => {
+      const { token } = await seedMemberWithAgent();
+
+      const bad = await SELF.fetch("https://nadi.test/api/skills", {
+        method: "POST",
+        headers: { ...cookie(token), "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "deploy!", description: "d", body: "b" }),
+      });
+      expect(bad.status).toBe(400);
+      expect(await bad.text()).toMatch(/lowercase/);
+
+      const missing = await SELF.fetch("https://nadi.test/api/skills", {
+        method: "POST",
+        headers: { ...cookie(token), "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "deploy", description: "d" }),
+      });
+      expect(missing.status).toBe(400);
+
+      const wrongType = await SELF.fetch("https://nadi.test/api/skills", {
+        method: "POST",
+        headers: { ...cookie(token), "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "deploy", description: "d", body: 7 }),
+      });
+      expect(wrongType.status).toBe(400);
+    });
+
+    // The authorization idiom every other write on this route uses. Both
+    // refusals matter: a foreign SKILL id must not be writable, and a foreign
+    // AGENT id must not be addressable as a scope.
+    it("refuses to edit another workspace's library skill", async () => {
+      const { token } = await seedMemberWithAgent();
+      const foreign = await seedOtherWorkspace();
+      const repo = new AgentSkillRepository(drizzle(env.REGISTRY_DB, { schema }));
+      const theirs = await repo.create({
+        workspaceId: foreign.workspaceId,
+        agentId: null,
+        name: "deploy",
+        description: "Deploy",
+        body: "theirs",
+      });
+
+      const res = await SELF.fetch(`https://nadi.test/api/skills/${theirs.id}`, {
+        method: "PATCH",
+        headers: { ...cookie(token), "Content-Type": "application/json" },
+        body: JSON.stringify({ body: "mine" }),
+      });
+      expect(res.status).toBe(404);
+      await expect(
+        repo.getActiveByName({ workspaceId: foreign.workspaceId, agentId: null, name: "deploy" }),
+      ).resolves.toMatchObject({ body: "theirs" });
+    });
+
+    it("refuses to create into an agent the session does not own", async () => {
+      const { token } = await seedMemberWithAgent();
+      const foreign = await seedOtherWorkspace();
+
+      const res = await SELF.fetch(`https://nadi.test/api/skills?agentId=${foreign.agentId}`, {
+        method: "POST",
+        headers: { ...cookie(token), "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "deploy", description: "d", body: "b" }),
+      });
+      expect(res.status).toBe(404);
+      const rows = await drizzle(env.REGISTRY_DB, { schema }).select().from(schema.skills).all();
+      expect(rows).toEqual([]);
+    });
+
+    it("404s an edit of an archived skill rather than silently reviving it", async () => {
+      const { token, workspaceId } = await seedMemberWithAgent();
+      const repo = new AgentSkillRepository(drizzle(env.REGISTRY_DB, { schema }));
+      const created = await repo.create({
+        workspaceId,
+        agentId: null,
+        name: "deploy",
+        description: "Deploy",
+        body: "old",
+      });
+      await repo.archiveById({ workspaceId, agentId: null, id: created.id });
+
+      const res = await SELF.fetch(`https://nadi.test/api/skills/${created.id}`, {
+        method: "PATCH",
+        headers: { ...cookie(token), "Content-Type": "application/json" },
+        body: JSON.stringify({ body: "new" }),
+      });
+      expect(res.status).toBe(404);
+      await expect(repo.listArchived({ workspaceId, agentId: null })).resolves.toMatchObject([
+        { id: created.id, body: "old" },
+      ]);
+    });
+
+    it("405s a method the skill routes do not serve", async () => {
+      const { token } = await seedMemberWithAgent();
+      const res = await SELF.fetch("https://nadi.test/api/skills/whatever", {
+        method: "DELETE",
+        headers: cookie(token),
+      });
+      expect(res.status).toBe(405);
+    });
+
+    it("401s a create and an edit without a session", async () => {
+      const created = await SELF.fetch("https://nadi.test/api/skills", {
+        method: "POST",
+        body: JSON.stringify({ name: "a", description: "b", body: "c" }),
+      });
+      expect(created.status).toBe(401);
+      const edited = await SELF.fetch("https://nadi.test/api/skills/x", {
+        method: "PATCH",
+        body: "{}",
+      });
+      expect(edited.status).toBe(401);
+    });
+  });
+
   // `countAgentsLiveOn` requires `archived_at IS NULL`, so on the archived tab it
   // can only ever answer zero. Omitting the field keeps that from being a D1
   // round-trip nobody can observe.

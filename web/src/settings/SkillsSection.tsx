@@ -2,8 +2,17 @@ import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { ArchiveButton } from "../components/ArchiveButton";
 import { SKILLS_SETTINGS_HINT } from "../settings-ui-config";
-import { archiveSkill, listSkills, restoreSkill, setSkillEnabled, type Skill } from "../skills-api";
-import { ArrowCounterClockwise } from "../icons";
+import {
+  archiveSkill,
+  createSkill,
+  listSkills,
+  restoreSkill,
+  setSkillEnabled,
+  updateSkill,
+  type Skill,
+  type SkillDraft,
+} from "../skills-api";
+import { ArrowCounterClockwise, PencilSimple, Plus } from "../icons";
 import { cn } from "@/lib/utils";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -12,6 +21,7 @@ import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { SectionHeading } from "./section-ui";
+import { SkillEditorDialog } from "./SkillEditorDialog";
 import { SkillNote, SkillRow } from "./SkillRow";
 
 /**
@@ -26,6 +36,9 @@ export function SkillsSection() {
   const [skills, setSkills] = useState<Skill[] | null>(null); // null = loading
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [showArchived, setShowArchived] = useState(false);
+  // `null` = the dialog is closed; `{ skill: null }` = writing a new one. A bare
+  // `Skill | null` could not tell "create" from "closed".
+  const [editing, setEditing] = useState<{ skill: Skill | null } | null>(null);
 
   const load = useCallback(() => {
     setSkills(null);
@@ -73,6 +86,31 @@ export function SkillsSection() {
     }
   }, []);
 
+  /**
+   * Write the dialog's draft, then re-read the list.
+   *
+   * A re-read rather than a splice, and specifically because of
+   * `liveOnAgentCount`: neither write returns it (both go through the server's
+   * plain `serialize`), so patching the row in place would blank the reach line
+   * on the very interaction it exists to inform — the defect Task 3 fixed on
+   * the enabled toggle, one write next door. A rename also reorders the
+   * name-sorted list, which only the server can do correctly.
+   *
+   * Errors are re-thrown, not toasted: the dialog owns them, so the draft stays
+   * on screen and a rejected name can be corrected instead of retyped.
+   */
+  const onSave = useCallback(
+    async (target: Skill | null, draft: SkillDraft) => {
+      if (target) await updateSkill(target.id, draft);
+      else await createSkill(draft);
+      // Silent: `load()` blanks the list to its skeleton first, and flashing
+      // three placeholders over a list the reader is already looking at reads
+      // as a page reload rather than a save.
+      setSkills(await listSkills(showArchived));
+    },
+    [showArchived],
+  );
+
   const onRestore = useCallback(async (skill: Skill) => {
     try {
       await restoreSkill(skill.id);
@@ -85,7 +123,19 @@ export function SkillsSection() {
 
   return (
     <section aria-label="Skills" className="space-y-4">
-      <SectionHeading title="Skills" description={SKILLS_SETTINGS_HINT} />
+      <SectionHeading
+        title="Skills"
+        description={SKILLS_SETTINGS_HINT}
+        action={
+          // Absent on the Archived tab: a new skill is never archived, so the
+          // button would create a row the tab you are on cannot show.
+          showArchived ? undefined : (
+            <Button size="sm" onClick={() => setEditing({ skill: null })}>
+              <Plus aria-hidden /> New skill
+            </Button>
+          )
+        }
+      />
 
       <ButtonGroup aria-label="Filter skills">
         <Button
@@ -137,10 +187,10 @@ export function SkillsSection() {
           <p className="text-muted-foreground text-sm">
             {showArchived ? "No archived skills" : "No skills yet"}
           </p>
-          <p className="mt-1 text-muted-foreground text-xs">
+          <p className="mx-auto mt-1 max-w-prose px-4 text-muted-foreground text-xs">
             {showArchived
               ? "Skills you archive will show up here."
-              : "Ask the agent to create one in chat."}
+              : "Write one with New skill above, or move one up from an agent’s own skills."}
           </p>
         </div>
       ) : (
@@ -171,6 +221,17 @@ export function SkillsSection() {
                       onCheckedChange={() => onToggle(skill)}
                       aria-label={skill.enabled ? `Disable ${skill.name}` : `Enable ${skill.name}`}
                     />
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => setEditing({ skill })}
+                      // Names the skill: this list can run to a dozen rows and
+                      // "Edit skill" a dozen times tells a screen reader nothing.
+                      aria-label={`Edit ${skill.name}`}
+                      title="Edit skill"
+                    >
+                      <PencilSimple aria-hidden />
+                    </Button>
                     <ArchiveButton
                       itemName={skill.name}
                       kind="skill"
@@ -184,6 +245,13 @@ export function SkillsSection() {
           })}
         </ul>
       )}
+
+      <SkillEditorDialog
+        open={editing !== null}
+        onOpenChange={(open) => setEditing(open ? editing : null)}
+        skill={editing?.skill ?? null}
+        onSave={(draft) => onSave(editing?.skill ?? null, draft)}
+      />
     </section>
   );
 }

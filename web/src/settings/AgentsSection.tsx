@@ -193,6 +193,7 @@ function AgentDetailPage({
   providers,
   networkAllowlistEnabled,
   isOnlyAgent,
+  otherAgentCount,
   onCreated,
   onUpdated,
   onDeleted,
@@ -204,6 +205,9 @@ function AgentDetailPage({
   networkAllowlistEnabled: boolean;
   /** The workspace's last usable agent can be neither disabled nor deleted. */
   isOnlyAgent: boolean;
+  /** How many OTHER agents exist — the reach a skill gains by moving to the
+   *  workspace library, shown on that move's confirmation. */
+  otherAgentCount: number;
   onCreated: (created: AgentSummary) => void;
   onUpdated: (updated: AgentSummary) => void;
   onDeleted: () => void;
@@ -634,7 +638,7 @@ function AgentDetailPage({
       {agent && (
         <>
           <Band title="Knowledge" description="What this agent carries between chats.">
-            <AgentSkillsSection agentId={agent.id} />
+            <AgentSkillsSection agentId={agent.id} otherAgentCount={otherAgentCount} />
             <FormCard title="Memory" description="What this agent remembers between chats.">
               <MemorySection agentId={agent.id} />
             </FormCard>
@@ -827,6 +831,11 @@ export function AgentsSection({
   const usableCount = (agents ?? []).filter((agent) => agent.enabled).length;
   const isOnlyAgent =
     selectedAgent !== null && selectedAgent.enabled && usableCount <= 1;
+  // Every agent but the one being edited. NOT filtered on `enabled`: a paused
+  // agent still carries a library skill and loads it again the moment it is
+  // resumed, which is exactly how `countAgentsLiveOn` counts.
+  // `GET /api/agents` already omits archived rows.
+  const otherAgentCount = Math.max((agents ?? []).length - (selectedAgent ? 1 : 0), 0);
 
   const handleReload = useCallback(async () => {
     await refresh().catch(() => undefined);
@@ -958,6 +967,7 @@ export function AgentsSection({
                 providers={providers}
                 networkAllowlistEnabled={networkAllowlistEnabled}
                 isOnlyAgent={false}
+                otherAgentCount={otherAgentCount}
                 onCreated={handleCreated}
                 onUpdated={handleUpdated}
                 onDeleted={handleDeleted}
@@ -986,6 +996,7 @@ export function AgentsSection({
                 providers={providers}
                 networkAllowlistEnabled={networkAllowlistEnabled}
                 isOnlyAgent={isOnlyAgent}
+                otherAgentCount={otherAgentCount}
                 onCreated={handleCreated}
                 onUpdated={handleUpdated}
                 onDeleted={handleDeleted}

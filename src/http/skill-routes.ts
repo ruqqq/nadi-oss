@@ -3,6 +3,7 @@ import { validateRequestSession, type ValidatedSession } from "../auth/session";
 import { registryDb } from "../db/client";
 import {
   AgentSkillDuplicateError,
+  AgentSkillNameError,
   AgentSkillRepository,
   type LibrarySkillForAgent,
 } from "../db/repositories/agent-skills";
@@ -14,6 +15,7 @@ export async function routeSkills(req: Request, env: Env): Promise<Response | nu
 
   if (url.pathname === "/api/skills") {
     if (req.method === "GET") return listSkills(req, env, url);
+    if (req.method === "POST") return createSkill(req, env, url);
     return new Response("Method not allowed", { status: 405 });
   }
 
@@ -47,6 +49,13 @@ export async function routeSkills(req: Request, env: Env): Promise<Response | nu
   const copyId = matchId(url.pathname, /^\/api\/skills\/([^/]+)\/copy-to-agent$/);
   if (copyId !== null) {
     if (req.method === "POST") return copySkillToAgent(req, env, copyId);
+    return new Response("Method not allowed", { status: 405 });
+  }
+
+  // Last, because every match above is a longer path under the same prefix.
+  const skillId = matchId(url.pathname, /^\/api\/skills\/([^/]+)$/);
+  if (skillId !== null) {
+    if (req.method === "PATCH") return editSkill(req, env, skillId);
     return new Response("Method not allowed", { status: 405 });
   }
 
@@ -248,6 +257,96 @@ async function copySkillToAgent(req: Request, env: Env, id: string): Promise<Res
       return new Response("That agent already has a skill with this name", { status: 409 });
     throw error;
   }
+}
+
+/**
+ * Write a skill into whichever scope the request names.
+ *
+ * The scope is `resolveSkillScope`'s, the same one every other write on this
+ * route uses: no `?agentId=` means the workspace LIBRARY, which is what
+ * Settings -> Skills manages. This is the only path by which a library skill
+ * can be authored or changed — the chat tools scope themselves to the calling
+ * thread's agent (`src/agent/skill-management-tools.ts`), so a shared skill has
+ * no editor in a turn.
+ *
+ * One shared body reader, because create and edit validate the same three
+ * fields and disagreeing about what counts as a valid description would let a
+ * skill be created that could never be saved again.
+ */
+function readSkillBody(
+  raw: unknown,
+  require: boolean,
+): { name?: string; description?: string; body?: string } | string {
+  const input = (raw ?? {}) as { name?: unknown; description?: unknown; body?: unknown };
+  const out: { name?: string; description?: string; body?: string } = {};
+  for (const field of ["name", "description", "body"] as const) {
+    const value = input[field];
+    if (value === undefined) {
+      if (require) return `${field} is required`;
+      continue;
+    }
+    if (typeof value !== "string") return `${field} must be a string`;
+    out[field] = value;
+  }
+  return out;
+}
+
+async function createSkill(req: Request, env: Env, url: URL): Promise<Response> {
+  const session = await validateRequestSession(env, req);
+  if (!session) return new Response("Unauthorized", { status: 401 });
+  const parsed = readSkillBody(await req.json().catch(() => null), true);
+  if (typeof parsed === "string") return new Response(parsed, { status: 400 });
+  const scope = await resolveSkillScope(env, session, url);
+  if (!scope) return new Response("Not found", { status: 404 });
+  const repo = new AgentSkillRepository(registryDb(env));
+  try {
+    const created = await repo.create({
+      ...scope,
+      name: parsed.name ?? "",
+      description: parsed.description ?? "",
+      body: parsed.body ?? "",
+    });
+    return Response.json({ skill: serialize(created) }, { status: 201 });
+  } catch (error) {
+    const mapped = nameError(error);
+    if (mapped) return mapped;
+    throw error;
+  }
+}
+
+async function editSkill(req: Request, env: Env, id: string): Promise<Response> {
+  const session = await validateRequestSession(env, req);
+  if (!session) return new Response("Unauthorized", { status: 401 });
+  const parsed = readSkillBody(await req.json().catch(() => null), false);
+  if (typeof parsed === "string") return new Response(parsed, { status: 400 });
+  const scope = await resolveSkillScope(env, session, new URL(req.url));
+  if (!scope) return new Response("Not found", { status: 404 });
+  const repo = new AgentSkillRepository(registryDb(env));
+  try {
+    const updated = await repo.editById({ ...scope, ...parsed, id });
+    if (!updated) return new Response("Not found", { status: 404 });
+    return Response.json({ skill: serialize(updated) });
+  } catch (error) {
+    const mapped = nameError(error);
+    if (mapped) return mapped;
+    throw error;
+  }
+}
+
+/**
+ * The two name failures, mapped once. A duplicate is a 409 and an unusable name
+ * a 400: `normalizeSkillName` lowercases and hyphenates, so what it rejects the
+ * caller cannot fix by retrying.
+ */
+function nameError(error: unknown): Response | null {
+  if (error instanceof AgentSkillDuplicateError)
+    return new Response("A skill with this name is already active", { status: 409 });
+  if (error instanceof AgentSkillNameError)
+    return new Response(
+      "A skill name can only use lowercase letters, numbers, dashes and underscores",
+      { status: 400 },
+    );
+  return null;
 }
 
 async function setEnabled(req: Request, env: Env, id: string): Promise<Response> {

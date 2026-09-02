@@ -16,6 +16,17 @@ import {
 } from "../skills-api";
 import { ArrowCounterClockwise, Copy, Stack } from "../icons";
 import { cn } from "@/lib/utils";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { ButtonGroup } from "@/components/ui/button-group";
@@ -34,7 +45,19 @@ import { SkillNote, SkillRow } from "./SkillRow";
  * agent's skill un-shadows the library row of the same name, and a copy creates
  * the shadow. Two sections fetching separately would sit there disagreeing.
  */
-export function AgentSkillsSection({ agentId }: { agentId: string }) {
+export function AgentSkillsSection({
+  agentId,
+  otherAgentCount,
+}: {
+  agentId: string;
+  /**
+   * How many OTHER agents the workspace has — what a move to the library
+   * hands the skill to. Passed in rather than fetched: the pane above already
+   * holds the list, and a second `GET /api/agents` here would be a round trip
+   * to re-learn a number it is looking at.
+   */
+  otherAgentCount: number;
+}) {
   const [data, setData] = useState<AgentSkills | null>(null); // null = loading
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [showArchived, setShowArchived] = useState(false);
@@ -287,14 +310,11 @@ export function AgentSkillsSection({ agentId }: { agentId: string }) {
                   }
                   footer={
                     showArchived ? null : (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => onMoveToLibrary(skill)}
-                        aria-label={`Move ${skill.name} to the workspace library`}
-                      >
-                        <Stack aria-hidden /> Move to library
-                      </Button>
+                      <MoveToLibraryButton
+                        skillName={skill.name}
+                        otherAgentCount={otherAgentCount}
+                        onConfirm={() => onMoveToLibrary(skill)}
+                      />
                     )
                   }
                 />
@@ -314,7 +334,7 @@ export function AgentSkillsSection({ agentId }: { agentId: string }) {
           ) : data.library.length === 0 ? (
             <EmptyState
               title="The library is empty"
-              hint="Move one of this agent’s skills up, or add one in Settings → Skills, to share it with every agent."
+              hint="Move one of this agent’s skills up, or write one in Settings → Skills, to share it with every agent."
             />
           ) : (
             <ul className="space-y-3">
@@ -402,6 +422,89 @@ function LibraryRow({
       }
     />
   );
+}
+
+/**
+ * Promoting a private skill into the shared library, behind a confirm.
+ *
+ * It shipped as a bare one-click ghost button beside an archive that asks for
+ * confirmation and a delete that makes you type the agent's name — the least
+ * guarded gesture on the page doing the widest thing on it. Three consequences,
+ * none of them visible from the button:
+ *
+ * 1. **Reach.** Every agent in the workspace loads it, except any that already
+ *    has its own skill of that name (own beats library — `listEffective`).
+ * 2. **Egress.** The row keeps its `network_domains` (`moveToLibrary` re-points
+ *    `agent_id` and nothing else), and `listEnabledSkillDomains` resolves over
+ *    the EFFECTIVE set, so those hosts join every carrying agent's sandbox
+ *    allowlist (`src/agent/compute-tools.ts:371-420`). Stated conditionally
+ *    because it only bites where the sandbox is restricted at all: with the
+ *    workspace's network restriction off, `allowedHosts` is `null` and
+ *    `unionAllowlistWithSkillDomains` returns `null` unchanged.
+ * 3. **No way back.** Nothing moves a skill OUT of the library; recovery is
+ *    copy-to-agent then archive the library row, and the id changes.
+ */
+function MoveToLibraryButton({
+  skillName,
+  otherAgentCount,
+  onConfirm,
+}: {
+  skillName: string;
+  otherAgentCount: number;
+  onConfirm: () => void;
+}) {
+  return (
+    <AlertDialog>
+      <AlertDialogTrigger asChild>
+        <Button
+          variant="ghost"
+          size="sm"
+          aria-label={`Move ${skillName} to the workspace library`}
+        >
+          <Stack aria-hidden /> Move to library
+        </Button>
+      </AlertDialogTrigger>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Move “{skillName}” to the workspace library?</AlertDialogTitle>
+          <AlertDialogDescription asChild>
+            <div className="space-y-2">
+              <p>{moveReachLine(skillName, otherAgentCount)}</p>
+              <p>
+                Any sandbox hosts it opens open for those agents too, and it stops being archived
+                along with this agent.
+              </p>
+              <p>
+                There is no move back: returning it here means copying it down and archiving the
+                library copy.
+              </p>
+            </div>
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction onClick={onConfirm}>Move to library</AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
+/**
+ * The reach, before the move rather than after it.
+ *
+ * A count of OTHER agents, not of carriers: exclusions and same-named private
+ * skills on other agents are not visible from this page, so the honest shape is
+ * the rule plus the population, with the shadowing caveat named. With no other
+ * agents the number would read as "this does nothing", which is wrong — the
+ * library is what every agent added later inherits.
+ */
+export function moveReachLine(skillName: string, otherAgentCount: number): string {
+  if (otherAgentCount <= 0)
+    return `This workspace has no other agents yet, but every agent added later loads “${skillName}” from the library.`;
+  const others =
+    otherAgentCount === 1 ? "The 1 other agent" : `All ${otherAgentCount} other agents`;
+  return `${others} in this workspace will load it, except any that already has its own skill called “${skillName}”.`;
 }
 
 function SkillSkeletons({ label }: { label: string }) {

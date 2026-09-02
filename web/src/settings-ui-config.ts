@@ -55,8 +55,12 @@ export const AGENT_SETTINGS_TITLE = "Configure agent";
 export const GENERAL_SETTINGS_SHOW_WORKSPACE_SECTION = false;
 export const PROVIDER_SECRET_NAME_FIELD_READ_ONLY = true;
 
+// The workspace LIBRARY, which is the one fact this tab exists to convey: one
+// copy, shared by every agent, so an edit here reaches all of them. It used to
+// say skills were "created and edited by the agent in chat" — following that
+// produces an AGENT-PRIVATE skill, which never appears on this tab at all.
 export const SKILLS_SETTINGS_HINT =
-  "Skills are created and edited by the agent in chat. Here you can review them, turn them on or off, and archive ones you no longer want.";
+  "Shared skills: every agent in this workspace loads these unless it opts out or has its own skill of the same name. One copy, so an edit here reaches all of them. A skill an agent writes in chat is private to that agent.";
 
 export const INVITES_SETTINGS_HINT =
   "Nadi is invite-only. Share a link with someone and they can sign in with their own email. A slot is only used up once they actually join — unused links cost you nothing.";

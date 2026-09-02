@@ -260,6 +260,51 @@ export class AgentSkillRepository {
     return this.db.select().from(skills).where(eq(skills.id, current.id)).get();
   }
 
+  /**
+   * Edit one skill by ID, in its own scope.
+   *
+   * `edit` above is the chat tools' entry point and keys on the NAME, which is
+   * what a model holds. A settings client holds the id it was listed with, and
+   * the id is the only handle that survives the rename this method performs.
+   * Scope-aware like every sibling: `agentId: null` is the workspace library,
+   * so this is the one write that can change a shared skill's body.
+   */
+  async editById(input: {
+    workspaceId: string;
+    agentId: string | null;
+    id: string;
+    name?: string;
+    description?: string;
+    body?: string;
+  }): Promise<Skill | undefined> {
+    const current = await this.getOwnedById(input);
+    // An archived row is restored, not edited: the partial unique index covers
+    // ACTIVE names only, so a rename here could park a collision that fires on
+    // restore instead of on the write that caused it.
+    if (!current || current.archivedAt !== null) return undefined;
+    const name = input.name !== undefined ? normalizeSkillName(input.name) : undefined;
+    if (name !== undefined && name !== current.name) {
+      await this.assertActiveNameAvailable({
+        workspaceId: input.workspaceId,
+        agentId: input.agentId,
+        name,
+      });
+    }
+    const patch = {
+      ...(name !== undefined ? { name } : {}),
+      ...(input.description !== undefined ? { description: input.description } : {}),
+      ...(input.body !== undefined ? { body: input.body } : {}),
+      updatedAt: Date.now(),
+    };
+    try {
+      await this.db.update(skills).set(patch).where(eq(skills.id, current.id));
+    } catch (error) {
+      if (isUniqueConstraintError(error)) throw new AgentSkillDuplicateError(name ?? current.name);
+      throw error;
+    }
+    return this.getOwnedById(input);
+  }
+
   async archive(input: {
     workspaceId: string;
     agentId: string | null;

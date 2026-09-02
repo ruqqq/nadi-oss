@@ -67,6 +67,53 @@ export async function listSkills(
   return ((await res.json()) as { skills: Skill[] }).skills;
 }
 
+/** The three fields a person writes. Everything else is the server's. */
+export interface SkillDraft {
+  name: string;
+  description: string;
+  body: string;
+}
+
+/**
+ * Author a skill in whichever scope `agentId` names — omitted means the shared
+ * workspace LIBRARY, which is what Settings → Skills manages.
+ *
+ * This and `updateSkill` are the only way a library skill can be written: the
+ * chat tools scope every write to the calling thread's agent, so what a model
+ * creates is always agent-private.
+ */
+export async function createSkill(
+  draft: SkillDraft,
+  agentId: SkillScope = null,
+  fetchImpl: FetchLike = appFetch,
+): Promise<Skill> {
+  const res = await fetchImpl(`/api/skills${scopeQuery(agentId)}`, {
+    method: "POST",
+    credentials: "include",
+    headers: JSON_HEADERS,
+    body: JSON.stringify(draft),
+  });
+  if (!res.ok) throw await errorFromResponse(res, "create the skill");
+  return ((await res.json()) as { skill: Skill }).skill;
+}
+
+/** Edit one skill in place. Omitted fields are left alone. */
+export async function updateSkill(
+  id: string,
+  patch: Partial<SkillDraft>,
+  agentId: SkillScope = null,
+  fetchImpl: FetchLike = appFetch,
+): Promise<Skill> {
+  const res = await fetchImpl(`/api/skills/${encodeURIComponent(id)}${scopeQuery(agentId)}`, {
+    method: "PATCH",
+    credentials: "include",
+    headers: JSON_HEADERS,
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw await errorFromResponse(res, "save the skill");
+  return ((await res.json()) as { skill: Skill }).skill;
+}
+
 export async function setSkillEnabled(
   id: string,
   enabled: boolean,

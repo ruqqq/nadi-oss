@@ -50,6 +50,7 @@ export {
   FolderSimple,
   Info,
   Copy,
+  PencilSimple,
   GitBranch,
   ArrowsClockwise,
   Play,

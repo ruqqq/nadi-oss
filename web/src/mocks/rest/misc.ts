@@ -89,6 +89,39 @@ function liveOnAgentCount(skill: Skill): number {
   }).length;
 }
 
+/**
+ * The two name failures the server can answer with, verbatim, so a mocked
+ * collision renders the same sentence the real one does
+ * (`nameError` in `src/http/skill-routes.ts`).
+ */
+const SKILL_NAME_MESSAGE =
+  "A skill name can only use lowercase letters, numbers, dashes and underscores";
+const SKILL_DUPLICATE_MESSAGE = "A skill with this name is already active";
+
+/**
+ * `normalizeSkillName`'s rule, re-stated (the real one lives in a repository
+ * that pulls in drizzle and cannot be imported into the web bundle): trim,
+ * lowercase, whitespace to dashes, then `^[a-z0-9_-]{1,80}$` or nothing.
+ */
+function normalizeSkillName(raw: string): string | null {
+  const normalized = raw.trim().toLowerCase().replace(/\s+/g, "-");
+  if (!normalized || normalized.length > 80 || !/^[a-z0-9_-]+$/.test(normalized)) return null;
+  return normalized;
+}
+
+/** The server's body validation: three string fields, all required on create. */
+function badSkillFields(input: Record<string, unknown>, require: boolean): string | null {
+  for (const field of ["name", "description", "body"] as const) {
+    const value = input[field];
+    if (value === undefined) {
+      if (require) return `${field} is required`;
+      continue;
+    }
+    if (typeof value !== "string") return `${field} must be a string`;
+  }
+  return null;
+}
+
 /** Library rows come back name-ordered and count-annotated, as the server's do. */
 function byName(a: Skill, b: Skill) {
   return a.name.localeCompare(b.name);
@@ -110,6 +143,54 @@ const skillHandlers = [
     return HttpResponse.json({
       skills: scoped.map((s) => ({ ...s, liveOnAgentCount: liveOnAgentCount(s) })),
     });
+  }),
+  // Library CRUD. The scope is `?agentId=` like every other write here, so the
+  // same handler serves an agent's private skills — the settings tab only ever
+  // calls the library form.
+  http.post("/api/skills", async ({ request }) => {
+    const { list } = skillScope(request.url);
+    const input = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const invalid = badSkillFields(input, true);
+    if (invalid) return HttpResponse.text(invalid, { status: 400 });
+    const name = normalizeSkillName(String(input.name));
+    if (!name) return HttpResponse.text(SKILL_NAME_MESSAGE, { status: 400 });
+    if (list.some((s) => s.name === name && !s.archivedAt))
+      return HttpResponse.text(SKILL_DUPLICATE_MESSAGE, { status: 409 });
+    const now = Date.now();
+    const skill: Skill = {
+      id: mockId("skl"),
+      name,
+      description: String(input.description),
+      body: String(input.body),
+      enabled: true,
+      createdAt: now,
+      updatedAt: now,
+      archivedAt: null,
+    };
+    list.push(skill);
+    // 201, and no `liveOnAgentCount`: the server's create returns the plain
+    // `serialize`, so a mock that annotated it would let the client depend on a
+    // field the real route never sends.
+    return HttpResponse.json({ skill }, { status: 201 });
+  }),
+  http.patch("/api/skills/:skillId", async ({ params, request }) => {
+    const { list } = skillScope(request.url);
+    const skill = list.find((s) => s.id === pathParam(params, "skillId") && !s.archivedAt);
+    if (!skill) return notFound("That skill");
+    const input = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const invalid = badSkillFields(input, false);
+    if (invalid) return HttpResponse.text(invalid, { status: 400 });
+    if (input.name !== undefined) {
+      const name = normalizeSkillName(String(input.name));
+      if (!name) return HttpResponse.text(SKILL_NAME_MESSAGE, { status: 400 });
+      if (name !== skill.name && list.some((s) => s.name === name && !s.archivedAt))
+        return HttpResponse.text(SKILL_DUPLICATE_MESSAGE, { status: 409 });
+      skill.name = name;
+    }
+    if (input.description !== undefined) skill.description = String(input.description);
+    if (input.body !== undefined) skill.body = String(input.body);
+    skill.updatedAt = Date.now();
+    return HttpResponse.json({ skill });
   }),
   http.post("/api/skills/:skillId/enabled", async ({ params, request }) => {
     const skill = skillScope(request.url).list.find((s) => s.id === pathParam(params, "skillId"));
