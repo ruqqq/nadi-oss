@@ -264,10 +264,11 @@ async function copySkillToAgent(req: Request, env: Env, id: string): Promise<Res
  *
  * The scope is `resolveSkillScope`'s, the same one every other write on this
  * route uses: no `?agentId=` means the workspace LIBRARY, which is what
- * Settings -> Skills manages. This is the only path by which a library skill
- * can be authored or changed — the chat tools scope themselves to the calling
- * thread's agent (`src/agent/skill-management-tools.ts`), so a shared skill has
- * no editor in a turn.
+ * Settings -> Skills manages. It is not the only path: the chat tools resolve a
+ * name own-before-library and edit whichever scope holds it
+ * (`src/agent/skill-management-tools.ts`), so a turn can change a shared skill
+ * too. This route is the only path that can CREATE one — `create_skill` is
+ * deliberately still agent-private, and says so when it shadows a library name.
  *
  * One shared body reader, because create and edit validate the same three
  * fields and disagreeing about what counts as a valid description would let a

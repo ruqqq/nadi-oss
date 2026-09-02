@@ -224,6 +224,16 @@ export class AgentSkillRepository {
       .get();
   }
 
+  /**
+   * Edit one skill by NAME, within a single scope.
+   *
+   * No production caller since the chat tools moved to resolving a name
+   * own-before-library and writing through {@link editById} with the resolved
+   * scope — this one cannot express that, because it takes the scope as an
+   * input rather than finding it. Kept as a name-keyed test helper alongside
+   * {@link archive}; do not wire it back into a write path without deciding
+   * which scope it is meant to hit.
+   */
   async edit(input: {
     workspaceId: string;
     agentId: string | null;
@@ -261,13 +271,15 @@ export class AgentSkillRepository {
   }
 
   /**
-   * Edit one skill by ID, in its own scope.
+   * Edit one skill by ID, in the scope it was found in.
    *
-   * `edit` above is the chat tools' entry point and keys on the NAME, which is
-   * what a model holds. A settings client holds the id it was listed with, and
-   * the id is the only handle that survives the rename this method performs.
-   * Scope-aware like every sibling: `agentId: null` is the workspace library,
-   * so this is the one write that can change a shared skill's body.
+   * The one edit path in the product. A settings client holds the id it was
+   * listed with; the chat tools resolve a model's NAME to a row first
+   * (own-before-library, as the turn resolves it) and pass that row's id and
+   * scope here. Either way the id is the only handle that survives the rename
+   * this method performs. Scope-aware like every sibling: `agentId: null` is
+   * the workspace library, so this is the write that changes a shared skill's
+   * body for every agent that loads it.
    */
   async editById(input: {
     workspaceId: string;
@@ -305,6 +317,7 @@ export class AgentSkillRepository {
     return this.getOwnedById(input);
   }
 
+  /** Archive by NAME within one scope. Test-only, like {@link edit}. */
   async archive(input: {
     workspaceId: string;
     agentId: string | null;

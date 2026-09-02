@@ -166,11 +166,27 @@ describe("skill management tools", () => {
    * return value is the tool output the SDK feeds back into the turn, not a log
    * line.
    */
-  it("redirects a library skill to Settings instead of answering not found", async () => {
+  /**
+   * A library skill resolves for writes exactly as it resolves for reads.
+   *
+   * Before this, `edit_skill` was hard-scoped to the thread's agent, so a model
+   * could read a library skill and not change it — and its natural recovery,
+   * `create_skill` with the same name, SUCCEEDED and forked a private shadow.
+   * The fork is the defect; resolving the write the same way the turn resolves
+   * the skill is what removes the reason to reach for it.
+   */
+  it("edits the shared library skill in place, and reports how far the change reaches", async () => {
     await seedRegistryThread(env.REGISTRY_DB, {
       workspaceId: "workspace-lib",
       agentId: "agent-lib",
       threadId: "thread-lib",
+    });
+    // A second agent in the same workspace, so the reach count is not 1 by
+    // default and a hardcoded number could not pass.
+    await seedRegistryThread(env.REGISTRY_DB, {
+      workspaceId: "workspace-lib",
+      agentId: "agent-lib-2",
+      threadId: "thread-lib-2",
     });
     const repo = new AgentSkillRepository(drizzle(env.REGISTRY_DB, { schema }));
     await repo.create({
@@ -182,28 +198,185 @@ describe("skill management tools", () => {
     });
     const tools = createSkillManagementTools({ env, threadId: "thread-lib" });
 
-    for (const result of [
-      await runTool(tools, "edit_skill", { name: "Deploy", body: "Fixed" }),
-      await runTool(tools, "delete_skill", { name: "deploy" }),
-    ]) {
-      expect(result).toContain("shared workspace-library skill");
-      expect(result).toContain("Settings -> Skills");
-      // The steer away from the fork, which is the whole point of the message.
-      expect(result).toContain("Do NOT create a skill with the same name");
-      // The old wording is GONE, not merely appended to.
-      expect(result).not.toContain("skill deploy not found");
-    }
+    const result = await runTool(tools, "edit_skill", { name: "Deploy", body: "Fixed" });
+    expect(result).toContain("edited skill: deploy");
+    // The blast radius, in the only surface a chat edit has: the transcript.
+    expect(result).toContain("shared workspace-library skill");
+    expect(result).toContain("2 agents");
 
-    // The library row is untouched by either refusal.
+    // The LIBRARY row changed — one copy, so every agent gets the fix.
     await expect(
       repo.getActiveByName({ workspaceId: "workspace-lib", agentId: null, name: "deploy" }),
-    ).resolves.toMatchObject({ body: "Library body", archivedAt: null });
+    ).resolves.toMatchObject({ body: "Fixed", archivedAt: null });
+    // ...and no private fork was created on the way.
+    await expect(
+      repo.getActiveByName({ workspaceId: "workspace-lib", agentId: "agent-lib", name: "deploy" }),
+    ).resolves.toBeUndefined();
 
-    // ...and a name that is in NEITHER scope still gets the plain answer, so the
-    // redirect cannot swallow a genuine typo.
+    // A name in NEITHER scope still gets the plain answer, so the widened
+    // resolution cannot swallow a genuine typo.
     await expect(runTool(tools, "edit_skill", { name: "nowhere", body: "x" })).resolves.toBe(
       "error: skill nowhere not found",
     );
+  });
+
+  /**
+   * The script and the domains have to land in the RESOLVED scope, not the
+   * thread's agent scope.
+   *
+   * A library skill's resources hang off the library row. Both setters look the
+   * skill up by name IN THE SCOPE THEY ARE GIVEN and throw when it is not
+   * there, so passing the thread's agent id — which is what the old
+   * agent-scoped code did — turns a valid edit into
+   * `error: skill not found: deploy` AFTER the body has already been written.
+   * The skill would read as half-updated, with the caller told it failed.
+   */
+  it("writes a library skill's script and domains into the library scope", async () => {
+    await seedRegistryThread(env.REGISTRY_DB, {
+      workspaceId: "workspace-libres",
+      agentId: "agent-libres",
+      threadId: "thread-libres",
+    });
+    const repo = new AgentSkillRepository(drizzle(env.REGISTRY_DB, { schema }));
+    const library = await repo.create({
+      workspaceId: "workspace-libres",
+      agentId: null,
+      name: "deploy",
+      description: "Deploy",
+      body: "Library body",
+    });
+    const tools = createSkillManagementTools({ env, threadId: "thread-libres" });
+
+    const result = await runTool(tools, "edit_skill", {
+      name: "deploy",
+      body: "Fixed",
+      script: { path: "scripts/run.py", source: "print(2)" },
+      networkDomains: ["example.com"],
+    });
+    expect(result).toContain("edited skill: deploy");
+
+    // The resources hang off the LIBRARY row's id.
+    const descriptors = await repo.listResourceDescriptors(library.id);
+    expect(descriptors).toContainEqual(expect.objectContaining({ path: "scripts/run.py" }));
+    await expect(
+      repo.getActiveByName({ workspaceId: "workspace-libres", agentId: null, name: "deploy" }),
+    ).resolves.toMatchObject({ networkDomains: JSON.stringify(["example.com"]) });
+
+    // Nothing was created under the agent on the way.
+    await expect(
+      repo.getActiveByName({
+        workspaceId: "workspace-libres",
+        agentId: "agent-libres",
+        name: "deploy",
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  /**
+   * Reach has to be read BEFORE the archive: `countAgentsLiveOn` skips archived
+   * rows, so asking afterwards always answers zero and the transcript would
+   * under-report exactly what was just removed from every agent.
+   */
+  it("deletes the shared library skill, reporting the reach it had before the archive", async () => {
+    await seedRegistryThread(env.REGISTRY_DB, {
+      workspaceId: "workspace-libdel",
+      agentId: "agent-libdel",
+      threadId: "thread-libdel",
+    });
+    const repo = new AgentSkillRepository(drizzle(env.REGISTRY_DB, { schema }));
+    await repo.create({
+      workspaceId: "workspace-libdel",
+      agentId: null,
+      name: "deploy",
+      description: "Deploy",
+      body: "Library body",
+    });
+    const tools = createSkillManagementTools({ env, threadId: "thread-libdel" });
+
+    const result = await runTool(tools, "delete_skill", { name: "deploy" });
+    expect(result).toContain("deleted skill: deploy");
+    expect(result).toContain("shared workspace-library skill");
+    expect(result).toContain("1 agent");
+    expect(result).not.toContain("no agent has it in scope");
+
+    await expect(
+      repo.getActiveByName({ workspaceId: "workspace-libdel", agentId: null, name: "deploy" }),
+    ).resolves.toBeUndefined();
+  });
+
+  /**
+   * An EXCLUDED library skill is not in this agent's effective set, so it does
+   * not resolve — and a bare "not found" for a skill the user can see in
+   * Settings is a dead end. It gets the scope explained instead, and the same
+   * steer away from the fork.
+   */
+  it("explains the scope for a library skill this agent is excluded from", async () => {
+    await seedRegistryThread(env.REGISTRY_DB, {
+      workspaceId: "workspace-excl",
+      agentId: "agent-excl",
+      threadId: "thread-excl",
+    });
+    const repo = new AgentSkillRepository(drizzle(env.REGISTRY_DB, { schema }));
+    const library = await repo.create({
+      workspaceId: "workspace-excl",
+      agentId: null,
+      name: "deploy",
+      description: "Deploy",
+      body: "Library body",
+    });
+    await repo.excludeLibrarySkill({ agentId: "agent-excl", skillId: library.id });
+    const tools = createSkillManagementTools({ env, threadId: "thread-excl" });
+
+    for (const result of [
+      await runTool(tools, "edit_skill", { name: "deploy", body: "Fixed" }),
+      await runTool(tools, "delete_skill", { name: "deploy" }),
+    ]) {
+      expect(result).toContain("excluded from");
+      expect(result).toContain("Do NOT create a skill with the same name");
+      expect(result).not.toContain("skill deploy not found");
+    }
+
+    // Neither refusal touched the library row.
+    await expect(
+      repo.getActiveByName({ workspaceId: "workspace-excl", agentId: null, name: "deploy" }),
+    ).resolves.toMatchObject({ body: "Library body", archivedAt: null });
+  });
+
+  /**
+   * Shadowing is the spec's rule and not an error — but it is invisible from
+   * chat, and it is what a model reaches for when it means to fix the shared
+   * skill. So the result says it happened.
+   */
+  it("says so when a created skill shadows a library skill of the same name", async () => {
+    await seedRegistryThread(env.REGISTRY_DB, {
+      workspaceId: "workspace-shadow",
+      agentId: "agent-shadow",
+      threadId: "thread-shadow",
+    });
+    const repo = new AgentSkillRepository(drizzle(env.REGISTRY_DB, { schema }));
+    await repo.create({
+      workspaceId: "workspace-shadow",
+      agentId: null,
+      name: "deploy",
+      description: "Shared",
+      body: "Library body",
+    });
+    const tools = createSkillManagementTools({ env, threadId: "thread-shadow" });
+
+    const shadowing = await runTool(tools, "create_skill", {
+      name: "deploy",
+      description: "Private",
+      body: "Own body",
+    });
+    expect(shadowing).toContain("created skill: deploy");
+    expect(shadowing).toContain("SHADOWS");
+    expect(shadowing).toContain("this agent");
+
+    // A name the library does NOT hold gets the plain answer — the note must
+    // not fire on every create.
+    await expect(
+      runTool(tools, "create_skill", { name: "solo", description: "d", body: "b" }),
+    ).resolves.toBe("created skill: solo");
   });
 
   /**
