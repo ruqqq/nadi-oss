@@ -75,17 +75,31 @@ export function AgentSkillsSection({ agentId }: { agentId: string }) {
     if (showArchived) loadArchived();
   }, [showArchived, loadArchived]);
 
-  /** Run a write, then re-read both groups; surface the server's own message. */
+  /**
+   * Run a write, then re-read both groups; surface the server's own message.
+   *
+   * The two awaits are deliberately NOT in one `try`. A write that SUCCEEDED
+   * followed by a failed re-read is not a failed write: reporting it as one
+   * rolls the caller's optimistic state back, leaving the switch reading
+   * "included" for a skill the agent no longer loads — the UI stating the
+   * opposite of the truth, which is the exact failure this surface exists to
+   * prevent. A failed refresh is only a stale view, so it says that instead and
+   * the change stands.
+   */
   const run = useCallback(
     async (fallback: string, action: () => Promise<unknown>) => {
       try {
         await action();
-        await refresh();
-        return true;
       } catch (err) {
         toast.error(err instanceof Error ? err.message : fallback);
         return false;
       }
+      try {
+        await refresh();
+      } catch {
+        toast.error("Saved, but couldn’t reload this agent’s skills.");
+      }
+      return true;
     },
     [refresh],
   );

@@ -90,6 +90,22 @@ function ownGroup() {
 function libraryGroup() {
   return screen.getByRole("region", { name: "From the workspace library" });
 }
+/**
+ * Is the status dot lit on this row?
+ *
+ * The dot is the one element encoding `listEffective`'s rule — whether the model
+ * actually loads this skill in this scope — and it is `aria-hidden` with no
+ * text, so it is reached by the class that draws it. Throwing when the dot is
+ * missing keeps this from reading "not lit" for a row that has no dot at all.
+ */
+function dotIsLit(scope: HTMLElement, name: string): boolean {
+  const row = within(scope).getByText(name).closest("li");
+  if (!row) throw new Error(`no row for ${name}`);
+  const dot = row.querySelector("span.size-2.shrink-0.rounded-full");
+  if (!dot) throw new Error(`no status dot on the ${name} row`);
+  return dot.classList.contains("bg-approve");
+}
+
 /** Open one row's body, where its secondary actions live. */
 async function expand(scope: HTMLElement, name: RegExp) {
   await userEvent.click(within(scope).getByRole("button", { name }));
@@ -177,6 +193,72 @@ describe("AgentSkillsSection", () => {
     expect(
       screen.getByText("Switched off in the library, so no agent loads it"),
     ).toBeInTheDocument();
+  });
+
+  /**
+   * The dot is the most glanceable thing on the page and the only element that
+   * states `listEffective`'s verdict. Lighting it on a row the model does not
+   * load would be the UI contradicting the runtime, so every way a library row
+   * can fail to reach the model is asserted here.
+   */
+  it("lights the status dot only where the model actually loads the skill", async () => {
+    await renderSection();
+
+    const library = libraryGroup();
+    expect(dotIsLit(library, "code_review")).toBe(true); // live
+    expect(dotIsLit(library, "deploy")).toBe(false); // shadowed by the agent's own
+    expect(dotIsLit(library, "drafting")).toBe(false); // excluded on this agent
+    expect(dotIsLit(library, "legacy_deploy")).toBe(false); // switched off in the library
+
+    expect(dotIsLit(ownGroup(), "release_notes")).toBe(true);
+  });
+
+  it("dims the dot on a switched-off own skill, and on every archived row", async () => {
+    api.listAgentSkills.mockResolvedValue({
+      ...AGENT_SKILLS,
+      own: [OWN_NOTES, makeSkill({ id: "own_off", name: "paused", enabled: false })],
+    });
+    // Archived rows come back `enabled`, because archiving writes archivedAt
+    // only — the tab, not the flag, is what says nobody loads them.
+    api.listSkills.mockResolvedValue([
+      makeSkill({ id: "own_old", name: "old_thing", archivedAt: 1 }),
+    ]);
+    await renderSection();
+
+    expect(dotIsLit(ownGroup(), "release_notes")).toBe(true);
+    expect(dotIsLit(ownGroup(), "paused")).toBe(false);
+
+    await userEvent.click(screen.getByRole("button", { name: "Archived" }));
+    await screen.findByText("old_thing");
+    expect(dotIsLit(ownGroup(), "old_thing")).toBe(false);
+  });
+
+  /**
+   * A write that SUCCEEDED and a re-read that failed are not the same event. If
+   * the failed GET rolls the switch back, the page tells the reader a skill is
+   * included that the server has already excluded — the UI stating the opposite
+   * of the truth, which is the failure this whole surface exists to prevent.
+   */
+  it("keeps a successful exclusion when only the re-read fails", async () => {
+    api.listAgentSkills
+      .mockResolvedValueOnce(AGENT_SKILLS)
+      .mockRejectedValue(new Error("The workspace is unreachable"));
+    await renderSection("wb_one");
+
+    await userEvent.click(
+      screen.getByRole("switch", { name: "Exclude code_review from this agent" }),
+    );
+
+    expect(api.setLibrarySkillExcluded).toHaveBeenCalledWith("wb_one", "skl_review", true);
+    await waitFor(() =>
+      expect(toasts.error).toHaveBeenCalledWith("Saved, but couldn’t reload this agent’s skills."),
+    );
+    // Not rolled back, and not reported as a failed write.
+    expect(
+      screen.getByRole("switch", { name: "Use code_review on this agent" }),
+    ).toBeInTheDocument();
+    expect(toasts.error).not.toHaveBeenCalledWith("Couldn’t update the skill.");
+    expect(toasts.error).not.toHaveBeenCalledWith("The workspace is unreachable");
   });
 
   it("archiving from an agent page archives the AGENT's skill, not the library's", async () => {

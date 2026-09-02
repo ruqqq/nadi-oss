@@ -99,9 +99,14 @@ const skillHandlers = [
     const archived = new URL(request.url).searchParams.get("archived") === "1";
     const { list, agentId } = skillScope(request.url);
     const scoped = list.filter((s) => (archived ? s.archivedAt : !s.archivedAt)).sort(byName);
-    // The count is a LIBRARY-scope field: on an agent's own skills it would
-    // always read 1, and its presence would imply the skill is shared.
-    if (agentId) return HttpResponse.json({ skills: scoped });
+    // The count is a LIBRARY-scope field, and never sent on the archived tab:
+    // on an agent's own skills it would always read 1, and its presence would
+    // imply the skill is shared; on an archived row the server's
+    // `countAgentsLiveOn` requires `archived_at IS NULL`, so it skips the query
+    // rather than sending a zero (`src/http/skill-routes.ts` `listSkills`).
+    // Absent is not zero — sending 0 here would render a state the real app
+    // cannot produce.
+    if (agentId || archived) return HttpResponse.json({ skills: scoped });
     return HttpResponse.json({
       skills: scoped.map((s) => ({ ...s, liveOnAgentCount: liveOnAgentCount(s) })),
     });

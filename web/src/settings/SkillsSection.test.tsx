@@ -43,6 +43,48 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
+/**
+ * Is the status dot lit on this row? The dot is `aria-hidden` and carries no
+ * text, so it is reached by the class that draws it; a missing dot throws
+ * rather than reading as "not lit".
+ */
+function dotIsLit(name: string): boolean {
+  const row = screen.getByText(name).closest("li");
+  if (!row) throw new Error(`no row for ${name}`);
+  const dot = row.querySelector("span.size-2.shrink-0.rounded-full");
+  if (!dot) throw new Error(`no status dot on the ${name} row`);
+  return dot.classList.contains("bg-approve");
+}
+
+describe("SkillsSection status dot", () => {
+  /**
+   * The count keeps reporting carriers for a switched-off skill, but
+   * `listEffective` filters on `enabled`, so it resolves for nobody. The dot has
+   * to agree with the runtime, not with the number next to it.
+   */
+  it("lights the dot only for a library skill the agents actually load", async () => {
+    api.listSkills.mockImplementation(async (archived: boolean) =>
+      archived
+        ? [makeSkill({ id: "z", name: "zulu", archivedAt: 1 })]
+        : [
+            makeSkill({ id: "a", name: "alpha", liveOnAgentCount: 4 }),
+            makeSkill({ id: "b", name: "bravo", enabled: false, liveOnAgentCount: 4 }),
+          ],
+    );
+    render(<SkillsSection />);
+
+    await screen.findByText("alpha");
+    expect(dotIsLit("alpha")).toBe(true);
+    expect(dotIsLit("bravo")).toBe(false);
+
+    await userEvent.click(screen.getByRole("button", { name: "Archived" }));
+    await screen.findByText("zulu");
+    // Archiving writes archivedAt only, so the row is still `enabled`; the tab
+    // is what says nobody loads it.
+    expect(dotIsLit("zulu")).toBe(false);
+  });
+});
+
 describe("SkillsSection reach line", () => {
   it("counts the agents a live library skill reaches, singular and plural", async () => {
     api.listSkills.mockResolvedValue([
