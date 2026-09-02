@@ -154,6 +154,133 @@ describe("skill management tools", () => {
     );
   });
 
+  /**
+   * The other door into the library's edit gap. These tools are scoped to the
+   * thread's agent, so a shared library skill is invisible to `edit`/`archive`
+   * even though the model can READ it (the catalog is `listEffective`). A bare
+   * "not found" steers the model into `create_skill` with the same name, which
+   * SUCCEEDS and forks a private copy — this agent fixed, every other agent
+   * silently stale.
+   *
+   * These assert the TOOL RESULT, which is what the model is shown: `execute`'s
+   * return value is the tool output the SDK feeds back into the turn, not a log
+   * line.
+   */
+  it("redirects a library skill to Settings instead of answering not found", async () => {
+    await seedRegistryThread(env.REGISTRY_DB, {
+      workspaceId: "workspace-lib",
+      agentId: "agent-lib",
+      threadId: "thread-lib",
+    });
+    const repo = new AgentSkillRepository(drizzle(env.REGISTRY_DB, { schema }));
+    await repo.create({
+      workspaceId: "workspace-lib",
+      agentId: null,
+      name: "deploy",
+      description: "Deploy",
+      body: "Library body",
+    });
+    const tools = createSkillManagementTools({ env, threadId: "thread-lib" });
+
+    for (const result of [
+      await runTool(tools, "edit_skill", { name: "Deploy", body: "Fixed" }),
+      await runTool(tools, "delete_skill", { name: "deploy" }),
+    ]) {
+      expect(result).toContain("shared workspace-library skill");
+      expect(result).toContain("Settings -> Skills");
+      // The steer away from the fork, which is the whole point of the message.
+      expect(result).toContain("Do NOT create a skill with the same name");
+      // The old wording is GONE, not merely appended to.
+      expect(result).not.toContain("skill deploy not found");
+    }
+
+    // The library row is untouched by either refusal.
+    await expect(
+      repo.getActiveByName({ workspaceId: "workspace-lib", agentId: null, name: "deploy" }),
+    ).resolves.toMatchObject({ body: "Library body", archivedAt: null });
+
+    // ...and a name that is in NEITHER scope still gets the plain answer, so the
+    // redirect cannot swallow a genuine typo.
+    await expect(runTool(tools, "edit_skill", { name: "nowhere", body: "x" })).resolves.toBe(
+      "error: skill nowhere not found",
+    );
+  });
+
+  /**
+   * The redirect must not fire for the agent's OWN skill of the same name: that
+   * one is editable here, and telling the model to go to Settings would send it
+   * to a page that cannot change this agent's private copy.
+   */
+  it("still edits the agent's own skill when the library has one by the same name", async () => {
+    await seedRegistryThread(env.REGISTRY_DB, {
+      workspaceId: "workspace-both",
+      agentId: "agent-both",
+      threadId: "thread-both",
+    });
+    const repo = new AgentSkillRepository(drizzle(env.REGISTRY_DB, { schema }));
+    await repo.create({
+      workspaceId: "workspace-both",
+      agentId: null,
+      name: "deploy",
+      description: "Shared",
+      body: "Library body",
+    });
+    await repo.create({
+      workspaceId: "workspace-both",
+      agentId: "agent-both",
+      name: "deploy",
+      description: "Private",
+      body: "Own body",
+    });
+    const tools = createSkillManagementTools({ env, threadId: "thread-both" });
+
+    await expect(runTool(tools, "edit_skill", { name: "deploy", body: "Fixed" })).resolves.toBe(
+      "edited skill: deploy",
+    );
+    await expect(
+      repo.getActiveByName({
+        workspaceId: "workspace-both",
+        agentId: "agent-both",
+        name: "deploy",
+      }),
+    ).resolves.toMatchObject({ body: "Fixed" });
+    // The library copy is NOT what was edited.
+    await expect(
+      repo.getActiveByName({ workspaceId: "workspace-both", agentId: null, name: "deploy" }),
+    ).resolves.toMatchObject({ body: "Library body" });
+  });
+
+  /**
+   * Scope, not just name: another workspace's library skill must read as a plain
+   * "not found", or the message leaks that a skill by that name exists
+   * elsewhere.
+   */
+  it("does not redirect for a library skill in another workspace", async () => {
+    await seedRegistryThread(env.REGISTRY_DB, {
+      workspaceId: "workspace-mine",
+      agentId: "agent-mine",
+      threadId: "thread-mine",
+    });
+    // The other workspace has to exist: `skills.workspace_id` is a FK.
+    await seedRegistryThread(env.REGISTRY_DB, {
+      workspaceId: "workspace-theirs",
+      agentId: "agent-theirs",
+      threadId: "thread-theirs",
+    });
+    await new AgentSkillRepository(drizzle(env.REGISTRY_DB, { schema })).create({
+      workspaceId: "workspace-theirs",
+      agentId: null,
+      name: "deploy",
+      description: "Theirs",
+      body: "Theirs",
+    });
+    const tools = createSkillManagementTools({ env, threadId: "thread-mine" });
+
+    await expect(runTool(tools, "edit_skill", { name: "deploy", body: "x" })).resolves.toBe(
+      "error: skill deploy not found",
+    );
+  });
+
   it("create_skill attaches a script and declares network domains", async () => {
     await seedRegistryThread(env.REGISTRY_DB, {
       workspaceId: "workspace-a",

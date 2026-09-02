@@ -25,6 +25,42 @@ export function createSkillManagementTools(input: { env: Env; threadId: string }
     };
   }
 
+  /**
+   * Why an agent-scoped write missed, in terms the MODEL can act on.
+   *
+   * These tools are hard-scoped to the thread's agent (`resolveScope`), so a
+   * workspace-LIBRARY skill (`agent_id IS NULL`, shared by every agent) is
+   * invisible to `edit`/`archive` even though the model can READ it — the
+   * catalog comes from `listEffective`, which resolves library rows. A bare
+   * "not found" for a skill the model is looking at steers it straight into
+   * `create_skill` with the same name, which SUCCEEDS
+   * (`assertActiveNameAvailable` is agent-scoped and
+   * `idx_skills_agent_name_unique` is partial on `agent_id IS NOT NULL`) and
+   * forks a PRIVATE copy: this agent gets the fix and every other agent silently
+   * keeps the old body. So name the scope, name the editor that can change it,
+   * and name the trap.
+   *
+   * This does not widen what the tools can write. Scoping them to the effective
+   * set is a separate product decision — filed in the P4 ledger.
+   */
+  async function missingSkillMessage(
+    repo: AgentSkillRepository,
+    workspaceId: string,
+    stableName: string,
+    verb: "edited" | "deleted",
+  ): Promise<string> {
+    const library = await repo.getActiveByName({ workspaceId, agentId: null, name: stableName });
+    if (!library) return `error: skill ${stableName} not found`;
+    return (
+      `error: ${stableName} is a shared workspace-library skill, not this agent's own, ` +
+      `so it cannot be ${verb} from chat. It is edited in Settings -> Skills, where one ` +
+      `edit reaches every agent that loads it. Do NOT create a skill with the same name: ` +
+      `that forks a private copy for this agent only and leaves every other agent on the ` +
+      `old version. Tell the user to change it there, or - if only this agent should ` +
+      `differ - to copy it onto this agent first from the agent's Skills page.`
+    );
+  }
+
   function errorMessage(error: unknown): string {
     if (error instanceof AgentSkillNameError) return "error: invalid skill name";
     if (error instanceof AgentSkillDuplicateError) return `error: ${error.message}`;
@@ -144,7 +180,8 @@ export function createSkillManagementTools(input: { env: Env; threadId: string }
             ...(body !== undefined ? { body } : {}),
           };
           const edited = await repo.edit(editInput);
-          if (!edited) return `error: skill ${normalizeSkillName(name)} not found`;
+          if (!edited)
+            return missingSkillMessage(repo, scope.workspaceId, normalizeSkillName(name), "edited");
           if (script) {
             await repo.setScript({
               workspaceId: scope.workspaceId,
@@ -184,7 +221,7 @@ export function createSkillManagementTools(input: { env: Env; threadId: string }
             agentId: scope.agentId,
             name,
           });
-          if (!archived) return `error: skill ${stableName} not found`;
+          if (!archived) return missingSkillMessage(repo, scope.workspaceId, stableName, "deleted");
           return `deleted skill: ${stableName}`;
         } catch (error) {
           return errorMessage(error);

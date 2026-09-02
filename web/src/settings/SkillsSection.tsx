@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ArchiveButton } from "../components/ArchiveButton";
 import { SKILLS_SETTINGS_HINT } from "../settings-ui-config";
@@ -40,12 +40,23 @@ export function SkillsSection() {
   // `Skill | null` could not tell "create" from "closed".
   const [editing, setEditing] = useState<{ skill: Skill | null } | null>(null);
 
+  /**
+   * The newest listing request. Every read stamps itself and drops its result if
+   * a later one has started, so a slow initial load cannot land on top of the
+   * list a save has already refreshed and make a just-created skill vanish.
+   */
+  const requestRef = useRef(0);
+
   const load = useCallback(() => {
+    const token = ++requestRef.current;
     setSkills(null);
     setLoadError(null);
     void listSkills(showArchived)
-      .then(setSkills)
+      .then((rows) => {
+        if (requestRef.current === token) setSkills(rows);
+      })
       .catch((err: unknown) => {
+        if (requestRef.current !== token) return;
         setSkills([]);
         setLoadError(err instanceof Error ? err : new Error(String(err)));
       });
@@ -94,19 +105,32 @@ export function SkillsSection() {
    * plain `serialize`), so patching the row in place would blank the reach line
    * on the very interaction it exists to inform — the defect Task 3 fixed on
    * the enabled toggle, one write next door. A rename also reorders the
-   * name-sorted list, which only the server can do correctly.
+   * name-sorted list, AND changes the count (`countAgentsLiveOn`'s shadow
+   * subquery joins on the NAME), which only the server can recompute.
    *
-   * Errors are re-thrown, not toasted: the dialog owns them, so the draft stays
-   * on screen and a rejected name can be corrected instead of retyped.
+   * The write and the re-read are deliberately NOT in one `try`, the same rule
+   * `AgentSkillsSection.run()` follows. The dialog treats a rejection from here
+   * as "the write was refused": it stays open, keeps the draft, and renders the
+   * message. So letting a failed re-read reject would tell the reader their
+   * skill was not saved while the server holds it — and the obvious retry then
+   * 409s against a row that is nowhere in the list. A failed write rejects and
+   * the dialog owns it; a failed re-read is only a stale view, says so, and
+   * lets the change stand.
    */
   const onSave = useCallback(
     async (target: Skill | null, draft: SkillDraft) => {
       if (target) await updateSkill(target.id, draft);
       else await createSkill(draft);
-      // Silent: `load()` blanks the list to its skeleton first, and flashing
-      // three placeholders over a list the reader is already looking at reads
-      // as a page reload rather than a save.
-      setSkills(await listSkills(showArchived));
+      const token = ++requestRef.current;
+      try {
+        // Silent: `load()` blanks the list to its skeleton first, and flashing
+        // three placeholders over a list the reader is already looking at reads
+        // as a page reload rather than a save.
+        const rows = await listSkills(showArchived);
+        if (requestRef.current === token) setSkills(rows);
+      } catch {
+        toast.error("Saved, but couldn’t reload the library.");
+      }
     },
     [showArchived],
   );

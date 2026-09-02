@@ -317,6 +317,69 @@ describe("SkillsSection editor", () => {
     expect(within(dialog).queryByText(/\d+ agent/)).not.toBeInTheDocument();
   });
 
+  /**
+   * A write the server ACCEPTED, followed by a failed re-read, is not a failed
+   * write. `SkillEditorDialog` treats any rejection from `onSave` as "refused":
+   * it stays open, keeps the draft, and renders the message as the reason the
+   * save did not happen. So a single rejection path would tell the reader their
+   * skill was lost while the server holds it, and the obvious retry then 409s
+   * against a row that is nowhere in the list.
+   *
+   * This is verbatim the defect `cfef4b7` fixed in `AgentSkillsSection.run()`
+   * one commit earlier; its test is `keeps a successful exclusion when only the
+   * re-read fails`, and this is its sibling.
+   */
+  it("keeps a saved skill when only the re-read fails, and does not call it a failed save", async () => {
+    api.listSkills
+      .mockResolvedValueOnce([])
+      .mockRejectedValue(new Error("The library is unreachable"));
+    render(<SkillsSection />);
+
+    const dialog = await openEditor("New skill");
+    await userEvent.type(within(dialog).getByLabelText("Name"), "release_notes");
+    await userEvent.type(within(dialog).getByLabelText("Description"), "d");
+    await userEvent.type(within(dialog).getByLabelText("Body"), "b");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+
+    await waitFor(() => expect(api.createSkill).toHaveBeenCalled());
+    // The dialog CLOSES: the write stands.
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(toasts.error).toHaveBeenCalledWith("Saved, but couldn’t reload the library.");
+    // ...and the read's own message is never presented as the write's failure.
+    expect(toasts.error).not.toHaveBeenCalledWith("The library is unreachable");
+  });
+
+  /**
+   * The initial listing and the post-save re-read are two reads racing for the
+   * same state. Fill the form faster than the mount-time load resolves and the
+   * slow response lands last, wiping the row that was just created.
+   */
+  it("does not let a slow initial load overwrite a skill saved before it arrived", async () => {
+    let resolveFirst: (rows: Skill[]) => void = () => {};
+    api.listSkills
+      .mockReturnValueOnce(
+        new Promise<Skill[]>((resolve) => {
+          resolveFirst = resolve;
+        }),
+      )
+      .mockResolvedValue([makeSkill({ id: "n", name: "new_skill", liveOnAgentCount: 2 })]);
+    render(<SkillsSection />);
+
+    const dialog = await openEditor("New skill");
+    await userEvent.type(within(dialog).getByLabelText("Name"), "new_skill");
+    await userEvent.type(within(dialog).getByLabelText("Description"), "d");
+    await userEvent.type(within(dialog).getByLabelText("Body"), "b");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+
+    expect(await screen.findByText("new_skill")).toBeInTheDocument();
+
+    // The mount-time listing arrives LAST, with a list that predates the save.
+    resolveFirst([]);
+    await waitFor(() => expect(api.listSkills).toHaveBeenCalledTimes(2));
+    expect(screen.getByText("new_skill")).toBeInTheDocument();
+    expect(screen.queryByText("No skills yet")).not.toBeInTheDocument();
+  });
+
   it("keeps the draft and shows the server's own message when the write is refused", async () => {
     api.createSkill.mockRejectedValue(new Error("A skill with this name is already active"));
     render(<SkillsSection />);
