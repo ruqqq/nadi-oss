@@ -13,6 +13,7 @@ import {
   type SkillDraft,
 } from "../skills-api";
 import { ArrowCounterClockwise, PencilSimple, Plus } from "../icons";
+import { writeThenRefresh } from "../lib/write-then-refresh";
 import { cn } from "@/lib/utils";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -108,29 +109,28 @@ export function SkillsSection() {
    * name-sorted list, AND changes the count (`countAgentsLiveOn`'s shadow
    * subquery joins on the NAME), which only the server can recompute.
    *
-   * The write and the re-read are deliberately NOT in one `try`, the same rule
-   * `AgentSkillsSection.run()` follows. The dialog treats a rejection from here
-   * as "the write was refused": it stays open, keeps the draft, and renders the
-   * message. So letting a failed re-read reject would tell the reader their
-   * skill was not saved while the server holds it — and the obvious retry then
-   * 409s against a row that is nowhere in the list. A failed write rejects and
-   * the dialog owns it; a failed re-read is only a stale view, says so, and
-   * lets the change stand.
+   * `writeThenRefresh` keeps the write and the re-read apart. The dialog treats
+   * a rejection from here as "the write was refused": it stays open, keeps the
+   * draft, and renders the message. So a failed re-read must not reject, or the
+   * reader is told their skill was not saved while the server holds it — and
+   * the obvious retry then 409s against a row that is nowhere in the list. Only
+   * `ok: false` is the write's own failure, and only that is rethrown.
    */
   const onSave = useCallback(
     async (target: Skill | null, draft: SkillDraft) => {
-      if (target) await updateSkill(target.id, draft);
-      else await createSkill(draft);
-      const token = ++requestRef.current;
-      try {
-        // Silent: `load()` blanks the list to its skeleton first, and flashing
-        // three placeholders over a list the reader is already looking at reads
-        // as a page reload rather than a save.
-        const rows = await listSkills(showArchived);
-        if (requestRef.current === token) setSkills(rows);
-      } catch {
-        toast.error("Saved, but couldn’t reload the library.");
-      }
+      const result = await writeThenRefresh(
+        () => (target ? updateSkill(target.id, draft) : createSkill(draft)),
+        async () => {
+          // Silent: `load()` blanks the list to its skeleton first, and flashing
+          // three placeholders over a list the reader is already looking at reads
+          // as a page reload rather than a save.
+          const token = ++requestRef.current;
+          const rows = await listSkills(showArchived);
+          if (requestRef.current === token) setSkills(rows);
+        },
+        "Saved, but couldn’t reload the library.",
+      );
+      if (!result.ok) throw result.error;
     },
     [showArchived],
   );

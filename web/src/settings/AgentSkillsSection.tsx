@@ -15,6 +15,7 @@ import {
   type Skill,
 } from "../skills-api";
 import { ArrowCounterClockwise, Copy, Stack } from "../icons";
+import { writeThenRefresh } from "../lib/write-then-refresh";
 import { cn } from "@/lib/utils";
 import {
   AlertDialog,
@@ -101,26 +102,24 @@ export function AgentSkillsSection({
   /**
    * Run a write, then re-read both groups; surface the server's own message.
    *
-   * The two awaits are deliberately NOT in one `try`. A write that SUCCEEDED
-   * followed by a failed re-read is not a failed write: reporting it as one
-   * rolls the caller's optimistic state back, leaving the switch reading
+   * `writeThenRefresh` is what keeps the two apart. A write that SUCCEEDED
+   * followed by a failed re-read is not a failed write: returning `false` for
+   * one rolls the caller's optimistic state back, leaving the switch reading
    * "included" for a skill the agent no longer loads — the UI stating the
    * opposite of the truth, which is the exact failure this surface exists to
-   * prevent. A failed refresh is only a stale view, so it says that instead and
-   * the change stands.
+   * prevent. So `false` here means the write itself was refused, and nothing
+   * else can produce it.
    */
   const run = useCallback(
     async (fallback: string, action: () => Promise<unknown>) => {
-      try {
-        await action();
-      } catch (err) {
-        toast.error(err instanceof Error ? err.message : fallback);
+      const result = await writeThenRefresh(
+        action,
+        refresh,
+        "Saved, but couldn’t reload this agent’s skills.",
+      );
+      if (!result.ok) {
+        toast.error(result.error instanceof Error ? result.error.message : fallback);
         return false;
-      }
-      try {
-        await refresh();
-      } catch {
-        toast.error("Saved, but couldn’t reload this agent’s skills.");
       }
       return true;
     },

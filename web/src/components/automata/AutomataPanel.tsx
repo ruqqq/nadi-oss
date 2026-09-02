@@ -16,6 +16,7 @@ import {
 } from "../../icons";
 import { useMediaQuery } from "../../lib/use-media-query";
 import { cn } from "../../lib/utils";
+import { writeThenRefresh } from "../../lib/write-then-refresh";
 import {
   archiveAutomaton,
   createAutomaton,
@@ -597,67 +598,76 @@ export function AutomataPanel({
     const overrideModel = form.modelProvider ? form.model.trim() : "";
     setBusy(true);
     setDetailError(null);
-    try {
-      const payload: CreateAutomatonInput = {
-        name,
-        prompt,
-        schedule: scheduleFromForm(form),
-        timezone,
-        projectId: form.projectId === "none" ? null : form.projectId,
-        agentId: form.agentId,
-        enabled: form.enabled,
-        notifyMode: form.notifyMode,
-        // Half an override is no override: a provider with an empty model box
-        // falls back to the agent's model rather than saving something unrunnable.
-        ...(overrideModel
-          ? {
-              modelProvider: form.modelProvider,
-              model: overrideModel,
-              modelInputModalities: form.modelInputModalities,
-            }
-          : { modelProvider: null, model: null, modelInputModalities: null }),
-      };
-      const saved = isCreatingView
-        ? await createAutomaton(payload)
-        : await updateAutomaton(selectedId!, payload);
-      await refreshList();
-      setCreating(false);
-      appliedIdRef.current = saved.id;
-      onSelect(saved.id, "replace");
-      applyForm(formFromAutomaton(saved));
-      fetchDetail(saved.id);
-      toast.success(isCreatingView ? "Automaton created" : "Automaton saved");
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Couldn't save the automaton.";
+    const payload: CreateAutomatonInput = {
+      name,
+      prompt,
+      schedule: scheduleFromForm(form),
+      timezone,
+      projectId: form.projectId === "none" ? null : form.projectId,
+      agentId: form.agentId,
+      enabled: form.enabled,
+      notifyMode: form.notifyMode,
+      // Half an override is no override: a provider with an empty model box
+      // falls back to the agent's model rather than saving something unrunnable.
+      ...(overrideModel
+        ? {
+            modelProvider: form.modelProvider,
+            model: overrideModel,
+            modelInputModalities: form.modelInputModalities,
+          }
+        : { modelProvider: null, model: null, modelInputModalities: null }),
+    };
+    // Split from the list re-read: an automaton the server saved must not be
+    // reported as unsaved because the list would not reload — the form would
+    // stay open over a row that already exists, and re-saving it collides.
+    const result = await writeThenRefresh(
+      () => (isCreatingView ? createAutomaton(payload) : updateAutomaton(selectedId!, payload)),
+      refreshList,
+      "Saved, but couldn't reload the automaton list.",
+    );
+    setBusy(false);
+    if (!result.ok) {
+      const message =
+        result.error instanceof Error ? result.error.message : "Couldn't save the automaton.";
       setDetailError(message);
       toast.error(isCreatingView ? "Couldn't create automaton" : "Couldn't save automaton");
-    } finally {
-      setBusy(false);
+      return;
     }
+    const saved = result.value;
+    setCreating(false);
+    appliedIdRef.current = saved.id;
+    onSelect(saved.id, "replace");
+    applyForm(formFromAutomaton(saved));
+    fetchDetail(saved.id);
+    toast.success(isCreatingView ? "Automaton created" : "Automaton saved");
   }, [applyForm, fetchDetail, form, isCreatingView, refreshList, selectedId]);
 
   const handleDelete = useCallback(async () => {
     if (!selectedId) return;
     setBusy(true);
-    try {
-      await archiveAutomaton(selectedId);
-      await refreshList();
-      setDetails((current) => {
-        const next = { ...current };
-        delete next[selectedId];
-        return next;
-      });
-      setCreating(false);
-      appliedIdRef.current = undefined;
-      // Leaves no entry pointing at the deleted automaton: pops the detail entry
-      // on mobile, replaces it on desktop (where it lands on the next one).
-      onBackToList();
-      toast.success("Automaton deleted");
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Couldn't delete the automaton.");
-    } finally {
-      setBusy(false);
+    const result = await writeThenRefresh(
+      () => archiveAutomaton(selectedId),
+      refreshList,
+      "Deleted, but couldn't reload the automaton list.",
+    );
+    setBusy(false);
+    if (!result.ok) {
+      toast.error(
+        result.error instanceof Error ? result.error.message : "Couldn't delete the automaton.",
+      );
+      return;
     }
+    setDetails((current) => {
+      const next = { ...current };
+      delete next[selectedId];
+      return next;
+    });
+    setCreating(false);
+    appliedIdRef.current = undefined;
+    // Leaves no entry pointing at the deleted automaton: pops the detail entry
+    // on mobile, replaces it on desktop (where it lands on the next one).
+    onBackToList();
+    toast.success("Automaton deleted");
   }, [onBackToList, refreshList, selectedId]);
 
   const handleToggleEnabled = useCallback(

@@ -28,6 +28,7 @@ import { formatRelativeTime } from "../../lib/thread-time";
 import { useProgressiveList } from "../../lib/use-progressive-list";
 import { useThreadQuery } from "../../lib/use-thread-query";
 import { cn } from "../../lib/utils";
+import { writeThenRefresh } from "../../lib/write-then-refresh";
 import { ShowMoreRow } from "../chat/ShowMoreRow";
 import { ThreadIndicator } from "../chat/ThreadIndicator";
 import { Alert, AlertDescription } from "../ui/alert";
@@ -358,45 +359,53 @@ export function ProjectsPanel({
     }
     setBusyProject(true);
     setProjectError(null);
-    try {
-      const payload = {
-        name: projectForm.name,
-        description: projectForm.description,
-        customInstructions: projectForm.customInstructions,
-        defaultAgentId: projectForm.defaultAgentId,
-      };
-      const savedProject = selectedProjectId
-        ? await updateProject(selectedProjectId, payload)
-        : await createProject(payload);
-      await refreshProjects();
-      setCreating(false);
-      onSelect(savedProject.id, "replace");
-      toast.success(selectedProjectId ? "Project updated" : "Project created");
-    } catch (error) {
-      setProjectError(error instanceof Error ? error.message : "Could not save project.");
+    const payload = {
+      name: projectForm.name,
+      description: projectForm.description,
+      customInstructions: projectForm.customInstructions,
+      defaultAgentId: projectForm.defaultAgentId,
+    };
+    // The list re-read is split from the write: a project the server saved must
+    // not be reported as unsaved just because the list would not reload, or the
+    // form stays open over a row that already exists and re-saving it collides.
+    const result = await writeThenRefresh(
+      () =>
+        selectedProjectId ? updateProject(selectedProjectId, payload) : createProject(payload),
+      refreshProjects,
+      "Saved, but couldn't reload the project list.",
+    );
+    setBusyProject(false);
+    if (!result.ok) {
+      setProjectError(result.error instanceof Error ? result.error.message : "Could not save project.");
       toast.error("Couldn't save project");
-    } finally {
-      setBusyProject(false);
+      return;
     }
+    setCreating(false);
+    onSelect(result.value.id, "replace");
+    toast.success(selectedProjectId ? "Project updated" : "Project created");
   }, [projectForm, refreshProjects, selectedProjectId, onSelect]);
 
   const handleArchiveProject = useCallback(async () => {
     if (!selectedProjectId) return;
     setBusyProject(true);
     setProjectError(null);
-    try {
-      await archiveProject(selectedProjectId);
-      await refreshProjects();
-      // Leaves no entry pointing at the archived project: pops the detail entry
-      // on mobile, replaces it on desktop (where it lands on the next one).
-      onBackToList();
-      toast.success("Project archived");
-    } catch (error) {
-      setProjectError(error instanceof Error ? error.message : "Could not archive project.");
+    const result = await writeThenRefresh(
+      () => archiveProject(selectedProjectId),
+      refreshProjects,
+      "Archived, but couldn't reload the project list.",
+    );
+    setBusyProject(false);
+    if (!result.ok) {
+      setProjectError(
+        result.error instanceof Error ? result.error.message : "Could not archive project.",
+      );
       toast.error("Couldn't archive project");
-    } finally {
-      setBusyProject(false);
+      return;
     }
+    // Leaves no entry pointing at the archived project: pops the detail entry
+    // on mobile, replaces it on desktop (where it lands on the next one).
+    onBackToList();
+    toast.success("Project archived");
   }, [refreshProjects, selectedProjectId, onBackToList]);
 
   return (
