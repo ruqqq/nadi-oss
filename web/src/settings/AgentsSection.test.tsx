@@ -41,7 +41,7 @@ vi.mock("../agents-api", async () => {
 // This file is about the agent page's own behaviour, so they are stubbed rather
 // than served — an unmocked fetch here would be an unhandled rejection, not a
 // signal.
-vi.mock("./SkillsSection", () => ({ SkillsSection: () => null }));
+vi.mock("./AgentSkillsSection", () => ({ AgentSkillsSection: () => null }));
 vi.mock("./MemorySection", () => ({ MemorySection: () => null }));
 
 import { AgentsSection } from "./AgentsSection";

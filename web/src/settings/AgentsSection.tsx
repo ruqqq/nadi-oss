@@ -75,7 +75,7 @@ import { Textarea } from "../components/ui/textarea";
 import { SandboxEnvVarsPanel } from "./SandboxEnvVarsPanel";
 import { SandboxSecretsPanel } from "./SandboxSecretsPanel";
 import { AgentRepositories } from "./AgentRepositories";
-import { SkillsSection } from "./SkillsSection";
+import { AgentSkillsSection } from "./AgentSkillsSection";
 import { MemorySection } from "./MemorySection";
 
 /**
@@ -586,12 +586,7 @@ function AgentDetailPage({
       {agent && (
         <>
           <Band title="Knowledge" description="What this agent carries between chats.">
-            <FormCard
-              title="Skills"
-              description="Private to this agent. A skill here shadows a library skill of the same name."
-            >
-              <SkillsSection agentId={agent.id} />
-            </FormCard>
+            <AgentSkillsSection agentId={agent.id} />
             <FormCard title="Memory" description="What this agent remembers between chats.">
               <MemorySection agentId={agent.id} />
             </FormCard>

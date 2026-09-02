@@ -3,24 +3,26 @@ import { toast } from "sonner";
 import { ArchiveButton } from "../components/ArchiveButton";
 import { SKILLS_SETTINGS_HINT } from "../settings-ui-config";
 import { archiveSkill, listSkills, restoreSkill, setSkillEnabled, type Skill } from "../skills-api";
-import { ArrowCounterClockwise, CaretDown } from "../icons";
+import { ArrowCounterClockwise } from "../icons";
 import { cn } from "@/lib/utils";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { ButtonGroup } from "@/components/ui/button-group";
 import { Card } from "@/components/ui/card";
-import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { SectionHeading } from "./section-ui";
+import { SkillNote, SkillRow } from "./SkillRow";
 
 /**
- * Skills have two scopes. With no `agentId` this is the workspace LIBRARY —
- * the shared skills every agent inherits, which is what the Skills tab manages.
- * With one, it is that agent's private skills, which shadow a library skill of
- * the same name.
+ * The workspace LIBRARY — the shared skills every agent inherits.
+ *
+ * This section is library-scope only. An agent's own skills, and the library as
+ * that agent sees it, are `AgentSkillsSection`: both groups there come from one
+ * `GET /api/agents/:id/skills`, because archiving an agent's skill un-shadows a
+ * library row and two independently-fetching sections would disagree about it.
  */
-export function SkillsSection({ agentId = null }: { agentId?: string | null } = {}) {
+export function SkillsSection() {
   const [skills, setSkills] = useState<Skill[] | null>(null); // null = loading
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [showArchived, setShowArchived] = useState(false);
@@ -28,13 +30,13 @@ export function SkillsSection({ agentId = null }: { agentId?: string | null } = 
   const load = useCallback(() => {
     setSkills(null);
     setLoadError(null);
-    void listSkills(showArchived, agentId)
+    void listSkills(showArchived)
       .then(setSkills)
       .catch((err: unknown) => {
         setSkills([]);
         setLoadError(err instanceof Error ? err : new Error(String(err)));
       });
-  }, [showArchived, agentId]);
+  }, [showArchived]);
 
   useEffect(() => {
     load();
@@ -44,8 +46,15 @@ export function SkillsSection({ agentId = null }: { agentId?: string | null } = 
     const next = !skill.enabled;
     setSkills((cur) => cur?.map((s) => (s.id === skill.id ? { ...s, enabled: next } : s)) ?? null);
     try {
-      const updated = await setSkillEnabled(skill.id, next, agentId);
-      setSkills((cur) => cur?.map((s) => (s.id === updated.id ? updated : s)) ?? null);
+      const updated = await setSkillEnabled(skill.id, next);
+      // The server does not recompute the reach count on a write, so keep the
+      // one we were listed with rather than dropping the line mid-interaction.
+      setSkills(
+        (cur) =>
+          cur?.map((s) =>
+            s.id === updated.id ? { ...updated, liveOnAgentCount: s.liveOnAgentCount } : s,
+          ) ?? null,
+      );
     } catch (err) {
       setSkills(
         (cur) => cur?.map((s) => (s.id === skill.id ? { ...s, enabled: !next } : s)) ?? null,
@@ -56,7 +65,7 @@ export function SkillsSection({ agentId = null }: { agentId?: string | null } = 
 
   const onArchive = useCallback(async (skill: Skill) => {
     try {
-      await archiveSkill(skill.id, agentId);
+      await archiveSkill(skill.id);
       setSkills((cur) => cur?.filter((s) => s.id !== skill.id) ?? null);
       toast.success(`Archived “${skill.name}”`);
     } catch (err) {
@@ -66,7 +75,7 @@ export function SkillsSection({ agentId = null }: { agentId?: string | null } = 
 
   const onRestore = useCallback(async (skill: Skill) => {
     try {
-      await restoreSkill(skill.id, agentId);
+      await restoreSkill(skill.id);
       setSkills((cur) => cur?.filter((s) => s.id !== skill.id) ?? null);
       toast.success(`Restored “${skill.name}”`);
     } catch (err) {
@@ -136,105 +145,69 @@ export function SkillsSection({ agentId = null }: { agentId?: string | null } = 
         </div>
       ) : (
         <ul className="space-y-3">
-          {skills.map((skill) => (
+          {skills.map((skill) => {
+            const reach = showArchived ? null : reachLine(skill);
+            return (
             <SkillRow
               key={skill.id}
               skill={skill}
-              archivedView={showArchived}
-              onToggle={onToggle}
-              onArchive={onArchive}
-              onRestore={onRestore}
+              live={skill.enabled && !showArchived}
+              dimmed={!skill.enabled && !showArchived}
+              notes={reach ? <SkillNote>{reach}</SkillNote> : null}
+              trailing={
+                showArchived ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => onRestore(skill)}
+                    aria-label={`Restore ${skill.name}`}
+                  >
+                    <ArrowCounterClockwise aria-hidden /> Restore
+                  </Button>
+                ) : (
+                  <>
+                    <Switch
+                      checked={skill.enabled}
+                      onCheckedChange={() => onToggle(skill)}
+                      aria-label={skill.enabled ? `Disable ${skill.name}` : `Enable ${skill.name}`}
+                    />
+                    <ArchiveButton
+                      itemName={skill.name}
+                      kind="skill"
+                      onConfirm={() => onArchive(skill)}
+                    />
+                  </>
+                )
+              }
             />
-          ))}
+            );
+          })}
         </ul>
       )}
     </section>
   );
 }
 
-function SkillRow({
-  skill,
-  archivedView,
-  onToggle,
-  onArchive,
-  onRestore,
-}: {
-  skill: Skill;
-  archivedView: boolean;
-  onToggle: (s: Skill) => void;
-  onArchive: (s: Skill) => void;
-  onRestore: (s: Skill) => void;
-}) {
-  const [expanded, setExpanded] = useState(false);
-
-  return (
-    <li>
-      <Card className={cn("overflow-hidden p-0", !skill.enabled && !archivedView && "opacity-70")}>
-        <div className="flex items-center gap-3 p-3">
-          <span
-            className={cn(
-              "size-2 shrink-0 rounded-full",
-              skill.enabled && !archivedView ? "bg-approve" : "bg-muted-foreground/40",
-            )}
-            aria-hidden="true"
-          />
-          <button
-            className="group/expand -m-1 flex min-w-0 flex-1 items-center gap-2 rounded-md p-1 text-left transition-colors hover:bg-muted/50"
-            type="button"
-            onClick={() => setExpanded((value) => !value)}
-            aria-expanded={expanded}
-            aria-controls={`skill-body-${skill.id}`}
-            title={expanded ? "Hide skill body" : "Show skill body"}
-          >
-            <CaretDown
-              aria-hidden
-              className={cn(
-                "size-3.5 shrink-0 text-muted-foreground transition-transform",
-                expanded && "rotate-180",
-              )}
-            />
-            <span className="flex min-w-0 flex-col">
-              <span className="truncate font-medium text-sm">{skill.name}</span>
-              <span className="truncate text-muted-foreground text-xs">{skill.description}</span>
-            </span>
-          </button>
-
-          {archivedView ? (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => onRestore(skill)}
-              aria-label={`Restore ${skill.name}`}
-            >
-              <ArrowCounterClockwise aria-hidden /> Restore
-            </Button>
-          ) : (
-            <>
-              <Switch
-                checked={skill.enabled}
-                onCheckedChange={() => onToggle(skill)}
-                aria-label={skill.enabled ? `Disable ${skill.name}` : `Enable ${skill.name}`}
-              />
-              <ArchiveButton
-                itemName={skill.name}
-                kind="skill"
-                onConfirm={() => onArchive(skill)}
-              />
-            </>
-          )}
-        </div>
-
-        {expanded && (
-          <>
-            <Separator />
-            <div id={`skill-body-${skill.id}`} className="bg-muted/30 p-3">
-              <pre className="whitespace-pre-wrap break-words font-mono text-muted-foreground text-xs">
-                {skill.body}
-              </pre>
-            </div>
-          </>
-        )}
-      </Card>
-    </li>
-  );
+/**
+ * How far this library skill reaches — deliberately still a count while the
+ * skill is switched off, because the off state is reversible and collapsing the
+ * number to zero would hide the blast radius exactly when someone is deciding
+ * whether to edit it. `listEffective` filters on `enabled`, so a disabled skill
+ * resolves for NOBODY; the conditional mood is what keeps the line honest, and
+ * it is only safe because the switch sits on the same row.
+ *
+ * Absent on an older server, and on the archived tab, where it means nothing —
+ * we render no line at all rather than a confident zero.
+ */
+function reachLine(skill: Skill): string | null {
+  const count = skill.liveOnAgentCount;
+  if (typeof count !== "number") return null;
+  if (skill.enabled) {
+    if (count === 0) return "Not live on any agent";
+    return count === 1 ? "Live on 1 agent" : `Live on ${count} agents`;
+  }
+  if (count === 0) return "Switched off — no agent would load it";
+  return count === 1
+    ? "Switched off — 1 agent would load it"
+    : `Switched off — ${count} agents would load it`;
 }

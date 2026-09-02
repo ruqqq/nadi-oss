@@ -27,7 +27,10 @@ export function ArchiveButton({
         <Button
           variant="ghost"
           size="icon"
-          aria-label={`Archive ${kind}`}
+          // Names the item, not just the kind: a page can list a dozen of these
+          // (an agent's own skills and the library it inherits), and "Archive
+          // skill" a dozen times tells a screen reader nothing about which.
+          aria-label={`Archive ${kind} ${itemName}`}
           title={`Archive ${kind}`}
         >
           <Archive aria-hidden />

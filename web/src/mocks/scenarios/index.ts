@@ -504,6 +504,28 @@ function richExtras(): Pick<
         archivedAt: null,
       },
       {
+        id: "skl_notes",
+        name: "release_notes",
+        description: "Turn a merged milestone into notes someone outside the team can read.",
+        body: "# Release notes\n\nLead with what changed for the reader.",
+        enabled: true,
+        createdAt: NOW - 6 * DAY,
+        updatedAt: NOW - DAY,
+        archivedAt: null,
+      },
+      // Every agent has opted out of this one, so its reach line is the real
+      // "Not live on any agent" state rather than a count of zero.
+      {
+        id: "skl_triage",
+        name: "incident_triage",
+        description: "Page, mitigate, then write the timeline.",
+        body: "# Incident triage\n\nMitigate first. Explain second.",
+        enabled: true,
+        createdAt: NOW - 30 * DAY,
+        updatedAt: NOW - 30 * DAY,
+        archivedAt: null,
+      },
+      {
         id: "skl_old",
         name: "legacy_deploy",
         description: "Superseded by the GitHub Actions deploy workflow.",
@@ -530,9 +552,39 @@ function richExtras(): Pick<
           updatedAt: NOW - DAY,
           archivedAt: null,
         },
+        // Disabled but not archived: an agent skill that still shadows nothing
+        // and still occupies its own name.
+        {
+          id: "skl_nadi_bench",
+          name: "benchmarking",
+          description: "Run the latency harness and compare against the last green run.",
+          body: "# Benchmarking\n\nWarm the isolate before you measure it.",
+          enabled: false,
+          createdAt: NOW - 5 * DAY,
+          updatedAt: NOW - 2 * DAY,
+          archivedAt: null,
+        },
+        // Archived, so the agent page's Archived tab has something to restore.
+        {
+          id: "skl_nadi_old",
+          name: "manual_deploy",
+          description: "Superseded by the deploy workflow.",
+          body: "# Manual deploy",
+          enabled: false,
+          createdAt: NOW - 50 * DAY,
+          updatedAt: NOW - 45 * DAY,
+          archivedAt: NOW - 45 * DAY,
+        },
       ],
     },
-    skillExclusions: { wb_docs: ["skl_swe"] },
+    // Spread deliberately so the library's reach line has every value: `skl_swe`
+    // reaches 1 (shadowed on one agent, excluded on another), `skl_notes` 2,
+    // `skl_review` 3 but switched OFF, and `skl_triage` nobody at all.
+    skillExclusions: {
+      wb_docs: ["skl_swe", "skl_triage"],
+      wb_nadi: ["skl_triage"],
+      wb_infra: ["skl_notes", "skl_triage"],
+    },
     memories: [
       {
         id: "mem_1",
