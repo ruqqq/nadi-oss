@@ -88,6 +88,17 @@ describe("serializeThread readOnly and readOnlyReason", () => {
     expect(summary).not.toHaveProperty("readOnlyReason");
   });
 
+  it("prefers the deleted agent over the disabled one when the agent is both", () => {
+    // Not a contrived combination: `AgentRepository.archive` sets `archived_at`
+    // and leaves `enabled` alone, so an agent the user paused and later deleted
+    // carries both flags. Naming the disable would tell that reader to turn an
+    // agent back on that is no longer in the list — a fix that cannot be done.
+    expect(serializeThread({ ...base, agentArchivedAt: 123, agentEnabled: false })).toMatchObject({
+      readOnly: true,
+      readOnlyReason: "agent_deleted",
+    });
+  });
+
   it("keeps the archived-thread reason when both are true", () => {
     // The thread's own state outranks its agent's: unarchiving is a fix the
     // reader can perform, and naming the agent would be the wrong instruction.

@@ -9,7 +9,7 @@
 
 import { delay, http, HttpResponse } from "msw";
 import type { ThreadSummary } from "../../threads-api";
-import { getStore } from "../store";
+import { getStore, readOnlyStateForThread } from "../store";
 import {
   errorResponse,
   historyUnreachable,
@@ -109,7 +109,13 @@ export const threadHandlers = [
       source: "manual",
       lastMessagePreview: "",
       archivedAt: null,
-      readOnly: false,
+      // Derived, not assumed: this row is built AFTER `getStore()` swept the
+      // store, so a hardcoded `false` would answer this one response wrong for
+      // a thread created against a disabled agent.
+      ...readOnlyStateForThread(
+        { archivedAt: null, runtime: "think", agentId: agent?.id ?? "agent_mock" },
+        store.agents,
+      ),
       status: "active",
       projectId: project?.id ?? null,
       projectName: project?.name ?? null,
@@ -218,11 +224,10 @@ export const threadHandlers = [
     }
     thread.status = "archived";
     thread.archivedAt = Date.now();
-    // Set here as well as derived in `getStore`: this response is built AFTER
-    // that derivation ran, so leaving it to the store would answer this one
-    // request with `readOnly: false` and only agree from the next read on.
-    thread.readOnly = true;
-    thread.readOnlyReason = "thread_archived";
+    // Re-derived here as well as in `getStore`: this response is built AFTER
+    // that sweep ran, so leaving it to the store would answer this one request
+    // with `readOnly: false` and only agree from the next read on.
+    Object.assign(thread, readOnlyStateForThread(thread, getStore().agents));
     thread.updatedAt = Date.now();
     return HttpResponse.json({ thread });
   }),

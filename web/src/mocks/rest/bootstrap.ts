@@ -43,12 +43,13 @@ export const bootstrapHandlers = [
       projects: store.projects.filter((p) => p.archivedAt === null),
       // The LEAN AgentListItem shape (see web/src/agents-api.ts), not the
       // AgentSummary GET /api/agents returns — no repositories/envVars/
-      // secretEnvNames. `enabled` isn't modeled on the mock store's agent
-      // fixtures yet, so it's `true` here; nothing in the mock represents a
-      // disabled agent today.
+      // secretEnvNames. `enabled` is the store's own value, matching
+      // `toAgentListItem` (src/http/agent-routes.ts:80): the `agent-gone`
+      // scenario seeds disabled agents, and hardcoding `true` here would put
+      // one in the composer's picker as if it could still take a turn.
       agents: store.agents
         .filter((a) => a.archivedAt === null)
-        .map((a) => ({ id: a.id, name: a.name, description: a.description, enabled: true })),
+        .map((a) => ({ id: a.id, name: a.name, description: a.description, enabled: a.enabled })),
       features: {
         voiceInput: false,
         workersAi: false,

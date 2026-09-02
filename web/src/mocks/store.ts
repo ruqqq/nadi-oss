@@ -150,31 +150,50 @@ export function getStore(): MockStore {
 }
 
 /**
- * Mirrors `serializeThread` (`src/http/thread-serialize.ts`): `readOnly` and
- * `readOnlyReason` are DERIVED from the thread's own state and its agent's,
- * never stored. Precedence matches the server — the thread's own state first.
+ * Mirrors `resolveReadOnlyReason` (`src/http/thread-serialize.ts`): `readOnly`
+ * and `readOnlyReason` are DERIVED from the thread's own state and its agent's,
+ * never stored. Precedence matches the server exactly — the thread's own state
+ * first, then a deleted agent before a merely disabled one (an agent that was
+ * paused and later deleted carries BOTH flags, and telling that reader to turn
+ * it back on points at a fix that no longer exists).
  *
  * A thread whose agent is not in the store (feedback threads, scenarios that
- * seed no agents) is left alone: an unknown agent is not a disabled one.
+ * seed no agents) is left alone: an unknown agent is not a disabled one, which
+ * is why the agent arm tests `=== false` rather than falsiness — the same
+ * distinction the server's doc comment makes.
+ *
+ * Exported because a handler that BUILDS a thread runs after `getStore()` has
+ * already swept the store, so it has to derive its own row's state rather than
+ * hardcode one. One rule, one function, four call sites.
  */
+export function readOnlyStateForThread(
+  thread: Pick<ThreadSummary, "archivedAt" | "runtime" | "agentId">,
+  agents: AgentSummary[],
+): { readOnly: boolean; readOnlyReason?: ThreadReadOnlyReason } {
+  const agent = agents.find((candidate) => candidate.id === thread.agentId);
+  const reason: ThreadReadOnlyReason | undefined =
+    thread.archivedAt !== null
+      ? "thread_archived"
+      : thread.runtime === "legacy"
+        ? "legacy_runtime"
+        : agent === undefined
+          ? undefined
+          : agent.archivedAt !== null
+            ? "agent_deleted"
+            : agent.enabled === false
+              ? "agent_disabled"
+              : undefined;
+  // Spread, not an assigned `undefined`: `exactOptionalPropertyTypes` rejects
+  // `{ readOnlyReason: undefined }`, and the key must be absent on the wire.
+  return { readOnly: reason !== undefined, ...(reason === undefined ? {} : { readOnlyReason: reason }) };
+}
+
 function applyLiveReadOnly(current: MockStore): void {
   for (const thread of current.threads) {
-    const agent = current.agents.find((candidate) => candidate.id === thread.agentId);
-    const reason: ThreadReadOnlyReason | undefined =
-      thread.archivedAt !== null
-        ? "thread_archived"
-        : thread.runtime === "legacy"
-          ? "legacy_runtime"
-          : agent === undefined
-            ? undefined
-            : agent.archivedAt !== null
-              ? "agent_deleted"
-              : !agent.enabled
-                ? "agent_disabled"
-                : undefined;
-    thread.readOnly = reason !== undefined;
-    if (reason === undefined) delete thread.readOnlyReason;
-    else thread.readOnlyReason = reason;
+    const state = readOnlyStateForThread(thread, current.agents);
+    thread.readOnly = state.readOnly;
+    if (state.readOnlyReason === undefined) delete thread.readOnlyReason;
+    else thread.readOnlyReason = state.readOnlyReason;
   }
 }
 

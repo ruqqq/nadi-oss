@@ -6,7 +6,7 @@
 
 import { http, HttpResponse } from "msw";
 import type { AutomatonRun, AutomatonSchedule, AutomatonSummary } from "../../automata-api";
-import { getStore } from "../store";
+import { getStore, readOnlyStateForThread } from "../store";
 import { mockId, notFound, pathParam } from "./util";
 
 type AutomatonInput = {
@@ -168,7 +168,12 @@ export const automataHandlers = [
       activityStatus: "running",
       currentTurnStartedAt: now,
       archivedAt: null,
-      readOnly: false,
+      // Same reason as the thread-create handler: built after `getStore()`
+      // already swept, so this row derives its own state.
+      ...readOnlyStateForThread(
+        { archivedAt: null, runtime: "think", agentId: automaton.agentId },
+        store.agents,
+      ),
       status: "active",
       projectId: automaton.projectId,
       projectName: store.projects.find((p) => p.id === automaton.projectId)?.name ?? null,

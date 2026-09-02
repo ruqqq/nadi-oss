@@ -1478,6 +1478,16 @@ function agentGoneStore(): MockStore {
       description: "Deleted; the sprite is gone.",
       archivedAt: NOW - 2 * DAY,
     }),
+    // Paused first, deleted later — `AgentRepository.archive` leaves `enabled`
+    // alone, so both flags are set. Seeded because it is the one case where the
+    // two agent reasons overlap and the order between them is observable.
+    makeAgent({
+      id: "wb_paused_then_retired",
+      name: "shelved-agent",
+      description: "Turned off, then deleted.",
+      enabled: false,
+      archivedAt: NOW - DAY,
+    }),
   ];
   const threads: ThreadSummary[] = [
     makeThread({
@@ -1495,6 +1505,14 @@ function agentGoneStore(): MockStore {
       agentName: "retired-agent",
       lastMessagePreview: "The agent that ran this is gone; the chat is not.",
       updatedAt: NOW - 2 * MINUTE,
+    }),
+    makeThread({
+      threadId: "thr_agent_off_then_deleted",
+      title: "Retired queue drain",
+      agentId: "wb_paused_then_retired",
+      agentName: "shelved-agent",
+      lastMessagePreview: "Its agent was paused and then deleted: deleted wins.",
+      updatedAt: NOW - 3 * MINUTE,
     }),
   ];
   return { ...base, agents, threads: [...threads, ...base.threads] };

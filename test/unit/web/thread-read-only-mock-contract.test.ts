@@ -46,6 +46,16 @@ describe("mock /api/threads — readOnly agrees with the server serializer", () 
       expect.arrayContaining(["agent_disabled", "agent_deleted", "thread_archived", undefined]),
     );
 
+    // The overlap has to be IN the sample, or the loop below compares the two
+    // implementations on a case where their orderings cannot disagree.
+    const overlapping = store.agents.find(
+      (agent) => agent.archivedAt !== null && agent.enabled === false,
+    );
+    expect(overlapping).toBeDefined();
+    expect(
+      threads.find((thread) => thread.agentId === overlapping?.id)?.readOnlyReason,
+    ).toBe("agent_deleted");
+
     for (const thread of threads) {
       const agent = store.agents.find((candidate) => candidate.id === thread.agentId);
       const expected = serializeThread({
@@ -70,6 +80,29 @@ describe("mock /api/threads — readOnly agrees with the server serializer", () 
         readOnlyReason: thread.readOnlyReason,
       }).toEqual({ readOnly: expected.readOnly, readOnlyReason: expected.readOnlyReason });
     }
+  });
+
+  /**
+   * The handlers that BUILD or MUTATE a thread run after `getStore()` has
+   * already swept the store, so their own response has to derive its state
+   * rather than inherit the sweep's. Archiving is the one such site where the
+   * difference is observable in a response: without the re-derivation this
+   * answers `readOnly: false` and only agrees from the next read on.
+   */
+  it("archives with the reason already set, in the same response", async () => {
+    const { threads } = await listThreads(mswFetch, "active");
+    const target = threads.find((thread) => !thread.readOnly);
+    expect(target).toBeDefined();
+
+    const response = await mswFetch(`/api/threads/${target?.threadId}/archive`, {
+      method: "POST",
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      thread: { readOnly: boolean; readOnlyReason?: string };
+    };
+
+    expect(body.thread).toMatchObject({ readOnly: true, readOnlyReason: "thread_archived" });
   });
 
   it("re-derives after an agent is turned off, the way the live join does", async () => {
