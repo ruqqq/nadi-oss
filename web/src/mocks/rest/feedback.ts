@@ -6,7 +6,7 @@ import type {
   FeedbackReportSummary,
 } from "../../feedback-api";
 import type { ThreadSummary } from "../../threads-api";
-import { getStore } from "../store";
+import { getStore, readOnlyStateForThread } from "../store";
 import { errorResponse, pathParam } from "./util";
 
 const FEEDBACK_THREAD_ID = "thr_feedback_mock";
@@ -35,7 +35,15 @@ function feedbackThread(): ThreadSummary {
     source: "manual",
     lastMessagePreview: "",
     archivedAt: null,
-    readOnly: false,
+    // Derived, never hardcoded: the server builds this row through the same
+    // `serializeThread` as every other thread (`src/http/feedback-routes.ts:454`),
+    // so a disabled or deleted agent makes the feedback thread read-only there
+    // too. Built here AND swept in `applyLiveReadOnly`, because this row is
+    // memoized on the store and the server re-derives on every request.
+    ...readOnlyStateForThread(
+      { archivedAt: null, runtime: "think", agentId: store.settings?.agent.id ?? "agent_mock" },
+      store.agents,
+    ),
     status: "active",
     projectId: null,
     projectName: null,

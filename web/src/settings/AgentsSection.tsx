@@ -337,7 +337,7 @@ function AgentDetailPage({
       >
         <Field
           label="Machine size"
-          hint="Choose medium for large repositories, heavy toolchains, or long builds."
+          hint="Choose medium for large repositories, heavy toolchains, or long builds; a change applies the next time this agent’s machine is created, not to one that already exists."
         >
           <Select
             value={form.resourceProfile}
@@ -358,7 +358,7 @@ function AgentDetailPage({
           <Field
             label="Allowed domains"
             htmlFor={`agent-network-allowlist-${id}`}
-            hint="One host per line, reachable for this agent on top of the workspace allowlist."
+            hint="One host per line, reachable for this agent on top of the workspace allowlist; a change reaches the machine the next time it starts up, not while it is running."
           >
             <Textarea
               id={`agent-network-allowlist-${id}`}

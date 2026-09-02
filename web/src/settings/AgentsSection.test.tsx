@@ -159,6 +159,34 @@ describe("AgentsSection machine settings", () => {
     expect(patch).toEqual(expect.objectContaining({ resourceProfile: "medium" }));
   });
 
+  it("says when a machine-size change takes effect", async () => {
+    api.listAgents.mockResolvedValue([AGENT]);
+
+    renderAgent();
+
+    await screen.findByLabelText("Machine size");
+    expect(
+      screen.getByText(/next time this agent\u2019s machine is created/i),
+    ).toBeInTheDocument();
+  });
+
+  it("says when an allowed-domains change reaches the machine", async () => {
+    api.listAgents.mockResolvedValue([AGENT]);
+
+    renderAgent({ networkAllowlistEnabled: true });
+
+    await screen.findByLabelText("Allowed domains");
+    // Deliberately NOT the machine-size wording: the allowlist is re-applied
+    // when the machine next starts (a sprite waking from hibernation counts),
+    // while the size is pinned to the machine that already exists.
+    expect(
+      screen.getByText(/next time it starts up, not while it is running/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/allowlist.*machine is created/i),
+    ).not.toBeInTheDocument();
+  });
+
   it("does not expose the network allowlist field when the capability is disabled", async () => {
     api.listAgents.mockResolvedValue([AGENT]);
 

@@ -164,7 +164,7 @@ export function getStore(): MockStore {
  *
  * Exported because a handler that BUILDS a thread runs after `getStore()` has
  * already swept the store, so it has to derive its own row's state rather than
- * hardcode one. One rule, one function, four call sites.
+ * hardcode one. One rule, one function, every call site.
  */
 export function readOnlyStateForThread(
   thread: Pick<ThreadSummary, "archivedAt" | "runtime" | "agentId">,
@@ -188,13 +188,21 @@ export function readOnlyStateForThread(
   return { readOnly: reason !== undefined, ...(reason === undefined ? {} : { readOnlyReason: reason }) };
 }
 
+function applyReadOnlyState(thread: ThreadSummary, agents: AgentSummary[]): void {
+  const state = readOnlyStateForThread(thread, agents);
+  thread.readOnly = state.readOnly;
+  if (state.readOnlyReason === undefined) delete thread.readOnlyReason;
+  else thread.readOnlyReason = state.readOnlyReason;
+}
+
 function applyLiveReadOnly(current: MockStore): void {
-  for (const thread of current.threads) {
-    const state = readOnlyStateForThread(thread, current.agents);
-    thread.readOnly = state.readOnly;
-    if (state.readOnlyReason === undefined) delete thread.readOnlyReason;
-    else thread.readOnlyReason = state.readOnlyReason;
-  }
+  for (const thread of current.threads) applyReadOnlyState(thread, current.agents);
+  // The feedback thread lives OUTSIDE `threads` but is a `ThreadSummary` the
+  // client reads the same way, and the server re-serializes it from the same
+  // live join on every `POST /api/feedback/thread`
+  // (`src/http/feedback-routes.ts:454`). Sweeping only `threads` left it frozen
+  // at whatever it was built with.
+  if (current.feedback.thread) applyReadOnlyState(current.feedback.thread, current.agents);
 }
 
 export function resetStore(): void {

@@ -4,6 +4,7 @@ import { afterAll, afterEach, beforeEach, beforeAll, describe, expect, it } from
 import { setupServer } from "../../../web/node_modules/msw/node";
 import { restHandlers } from "../../../web/src/mocks/rest";
 import { getStore, resetStore, seedStore } from "../../../web/src/mocks/store";
+import type { ThreadSummary } from "../../../web/src/threads-api";
 import { listThreads } from "../../../web/src/threads-api";
 import { serializeThread } from "../../../src/http/thread-serialize";
 
@@ -121,5 +122,87 @@ describe("mock /api/threads — readOnly agrees with the server serializer", () 
     const after = await listThreads(mswFetch, "all");
     const now = after.threads.find((thread) => thread.threadId === live?.threadId);
     expect(now).toMatchObject({ readOnly: true, readOnlyReason: "agent_disabled" });
+  });
+
+  /**
+   * The feedback thread is a `ThreadSummary` that lives OUTSIDE `store.threads`,
+   * and it used to hardcode `readOnly: false`. On the server it goes through the
+   * same `serializeThread` as every other thread
+   * (`src/http/feedback-routes.ts:454`), so a disabled agent makes it read-only
+   * there.
+   *
+   * No scenario reaches this state on its own: the feedback thread's agent is
+   * `store.settings.agent`, and no scenario carries a matching row in
+   * `store.agents` — an unknown agent is "unknown", not "disabled". The row is
+   * therefore added here rather than seeded, and both directions are asserted so
+   * a helper that silently returned `undefined` could not pass.
+   */
+  async function fetchFeedbackThread() {
+    const response = await mswFetch("/api/feedback/thread", { method: "POST" });
+    expect(response.status).toBe(200);
+    return ((await response.json()) as { thread: ThreadSummary }).thread;
+  }
+
+  it("derives the feedback thread's readOnly from its agent, both ways", async () => {
+    const store = getStore();
+    const agentId = store.settings?.agent.id;
+    expect(agentId).toBeDefined();
+    expect(store.agents.some((agent) => agent.id === agentId)).toBe(false);
+
+    // An agent the store does not carry: unknown, not disabled.
+    expect(await fetchFeedbackThread()).toMatchObject({ readOnly: false });
+
+    store.agents.push({ ...store.agents[0]!, id: agentId!, enabled: true, archivedAt: null });
+    expect(await fetchFeedbackThread()).toMatchObject({ readOnly: false });
+
+    const seeded = getStore().agents.find((agent) => agent.id === agentId)!;
+    seeded.enabled = false;
+    const disabled = await fetchFeedbackThread();
+    expect(disabled).toMatchObject({ readOnly: true, readOnlyReason: "agent_disabled" });
+
+    // The same row, through the REAL serializer.
+    const expected = serializeThread({
+      id: disabled.threadId,
+      workspaceId: disabled.workspaceId,
+      agentId: disabled.agentId,
+      runtime: disabled.runtime,
+      title: disabled.title,
+      source: disabled.source,
+      lastMessagePreview: disabled.lastMessagePreview,
+      archivedAt: disabled.archivedAt,
+      agentArchivedAt: seeded.archivedAt,
+      agentEnabled: seeded.enabled,
+      createdAt: disabled.createdAt,
+      updatedAt: disabled.updatedAt,
+    });
+    expect({ readOnly: disabled.readOnly, readOnlyReason: disabled.readOnlyReason }).toEqual({
+      readOnly: expected.readOnly,
+      readOnlyReason: expected.readOnlyReason,
+    });
+
+    // ...and back: re-enabling clears BOTH fields, so a stale `readOnlyReason`
+    // left behind by the sweep would fail here.
+    seeded.enabled = true;
+    const reenabled = await fetchFeedbackThread();
+    expect(reenabled.readOnly).toBe(false);
+    expect(reenabled.readOnlyReason).toBeUndefined();
+  });
+
+  /**
+   * The BUILD site, separately: `applyLiveReadOnly` runs on the way INTO the
+   * handler, when there is still no feedback row to sweep, so the first response
+   * is whatever `feedbackThread()` constructs. Ordering is the whole test — the
+   * agent has to be disabled before the thread is ever asked for.
+   */
+  it("builds the feedback thread already read-only when its agent is off", async () => {
+    const store = getStore();
+    const agentId = store.settings?.agent.id;
+    store.agents.push({ ...store.agents[0]!, id: agentId!, enabled: false, archivedAt: null });
+    expect(store.feedback.thread).toBeNull();
+
+    expect(await fetchFeedbackThread()).toMatchObject({
+      readOnly: true,
+      readOnlyReason: "agent_disabled",
+    });
   });
 });
