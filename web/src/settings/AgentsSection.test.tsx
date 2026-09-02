@@ -170,20 +170,28 @@ describe("AgentsSection machine settings", () => {
     ).toBeInTheDocument();
   });
 
-  it("says when an allowed-domains change reaches the machine", async () => {
+  it("states the allowed-domains prerequisite as well as the timing", async () => {
     api.listAgents.mockResolvedValue([AGENT]);
 
     renderAgent({ networkAllowlistEnabled: true });
 
     await screen.findByLabelText("Allowed domains");
-    // Deliberately NOT the machine-size wording: the allowlist is re-applied
-    // when the machine next starts (a sprite waking from hibernation counts),
-    // while the size is pinned to the machine that already exists.
+    // The two things that hold on EVERY provider, and the only two this hint is
+    // allowed to promise. The prerequisite clause is the load-bearing half: with
+    // the workspace's `networkRestrictionEnabled` off — the column default, and
+    // no UI turns it on — sprites and cloudflare discard the list entirely, so a
+    // hint that promised delivery "at the next startup" was plainly false.
     expect(
-      screen.getByText(/next time it starts up, not while it is running/i),
+      screen.getByText(/never reaches a machine that is already running/i),
     ).toBeInTheDocument();
     expect(
-      screen.queryByText(/allowlist.*machine is created/i),
+      screen.getByText(/until the workspace has network restriction enabled/i),
+    ).toBeInTheDocument();
+    // Neither the machine-size wording nor an unconditional promise of delivery:
+    // both were the shape of the defect this replaced.
+    expect(screen.queryByText(/allowlist.*machine is created/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/reaches the machine the next time it starts/i),
     ).not.toBeInTheDocument();
   });
 

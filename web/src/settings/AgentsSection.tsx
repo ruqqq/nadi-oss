@@ -335,6 +335,19 @@ function AgentDetailPage({
         title="Sandbox"
         description="The machine this agent works on."
       >
+        {/*
+         * The size is PINNED to the machine that exists: `resourceProfile` is
+         * read live each turn, but the profile persisted at `markAcquiring`
+         * outranks it while `computeState.status` is `active` OR `recoverable`
+         * (`src/agent/compute-tools.ts:394-397`, restated at
+         * `src/compute/thread-service.ts:2859-2862`). A hibernated sprite counts
+         * as existing, so only a destroy-and-reprovision changes the size.
+         * Provider-independent, unlike the allowlist below. NOTE the hint names
+         * an event no control in this app can trigger — the only paths that
+         * destroy a machine (`exec_shutdown` asked for in chat, agent deletion)
+         * also destroy the agent's persistent files, so the copy deliberately
+         * does not point at either. A reset-machine control is the real fix.
+         */}
         <Field
           label="Machine size"
           hint="Choose medium for large repositories, heavy toolchains, or long builds; a change applies the next time this agent’s machine is created, not to one that already exists."
@@ -354,11 +367,46 @@ function AgentDetailPage({
             </SelectContent>
           </Select>
         </Field>
+        {/*
+         * WHEN THIS LIST ACTUALLY REACHES A MACHINE — stated as the mechanism,
+         * because every UI-shaped version of this note has gone stale.
+         *
+         * The agent's hosts are unioned into `allowedHosts` on EVERY turn's
+         * resolve (`src/agent/compute-tools.ts:408-420`), so the value is never
+         * pinned the way `resourceProfile` is. Two things gate it anyway:
+         *
+         *  1. `unionAllowlistWithSkillDomains` returns `null` for a `null` base
+         *     (`compute-tools.ts:261`), and the base is `null` unless the
+         *     WORKSPACE has `networkRestrictionEnabled`
+         *     (`src/compute/config.ts:237-246`). With it off — the column
+         *     default — the agent list is discarded and nothing is ever posted
+         *     to the provider. Daytona is the one exception: it substitutes
+         *     `DEFAULT_COMPUTE_ALLOWED_HOSTS` when the agent has hosts
+         *     (`compute-tools.ts:411-415`), so on Daytona typing here TURNS
+         *     RESTRICTION ON for this agent.
+         *  2. Nothing re-applies a policy to a machine that is already up. What
+         *     happens on the next turn then differs per provider:
+         *       - sprites: a hibernated box wakes through
+         *         `acquire(spec, recovery)` -> `prepare()` -> `setNetworkPolicy`
+         *         with the CURRENT list (`backends/sprites.ts:456`, `:849-857`).
+         *         Same sprite, same disk. A box still `active` never sees it.
+         *       - daytona: `readOrAcquireRuntime` THROWS
+         *         `daytona_egress_policy_changed_run_exec_shutdown` for `active`
+         *         AND `recoverable` (`compute/thread-service.ts:2843-2850`), so
+         *         the user's next turn errors until the box is destroyed.
+         *       - cloudflare: any non-empty list fails every acquire outright,
+         *         `cloudflare_no_network_policy` (`backends/cloudflare.ts:154-162`).
+         *
+         * So the hint promises only what holds in ALL of those: it never
+         * changes a running machine, and it may do nothing at all until the
+         * workspace's restriction is on. Anything more specific is a per-provider
+         * claim this field cannot make — it does not know the provider.
+         */}
         {networkAllowlistEnabled && (
           <Field
             label="Allowed domains"
             htmlFor={`agent-network-allowlist-${id}`}
-            hint="One host per line, reachable for this agent on top of the workspace allowlist; a change reaches the machine the next time it starts up, not while it is running."
+            hint="One host per line, added to the workspace allowlist for this agent. A change never reaches a machine that is already running, and until the workspace has network restriction enabled your sandbox may ignore the list entirely."
           >
             <Textarea
               id={`agent-network-allowlist-${id}`}
