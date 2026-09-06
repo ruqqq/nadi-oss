@@ -1,6 +1,25 @@
 import { describe, expect, it, vi } from "vitest";
+import type { ToolSet } from "ai";
 import { createBaseNativeThreadTools } from "../../../src/agent/thread-tools";
-import { createFileTransferTools, uploadToSignedUrl } from "../../../src/agent/file-transfer-tools";
+import {
+  createFileTransferTools,
+  signedUploadNeedsApproval,
+  trustedUploadHostsFrom,
+  uploadToSignedUrl,
+} from "../../../src/agent/file-transfer-tools";
+import {
+  DEFAULT_COMPUTE_ALLOWED_HOSTS,
+  hostMatchesDomainAllowlist,
+} from "../../../src/compute/config";
+
+async function approvalRequired(tools: ToolSet, signedUploadUrl: string): Promise<boolean> {
+  const needsApproval = tools.upload_to_signed_url?.needsApproval;
+  if (typeof needsApproval !== "function") throw new Error("expected needsApproval function");
+  return needsApproval(
+    { source: { kind: "attachment", attachmentId: "att_1" }, signedUploadUrl },
+    { toolCallId: "tc_1", messages: [] },
+  );
+}
 
 const encoder = new TextEncoder();
 
@@ -292,13 +311,23 @@ describe("createFileTransferTools", () => {
     expect(Object.keys(tools)).toContain("upload_to_signed_url");
   });
 
-  it("marks upload_to_signed_url as approval-required", () => {
-    const tools = createFileTransferTools({ env: {} as never, threadId: "thr_1" }) as Record<
-      string,
-      { needsApproval?: boolean }
-    >;
+  it("requires approval for unknown hosts and skips it for allowlisted or MCP hosts", async () => {
+    const tools = createFileTransferTools({
+      env: {} as never,
+      threadId: "thr_1",
+      resolveKnownHosts: async () => ["files.example", "*.github.com", "mcp.acme.com"],
+    });
 
-    expect(tools.upload_to_signed_url!.needsApproval).toBe(true);
+    expect(await approvalRequired(tools, "https://evil.example/u")).toBe(true);
+    expect(await approvalRequired(tools, "https://files.example/upload?token=secret")).toBe(false);
+    expect(await approvalRequired(tools, "https://objects.github.com/upload")).toBe(false);
+    expect(await approvalRequired(tools, "https://mcp.acme.com/put")).toBe(false);
+  });
+
+  it("fails closed to approval-required when known hosts cannot be resolved", async () => {
+    const tools = createFileTransferTools({ env: {} as never, threadId: "thr_1" });
+
+    expect(await approvalRequired(tools, "https://files.example/u")).toBe(true);
   });
 
   it("is included in base native thread tools", () => {
@@ -308,5 +337,77 @@ describe("createFileTransferTools", () => {
     });
 
     expect(Object.keys(tools)).toContain("upload_to_signed_url");
+  });
+});
+
+describe("trustedUploadHostsFrom", () => {
+  it("unions the configured allowlist with MCP hosts when restriction is off", () => {
+    expect(
+      trustedUploadHostsFrom({
+        networkRestrictionEnabled: false,
+        workspaceAllowlist: "Files.Example\napi.internal.test",
+        mcpHosts: ["MCP.acme.com", "mcp.acme.com"],
+      }),
+    ).toEqual(["files.example", "api.internal.test", "mcp.acme.com"]);
+  });
+
+  it("uses curated sandbox defaults when restriction is on and the list is empty", () => {
+    const hosts = trustedUploadHostsFrom({
+      networkRestrictionEnabled: true,
+      workspaceAllowlist: "",
+      mcpHosts: ["mcp.acme.com"],
+    });
+    expect(hosts).toEqual(
+      expect.arrayContaining([
+        ...DEFAULT_COMPUTE_ALLOWED_HOSTS.map((h) => h.toLowerCase()),
+        "mcp.acme.com",
+      ]),
+    );
+  });
+
+  it("does not apply curated defaults when restriction is off and the list is empty", () => {
+    expect(
+      trustedUploadHostsFrom({
+        networkRestrictionEnabled: false,
+        workspaceAllowlist: "",
+        mcpHosts: ["mcp.acme.com"],
+      }),
+    ).toEqual(["mcp.acme.com"]);
+  });
+
+  it("includes workbench allowlist additions", () => {
+    expect(
+      trustedUploadHostsFrom({
+        networkRestrictionEnabled: false,
+        workspaceAllowlist: "files.example",
+        workbenchAllowlist: "uploads.workbench.test",
+        mcpHosts: [],
+      }),
+    ).toEqual(["files.example", "uploads.workbench.test"]);
+  });
+});
+
+describe("signedUploadNeedsApproval", () => {
+  it("requires approval for unparseable destinations and unknown hosts", () => {
+    expect(signedUploadNeedsApproval("not a url", ["files.example"])).toBe(true);
+    expect(signedUploadNeedsApproval("https://unknown.example/u", ["files.example"])).toBe(true);
+    expect(signedUploadNeedsApproval(undefined, ["files.example"])).toBe(true);
+  });
+
+  it("skips approval when the destination host is known", () => {
+    expect(signedUploadNeedsApproval("https://files.example/u?sig=secret", ["files.example"])).toBe(
+      false,
+    );
+  });
+});
+
+describe("hostMatchesDomainAllowlist", () => {
+  it("matches exact hosts and wildcard subdomains, not the apex for *.", () => {
+    expect(hostMatchesDomainAllowlist("github.com", ["github.com"])).toBe(true);
+    expect(hostMatchesDomainAllowlist("api.github.com", ["github.com"])).toBe(false);
+    expect(hostMatchesDomainAllowlist("api.github.com", ["*.github.com"])).toBe(true);
+    expect(hostMatchesDomainAllowlist("github.com", ["*.github.com"])).toBe(false);
+    expect(hostMatchesDomainAllowlist("evilgithub.com", ["*.github.com"])).toBe(false);
+    expect(hostMatchesDomainAllowlist("FILES.EXAMPLE", ["files.example"])).toBe(true);
   });
 });

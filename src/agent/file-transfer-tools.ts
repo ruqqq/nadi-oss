@@ -1,10 +1,19 @@
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import type { Env } from "../env";
-import { registryBinding } from "../db/client";
+import { registryBinding, registryDb } from "../db/client";
 import { AttachmentRepository, type AttachmentRow } from "../db/attachment-repository";
+import { ThreadRepository } from "../db/repositories/threads";
+import { ThreadRepositorySnapshotRepository } from "../db/repositories/thread-repository-snapshots";
+import { WorkbenchRepository } from "../db/repositories/workbenches";
 import { attachmentsBucket } from "../storage/bucket-binding";
 import { assertSafeUrl, UrlGuardError } from "../web/url-guard";
+import {
+  DEFAULT_COMPUTE_ALLOWED_HOSTS,
+  hostMatchesDomainAllowlist,
+  parseDomainList,
+} from "../compute/config";
+import { getWorkspaceComputeSettings, loadMcpHosts } from "../compute/settings";
 
 export const MAX_SIGNED_UPLOAD_SOURCE_BYTES = 10 * 1024 * 1024;
 
@@ -75,6 +84,13 @@ export interface UploadToSignedUrlDeps {
   attachmentRepository?: AttachmentRepositoryLike;
 }
 
+export interface TrustedUploadHostsInput {
+  networkRestrictionEnabled: boolean;
+  workspaceAllowlist?: string | null;
+  workbenchAllowlist?: string | null;
+  mcpHosts?: readonly string[];
+}
+
 interface ResolvedSource {
   kind: "attachment" | "url";
   filename?: string;
@@ -88,12 +104,13 @@ export function createFileTransferTools(deps: {
   threadId: string;
   fetchImpl?: typeof fetch;
   attachmentRepository?: AttachmentRepositoryLike;
+  resolveKnownHosts?: () => Promise<readonly string[]>;
 }): ToolSet {
   return {
     upload_to_signed_url: {
       ...tool({
         description:
-          "Upload bytes from a current-thread Nadi attachment or a guarded external URL to a caller-provided signed upload URL. This writes bytes to an external bearer URL and requires user approval; never pass secrets in headers.",
+          "Upload bytes from a current-thread Nadi attachment or a guarded external URL to a caller-provided signed upload URL. Destinations on the workspace network allowlist or an enabled MCP host run without approval; unknown hosts still require it. Never pass secrets in headers.",
         inputSchema,
         execute: async (input) =>
           uploadToSignedUrl(input, {
@@ -105,9 +122,84 @@ export function createFileTransferTools(deps: {
               : {}),
           }),
       }),
-      needsApproval: true,
+      needsApproval: async (input: UploadToSignedUrlInput) => {
+        const hosts = await resolveKnownUploadHosts(deps);
+        return signedUploadNeedsApproval(input.signedUploadUrl, hosts);
+      },
     },
   };
+}
+
+/**
+ * Hosts the signed-upload tool may write to without a HITL prompt: the
+ * workspace (and workbench) network allowlist, plus enabled MCP server hosts.
+ * MCP hosts are always included, even when network restriction is off — they
+ * are independently trusted. An empty configured list with restriction on
+ * uses the same curated defaults the sandbox would.
+ */
+export function trustedUploadHostsFrom(input: TrustedUploadHostsInput): string[] {
+  const configured = parseDomainList(input.workspaceAllowlist);
+  const workspaceHosts =
+    configured.length > 0
+      ? configured
+      : input.networkRestrictionEnabled
+        ? DEFAULT_COMPUTE_ALLOWED_HOSTS.map((host) => host.toLowerCase())
+        : [];
+  const workbenchHosts = parseDomainList(input.workbenchAllowlist);
+  const mcpHosts = (input.mcpHosts ?? []).map((host) => host.trim().toLowerCase()).filter(Boolean);
+  return [...new Set([...workspaceHosts, ...workbenchHosts, ...mcpHosts])];
+}
+
+export function signedUploadNeedsApproval(
+  signedUploadUrl: string | undefined,
+  knownHosts: readonly string[],
+): boolean {
+  if (!signedUploadUrl) return true;
+  let hostname: string;
+  try {
+    hostname = new URL(signedUploadUrl).hostname;
+  } catch {
+    return true;
+  }
+  return !hostMatchesDomainAllowlist(hostname, knownHosts);
+}
+
+export async function loadTrustedUploadHosts(env: Env, threadId: string): Promise<string[]> {
+  const db = registryDb(env);
+  const thread = await new ThreadRepository(db).getById(threadId);
+  if (!thread) return [];
+
+  const [workspace, mcpHosts, snapshot] = await Promise.all([
+    getWorkspaceComputeSettings(env, thread.workspaceId).catch(() => null),
+    loadMcpHosts(env, thread.workspaceId).catch(() => [] as string[]),
+    new ThreadRepositorySnapshotRepository(db)
+      .listWorkbenchSnapshot(threadId)
+      .catch(() => undefined),
+  ]);
+  const workbenchId = snapshot?.workbenchId ?? thread.workbenchId ?? null;
+  const workbench = workbenchId
+    ? await new WorkbenchRepository(db).getById(workbenchId).catch(() => undefined)
+    : undefined;
+
+  return trustedUploadHostsFrom({
+    networkRestrictionEnabled: workspace?.networkRestrictionEnabled ?? false,
+    workspaceAllowlist: workspace?.networkDomainAllowlist ?? "",
+    workbenchAllowlist: workbench?.sandboxNetworkDomainAllowlist ?? "",
+    mcpHosts,
+  });
+}
+
+async function resolveKnownUploadHosts(deps: {
+  env: Env;
+  threadId: string;
+  resolveKnownHosts?: () => Promise<readonly string[]>;
+}): Promise<readonly string[]> {
+  if (deps.resolveKnownHosts) return deps.resolveKnownHosts();
+  try {
+    return await loadTrustedUploadHosts(deps.env, deps.threadId);
+  } catch {
+    return [];
+  }
 }
 
 export async function uploadToSignedUrl(

@@ -97,6 +97,31 @@ export function parseDomainList(raw: string | null | undefined): string[] {
     .filter(Boolean);
 }
 
+function normalizeDomain(value: string): string {
+  return value.trim().toLowerCase().replace(/\.$/, "");
+}
+
+/**
+ * Whether `host` is covered by a sandbox-style domain allowlist. Exact entries
+ * match only that hostname; `*.example.com` matches subdomains, not the apex —
+ * the curated default list records both `github.com` and `*.github.com`.
+ */
+export function hostMatchesDomainAllowlist(host: string, patterns: readonly string[]): boolean {
+  const normalized = normalizeDomain(host);
+  if (!normalized) return false;
+  for (const raw of patterns) {
+    const pattern = normalizeDomain(raw);
+    if (!pattern) continue;
+    if (pattern.startsWith("*.")) {
+      const suffix = pattern.slice(2);
+      if (suffix && normalized.endsWith(`.${suffix}`)) return true;
+      continue;
+    }
+    if (normalized === pattern) return true;
+  }
+  return false;
+}
+
 export function validateSandboxDomain(value: string): string {
   const domain = value.trim().toLowerCase();
   if (!domain) throw new Error("sandbox_domain_required");
