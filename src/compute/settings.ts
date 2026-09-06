@@ -129,7 +129,7 @@ export function extractMcpHosts(servers: { url: string; enabled: boolean }[]): s
   return [...hosts];
 }
 
-async function loadMcpHosts(env: Env, workspaceId: string): Promise<string[]> {
+export async function loadMcpHosts(env: Env, workspaceId: string): Promise<string[]> {
   const servers = await registryDb(env)
     .select({ url: mcpServers.url, enabled: mcpServers.enabled })
     .from(mcpServers)
