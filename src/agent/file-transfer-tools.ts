@@ -122,7 +122,7 @@ export function createFileTransferTools(deps: {
               : {}),
           }),
       }),
-      needsApproval: async (input) => {
+      needsApproval: async (input: UploadToSignedUrlInput) => {
         const hosts = await resolveKnownUploadHosts(deps);
         return signedUploadNeedsApproval(input.signedUploadUrl, hosts);
       },

@@ -5,6 +5,7 @@
  */
 import { env } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
+import type { ToolSet } from "ai";
 import {
   createFileTransferTools,
   loadTrustedUploadHosts,
@@ -61,11 +62,13 @@ async function seedKnownHosts() {
 }
 
 async function needsApprovalFor(signedUploadUrl: string): Promise<boolean> {
-  const tools = createFileTransferTools({
+  const tools: ToolSet = createFileTransferTools({
     env: env as unknown as Env,
     threadId: THREAD_ID,
-  }) as Record<string, { needsApproval?: (input: unknown, options: unknown) => Promise<boolean> }>;
-  return tools.upload_to_signed_url!.needsApproval!(
+  });
+  const needsApproval = tools.upload_to_signed_url?.needsApproval;
+  if (typeof needsApproval !== "function") throw new Error("expected needsApproval function");
+  return needsApproval(
     { source: { kind: "attachment", attachmentId: "att_1" }, signedUploadUrl },
     { toolCallId: "tc_1", messages: [] },
   );

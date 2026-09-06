@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { ToolSet } from "ai";
 import { createBaseNativeThreadTools } from "../../../src/agent/thread-tools";
 import {
   createFileTransferTools,
@@ -10,6 +11,15 @@ import {
   DEFAULT_COMPUTE_ALLOWED_HOSTS,
   hostMatchesDomainAllowlist,
 } from "../../../src/compute/config";
+
+async function approvalRequired(tools: ToolSet, signedUploadUrl: string): Promise<boolean> {
+  const needsApproval = tools.upload_to_signed_url?.needsApproval;
+  if (typeof needsApproval !== "function") throw new Error("expected needsApproval function");
+  return needsApproval(
+    { source: { kind: "attachment", attachmentId: "att_1" }, signedUploadUrl },
+    { toolCallId: "tc_1", messages: [] },
+  );
+}
 
 const encoder = new TextEncoder();
 
@@ -306,67 +316,18 @@ describe("createFileTransferTools", () => {
       env: {} as never,
       threadId: "thr_1",
       resolveKnownHosts: async () => ["files.example", "*.github.com", "mcp.acme.com"],
-    }) as Record<
-      string,
-      { needsApproval?: (input: unknown, options: unknown) => Promise<boolean> }
-    >;
+    });
 
-    const needsApproval = tools.upload_to_signed_url!.needsApproval!;
-    const options = { toolCallId: "tc_1", messages: [] };
-
-    expect(
-      await needsApproval(
-        {
-          source: { kind: "attachment", attachmentId: "att_1" },
-          signedUploadUrl: "https://evil.example/u",
-        },
-        options,
-      ),
-    ).toBe(true);
-    expect(
-      await needsApproval(
-        {
-          source: { kind: "attachment", attachmentId: "att_1" },
-          signedUploadUrl: "https://files.example/upload?token=secret",
-        },
-        options,
-      ),
-    ).toBe(false);
-    expect(
-      await needsApproval(
-        {
-          source: { kind: "attachment", attachmentId: "att_1" },
-          signedUploadUrl: "https://objects.github.com/upload",
-        },
-        options,
-      ),
-    ).toBe(false);
-    expect(
-      await needsApproval(
-        {
-          source: { kind: "attachment", attachmentId: "att_1" },
-          signedUploadUrl: "https://mcp.acme.com/put",
-        },
-        options,
-      ),
-    ).toBe(false);
+    expect(await approvalRequired(tools, "https://evil.example/u")).toBe(true);
+    expect(await approvalRequired(tools, "https://files.example/upload?token=secret")).toBe(false);
+    expect(await approvalRequired(tools, "https://objects.github.com/upload")).toBe(false);
+    expect(await approvalRequired(tools, "https://mcp.acme.com/put")).toBe(false);
   });
 
   it("fails closed to approval-required when known hosts cannot be resolved", async () => {
-    const tools = createFileTransferTools({ env: {} as never, threadId: "thr_1" }) as Record<
-      string,
-      { needsApproval?: (input: unknown, options: unknown) => Promise<boolean> }
-    >;
+    const tools = createFileTransferTools({ env: {} as never, threadId: "thr_1" });
 
-    expect(
-      await tools.upload_to_signed_url!.needsApproval!(
-        {
-          source: { kind: "attachment", attachmentId: "att_1" },
-          signedUploadUrl: "https://files.example/u",
-        },
-        { toolCallId: "tc_1", messages: [] },
-      ),
-    ).toBe(true);
+    expect(await approvalRequired(tools, "https://files.example/u")).toBe(true);
   });
 
   it("is included in base native thread tools", () => {
