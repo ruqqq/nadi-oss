@@ -102,6 +102,7 @@ async function withParent(
         return nonce == null ? { kind: "unknown" } : { kind: "known", nonce };
       },
       attachedRuntimeForThisAgent: () => undefined,
+      computeOwnerThreadId: proto.computeOwnerThreadId,
       processMonitorEnabled: () => true,
       // The REAL derivations + hooks under test.
       subagentRows: proto.subagentRows,
