@@ -1138,8 +1138,18 @@ export async function createComputeTools(deps: ComputeToolHostDeps): Promise<Too
     async () => ({ env: deps.env, threadId: deps.threadId, workspaceId: resolved.workspaceId }),
     {
       networkDomainAllowlist: resolved.config.allowedHosts,
-      secretEnvVarNames: resolved.config.secretEnvNames,
-      envVarNames: Object.keys(resolved.config.editableEnv),
+      secretEnvVarNames: [
+        ...new Set([
+          ...resolved.config.secretEnvNames,
+          ...resolved.config.environmentSecretEnvNames,
+        ]),
+      ],
+      envVarNames: [
+        ...new Set([
+          ...Object.keys(resolved.config.editableEnv),
+          ...Object.keys(resolved.config.environmentEditableEnv),
+        ]),
+      ],
       supportsProcessMonitor,
       ...(backgroundLongRunningExec === undefined ? {} : { backgroundLongRunningExec }),
       attachedRuntime,

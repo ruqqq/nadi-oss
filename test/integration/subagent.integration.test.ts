@@ -1,8 +1,14 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { applyRegistryTestSchema, seedRegistryThread } from "./helpers/registry";
+import { createComputeTools } from "../../src/agent/compute-tools";
 import type { SubAgent } from "../../src/agent/subagent";
 import { SUBAGENT_DEADLINE_MS, SUBAGENT_STALE_AFTER_MS } from "../../src/agent/work-ledger";
+import { FakeComputeBackend } from "../../src/compute/backends/fake";
+import { ComputeEnvSecretsStore } from "../../src/compute/env-secrets";
+import type { EffectiveComputeConfig } from "../../src/compute/types";
+import type { Env } from "../../src/env";
+import { createWorkspaceSecretsServices } from "../../src/secrets";
 
 // TEST-ONLY: `SUB_AGENT` is a test-only Miniflare binding (see vitest.config.ts)
 // for a facet-only class with no wrangler.jsonc binding, so it's not present in
@@ -35,7 +41,16 @@ type SubAgentTestSeam = SubAgent & {
     agentId: string;
     attachedRuntime: { provider: string; version: 1; payload: Record<string, string> };
   };
+  _testSandboxServiceOverrides?: {
+    buildBackend?: (
+      config: EffectiveComputeConfig,
+      execEnv: Record<string, string>,
+    ) => Promise<FakeComputeBackend>;
+  };
   __unsafe_ensureInitialized(): Promise<void>;
+  resolveComputeServiceForTest(): Promise<{
+    config: EffectiveComputeConfig;
+  } | null>;
 };
 
 // `runInDurableObject`'s generic inference blows up ("Type instantiation is
@@ -530,5 +545,92 @@ describe("SubAgent", () => {
       parent.getSandboxDeclaredClean(),
     );
     expect(after).toBe(false);
+  });
+
+  /**
+   * Workbench env/secrets (and the sprites per-exec env they feed) are looked
+   * up by thread id: snapshot, then `thread_index.workbenchId`. A subagent
+   * facet's name is a run id, not the parent thread id, so resolving against
+   * `this.name` finds no workbench and drops BENCH_VAR / BENCH_SECRET from the
+   * env the attached backend is constructed with. Sprites carries that map on
+   * every exec (create-time environment never reaches a command), so the
+   * parent-sandbox share does not hide the miss the way Daytona/Cloudflare
+   * bake-at-acquire does.
+   */
+  it("an attached subagent inherits the parent thread's workbench env vars and secrets", async () => {
+    const now = 1_800_000_000_000;
+    const parentThreadId = "thr_sub_env_parent";
+    const childRunId = "sub_run_env";
+    const workbenchId = "wb_sub_env";
+    const { workspaceId, agentId } = await seedRegistryThread(env.REGISTRY_DB, {
+      threadId: parentThreadId,
+      workspaceId: "ws-sub-env",
+      agentId: "agent-sub-env",
+      runtime: "think",
+    });
+    await env.REGISTRY_DB.prepare(
+      `INSERT INTO workspace_sandbox_settings
+        (workspace_id, enabled, provider, provider_config_json,
+         image, idle_timeout_ms, recovery_ttl_ms, max_process_runtime_ms, limits_json,
+         network_restriction_enabled, network_domain_allowlist)
+       VALUES (?, 1, 'cloudflare', ?, '', 900000, 86400000, 600000, '{}', 0, '')`,
+    )
+      .bind(workspaceId, JSON.stringify({ kind: "cloudflare" }))
+      .run();
+    await env.REGISTRY_DB.prepare(
+      `INSERT INTO workbenches (id, workspace_id, name, resource_profile, sandbox_env_vars_json, created_at, updated_at)
+       VALUES (?, ?, 'Env bench', 'small', ?, ?, ?)`,
+    )
+      .bind(workbenchId, workspaceId, JSON.stringify({ BENCH_VAR: "from-workbench" }), now, now)
+      .run();
+    await env.REGISTRY_DB.prepare(
+      `INSERT INTO thread_workbench_snapshots (thread_id, workspace_id, workbench_id, name, setup_script, resource_profile, created_at)
+       VALUES (?, ?, ?, 'Env bench', '', 'small', ?)`,
+    )
+      .bind(parentThreadId, workspaceId, workbenchId, now)
+      .run();
+
+    const { store, writer } = createWorkspaceSecretsServices(env as unknown as Env);
+    const secretStore = new ComputeEnvSecretsStore({ store, writer });
+    await secretStore.setEnvironment(workspaceId, workbenchId, "BENCH_SECRET", "workbench-secret");
+
+    const childStub = env.SUB_AGENT.get(env.SUB_AGENT.idFromName(childRunId));
+    const result = await runInSubAgentDo(childStub, async (child: SubAgentTestSeam) => {
+      child._testSubagentContext = {
+        parentThreadId,
+        workspaceId,
+        agentId,
+        attachedRuntime: {
+          provider: "daytona",
+          version: 1,
+          payload: { kind: "runtime", sandboxId: "fake_sbx_parent" },
+        },
+      };
+      await child.__unsafe_ensureInitialized();
+      let execEnv: Record<string, string> | undefined;
+      child._testSandboxServiceOverrides = {
+        buildBackend: async (_config, envVars) => {
+          execEnv = envVars;
+          return new FakeComputeBackend();
+        },
+      };
+      const resolved = await child.resolveComputeServiceForTest();
+      const tools = await createComputeTools((child as any).sandboxHostDeps());
+      return {
+        environmentEditableEnv: resolved?.config.environmentEditableEnv,
+        environmentSecretEnvNames: resolved?.config.environmentSecretEnvNames,
+        execEnv,
+        execDescription: (tools.exec as { description?: string } | undefined)?.description,
+      };
+    });
+
+    expect(result.environmentEditableEnv).toEqual({ BENCH_VAR: "from-workbench" });
+    expect(result.environmentSecretEnvNames).toEqual(["BENCH_SECRET"]);
+    expect(result.execEnv).toMatchObject({
+      BENCH_VAR: "from-workbench",
+      BENCH_SECRET: "workbench-secret",
+    });
+    expect(result.execDescription).toContain("BENCH_VAR");
+    expect(result.execDescription).toContain("BENCH_SECRET");
   });
 });

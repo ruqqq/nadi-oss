@@ -2245,6 +2245,18 @@ export class ThinkThreadAgent extends Think<Env> {
     return undefined;
   }
 
+  /**
+   * Thread id used for compute resolution: workbench snapshot, workbench env
+   * vars/secrets, GH_TOKEN mint from repo snapshots, Cloudflare sandbox
+   * identity, and the quota ledger. Default is this Durable Object's name.
+   * {@link SubAgent} overrides it to the PARENT thread id — a facet's name is
+   * a run id with no workbench row, so using it would drop workbench env from
+   * every attached exec (sprites carries that map per-command).
+   */
+  protected computeOwnerThreadId(): string {
+    return this.name;
+  }
+
   /** Whether process watchers + the turn-end auto-watch backstop are available.
    *  Overridden to false in SubAgent to avoid subagent-owned watchers. */
   protected processMonitorEnabled(): boolean {
@@ -4434,7 +4446,7 @@ export class ThinkThreadAgent extends Think<Env> {
     const processMonitorEnabled = backgroundWorkAdmission ?? this.processMonitorEnabled();
     return {
       env: this.env,
-      threadId: this.name,
+      threadId: this.computeOwnerThreadId(),
       storage: this.ctx.storage,
       // Think can drive a proactive turn (see deliverSystemReminder below), so
       // watcher exit reminders are surfaced instead of silently dropped.
@@ -4576,7 +4588,7 @@ export class ThinkThreadAgent extends Think<Env> {
       onFreshRuntimeAcquired: (() => {
         const prepareRepositories = createRepositoryPreparation({
           env: this.env,
-          threadId: this.name,
+          threadId: this.computeOwnerThreadId(),
           resolveComputeService: () => resolveComputeService(this.sandboxHostDeps()),
         });
         return async () => {
