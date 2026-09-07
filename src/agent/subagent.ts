@@ -235,6 +235,19 @@ export class SubAgent extends ThinkThreadAgent {
   }
 
   /**
+   * Workbench env/secrets are keyed by the parent thread, not this facet's run
+   * id. Cached from {@link subagentContext} (or the test seam) so
+   * `sandboxHostDeps()` can read it synchronously.
+   */
+  protected override computeOwnerThreadId(): string {
+    return (
+      this._testSubagentContext?.parentThreadId ??
+      this._subagentContext?.parentThreadId ??
+      this.name
+    );
+  }
+
+  /**
    * An attached subagent writes to the PARENT's machine, so its writes must
    * invalidate the PARENT's `sandbox:declared-clean` bit — the inherited
    * implementation would only clear this facet's own storage, which nothing
