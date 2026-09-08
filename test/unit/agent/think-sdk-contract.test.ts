@@ -51,3 +51,27 @@ describe("Think overlay-persistence seam", () => {
     expect((proto._persistIncomingMessage as (...a: unknown[]) => unknown).length).toBe(2);
   });
 });
+
+/**
+ * The durable-submission drain seam. ThinkThreadAgent shadows
+ * `_startSubmissionDrain` on the instance where the platform cannot carry
+ * detached work (celld), redirecting the kick onto `_scheduleSubmissionDrain`
+ * so the alarm drives the turn.
+ *
+ * A shadow of a method that no longer exists intercepts nothing, and the
+ * failure is invisible to every behavioural test: the turn still completes,
+ * because the SDK's own (renamed) detached kick runs it — on workerd, where
+ * detached work survives. Only on celld does it come back as the original bug,
+ * a submission claimed `running` and abandoned with no error. So pin both
+ * halves of the seam here.
+ */
+describe("Think durable-submission drain seam", () => {
+  it.each(["_startSubmissionDrain", "_scheduleSubmissionDrain"])(
+    "still exposes %s on the prototype",
+    (method) => {
+      const proto = Think.prototype as unknown as Record<string, unknown>;
+      expect(typeof proto[method]).toBe("function");
+      expect((proto[method] as (...a: unknown[]) => unknown).length).toBe(0);
+    },
+  );
+});

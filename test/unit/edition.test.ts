@@ -76,18 +76,21 @@ describe("platformCapabilities", () => {
       containerSandbox: true,
       wsSchemeUpgrade: false,
       cleanEgress: false,
+      detachedWorkSurvivesResponse: true,
     });
     expect(platformCapabilities({ NADI_PLATFORM: "cloudflare" })).toEqual({
       speechToText: true,
       containerSandbox: true,
       wsSchemeUpgrade: false,
       cleanEgress: false,
+      detachedWorkSurvivesResponse: true,
     });
     expect(platformCapabilities({ NADI_PLATFORM: "celld" })).toEqual({
       speechToText: false,
       containerSandbox: false,
       wsSchemeUpgrade: true,
       cleanEgress: true,
+      detachedWorkSurvivesResponse: false,
     });
   });
 
@@ -112,6 +115,19 @@ describe("platformCapabilities", () => {
     expect(platformCapabilities({}).cleanEgress).toBe(false);
     expect(platformCapabilities({ NADI_PLATFORM: "CELLD" }).cleanEgress).toBe(true);
     expect(platformCapabilities({ NADI_PLATFORM: "celd" }).cleanEgress).toBe(false);
+  });
+
+  it("withdraws detachedWorkSurvivesResponse only on celld", () => {
+    // The fall must point at Cloudflare, where `void doWork()` really does keep
+    // running. Getting this backwards on Cloudflare would silence the drain kick
+    // and leave every submission waiting on the alarm; getting it backwards on
+    // celld is the bug it exists to prevent — a claimed submission abandoned
+    // mid-turn with no error and nothing to retry it.
+    expect(platformCapabilities({}).detachedWorkSurvivesResponse).toBe(true);
+    expect(platformCapabilities({ NADI_PLATFORM: "CELLD" }).detachedWorkSurvivesResponse).toBe(
+      false,
+    );
+    expect(platformCapabilities({ NADI_PLATFORM: "celd" }).detachedWorkSurvivesResponse).toBe(true);
   });
 
   it("grants containerSandbox only on cloudflare", () => {

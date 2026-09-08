@@ -107,6 +107,22 @@ export interface PlatformCapabilities {
    * is what that function already did with an empty `proxyUrl`.
    */
   cleanEgress: boolean;
+  /**
+   * True when an async continuation that outlives the request (or Durable
+   * Object RPC) which started it keeps running — the fire-and-forget pattern
+   * `void doWork()`.
+   *
+   * Cloudflare keeps such work alive; celld does NOT. Measured on the beta
+   * 2026-09-09: a detached loop logs its first iteration and never resumes
+   * past the first real suspension — a `setTimeout` and an outbound `fetch`
+   * both die, while the identical loop awaited inside the request runs to
+   * completion, and so does one running inside an alarm handler. Think starts
+   * its durable-submission drain that way (`_startSubmissionDrain`), so on
+   * celld every such turn was claimed `running` and then abandoned with no
+   * error and no completion. Where this is false, detached work must be
+   * driven from an alarm instead.
+   */
+  detachedWorkSurvivesResponse: boolean;
 }
 
 export function platformCapabilities(env: {
@@ -118,6 +134,7 @@ export function platformCapabilities(env: {
     containerSandbox: platform === "cloudflare",
     wsSchemeUpgrade: platform === "celld",
     cleanEgress: platform === "celld",
+    detachedWorkSurvivesResponse: platform === "cloudflare",
   };
 }
 
