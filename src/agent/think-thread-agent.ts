@@ -14,6 +14,7 @@ import {
   type TurnContext,
 } from "@cloudflare/think";
 import type { SkillScriptRequest, SkillScriptRunner } from "agents/skills";
+import { platformCapabilities } from "../edition";
 import { callable, getAgentByName } from "agents";
 import { estimateMessageTokens } from "agents/experimental/memory/utils";
 import {
@@ -536,6 +537,27 @@ function trailingUserMessageIds(messages: Array<{ id?: unknown; role?: unknown }
 }
 
 export class ThinkThreadAgent extends Think<Env> {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    // Drain durable submissions from the alarm only, where detached work dies.
+    //
+    // `submitMessages` both schedules a drain alarm AND kicks a detached drain
+    // (`_startSubmissionDrain`), and on Cloudflare the detached one simply wins
+    // the race. On celld it wins the race and then dies: the runtime drops any
+    // continuation belonging to work that outlived its request, so the drain
+    // claims the row `running`, appends the user message, and never resumes
+    // past its first real await. Nothing retries it — the drain only ever picks
+    // up `pending` rows — so the first message of every new thread, and every
+    // automaton run, hung forever with no error and no completion. The alarm
+    // path runs the same turn to completion (measured: timers and outbound
+    // fetch both work inside an alarm handler), so where the detached pattern
+    // is unsafe the alarm is the only drain. Shadowed on the instance because
+    // the method is private to Think and cannot be overridden.
+    if (!platformCapabilities(env).detachedWorkSurvivesResponse) {
+      (this as unknown as { _startSubmissionDrain: () => void })._startSubmissionDrain = () => {};
+    }
+  }
+
   workspaceBash = false;
   /** Cap on concurrent non-terminal agent-tool runs this thread may own at once (shared-sandbox subagents). */
   maxConcurrentAgentTools = 4;
