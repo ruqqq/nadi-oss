@@ -17,6 +17,8 @@ import { collectMessageFileParts } from "@/lib/message-file-parts";
 import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-elements/reasoning";
 import { buildToolTimeline } from "@/lib/group-tool-parts";
 import { MODEL_SWITCH_PART_TYPE, readModelSwitchPart } from "@/lib/model-switch";
+import { readTurnErrorPart } from "@/lib/turn-error";
+import { TurnErrorNotice } from "./TurnErrorNotice";
 import type { ToolNameServer } from "@/lib/resolve-tool-name";
 import { isSteeredMessage } from "@/lib/steering-messages";
 import { ArrowBendDownRight } from "@/icons";
@@ -166,6 +168,10 @@ export function MessageRow({
             const part = node.part;
             if (part.type === "text") {
               return <MessageResponse key={node.key}>{part.text}</MessageResponse>;
+            }
+            const turnError = readTurnErrorPart(part);
+            if (turnError) {
+              return <TurnErrorNotice key={node.key} message={turnError.message} />;
             }
             if (part.type === "reasoning") {
               return (

@@ -118,6 +118,19 @@ function buildProviderModel(input: Parameters<typeof buildModel>[0]): LanguageMo
     return createOpenAICompatibleModel(compatibleInput);
   }
 
+  if (provider === "mock-error") {
+    // Rejects the way a live provider rejects a blocked/invalid key: the request
+    // throws inside doStream, after the turn has already been admitted.
+    return new MockLanguageModelV3({
+      provider: "mock",
+      modelId: "mock-error",
+      doStream: async () => {
+        throw new Error("AuthError: Missing API key.");
+      },
+      // double-cast: MockLanguageModelV3 from ai/test does not match ai's LanguageModel union type
+    }) as unknown as LanguageModel;
+  }
+
   if (provider === "mock-tool-call") {
     // Emits a single tool-call for "demo_tool" then finishes — used in DO-persistence approval tests.
     return new MockLanguageModelV3({

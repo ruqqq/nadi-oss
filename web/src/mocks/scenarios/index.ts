@@ -25,6 +25,7 @@ import type { MockArtifact, MockAttachment, MockFaults, MockStore } from "../sto
 import { TOOL_RUN_THREAD_ID, TOOL_WRITE_THREAD_ID } from "../chat/tool-run-transcript";
 import { MID_TURN_THREAD_ID } from "../chat/mid-turn-transcript";
 import { HERO_THREAD_ID } from "../chat/hero-transcript";
+import { TURN_ERROR_THREAD_ID } from "../chat/turn-error-transcript";
 import {
   ASSISTANT_ARTIFACTS_THREAD_ID,
   MOCK_ARTIFACT_ID,
@@ -1012,6 +1013,27 @@ function midTurnResumeStore(): MockStore {
 }
 
 /**
+ * A thread whose turn failed with nobody watching. Seeded rather than parked in
+ * `preview.tsx` because the transcript alone drives it — the failure is a
+ * durable part, not a transient client state.
+ */
+function turnErrorStore(): MockStore {
+  const base = defaultStore();
+  return {
+    ...base,
+    threads: [
+      makeThread({
+        threadId: TURN_ERROR_THREAD_ID,
+        title: "Incident report summary",
+        lastMessagePreview: "Summarise yesterday's incident report.",
+        updatedAt: NOW - 2 * MINUTE,
+      }),
+      ...base.threads,
+    ],
+  };
+}
+
+/**
  * The documentation screenshot seed: a full two-exchange thread at the top of a
  * populated rail. Kept a named scenario rather than a one-off script so a
  * regenerated hero image is reproducible instead of a lucky capture.
@@ -1532,6 +1554,7 @@ export const SCENARIOS: Record<string, () => MockStore> = {
   "history-error": historyErrorStore,
   "first-message-failure": firstMessageFailureStore,
   "mid-turn-resume": midTurnResumeStore,
+  "turn-error": turnErrorStore,
   hero: heroStore,
   feedback: feedbackStore,
   "feedback-model-error": feedbackModelErrorStore,
