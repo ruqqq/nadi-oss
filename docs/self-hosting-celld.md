@@ -179,8 +179,8 @@ rules in [Operating](#operating).
 ## Prerequisites
 
 - A machine with Node 22+, `pnpm`, and `git`.
-- **celld v0.4.0**: `curl -fsSL https://celld.dev/install.sh | sh` (add
-  `CELLD_VERSION=v0.4.0` to pin). This is the version Nadi is built against and
+- **celld v0.4.1**: `curl -fsSL https://celld.dev/install.sh | sh` (add
+  `CELLD_VERSION=v0.4.1` to pin). This is the version Nadi is built against and
   the one `deploy/celld/Dockerfile` pins. See
   [Upgrading celld](#upgrading-celld) before moving it.
 - **An S3-compatible bucket.** [MinIO](https://min.io) is fine and is what this
@@ -671,7 +671,7 @@ occurrences are being missed, not merely delayed.
 
 ## Upgrading celld
 
-Nadi pins **v0.4.0** (`CELLD_VERSION` in `deploy/celld/Dockerfile`).
+Nadi pins **v0.4.1** (`CELLD_VERSION` in `deploy/celld/Dockerfile`).
 
 ### v0.3.0 → v0.4.0
 
