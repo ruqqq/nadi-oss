@@ -466,6 +466,133 @@ export async function routeDebug(req: Request, env: Env): Promise<Response | nul
     );
   }
 
+  // GET /api/debug/stream-probe?provider=&model=&timeoutMs= — issue the SAME
+  // chat completion twice against the workspace's stored credential, once
+  // NON-STREAMING and once with `stream: true`, and time both.
+  //
+  // This exists because a model turn on celld v0.4.0 hangs with zero bytes
+  // returned and no error, for two different providers, while
+  // `/api/debug/provider-chat` (non-streaming, same endpoint, same key) answers
+  // immediately. A hung turn never reaches a terminal submission status, so
+  // nothing is written anywhere — the failure is invisible from the app. This
+  // reduces that to one request whose output names which of the two shapes
+  // stalls, and is bounded by its own deadline so the probe itself cannot
+  // become another hang.
+  if (url.pathname === "/api/debug/stream-probe" && req.method === "GET") {
+    const provider = url.searchParams.get("provider") ?? "";
+    if (!isProviderConfigProvider(provider)) {
+      return Response.json({ error: "unknown provider", provider }, { status: 400 });
+    }
+    const model = url.searchParams.get("model") ?? "";
+    if (!model) return Response.json({ error: "model required" }, { status: 400 });
+    const timeoutMs = Math.min(
+      Math.max(Number(url.searchParams.get("timeoutMs") ?? "20000"), 1000),
+      60000,
+    );
+
+    const endpointConfig = await getProviderEndpointConfig(env, workspaceId, provider);
+    const secret = await getProviderSecretValue(env, workspaceId, provider);
+    const base = endpointConfig.baseUrl.replace(/\/+$/, "");
+    if (!base) {
+      return Response.json({ error: "provider has no baseUrl", provider }, { status: 400 });
+    }
+    const headers = {
+      "Content-Type": "application/json",
+      ...(secret ? { Authorization: `Bearer ${secret}` } : {}),
+    };
+    const messages = [{ role: "user", content: "hi" }];
+
+    // Bounded by an AbortController rather than by racing a promise: an
+    // unresolved fetch would otherwise outlive the response and keep the
+    // request open (the same reason stray timers are cleared on this runtime).
+    // The timer is ALWAYS cleared, on every path.
+    async function probe(stream: boolean): Promise<Record<string, unknown>> {
+      const controller = new AbortController();
+      const startedAt = Date.now();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await fetch(`${base}/chat/completions`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ model, messages, ...(stream ? { stream: true } : {}) }),
+          signal: controller.signal,
+        });
+        const headersMs = Date.now() - startedAt;
+        if (!res.body) {
+          const text = await res.text();
+          return {
+            stream,
+            headersMs,
+            status: res.status,
+            ok: res.ok,
+            bodyBytes: text.length,
+            snippet: text.slice(0, 200),
+            note: "no readable body",
+          };
+        }
+        // Read the body as chunks so "headers came back" and "bytes actually
+        // flowed" are reported separately — a stall between the two is exactly
+        // the shape being hunted.
+        const reader = res.body.getReader();
+        let chunks = 0;
+        let bytes = 0;
+        let firstChunkMs: number | null = null;
+        let snippet = "";
+        const decoder = new TextDecoder();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (firstChunkMs === null) firstChunkMs = Date.now() - startedAt;
+          chunks += 1;
+          bytes += value?.byteLength ?? 0;
+          if (snippet.length < 200 && value) {
+            snippet += decoder.decode(value, { stream: true }).slice(0, 200 - snippet.length);
+          }
+        }
+        return {
+          stream,
+          headersMs,
+          status: res.status,
+          ok: res.ok,
+          firstChunkMs,
+          chunks,
+          bytes,
+          totalMs: Date.now() - startedAt,
+          snippet: snippet.slice(0, 200),
+        };
+      } catch (err) {
+        const aborted = controller.signal.aborted;
+        return {
+          stream,
+          elapsedMs: Date.now() - startedAt,
+          timedOut: aborted,
+          threw: err instanceof Error ? err.message : String(err),
+          ...(aborted ? { note: `no response within ${timeoutMs}ms` } : {}),
+        };
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    // Sequential, not parallel: two concurrent requests to the same upstream
+    // would let a rate limit masquerade as the stall being measured.
+    const nonStreaming = await probe(false);
+    const streaming = await probe(true);
+
+    return Response.json(
+      {
+        provider,
+        model,
+        baseUrl: base,
+        sentKey: secret !== null && secret !== "",
+        timeoutMs,
+        nonStreaming,
+        streaming,
+      },
+      { headers: { "Cache-Control": "no-store" } },
+    );
+  }
+
   // GET /api/debug/provider-models?provider=…&q=… — what the Worker actually
   // sees when it lists a provider's models. searchProviderModels degrades to the
   // static list on ANY live-fetch failure, which is indistinguishable from
