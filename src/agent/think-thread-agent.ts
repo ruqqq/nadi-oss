@@ -10,6 +10,7 @@ import {
   type StepConfig,
   type StepContext,
   type TurnConfig,
+  type ThinkSubmissionInspection,
   type TurnContext,
 } from "@cloudflare/think";
 import type { SkillScriptRequest, SkillScriptRunner } from "agents/skills";
@@ -29,6 +30,7 @@ import {
   type ContextBudget,
 } from "./context-budget";
 import { boundTranscript } from "./transcript-bounding";
+import { turnErrorMessageId, turnErrorPart } from "./turn-error";
 import {
   boundContinuity,
   EMPTY_CONTINUITY,
@@ -66,7 +68,11 @@ import {
 } from "../flags";
 import { buildModel } from "../providers/model-factory";
 import { invalidatablePromiseCache } from "./promise-cache";
-import { chatErrorForClient, serializeErrorChain } from "../error-details";
+import {
+  chatErrorForClient,
+  serializeErrorChain,
+  submissionErrorForClient,
+} from "../error-details";
 import {
   buildThreadModelForWorkspace,
   resolveThreadRuntimeConfigForAgent,
@@ -2140,6 +2146,80 @@ export class ThinkThreadAgent extends Think<Env> {
     this.scheduleSearchProjection?.();
     if (phClient) this.ctx.waitUntil(phClient.flush().catch(() => {}));
     return chatErrorForClient(error);
+  }
+
+  /**
+   * The submission path's answer to `onChatError`, which Think does NOT call
+   * for a turn it drove from the submission ledger.
+   *
+   * A queued send and an automaton run both reach the model through
+   * `submitMessages`, and when that turn dies Think records the reason on the
+   * submission row, broadcasts it to whatever client happens to be attached at
+   * that instant, and stops. Nothing is persisted, no hook of ours runs. So a
+   * failure that lands in the ~300ms before the browser's socket attaches — or
+   * any failure at all on an automaton run, which has no client by definition —
+   * left the thread showing typing dots forever, with the only trace a
+   * `console.error` inside Think. That is how a provider returning 401 on every
+   * turn presented as "the app is up and chat just does nothing".
+   *
+   * Writing the failure into the transcript is what makes it survive: a reload,
+   * a reconnect, and a client that was never there in the first place all read
+   * the same durable row.
+   */
+  protected async onSubmissionStatus(submission: ThinkSubmissionInspection): Promise<void> {
+    if (submission.status !== "error") return;
+
+    const message = submissionErrorForClient(submission.error);
+    log.error("think_thread.submission_error", {
+      threadId: this.name,
+      submissionId: submission.submissionId,
+      requestId: submission.requestId,
+      provider: this.currentTurnTrace?.provider,
+      model: this.currentTurnTrace?.model,
+      error: submission.error,
+    });
+
+    // Idempotent by construction: `addMessages` is a no-op for an id already in
+    // history, and the id is derived from the submission — celld replays a
+    // terminal status with the alarm that carried it.
+    try {
+      await this.addMessages([
+        {
+          id: turnErrorMessageId(submission.submissionId),
+          role: "assistant",
+          parts: [turnErrorPart({ message })],
+        },
+      ]);
+    } catch (error) {
+      log.warn("think_thread.submission_error_persist_failed", {
+        threadId: this.name,
+        submissionId: submission.submissionId,
+        error: String(error),
+      });
+    }
+
+    // Same lifecycle event the interactive path fires from `onChatError`, so a
+    // failed queued send marks the thread unread and pushes, rather than only
+    // an interactive one.
+    try {
+      const runtimeConfig = await this.resolveRuntimeConfigForThink();
+      await recordThreadLifecycleEvent({
+        env: this.env,
+        event: {
+          type: "thread.failed",
+          threadId: this.name,
+          workspaceId: runtimeConfig.workspaceId,
+          startedAt: submission.startedAt ?? submission.createdAt,
+          occurredAt: Date.now(),
+        },
+      });
+    } catch (error) {
+      log.warn("think_thread.submission_error_notify_failed", {
+        threadId: this.name,
+        submissionId: submission.submissionId,
+        error: String(error),
+      });
+    }
   }
 
   /**

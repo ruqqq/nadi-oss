@@ -27,6 +27,7 @@ export const SUPPORTED_MODEL_PROVIDERS: Record<string, true> = {
   "mock-tool-call": true,
   "mock-tool-loop": true,
   "mock-reasoning": true,
+  "mock-error": true,
 };
 
 export const WORKSPACE_SECRET_PROVIDERS: Record<string, true> = {
@@ -64,6 +65,7 @@ export const SUPPORTED_RUNTIME_PROVIDERS = new Set([
   "mock-tool-call",
   "mock-tool-loop",
   "mock-reasoning",
+  "mock-error",
 ]);
 
 export function resolveModelConfig(env: Env): ResolvedModelConfig {
