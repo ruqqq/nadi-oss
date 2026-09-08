@@ -88,6 +88,25 @@ export interface PlatformCapabilities {
    * `baseUrl` scheme already matches.
    */
   wsSchemeUpgrade: boolean;
+  /**
+   * True when the platform's own outbound egress is acceptable to providers
+   * that refuse shared cloud egress — so a clean-egress proxy route is a
+   * choice rather than a requirement.
+   *
+   * ChatGPT 403s Cloudflare Worker egress, which is why `openai-oauth` is
+   * usable there only with `endpointConfig.proxyUrl` set: direct is not a
+   * working configuration, so offering it would only produce a provider that
+   * fails on every turn. A celld node egresses from the operator's own
+   * machine, where that block does not apply — measured on the hosted beta,
+   * which answers 401 (reachable, unauthenticated) rather than 403 (blocked)
+   * on `chatgpt.com/backend-api/codex` from both the container and the host.
+   *
+   * Gates SELECTION only, and only the proxy REQUIREMENT: a workspace that has
+   * configured a proxy still uses it (`resolveEgressProxy` reads the stored
+   * route either way), and a workspace with none simply egresses direct, which
+   * is what that function already did with an empty `proxyUrl`.
+   */
+  cleanEgress: boolean;
 }
 
 export function platformCapabilities(env: {
@@ -98,6 +117,7 @@ export function platformCapabilities(env: {
     speechToText: platform === "cloudflare",
     containerSandbox: platform === "cloudflare",
     wsSchemeUpgrade: platform === "celld",
+    cleanEgress: platform === "celld",
   };
 }
 

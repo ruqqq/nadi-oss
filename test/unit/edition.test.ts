@@ -75,16 +75,19 @@ describe("platformCapabilities", () => {
       speechToText: true,
       containerSandbox: true,
       wsSchemeUpgrade: false,
+      cleanEgress: false,
     });
     expect(platformCapabilities({ NADI_PLATFORM: "cloudflare" })).toEqual({
       speechToText: true,
       containerSandbox: true,
       wsSchemeUpgrade: false,
+      cleanEgress: false,
     });
     expect(platformCapabilities({ NADI_PLATFORM: "celld" })).toEqual({
       speechToText: false,
       containerSandbox: false,
       wsSchemeUpgrade: true,
+      cleanEgress: true,
     });
   });
 
@@ -96,6 +99,19 @@ describe("platformCapabilities", () => {
     expect(platformCapabilities({}).wsSchemeUpgrade).toBe(false);
     expect(platformCapabilities({ NADI_PLATFORM: "CELLD" }).wsSchemeUpgrade).toBe(true);
     expect(platformCapabilities({ NADI_PLATFORM: "celd" }).wsSchemeUpgrade).toBe(false);
+  });
+
+  it("grants cleanEgress only on celld", () => {
+    // Also inverted, and for the same reason as wsSchemeUpgrade: it is a
+    // property of WHERE the request leaves from. A celld node egresses from the
+    // operator's own machine; Cloudflare's Worker egress is shared and ChatGPT
+    // 403s it, which is why openai-oauth needs a proxy route THERE. An unset or
+    // misspelled platform must land on the Cloudflare answer — the one that
+    // keeps the proxy REQUIRED, so a bad platform string cannot quietly offer a
+    // configuration that fails on every turn.
+    expect(platformCapabilities({}).cleanEgress).toBe(false);
+    expect(platformCapabilities({ NADI_PLATFORM: "CELLD" }).cleanEgress).toBe(true);
+    expect(platformCapabilities({ NADI_PLATFORM: "celd" }).cleanEgress).toBe(false);
   });
 
   it("grants containerSandbox only on cloudflare", () => {
