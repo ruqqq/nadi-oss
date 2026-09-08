@@ -1,5 +1,6 @@
 import type { Env } from "../env";
 import { canUseProvider } from "../auth/provider-gate";
+import { platformCapabilities, type PlatformCapabilities } from "../edition";
 import { createWorkspaceSecretsServices } from "../secrets";
 import {
   getProviderConfig,
@@ -55,6 +56,7 @@ async function listAllProviderSettings(
   workspaceId: string,
 ): Promise<ProviderSettingsView[]> {
   const metadata = await listProviderConfigMetadata(env, workspaceId);
+  const capabilities = platformCapabilities(env);
   const { writer } = createWorkspaceSecretsServices(env);
   const [secretMetadata, whitelists] = await Promise.all([
     Promise.all(
@@ -67,7 +69,7 @@ async function listAllProviderSettings(
     const matchingSecret = secretMetadata[index] ?? null;
     const secretPresent = matchingSecret !== null;
     const endpointConfig = entry.endpointConfig;
-    const usable = isProviderUsable(entry.provider, secretPresent, endpointConfig);
+    const usable = isProviderUsable(entry.provider, secretPresent, endpointConfig, capabilities);
     return {
       ...entry,
       secretPresent,
@@ -193,6 +195,7 @@ export function isProviderUsable(
   provider: ProviderConfigProvider,
   secretPresent: boolean,
   endpointConfig: ProviderEndpointConfig,
+  capabilities: Pick<PlatformCapabilities, "cleanEgress">,
 ): boolean {
   // Authenticated by the `AI` binding, so there is nothing to configure — it is
   // usable the moment it is offered. The allowlist decides whether it is offered
@@ -201,9 +204,13 @@ export function isProviderUsable(
     return true;
   }
   if (provider === "openai-oauth") {
-    // Needs both the ChatGPT OAuth token and a clean-egress proxy route:
-    // ChatGPT 403s Worker egress, so direct is not a usable configuration.
-    return secretPresent && endpointConfig.proxyUrl.length > 0;
+    // Needs the ChatGPT OAuth token, plus a clean-egress proxy route on a
+    // platform whose own egress ChatGPT refuses: it 403s Cloudflare Worker
+    // egress, so direct is not a usable configuration THERE. Where the
+    // platform's egress is already acceptable (`cleanEgress`, i.e. celld,
+    // which leaves from the operator's own machine) the proxy is optional and
+    // requiring it would make a perfectly good credential unselectable.
+    return secretPresent && (capabilities.cleanEgress || endpointConfig.proxyUrl.length > 0);
   }
   if (provider === "openai-compatible" && endpointConfig.auth === "none") {
     return endpointConfig.baseUrl.length > 0;

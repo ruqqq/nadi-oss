@@ -88,13 +88,28 @@ describe("isProviderUsable", () => {
     auth: "bearer" as const,
     body: {},
   });
+  /** Cloudflare: shared Worker egress, which ChatGPT refuses. */
+  const dirtyEgress = { cleanEgress: false };
+  /** celld: egress from the operator's own machine. */
+  const cleanEgress = { cleanEgress: true };
 
   // ChatGPT 403s Worker egress, so a token without a proxy route is not usable.
   it("requires a proxy route for openai-oauth, not just the token", () => {
-    expect(isProviderUsable("openai-oauth", true, oauthConfig(""))).toBe(false);
+    expect(isProviderUsable("openai-oauth", true, oauthConfig(""), dirtyEgress)).toBe(false);
     expect(
-      isProviderUsable("openai-oauth", true, oauthConfig("https://proxy.example.com/openai-oauth")),
+      isProviderUsable(
+        "openai-oauth",
+        true,
+        oauthConfig("https://proxy.example.com/openai-oauth"),
+        dirtyEgress,
+      ),
     ).toBe(true);
+  });
+
+  // Where the platform's own egress is already acceptable the proxy is a
+  // choice, and requiring it would make a working credential unselectable.
+  it("does not require a proxy route for openai-oauth on a clean-egress platform", () => {
+    expect(isProviderUsable("openai-oauth", true, oauthConfig(""), cleanEgress)).toBe(true);
   });
 
   it("still requires the OAuth secret", () => {
@@ -103,19 +118,27 @@ describe("isProviderUsable", () => {
         "openai-oauth",
         false,
         oauthConfig("https://proxy.example.com/openai-oauth"),
+        dirtyEgress,
       ),
     ).toBe(false);
+    // Clean egress removes the proxy requirement, never the credential one.
+    expect(isProviderUsable("openai-oauth", false, oauthConfig(""), cleanEgress)).toBe(false);
   });
 
   // Zen works direct (paid models); the proxy is only what makes free ones work.
   it("does not require a proxy route for opencode-zen", () => {
     expect(
-      isProviderUsable("opencode-zen", true, {
-        baseUrl: "https://opencode.ai/zen/v1",
-        proxyUrl: "",
-        auth: "bearer",
-        body: {},
-      }),
+      isProviderUsable(
+        "opencode-zen",
+        true,
+        {
+          baseUrl: "https://opencode.ai/zen/v1",
+          proxyUrl: "",
+          auth: "bearer",
+          body: {},
+        },
+        dirtyEgress,
+      ),
     ).toBe(true);
   });
 });
