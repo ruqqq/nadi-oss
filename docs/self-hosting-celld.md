@@ -673,6 +673,36 @@ occurrences are being missed, not merely delayed.
 
 Nadi pins **v0.4.1** (`CELLD_VERSION` in `deploy/celld/Dockerfile`).
 
+### v0.4.0 → v0.4.1
+
+**A rolling upgrade is supported**, unlike the previous two releases — upstream
+says so and the peer tunnel does not change version. On the single-node stack
+`~/update-nadi.sh` handles it: the celld binary moving is the one thing that
+still recreates the node rather than adopting in place, and the script detects
+that by image id rather than trusting the operator to remember.
+
+Nothing in this repo changed for it. The version bump is the whole diff.
+
+**Two release-note claims are NOT measured here, and both would retire a
+workaround if true.** They are recorded as open questions rather than facts,
+because this is the release series where believing the compatibility page has
+already been wrong twice:
+
+- **`ctx.facets`** is listed as implemented (`get()`, `abort()`, `delete()`,
+  each facet with its own replicated SQLite database). Facets are the one thing
+  standing between this deployment and subagents — the `agents` SDK builds them
+  from facets, which is why `wrangler.celld.jsonc` pins
+  `BACKGROUND_WORK_ENABLED: "false"`. That flag is a plain env var, not a
+  `PlatformCapabilities` entry, so flipping it is a config change — but flip it
+  on evidence, not on the changelog.
+- **RSA signing** is listed under the new Web Crypto surface. If a v0.4.1 node
+  can actually sign `RSASSA-PKCS1-v1_5`, the in-repo BigInt RS256 signer becomes
+  dead weight. Note that `nativeRsaAvailable` probes by *signing* and caches the
+  answer, so a runtime that gained the capability already takes the native path
+  with no configuration and no deploy — the only thing left to do is delete the
+  shim, and that needs a measurement first. See the v0.4.0 note above for why
+  the probe signs rather than merely importing.
+
 ### v0.3.0 → v0.4.0
 
 **This upgrade must NOT be a rolling update.** Stop every v0.3.0 node, then
