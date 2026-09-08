@@ -357,6 +357,8 @@ async function tryJson(fn: () => Promise<unknown>): Promise<Response> {
 }
 
 /** Explicit query param wins, then DEBUG_WORKSPACE_ID, then the real "default" tenant. */
+const TIMED_OUT = Symbol("timed-out");
+
 export function resolveDebugWorkspaceId(env: Env, queryParam: string | null): string {
   return queryParam ?? env.DEBUG_WORKSPACE_ID ?? env.DEFAULT_WORKSPACE_ID;
 }
@@ -589,6 +591,82 @@ export async function routeDebug(req: Request, env: Env): Promise<Response | nul
         nonStreaming,
         streaming,
       },
+      { headers: { "Cache-Control": "no-store" } },
+    );
+  }
+
+  // GET /api/debug/turn-phases?threadId=&timeoutMs= — bisect where a turn stalls.
+  //
+  // A turn on the celld beta is claimed and then never produces a byte:
+  // `cf_think_submissions.status` stays 'running', `cf_ai_chat_stream_chunks`
+  // stays 0, and no error is ever recorded. `/api/debug/stream-probe` ruled the
+  // model call itself out — both request shapes answer in under 1.2s — so the
+  // stall is upstream of it, and there is no other way to see that: Durable
+  // Object console output is not surfaced on this deployment, so a log line
+  // would be written into a void.
+  //
+  // Each phase is RACED against a deadline rather than awaited, so one hanging
+  // phase is reported instead of hanging the probe too. A phase that times out
+  // keeps running on the object — this reports where it got stuck, it does not
+  // unstick it.
+  if (url.pathname === "/api/debug/turn-phases" && req.method === "GET") {
+    const threadId = url.searchParams.get("threadId");
+    if (!threadId) return new Response("threadId required", { status: 400 });
+    const timeoutMs = Math.min(
+      Math.max(Number(url.searchParams.get("timeoutMs") ?? "15000"), 1000),
+      60000,
+    );
+
+    const stub = (await getAgentByName(env.THINK_THREAD_AGENT, threadId)) as unknown as {
+      ping(): Promise<string>;
+      hasActiveTurn(): Promise<boolean>;
+      compatibilityReport(): Promise<unknown>;
+      resolveRuntimeConfigForThink(): Promise<{ provider?: string; model?: string }>;
+      beforeTurnProbeForTest(messages: unknown[]): Promise<{ activeTools?: string[] }>;
+    };
+
+    async function phase(name: string, run: () => Promise<unknown>) {
+      const startedAt = Date.now();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const timeout = new Promise<typeof TIMED_OUT>((resolve) => {
+          timer = setTimeout(() => resolve(TIMED_OUT), timeoutMs);
+        });
+        const result = await Promise.race([run(), timeout]);
+        const ms = Date.now() - startedAt;
+        if (result === TIMED_OUT) return { name, ms, stalled: true };
+        return { name, ms, stalled: false, result };
+      } catch (error) {
+        return {
+          name,
+          ms: Date.now() - startedAt,
+          stalled: false,
+          threw: error instanceof Error ? error.message : String(error),
+        };
+      } finally {
+        // Always cleared: a live timer pins the request open on celld.
+        if (timer !== undefined) clearTimeout(timer);
+      }
+    }
+
+    // Ordered cheapest-first, so the LAST entry that completed names the
+    // boundary the stall sits behind. Stops at the first stall — every later
+    // phase would queue behind it and report the same thing.
+    const phases: Array<Record<string, unknown>> = [];
+    for (const [name, run] of [
+      ["ping", () => stub.ping()],
+      ["hasActiveTurn", () => stub.hasActiveTurn()],
+      ["resolveRuntimeConfig", () => stub.resolveRuntimeConfigForThink()],
+      ["compatibilityReport", () => stub.compatibilityReport()],
+      ["beforeTurn", () => stub.beforeTurnProbeForTest([])],
+    ] as Array<[string, () => Promise<unknown>]>) {
+      const outcome = await phase(name, run);
+      phases.push(outcome);
+      if (outcome.stalled) break;
+    }
+
+    return Response.json(
+      { threadId, timeoutMs, phases },
       { headers: { "Cache-Control": "no-store" } },
     );
   }
