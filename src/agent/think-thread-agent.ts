@@ -2200,26 +2200,34 @@ export class ThinkThreadAgent extends Think<Env> {
 
     // Same lifecycle event the interactive path fires from `onChatError`, so a
     // failed queued send marks the thread unread and pushes, rather than only
-    // an interactive one.
-    try {
-      const runtimeConfig = await this.resolveRuntimeConfigForThink();
-      await recordThreadLifecycleEvent({
-        env: this.env,
-        event: {
-          type: "thread.failed",
-          threadId: this.name,
-          workspaceId: runtimeConfig.workspaceId,
-          startedAt: submission.startedAt ?? submission.createdAt,
-          occurredAt: Date.now(),
-        },
-      });
-    } catch (error) {
-      log.warn("think_thread.submission_error_notify_failed", {
-        threadId: this.name,
-        submissionId: submission.submissionId,
-        error: String(error),
-      });
-    }
+    // an interactive one — and deferred through `waitUntil` for the same reason
+    // `onChatError` defers its copy. Think awaits this hook inside the
+    // submission's status emit, so anything awaited here holds the object busy
+    // after the turn is already decided; the D1 write has no reader that needs
+    // it before the emit returns.
+    const startedAt = submission.startedAt ?? submission.createdAt;
+    this.ctx.waitUntil(
+      this.resolveRuntimeConfigForThink()
+        .then((runtimeConfig) =>
+          recordThreadLifecycleEvent({
+            env: this.env,
+            event: {
+              type: "thread.failed",
+              threadId: this.name,
+              workspaceId: runtimeConfig.workspaceId,
+              startedAt,
+              occurredAt: Date.now(),
+            },
+          }),
+        )
+        .catch((error) =>
+          log.warn("think_thread.submission_error_notify_failed", {
+            threadId: this.name,
+            submissionId: submission.submissionId,
+            error: String(error),
+          }),
+        ),
+    );
   }
 
   /**
