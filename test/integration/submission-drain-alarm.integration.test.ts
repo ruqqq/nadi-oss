@@ -18,8 +18,9 @@ const platformEnv = env as typeof env & { NADI_PLATFORM?: string | undefined };
  * alongside it as the only driver.
  *
  * workerd carries detached work fine, so this cannot reproduce the cut itself.
- * What it does guard is the half that has to be true for the fix to work: with
- * the detached kick gone, the alarm alone still runs the turn to completion.
+ * What it does guard is the two halves that have to be true for the fix to work:
+ * with the detached kick gone the alarm alone still runs the turn to completion,
+ * and the kick itself schedules that alarm rather than dropping the request.
  */
 describe("a durable submission on a platform where detached work dies", () => {
   beforeAll(async () => {
@@ -69,6 +70,45 @@ describe("a durable submission on a platform where detached work dies", () => {
       expect(observed.shadowed).toBe(true);
       expect(observed.submissions.map((row) => row.status)).toEqual(["completed"]);
       expect(observed.messages).toContain("assistant");
+    } finally {
+      if (previousPlatform === undefined) delete platformEnv.NADI_PLATFORM;
+      else platformEnv.NADI_PLATFORM = previousPlatform;
+    }
+  });
+
+  it("turns the kick into a schedule, so onStart recovery still has a trigger", async () => {
+    // `_recoverSubmissionsOnStart` can revive an interrupted row to `pending`,
+    // and onStart then kicks the drain WITHOUT scheduling it — the alarm that
+    // queued the original attempt has already fired. A kick that did nothing
+    // would strand that row until the next submit, so the shadow must schedule.
+    const previousPlatform = platformEnv.NADI_PLATFORM;
+    platformEnv.NADI_PLATFORM = "celld";
+    try {
+      const { threadId } = await seedRegistryThread(env.REGISTRY_DB, {
+        threadId: "thr_submission_kick_schedules",
+        provider: "mock",
+        model: "mock",
+      });
+      const stub = env.THINK_THREAD_AGENT.get(env.THINK_THREAD_AGENT.idFromName(threadId));
+
+      const scheduled = await runInDurableObject(stub, async (agent: ThinkThreadAgent) => {
+        await (agent as unknown as Initializable).__unsafe_ensureInitialized();
+
+        const internals = agent as unknown as {
+          _startSubmissionDrain(): void;
+          _scheduleSubmissionDrain(): Promise<void>;
+        };
+        let calls = 0;
+        internals._scheduleSubmissionDrain = () => {
+          calls += 1;
+          return Promise.resolve();
+        };
+        internals._startSubmissionDrain();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        return calls;
+      });
+
+      expect(scheduled).toBe(1);
     } finally {
       if (previousPlatform === undefined) delete platformEnv.NADI_PLATFORM;
       else platformEnv.NADI_PLATFORM = previousPlatform;

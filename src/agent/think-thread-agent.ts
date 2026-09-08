@@ -539,7 +539,7 @@ function trailingUserMessageIds(messages: Array<{ id?: unknown; role?: unknown }
 export class ThinkThreadAgent extends Think<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    // Drain durable submissions from the alarm only, where detached work dies.
+    // Redirect the detached drain kick onto the alarm, where detached work dies.
     //
     // `submitMessages` both schedules a drain alarm AND kicks a detached drain
     // (`_startSubmissionDrain`), and on Cloudflare the detached one simply wins
@@ -550,11 +550,27 @@ export class ThinkThreadAgent extends Think<Env> {
     // up `pending` rows — so the first message of every new thread, and every
     // automaton run, hung forever with no error and no completion. The alarm
     // path runs the same turn to completion (measured: timers and outbound
-    // fetch both work inside an alarm handler), so where the detached pattern
-    // is unsafe the alarm is the only drain. Shadowed on the instance because
-    // the method is private to Think and cannot be overridden.
+    // fetch both work inside an alarm handler).
+    //
+    // The kick becomes a schedule rather than a no-op because one call site has
+    // no other trigger: after `_recoverSubmissionsOnStart` revives an
+    // interrupted row to `pending`, `onStart` kicks the drain WITHOUT also
+    // scheduling it (unlike `submitMessages`, which awaits the schedule first),
+    // and the alarm that queued the original attempt has already fired. Dropping
+    // that kick would strand the revived row until the next submit. The extra
+    // schedule from the `submitMessages` sites is free — `_scheduleSubmissionDrain`
+    // is `schedule(0, ..., { idempotent: true })`.
+    //
+    // Shadowed on the instance because the method is private to Think and cannot
+    // be overridden.
     if (!platformCapabilities(env).detachedWorkSurvivesResponse) {
-      (this as unknown as { _startSubmissionDrain: () => void })._startSubmissionDrain = () => {};
+      (this as unknown as { _startSubmissionDrain: () => void })._startSubmissionDrain = () => {
+        void (this as unknown as { _scheduleSubmissionDrain(): Promise<void> })
+          ._scheduleSubmissionDrain()
+          .catch((error: unknown) => {
+            console.error("[nadi] Failed to schedule submission drain", error);
+          });
+      };
     }
   }
 
