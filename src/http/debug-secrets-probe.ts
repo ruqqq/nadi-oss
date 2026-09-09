@@ -73,6 +73,25 @@ async function fingerprint(input: Uint8Array | string): Promise<string> {
   return toHex(new Uint8Array(digest)).slice(0, 16);
 }
 
+/**
+ * The same vector at a range of AAD lengths. Every check that has passed so
+ * far used a SHORT AAD (9 to 15 bytes); the AAD that fails in production is 43
+ * bytes — more than one 16-byte GCM block. An implementation that mishandles
+ * AAD past the first block would pass all of them and still fail this.
+ */
+const KAT_AAD_LENGTHS: ReadonlyArray<readonly [number, string]> = [
+  [0, "2963b272e88eac74fa2fbaeadf9a0f08f1fbf351830fda4a44d85cf2383cf77a4f81db9b7393"],
+  [1, "2963b272e88eac74fa2fbaeadf9a0f08f1fbf351830f3af3df682eea46aab0ae3d784df60720"],
+  [15, "2963b272e88eac74fa2fbaeadf9a0f08f1fbf351830f6195220b28d553e3033eda8dd03b5bdc"],
+  [16, "2963b272e88eac74fa2fbaeadf9a0f08f1fbf351830f49a89fb71a500645d2cdc4ce94a088b0"],
+  [17, "2963b272e88eac74fa2fbaeadf9a0f08f1fbf351830f935a1ea5c82aed9385f2b786070652d1"],
+  [31, "2963b272e88eac74fa2fbaeadf9a0f08f1fbf351830fc83ce3c6ce15f8da366250739acb0e2d"],
+  [32, "2963b272e88eac74fa2fbaeadf9a0f08f1fbf351830f4cacbdd86d8a3299c79022644d6f7c12"],
+  [33, "2963b272e88eac74fa2fbaeadf9a0f08f1fbf351830fcc43c0739663098d711c54ee7cda04ff"],
+  [43, "2963b272e88eac74fa2fbaeadf9a0f08f1fbf351830f18da81e22399f98f514e877d25d4bdfa"],
+  [64, "2963b272e88eac74fa2fbaeadf9a0f08f1fbf351830f3147f65ed8d072374a0feb24994f3109"],
+];
+
 function fromHex(hex: string): Uint8Array<ArrayBuffer> {
   const bytes = new Uint8Array(new ArrayBuffer(hex.length / 2));
   for (let i = 0; i < bytes.length; i += 1)
@@ -133,6 +152,7 @@ async function probeKnownAnswer(): Promise<Record<string, unknown>> {
       expectedHex: KAT_EXPECTED_HEX,
       decrypts,
       ...(decryptError === undefined ? {} : { decryptError }),
+      byAadLength: await katByAadLength(key),
     };
   } catch (error) {
     return { ok: false, error: describe(error) };
@@ -181,6 +201,28 @@ async function probeBase64(): Promise<Record<string, unknown>> {
   } catch (error) {
     return { ok: false, error: describe(error) };
   }
+}
+
+/** The first AAD length whose ciphertext+tag diverges, if any. */
+async function katByAadLength(key: CryptoKey): Promise<Record<string, unknown>> {
+  const mismatched: number[] = [];
+  const matched: number[] = [];
+  for (const [length, expected] of KAT_AAD_LENGTHS) {
+    try {
+      const additionalData = new Uint8Array(new ArrayBuffer(length)).fill(0x41);
+      const produced = new Uint8Array(
+        await crypto.subtle.encrypt(
+          { name: "AES-GCM", iv: fromHex(KAT_IV_HEX), additionalData },
+          key,
+          new TextEncoder().encode(KAT_PLAINTEXT),
+        ),
+      );
+      (toHex(produced) === expected ? matched : mismatched).push(length);
+    } catch {
+      mismatched.push(length);
+    }
+  }
+  return { matched, mismatched, ok: mismatched.length === 0 };
 }
 
 async function probeKek(
