@@ -147,13 +147,42 @@ async function probeKek(
  * while the stored DEK does not, the difference is the bytes, not the crypto.
  */
 async function probeRoundTrip(key: CryptoKey): Promise<Record<string, unknown>> {
+  const report: Record<string, unknown> = {};
   try {
     const packed = await encrypt(key, "nadi-secrets-probe", "probe:aad");
     const back = await decrypt(key, packed, "probe:aad");
-    return { ok: back === "nadi-secrets-probe" };
+    report.ok = back === "nadi-secrets-probe";
+
+    // The decisive test. Every stored record is bound to an AAD
+    // (`<workspace>:dek`), so a runtime that silently DROPS `additionalData`
+    // round-trips its own ciphertext happily while failing to open anything
+    // written by a runtime that honoured it — which is the exact shape of the
+    // v0.4.1 breakage, given the KEK bytes and the wrapped-DEK bytes both
+    // fingerprint identical across the two versions.
+    //
+    // A conforming runtime MUST reject this: same key, same ciphertext,
+    // different AAD.
+    try {
+      await decrypt(key, packed, "probe:aad:WRONG");
+      report.rejectsWrongAad = false;
+    } catch {
+      report.rejectsWrongAad = true;
+    }
+
+    // And the other direction: a ciphertext written with NO aad must not open
+    // with one.
+    const packedNoAad = await encrypt(key, "nadi-secrets-probe", "");
+    try {
+      await decrypt(key, packedNoAad, "probe:aad");
+      report.rejectsAddedAad = false;
+    } catch {
+      report.rejectsAddedAad = true;
+    }
   } catch (error) {
-    return { ok: false, error: describe(error) };
+    report.ok = false;
+    report.error = describe(error);
   }
+  return report;
 }
 
 async function probeDek(
