@@ -52,7 +52,7 @@ ENV CELLD_INSTALL_ROOT=/usr/local
 # notes in docs/self-hosting-celld.md — v0.2.0 changed the listener flags,
 # v0.2.1 stopped trusting X-Forwarded-* by default, and v0.4.0 moved the health
 # endpoint and made a v0.3.0→v0.4.0 rolling update unsafe.
-ARG CELLD_VERSION="v0.4.1"
+ARG CELLD_VERSION="v0.4.0"
 RUN CELLD_VERSION="${CELLD_VERSION}" sh -c 'curl -fsSL https://celld.dev/install.sh | sh'
 
 # --- web-server: Caddy, TLS only --------------------------------------------
