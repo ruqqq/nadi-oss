@@ -38,6 +38,7 @@ import {
 } from "./debug-vision";
 import type { VisionProbeConfig } from "./debug-vision";
 import { runSpritesSmoke } from "../compute/backends/sprites-smoke";
+import { runSecretsProbe } from "./debug-secrets-probe";
 
 /** RPC surface of ThinkThreadAgent's DEBUG-only methods (token-gated routes). */
 interface DebugThreadStub {
@@ -378,6 +379,14 @@ export async function routeDebug(req: Request, env: Env): Promise<Response | nul
   }
 
   const workspaceId = resolveDebugWorkspaceId(env, url.searchParams.get("workspaceId"));
+
+  // GET /api/debug/secrets-probe — fingerprints the three inputs to the DEK
+  // unwrap (KEK bytes, wrapped-DEK bytes, AAD) plus a base64 conformance check.
+  // Run it on the pinned celld and on a candidate one; the diff names the
+  // cause of the v0.4.1 secrets breakage instead of leaving it a stack trace.
+  if (url.pathname === "/api/debug/secrets-probe" && req.method === "GET") {
+    return runSecretsProbe(env, workspaceId);
+  }
 
   // GET /api/debug/provider-chat?provider=&model=&n= — fire N chat completions
   // with the stored key, then immediately re-list models. Zen rate-limits; when
