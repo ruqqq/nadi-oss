@@ -265,6 +265,44 @@ async function probeRoundTrip(key: CryptoKey): Promise<Record<string, unknown>> 
   return report;
 }
 
+async function probeDirectUnwrap(
+  env: Env,
+  packed: string,
+  aad: string,
+): Promise<Record<string, unknown>> {
+  try {
+    const raw = unpackB64(env.SECRETS_STORE_KEK_RAW_B64 ?? "");
+    const keyBytes = new Uint8Array(new ArrayBuffer(raw.byteLength));
+    keyBytes.set(raw);
+    const key = await crypto.subtle.importKey("raw", keyBytes, { name: "AES-GCM" }, false, [
+      "decrypt",
+    ]);
+
+    const payload = unpackB64(packed);
+    const iv = new Uint8Array(new ArrayBuffer(12));
+    iv.set(payload.subarray(0, 12));
+    const ciphertext = new Uint8Array(new ArrayBuffer(payload.byteLength - 12));
+    ciphertext.set(payload.subarray(12));
+    const aadBytes = new TextEncoder().encode(aad);
+    const additionalData = new Uint8Array(new ArrayBuffer(aadBytes.byteLength));
+    additionalData.set(aadBytes);
+
+    const opened = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv, additionalData },
+      key,
+      ciphertext,
+    );
+    return {
+      ok: true,
+      ivHex: toHex(iv),
+      ciphertextLength: ciphertext.byteLength,
+      plaintextLength: opened.byteLength,
+    };
+  } catch (error) {
+    return { ok: false, error: describe(error) };
+  }
+}
+
 async function probeDek(
   env: Env,
   workspaceId: string,
@@ -305,6 +343,16 @@ async function probeDek(
   }
 
   if (key === null) return { ...report, unwrapped: false, error: "kek unavailable" };
+
+  // Differential. Every input to this decrypt fingerprints identical to the
+  // version where it works, and the runtime passes an AES-GCM known-answer
+  // test — so if it still fails, the bytes are not reaching the primitive the
+  // way we think. This path rebuilds every argument as a freshly allocated,
+  // zero-offset buffer and re-imports the key from copied bytes, bypassing
+  // both the shared `CryptoKey` and the `.slice()` views `decrypt` hands over.
+  // Succeeding here while `decrypt` fails would put the defect in argument
+  // marshalling, not in the crypto or in anything stored.
+  report.direct = await probeDirectUnwrap(env, record.wrapped_dek, aad);
 
   try {
     const dekB64 = await decrypt(key, record.wrapped_dek, aad);
