@@ -38,6 +38,10 @@ import {
 } from "./debug-vision";
 import type { VisionProbeConfig } from "./debug-vision";
 import { runSpritesSmoke } from "../compute/backends/sprites-smoke";
+import { listWorkspaceIds, runSecretsProbe } from "./debug-secrets-probe";
+import { loadKek } from "../secrets/load-kek";
+import { secretsBinding } from "../secrets";
+import { rewrapWorkspaceSecrets } from "../secrets/rewrap";
 
 /** RPC surface of ThinkThreadAgent's DEBUG-only methods (token-gated routes). */
 interface DebugThreadStub {
@@ -378,6 +382,39 @@ export async function routeDebug(req: Request, env: Env): Promise<Response | nul
   }
 
   const workspaceId = resolveDebugWorkspaceId(env, url.searchParams.get("workspaceId"));
+
+  // GET /api/debug/secrets-probe — fingerprints the three inputs to the DEK
+  // unwrap (KEK bytes, wrapped-DEK bytes, AAD) plus a base64 conformance check.
+  // Run it on the pinned celld and on a candidate one; the diff names the
+  // cause of the v0.4.1 secrets breakage instead of leaving it a stack trace.
+  if (url.pathname === "/api/debug/secrets-probe" && req.method === "GET") {
+    return runSecretsProbe(env, workspaceId);
+  }
+
+  // POST /api/debug/rewrap-secrets?dryRun=0[&workspaceId=] — bind every stored
+  // record to its AAD after a celld v0.4.0 node sealed them without one. Dry
+  // run by default; the migration refuses to run on a runtime that ignores
+  // additionalData, where it would report success and fix nothing.
+  if (url.pathname === "/api/debug/rewrap-secrets" && req.method === "POST") {
+    const dryRun = url.searchParams.get("dryRun") !== "0";
+    const requested = url.searchParams.get("workspaceId");
+    const ids = requested === null ? await listWorkspaceIds(env, workspaceId) : [requested];
+    const kek = await loadKek(env);
+    const kv = secretsBinding(env);
+
+    const reports = [];
+    for (const id of ids) {
+      try {
+        reports.push(await rewrapWorkspaceSecrets(kv, kek, id, { dryRun }));
+      } catch (error) {
+        reports.push({
+          workspaceId: id,
+          error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+        });
+      }
+    }
+    return Response.json({ dryRun, reports });
+  }
 
   // GET /api/debug/provider-chat?provider=&model=&n= — fire N chat completions
   // with the stored key, then immediately re-list models. Zen rate-limits; when

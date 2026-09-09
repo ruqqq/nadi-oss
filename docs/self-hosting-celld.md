@@ -129,6 +129,7 @@ What reaches the bucket, and when, has moved twice:
 | v0.1.0 | on idle eviction only — a crash lost everything since the cell last went quiet |
 | v0.2.0–v0.2.1 | one LTX frame per transaction. Measured here: `SIGKILL` with the container destroyed 0.1 s after the last write lost **0 of 25** registry rows |
 | v0.3.0 | as above for a single node. For fleets of **two or more**, a replicated write-behind log acknowledges a write after peer fsync and uploads to the bucket behind it |
+| v0.4.1 | as v0.4.0, plus AES-GCM finally authenticates `additionalData` |
 | v0.4.0 | unchanged for a single node. The output gate is stronger — read-only output now waits for earlier request or alarm writes to become durable, so a response cannot describe state the bucket has not accepted |
 
 The v0.3.0 write-behind log is the one change that would alter the posture
@@ -179,10 +180,14 @@ rules in [Operating](#operating).
 ## Prerequisites
 
 - A machine with Node 22+, `pnpm`, and `git`.
-- **celld v0.4.0**: `curl -fsSL https://celld.dev/install.sh | sh` (add
-  `CELLD_VERSION=v0.4.0` to pin). This is the version Nadi is built against and
-  the one `deploy/celld/Dockerfile` pins. See
-  [Upgrading celld](#upgrading-celld) before moving it.
+- **celld v0.4.1**: `curl -fsSL https://celld.dev/install.sh | sh` (add
+  `CELLD_VERSION=v0.4.1` to pin). This is the version Nadi is built against and
+  the one `deploy/celld/Dockerfile` pins. **Do not run v0.4.0** — its AES-GCM
+  silently discards `additionalData`, which leaves every stored secret without
+  its authentication binding; see
+  [Upgrading celld](#upgrading-celld) before moving it, and
+  [v0.4.0 → v0.4.1](#v040--v041-workspace-secrets-must-be-re-wrapped) if you
+  are coming from v0.4.0.
 - **An S3-compatible bucket.** [MinIO](https://min.io) is fine and is what this
   was tested against; so is Cloudflare R2 or AWS S3. You need two buckets, or one
   bucket and one prefix: the *fleet* bucket celld replicates into, and an
@@ -671,7 +676,57 @@ occurrences are being missed, not merely delayed.
 
 ## Upgrading celld
 
-Nadi pins **v0.4.0** (`CELLD_VERSION` in `deploy/celld/Dockerfile`).
+Nadi pins **v0.4.1** (`CELLD_VERSION` in `deploy/celld/Dockerfile`).
+
+### v0.4.0 → v0.4.1: workspace secrets must be re-wrapped
+
+**celld v0.4.0 silently discards AES-GCM `additionalData`.** Measured on a live
+node with a known-answer vector: it produced the AAD-length-**zero** ciphertext
+at every AAD length, and a ciphertext encrypted under one AAD opened happily
+under another. v0.4.1 implements it correctly.
+
+Two consequences, and the first is the reason not to stay on v0.4.0.
+
+**The AAD binding was never enforced.** Nadi binds each record to its slot —
+`<workspace>:dek` for a workspace key, `<workspace>:<name>` for a secret — so
+that a ciphertext cannot be moved between workspaces, or from one secret's slot
+into another's, and still decrypt. On v0.4.0 it could. Cloudflare is unaffected;
+workerd has always honoured AAD.
+
+**Everything v0.4.0 sealed is unbound, so v0.4.1 cannot open it.** The tag was
+computed without the AAD, and a correct implementation checks it. Left alone,
+the upgrade presents as `AES-GCM decrypt failed` out of `loadDek` and every
+workspace secret reads as unavailable. Nothing is lost — rolling back to v0.4.0
+restores reads immediately, because it ignores the AAD either way.
+
+The fix is a one-time re-wrap, and it must run **on v0.4.1** (v0.4.0 cannot
+produce an AAD-bound ciphertext at all, so the same pass there would report
+every record as already correct and write nothing — the migration refuses to
+run on such a runtime rather than lie about it):
+
+```bash
+# 1. Deploy the new pin. Secrets are unreadable from here until step 3.
+~/update-nadi.sh --ref origin/main
+
+# 2. Dry run — reports what it would re-wrap, writes nothing.
+curl -s -X POST -H "x-debug-token: $DEBUG_TOKEN" \
+  "https://<your-host>/api/debug/rewrap-secrets?dryRun=1"
+
+# 3. Apply.
+curl -s -X POST -H "x-debug-token: $DEBUG_TOKEN" \
+  "https://<your-host>/api/debug/rewrap-secrets?dryRun=0"
+```
+
+Each record is reported as `bound` (already correct), `rewrapped`, `missing`
+(named in the index with no value) or `unreadable`. Nothing is written unless
+the plaintext is in hand, so an `unreadable` record is left exactly as it is;
+re-running finds the work already done. A workspace with a DEK but no secret
+index is flagged `indexMissing` rather than reported as having no secrets — run
+the backfill first.
+
+`GET /api/debug/secrets-probe` reports the same fingerprints the diagnosis used
+(KEK bytes, wrapped-DEK bytes, AAD, an AES-GCM known-answer sweep), and is the
+first thing to run against any future celld bump.
 
 ### v0.3.0 → v0.4.0
 
