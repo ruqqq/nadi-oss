@@ -5,6 +5,8 @@ import { buildWorkspaceDekKey, parseWorkspaceDekRecord } from "../secrets/kv-rec
 import { dekAad } from "../secrets/kv-store";
 import { loadKek } from "../secrets/load-kek";
 import { secretsBinding } from "../secrets";
+import { registryDb } from "../db/client";
+import { workspaces } from "../db/schema";
 
 /**
  * Why this endpoint exists.
@@ -218,7 +220,13 @@ export async function runSecretsProbe(env: Env, workspaceId: string): Promise<Re
   const roundTrip = kek.key
     ? await probeRoundTrip(kek.key)
     : { ok: false, error: "kek unavailable" };
-  const dek = await probeDek(env, workspaceId, kek.key);
+  // Probe every workspace, not just the requested one. The debug default is
+  // `default`, which on this deployment holds no DEK at all — and a probe that
+  // reports "nothing to unwrap" would have looked just as green on the broken
+  // version. The wrapped DEK is the artifact under test, so go find one.
+  const ids = await listWorkspaceIds(env, workspaceId);
+  const dek: Record<string, unknown> = {};
+  for (const id of ids) dek[id] = await probeDek(env, id, kek.key);
 
   return Response.json({
     workspaceId,
@@ -228,4 +236,16 @@ export async function runSecretsProbe(env: Env, workspaceId: string): Promise<Re
     kekRoundTrip: roundTrip,
     dek,
   });
+}
+
+async function listWorkspaceIds(env: Env, requested: string): Promise<string[]> {
+  const ids = new Set<string>([requested]);
+  try {
+    const rows = await registryDb(env).select({ id: workspaces.id }).from(workspaces).limit(25);
+    for (const row of rows) ids.add(row.id);
+  } catch {
+    // D1 unavailable — the requested workspace alone still answers the question
+    // whenever it is the one holding a DEK.
+  }
+  return [...ids];
 }
