@@ -51,7 +51,10 @@ ENV CELLD_INSTALL_ROOT=/usr/local
 # builds a week apart differ. Do not move this without re-reading the upgrade
 # notes in docs/self-hosting-celld.md — v0.2.0 changed the listener flags,
 # v0.2.1 stopped trusting X-Forwarded-* by default, and v0.4.0 moved the health
-# endpoint and made a v0.3.0→v0.4.0 rolling update unsafe.
+# endpoint and made a v0.3.0→v0.4.0 rolling update unsafe, and v0.4.1 fixed an
+# AES-GCM that discarded additionalData — coming from v0.4.0 needs the one-time
+# secrets re-wrap (POST /api/debug/rewrap-secrets), or every workspace secret
+# reads as undecryptable.
 ARG CELLD_VERSION="v0.4.1"
 RUN CELLD_VERSION="${CELLD_VERSION}" sh -c 'curl -fsSL https://celld.dev/install.sh | sh'
 
