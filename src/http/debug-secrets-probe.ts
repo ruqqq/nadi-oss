@@ -449,7 +449,7 @@ export async function runSecretsProbe(env: Env, workspaceId: string): Promise<Re
   });
 }
 
-async function listWorkspaceIds(env: Env, requested: string): Promise<string[]> {
+export async function listWorkspaceIds(env: Env, requested: string): Promise<string[]> {
   const ids = new Set<string>([requested]);
   try {
     const rows = await registryDb(env).select({ id: workspaces.id }).from(workspaces).limit(25);
