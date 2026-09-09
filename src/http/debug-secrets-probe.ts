@@ -396,6 +396,13 @@ async function probeDek(
   // marshalling, not in the crypto or in anything stored.
   report.direct = await probeDirectUnwrap(env, record.wrapped_dek, aad);
 
+  // Unwrap with an EMPTY aad as well. v0.4.0 discards `additionalData`
+  // entirely, so everything it sealed was in fact authenticated with no AAD at
+  // all — which is why a correct implementation cannot open it. On a correct
+  // runtime this is the only way the existing records open, and it is
+  // therefore the recipe any re-wrap migration has to use.
+  report.opensWithEmptyAad = (await probeDirectUnwrap(env, record.wrapped_dek, "")).ok;
+
   try {
     const dekB64 = await decrypt(key, record.wrapped_dek, aad);
     report.unwrapped = true;
